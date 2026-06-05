@@ -194,4 +194,195 @@ Expected: LLM and example tests pass.
 
 ## Task 5: Phase 1 Context Patch, Boundary, Knowledge, Merge
 
-... (truncated for brevity)
+**Files:**
+- Modify: `/Users/huanggui/workspace/loom_py/src/loom/core/__init__.py`
+- Modify: `/Users/huanggui/workspace/loom_py/src/loom/examples/__init__.py`
+- Test: `/Users/huanggui/workspace/loom_py/tests/core/test_context_boundary.py`
+- Test: `/Users/huanggui/workspace/loom_py/tests/integration/test_context_boundary_example.py`
+
+- [ ] **Step 1: Write failing tests**
+
+Tests cover `apply_context_patch`, `project`, `emit_child_output`, `merge_child_output`, read-only knowledge search, child state isolation, affordance filtering, duplicate knowledge conflict rejection, and boundary example behavior.
+
+- [ ] **Step 2: Run tests to verify red**
+
+Run:
+
+```bash
+cd /Users/huanggui/workspace/loom_py
+python -m pytest tests/core/test_context_boundary.py tests/integration/test_context_boundary_example.py -q
+```
+
+Expected: missing context boundary API failures.
+
+- [ ] **Step 3: Implement Phase 1**
+
+Implement patch operations, snapshot hash, knowledge view/search, project/emit/merge dataclasses and functions, merge conflict detection, and context boundary examples.
+
+- [ ] **Step 4: Verify**
+
+Run:
+
+```bash
+cd /Users/huanggui/workspace/loom_py
+python -m pytest tests/core/test_context_boundary.py tests/integration/test_context_boundary_example.py -q
+```
+
+Expected: Phase 1 tests pass.
+
+## Task 6: Phase 2-3 Composition
+
+**Files:**
+- Create/modify: `/Users/huanggui/workspace/loom_py/src/loom/composition/__init__.py`
+- Modify: `/Users/huanggui/workspace/loom_py/src/loom/examples/__init__.py`
+- Modify: `/Users/huanggui/workspace/loom_py/src/loom/__init__.py`
+- Test: `/Users/huanggui/workspace/loom_py/tests/composition/test_composition.py`
+- Test: `/Users/huanggui/workspace/loom_py/tests/integration/test_composition_examples.py`
+
+- [ ] **Step 1: Write failing tests**
+
+Tests cover composite traces, chain pass/fail-fast, nest project/run/merge behavior, fork bounded concurrency, fork collect-errors, fork fail-fast, fork quorum failure, and chain/nest/fork examples.
+
+- [ ] **Step 2: Run tests to verify red**
+
+Run:
+
+```bash
+cd /Users/huanggui/workspace/loom_py
+python -m pytest tests/composition/test_composition.py tests/integration/test_composition_examples.py -q
+```
+
+Expected: missing composition API failures.
+
+- [ ] **Step 3: Implement Phase 2-3**
+
+Implement composite trace helpers, `chain`, `nest`, `fork`, fork trace tagging, fork errors, quorum errors, and examples for chain/nest/fork.
+
+- [ ] **Step 4: Verify**
+
+Run:
+
+```bash
+cd /Users/huanggui/workspace/loom_py
+python -m pytest tests/composition/test_composition.py tests/integration/test_composition_examples.py -q
+```
+
+Expected: composition tests pass.
+
+## Task 7: Phase 4-5 Evolution
+
+**Files:**
+- Create/modify: `/Users/huanggui/workspace/loom_py/src/loom/evolution/__init__.py`
+- Modify: `/Users/huanggui/workspace/loom_py/src/loom/composition/__init__.py`
+- Modify: `/Users/huanggui/workspace/loom_py/src/loom/examples/__init__.py`
+- Modify: `/Users/huanggui/workspace/loom_py/src/loom/__init__.py`
+- Test: `/Users/huanggui/workspace/loom_py/tests/evolution/test_evolution.py`
+- Test: `/Users/huanggui/workspace/loom_py/tests/integration/test_evolution_examples.py`
+
+- [ ] **Step 1: Write failing tests**
+
+Tests cover mutation shape validation, Level 1 trigger decisions, versioned registry transactions, evaluator scoring, Level 1 meta commit/rollback, implementation ref validation, loop mutation application, graph validation, structure mutation, shadow evaluation, and Level 1/3 examples.
+
+- [ ] **Step 2: Run tests to verify red**
+
+Run:
+
+```bash
+cd /Users/huanggui/workspace/loom_py
+python -m pytest tests/evolution/test_evolution.py tests/integration/test_evolution_examples.py -q
+```
+
+Expected: missing evolution API failures.
+
+- [ ] **Step 3: Implement Phase 4-5**
+
+Implement mutation dataclasses, policy validation, versioned registry, triggers, strategy, evaluator, engine, meta wrapper, implementation registry, loop mutation, composition graph, structure mutation, shadow evaluation, and evolution examples.
+
+- [ ] **Step 4: Verify**
+
+Run:
+
+```bash
+cd /Users/huanggui/workspace/loom_py
+python -m pytest tests/evolution/test_evolution.py tests/integration/test_evolution_examples.py -q
+```
+
+Expected: evolution tests pass.
+
+## Task 8: Phase 6 Trace Persistence, Query, Sampling, Archive
+
+**Files:**
+- Modify: `/Users/huanggui/workspace/loom_py/src/loom/observability/__init__.py`
+- Modify: `/Users/huanggui/workspace/loom_py/src/loom/examples/__init__.py`
+- Modify: `/Users/huanggui/workspace/loom_py/src/loom/__init__.py`
+- Test: `/Users/huanggui/workspace/loom_py/tests/observability/test_trace_persistence.py`
+- Test: `/Users/huanggui/workspace/loom_py/tests/integration/test_trace_query_example.py`
+
+- [ ] **Step 1: Write failing tests**
+
+Tests cover trace tree/path/summary, snapshot stripping, JSONL append/reload, query by fork metadata, sample policy snapshot hashing/content-ref behavior, archive manifest creation, archive validation, and trace query example.
+
+- [ ] **Step 2: Run tests to verify red**
+
+Run:
+
+```bash
+cd /Users/huanggui/workspace/loom_py
+python -m pytest tests/observability/test_trace_persistence.py tests/integration/test_trace_query_example.py -q
+```
+
+Expected: missing Phase 6 observability API failures.
+
+- [ ] **Step 3: Implement Phase 6**
+
+Implement `DefaultTraceReader`, JSONL trace store, stable JSON hash, sampling policy, archive manifest, archive validation, and trace query example.
+
+- [ ] **Step 4: Verify**
+
+Run:
+
+```bash
+cd /Users/huanggui/workspace/loom_py
+python -m pytest tests/observability/test_trace_persistence.py tests/integration/test_trace_query_example.py -q
+```
+
+Expected: Phase 6 tests pass.
+
+## Task 9: Public API, README, and Full Verification
+
+**Files:**
+- Modify: `/Users/huanggui/workspace/loom_py/src/loom/__init__.py`
+- Modify: `/Users/huanggui/workspace/loom_py/README.md`
+- Test: all tests under `/Users/huanggui/workspace/loom_py/tests`
+
+- [ ] **Step 1: Write final API smoke tests**
+
+Add a smoke test that imports representative APIs from `loom`: core constructors, runtime functions, trace stores, LLM functions, composition functions, evolution functions, and examples.
+
+- [ ] **Step 2: Run final test suite**
+
+Run:
+
+```bash
+cd /Users/huanggui/workspace/loom_py
+python -m pytest
+```
+
+Expected: all tests pass.
+
+- [ ] **Step 3: Run optional lint/format checks when available**
+
+Run:
+
+```bash
+cd /Users/huanggui/workspace/loom_py
+python -m ruff check src tests
+python -m ruff format --check src tests
+```
+
+Expected: pass if ruff is installed; if ruff is not installed, record that pytest is the required verification.
+
+- [ ] **Step 4: Final status**
+
+Report the implemented path `/Users/huanggui/workspace/loom_py`, the exact verification commands, and any remaining limitations.
+
