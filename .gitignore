@@ -1,0 +1,41 @@
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+ENV/
+.uv-cache/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test, lint, type-check, and coverage output
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+pip-wheel-metadata/
+
+# Editor and OS-local files
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
