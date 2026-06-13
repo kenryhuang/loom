@@ -1,9 +1,12 @@
 """Observability public API for Loom."""
 
 from loom.observability.traces import (
+    CompositeTraceSink,
     DefaultTraceReader,
+    EventRecordingPolicy,
     InMemoryTraceStore,
     JsonlTraceStore,
+    NoOpTraceSink,
     TraceArchiveManifest,
     TraceSamplePolicy,
     TraceSink,
@@ -17,9 +20,12 @@ from loom.observability.traces import (
 )
 
 __all__ = [
+    "CompositeTraceSink",
     "DefaultTraceReader",
+    "EventRecordingPolicy",
     "InMemoryTraceStore",
     "JsonlTraceStore",
+    "NoOpTraceSink",
     "TraceArchiveManifest",
     "TraceSamplePolicy",
     "TraceSink",

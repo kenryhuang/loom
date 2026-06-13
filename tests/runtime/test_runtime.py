@@ -24,6 +24,7 @@ from loom.core import (
     new_trace_id,
     ok,
 )
+from loom.observability import EventRecordingPolicy, InMemoryTraceStore
 from loom.runtime import (
     CancellationToken,
     create,
@@ -130,6 +131,103 @@ def test_step_converts_errors_and_honors_cancellation():
         assert cancelled.error.code == "ABORTED"
         cancelled_traces = [trace async for trace in abortable_handle.trace_reader.query({"outcome": ("cancelled",)})]
         assert len(cancelled_traces) == 1
+
+    asyncio.run(scenario())
+
+
+def test_run_emits_run_step_and_tool_events_to_trace_store():
+    async def scenario():
+        class SearchTool:
+            async def invoke(self, input_value, options):
+                return ok(Observation("tool-obs", "search", {"hit": input_value["query"], "options": options}, NOW))
+
+        loop_id = new_loop_id()
+        version = new_loop_version()
+
+        async def step_fn(context, runtime):
+            tool_result = await runtime.call_tool("search", {"query": "loom"}, metadata={"tool_call_id": "call_search"})
+            if not tool_result.ok:
+                return tool_result
+            next_context = freeze_context(
+                replace(
+                    context,
+                    id=new_context_id(),
+                    state=StateLayer(observations=(*context.state.observations, tool_result.value)),
+                )
+            )
+            return ok(StepResult(next_context, make_trace(context, loop_id, version, next_context)))
+
+        definition = MinimalLoopDefinition(
+            id=loop_id,
+            version=version,
+            identity=IdentityLayer(role="tool loop"),
+            goal=GoalLayer(objective="Call a tool"),
+            step=step_fn,
+            done=lambda context, _runtime: ok(len(context.state.observations) >= 1),
+        )
+        store = InMemoryTraceStore()
+        handle = create(definition, trace_store=store, registry=create_runtime_registry(tools={"search": SearchTool()})).unwrap()
+
+        result = await run(handle, make_context())
+
+        assert result.ok
+        event_types = [event["type"] for event in store.events()]
+        assert event_types == [
+            "run.started",
+            "step.started",
+            "tool.started",
+            "tool.completed",
+            "action.recorded",
+            "step.completed",
+            "run.completed",
+        ]
+        tool_started = store.events()[2]
+        tool_completed = store.events()[3]
+        assert tool_started["tool_id"] == "search"
+        assert tool_started["input"] == {"query": "loom"}
+        assert tool_started["metadata"]["tool_call_id"] == "call_search"
+        assert tool_completed["output"].value["hit"] == "loom"
+        assert store.events()[-1]["steps"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_create_accepts_pluggable_event_recorder():
+    async def scenario():
+        captured = []
+
+        class Recorder:
+            async def emit(self, event):
+                captured.append(event)
+                return ok(None)
+
+        handle = create(make_one_step_definition(), event_recorder=Recorder()).unwrap()
+
+        result = await run(handle, make_context())
+
+        assert result.ok
+        assert [event["type"] for event in captured] == [
+            "run.started",
+            "step.started",
+            "action.recorded",
+            "step.completed",
+            "run.completed",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_event_recording_can_be_disabled_while_traces_remain_queryable():
+    async def scenario():
+        store = InMemoryTraceStore()
+        handle = create(make_one_step_definition(), trace_store=store, event_policy=EventRecordingPolicy(enabled=False)).unwrap()
+
+        result = await run(handle, make_context())
+
+        assert result.ok
+        assert store.events() == ()
+        traces = [trace async for trace in handle.trace_reader.query({"run_id": result.value.context.run_id})]
+        assert len(traces) == 1
 
     asyncio.run(scenario())
 

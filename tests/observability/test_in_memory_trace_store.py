@@ -11,7 +11,10 @@ from loom.core import (
     ok,
 )
 from loom.observability import (
+    CompositeTraceSink,
+    EventRecordingPolicy,
     InMemoryTraceStore,
+    JsonlTraceStore,
     create_in_memory_trace_sink,
 )
 
@@ -79,6 +82,61 @@ def test_store_reports_missing_and_sink_persists_completed_traces():
         trace = make_trace(run_id=new_run_id(), loop_id=new_loop_id())
         assert await sink.emit({"type": "step.completed", "trace": trace, "at": NOW}) == ok(None)
         assert await store.get(trace.id) == ok(trace)
+
+    asyncio.run(scenario())
+
+
+def test_event_recording_policy_can_disable_events_without_losing_completed_traces():
+    async def scenario():
+        store = InMemoryTraceStore()
+        sink = create_in_memory_trace_sink(store, policy=EventRecordingPolicy(enabled=False))
+        trace = make_trace(run_id=new_run_id(), loop_id=new_loop_id())
+
+        assert await sink.emit({"type": "step.started", "trace_id": trace.id, "at": NOW}) == ok(None)
+        assert await sink.emit({"type": "step.completed", "trace": trace, "at": NOW}) == ok(None)
+
+        assert store.events() == ()
+        assert await store.get(trace.id) == ok(trace)
+
+    asyncio.run(scenario())
+
+
+def test_composite_trace_sink_supports_pluggable_event_recorders():
+    async def scenario():
+        store = InMemoryTraceStore()
+        captured = []
+
+        class Recorder:
+            async def emit(self, event):
+                captured.append(event)
+                return ok(None)
+
+        sink = CompositeTraceSink((create_in_memory_trace_sink(store), Recorder()))
+        trace = make_trace(run_id=new_run_id(), loop_id=new_loop_id())
+        event = {"type": "step.completed", "trace": trace, "at": NOW}
+
+        assert await sink.emit(event) == ok(None)
+
+        assert store.events() == (event,)
+        assert captured == [event]
+        assert await store.get(trace.id) == ok(trace)
+
+    asyncio.run(scenario())
+
+
+def test_jsonl_trace_store_persists_event_records(tmp_path):
+    async def scenario():
+        path = tmp_path / "events.jsonl"
+        store = JsonlTraceStore(path)
+        sink = create_in_memory_trace_sink(store)
+        trace = make_trace(run_id=new_run_id(), loop_id=new_loop_id())
+
+        assert await sink.emit({"type": "step.started", "trace_id": trace.id, "at": NOW}) == ok(None)
+        assert await sink.emit({"type": "step.completed", "trace": trace, "at": NOW}) == ok(None)
+
+        reopened = JsonlTraceStore(path)
+        assert [event["type"] for event in reopened.events()] == ["step.started", "step.completed"]
+        assert await reopened.get(trace.id) == ok(trace)
 
     asyncio.run(scenario())
 

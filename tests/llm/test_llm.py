@@ -350,6 +350,72 @@ def test_default_env_config_loads_project_dotenv_when_present():
     assert config.value.api_key
 
 
+def test_llm_step_emits_full_provider_io_events():
+    async def scenario():
+        events = []
+        provider = FakeProvider(
+            [
+                ok(
+                    LlmResponse(
+                        content=None,
+                        tool_calls=(LlmToolCall("call_1", "search", '{"query":"loom"}'),),
+                        usage=TokenUsage(11, 2, 13),
+                        finish_reason="tool_calls",
+                    )
+                ),
+                ok(
+                    LlmResponse(
+                        content=json.dumps(
+                            {
+                                "reasoning": "Tool result is enough",
+                                "action": {
+                                    "kind": "tool",
+                                    "target": "search",
+                                    "description": "Use the search result",
+                                    "input": {"query": "loom"},
+                                },
+                                "alternatives": [],
+                                "confidence": 0.8,
+                            }
+                        ),
+                        usage=TokenUsage(17, 5, 22),
+                    )
+                ),
+            ]
+        )
+
+        async def call_tool(_name, _input_value, **_options):
+            return ok(Observation("search-obs", "search", {"result": "found"}, NOW))
+
+        result = await create_llm_step_function(provider)(make_context(), make_runtime(call_tool=call_tool, events=events))
+
+        assert result.ok
+        assert [event["type"] for event in events] == [
+            "llm.requested",
+            "llm.completed",
+            "llm.requested",
+            "llm.completed",
+            "decision.recorded",
+            "action.started",
+            "observation.recorded",
+            "observation.recorded",
+            "action.completed",
+        ]
+        first_request = events[0]
+        first_response = events[1]
+        second_request = events[2]
+        assert first_request["model"] == "mock-model"
+        assert [message.role for message in first_request["messages"]] == ["system", "user"]
+        assert first_request["tools"][0]["function"]["name"] == "search"
+        assert first_response["response"].tool_calls[0].name == "search"
+        assert first_request["llm_call_id"] == first_response["llm_call_id"]
+        assert [message.role for message in second_request["messages"]] == ["system", "user", "assistant", "tool"]
+        assert events[3]["response"].usage.total_tokens == 22
+        assert "api_key" not in json.dumps(str(events))
+
+    asyncio.run(scenario())
+
+
 class FakeProvider:
     model = "mock-model"
 
@@ -397,9 +463,14 @@ def make_context(max_tokens=None):
     )
 
 
-def make_runtime(call_tool=None):
+def make_runtime(call_tool=None, events=None):
     async def default_call_tool(_name, _input_value, **_options):
         return ok(Observation("tool-obs", "search", {"result": "found"}, NOW))
+
+    async def emit(event):
+        if events is not None:
+            events.append(event)
+        return ok(None)
 
     return type(
         "Runtime",
@@ -409,7 +480,7 @@ def make_runtime(call_tool=None):
             "loop_id": new_loop_id(),
             "cancellation": None,
             "registry": None,
-            "trace_sink": type("Sink", (), {"emit": staticmethod(lambda _event: ok(None))})(),
+            "trace_sink": type("Sink", (), {"emit": staticmethod(emit)})(),
             "now": staticmethod(lambda: NOW),
             "call_tool": staticmethod(call_tool or default_call_tool),
         },

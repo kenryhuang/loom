@@ -160,12 +160,22 @@ def test_end_to_end_llm_loop_runs_tool_and_records_queryable_trace(tmp_path):
 
         event_types = [event["type"] for event in trace_store.events()]
         assert event_types == [
+            "run.started",
             "step.started",
+            "llm.requested",
+            "llm.completed",
+            "tool.started",
+            "tool.completed",
+            "llm.requested",
+            "llm.completed",
             "decision.recorded",
             "action.started",
             "observation.recorded",
             "observation.recorded",
+            "action.completed",
+            "action.recorded",
             "step.completed",
+            "run.completed",
         ]
 
     asyncio.run(scenario())

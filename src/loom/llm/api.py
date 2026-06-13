@@ -7,6 +7,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,30 @@ class TokenUsage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSelectionConfig:
+    """Configuration for LLM-based dynamic tool selection.
+
+    When enabled, each loop step begins with a lightweight LLM call that
+    analyzes the current context and selects a minimal tool subset from
+    the full affordances. The main LLM call then only sees the selected
+    tools, reducing context window usage and improving decision quality.
+    """
+
+    enabled: bool = True
+    provider: Any = None  # None = reuse main provider
+    max_tokens: int = 256
+    min_tools: int = 1
+    max_tools: int | None = None  # None = no limit
+    fallback: str = "all"  # "all" | "none" | "default"
+    default_tools: tuple[str, ...] = ()  # tool ids for fallback="default"
+    always_include: tuple[str, ...] = ()  # tool ids always kept regardless of selection
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "default_tools", tuple(self.default_tools))
+        object.__setattr__(self, "always_include", tuple(self.always_include))
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,22 +238,89 @@ def create_llm_step_function(
     prompt_options: dict[str, Any] | None = None,
     enable_tool_calling: bool = True,
     max_tool_calls_per_step: int = 5,
+    tool_selection: ToolSelectionConfig | None = None,
 ):
     async def llm_step(context: Context, runtime: Any) -> Result:
         started_at = runtime.now()
-        trace_id = new_trace_id()
+        trace_id = getattr(runtime, "trace_id", None) or new_trace_id()
         tracker = create_token_tracker()
-        tools = to_llm_tools(context.affordances.tools) if enable_tool_calling and context.affordances.tools else None
+
+        # ── Phase 1: Tool Selection ────────────────────────────────────
+        all_tools = context.affordances.tools
+        effective_tools = all_tools
+        tool_selection_result: ToolSelectionResult | None = None
+
+        if enable_tool_calling and all_tools and tool_selection is not None and tool_selection.enabled:
+            selection_provider = tool_selection.provider or provider
+            tool_selection_result = await _select_tools(context, selection_provider, tool_selection, runtime, trace_id)
+
+            # Build the effective tool list from selection
+            selected_ids = set(tool_selection_result.selected_tools)
+            effective_tools = tuple(t for t in all_tools if t.id in selected_ids)
+
+        tools = to_llm_tools(effective_tools) if enable_tool_calling and effective_tools else None
         messages = list(build_messages(context, **(prompt_options or {})))
         final_response: LlmResponse | None = None
+        llm_call_count = 0
         tool_call_count = 0
         tool_observations: list[Observation] = []
 
         while True:
+            llm_call_count += 1
+            llm_call_id = f"{trace_id}-llm-{llm_call_count}"
+            requested = await _emit_runtime_event(
+                runtime,
+                {
+                    "type": "llm.requested",
+                    "run_id": context.run_id,
+                    "loop_id": runtime.loop_id,
+                    "trace_id": trace_id,
+                    "llm_call_id": llm_call_id,
+                    "step_number": as_step_number(len(context.state.observations)),
+                    "model": provider.model,
+                    "messages": tuple(messages),
+                    "tools": tools,
+                    "at": runtime.now(),
+                },
+            )
+            if not requested.ok:
+                return requested
             response = await provider.chat(messages, tools, getattr(runtime, "cancellation", None))
             if not response.ok:
+                failed = await _emit_runtime_event(
+                    runtime,
+                    {
+                        "type": "llm.failed",
+                        "run_id": context.run_id,
+                        "loop_id": runtime.loop_id,
+                        "trace_id": trace_id,
+                        "llm_call_id": llm_call_id,
+                        "step_number": as_step_number(len(context.state.observations)),
+                        "model": provider.model,
+                        "error": response.error,
+                        "at": runtime.now(),
+                    },
+                )
+                if not failed.ok:
+                    return failed
                 return response
             final_response = response.value
+            completed = await _emit_runtime_event(
+                runtime,
+                {
+                    "type": "llm.completed",
+                    "run_id": context.run_id,
+                    "loop_id": runtime.loop_id,
+                    "trace_id": trace_id,
+                    "llm_call_id": llm_call_id,
+                    "step_number": as_step_number(len(context.state.observations)),
+                    "model": provider.model,
+                    "response": final_response,
+                    "at": runtime.now(),
+                },
+            )
+            if not completed.ok:
+                return completed
             tracker.add(final_response.usage)
             if not tracker.is_within_budget(context.goal.budget.max_tokens):
                 return _token_budget_exceeded(tracker.total, context.goal.budget.max_tokens)
@@ -275,8 +367,30 @@ def create_llm_step_function(
         if final_response is None:
             return err(make_loom_error("LLM_FAILED", "LLM provider returned no response", retryable=False))
 
+        # Include tool selection tokens in the tracker
+        if tool_selection_result is not None:
+            tracker.add(tool_selection_result.token_usage)
+
         parsed = _parse_decision(final_response.content, trace_id)
         ended_at = runtime.now()
+
+        # Build trace metadata including tool selection info
+        trace_metadata: dict[str, Any] = {
+            "model": provider.model,
+            "finishReason": final_response.finish_reason,
+            "tokenUsage": _token_usage_metadata(tracker.total),
+        }
+        if tool_selection_result is not None:
+            trace_metadata["toolSelection"] = {
+                "selected": tool_selection_result.selected_tools,
+                "reasoning": tool_selection_result.reasoning,
+                "confidence": tool_selection_result.confidence,
+                "model": tool_selection_result.model,
+                "duration_ms": tool_selection_result.duration_ms,
+                "fallback": tool_selection_result.fallback,
+                "tokenUsage": _token_usage_metadata(tool_selection_result.token_usage),
+            }
+
         llm_observation = Observation(
             f"{trace_id}-llm-observation",
             "llm",
@@ -331,11 +445,7 @@ def create_llm_step_function(
             decisions=(decision,),
             actions=(decision.action,),
             tags=("llm",),
-            metadata={
-                "model": provider.model,
-                "finishReason": final_response.finish_reason,
-                "tokenUsage": _token_usage_metadata(tracker.total),
-            },
+            metadata=trace_metadata,
         )
         emitted = await _emit_llm_events(runtime, trace, observations, decision)
         if not emitted.ok:
@@ -547,6 +657,279 @@ def _field(value: Any, key: str, default: Any = "") -> Any:
     return getattr(value, key, default)
 
 
+# ─── Tool Selection ────────────────────────────────────────────────────
+
+
+def build_tool_selection_prompt(
+    context: Context,
+    *,
+    max_history_steps: int = 3,
+) -> str:
+    """Build a prompt asking the LLM to select the minimal tool set for the next step.
+
+    The LLM receives the goal, recent observations/decisions, and the full tool
+    catalog. It returns a JSON with selected tool IDs and reasoning.
+    """
+    lines = [
+        "You are a tool selection assistant.",
+        "",
+        f"Goal: {context.goal.objective}",
+        f"Current step: {len(context.state.observations)}",
+    ]
+
+    # Recent context
+    recent_obs = context.state.observations[-max_history_steps:]
+    if recent_obs:
+        lines.extend(["", "Recent observations:", *format_observations(recent_obs)])
+
+    recent_dec = context.state.decisions[-max_history_steps:]
+    if recent_dec:
+        lines.extend(["", "Recent decisions:", *format_decisions(recent_dec)])
+
+    # Available tools
+    lines.extend(["", "Available tools:"])
+    for tool in context.affordances.tools:
+        schema_hint = ""
+        if tool.input_schema:
+            try:
+                schema = thaw_json(tool.input_schema)
+                props = schema.get("properties", {})
+                if props:
+                    schema_hint = f" (params: {', '.join(props.keys())})"
+            except Exception:
+                pass
+        lines.append(f"- {tool.id}: {tool.description}{schema_hint}")
+
+    lines.extend(
+        [
+            "",
+            "Select the MINIMAL tool set needed for the NEXT step.",
+            "Return ONLY valid JSON with this shape:",
+            "",
+            "{",
+            '  "reasoning": "why these tools are the best choice",',
+            '  "selected_tools": ["tool-id-1", "tool-id-2"],',
+            '  "confidence": 0.9',
+            "}",
+            "",
+            "Rules:",
+            "- Select at least 1 tool.",
+            "- Prefer fewer tools when possible.",
+            "- Only use tool IDs from the available list above.",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSelectionResult:
+    selected_tools: tuple[str, ...]
+    reasoning: str
+    confidence: float
+    token_usage: TokenUsage
+    duration_ms: int
+    model: str
+    fallback: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "selected_tools", tuple(self.selected_tools))
+
+
+def _fallback_tool_selection(
+    config: ToolSelectionConfig,
+    all_tool_ids: tuple[str, ...],
+    reason: str,
+) -> ToolSelectionResult:
+    """Return a fallback tool selection when the LLM call fails."""
+    if config.fallback == "none":
+        selected: tuple[str, ...] = ()
+    elif config.fallback == "default" and config.default_tools:
+        selected = tuple(tid for tid in config.default_tools if tid in all_tool_ids)
+    else:  # "all"
+        selected = all_tool_ids
+
+    # Always include always_include tools
+    always = tuple(tid for tid in config.always_include if tid in all_tool_ids)
+    selected = tuple(dict.fromkeys(selected + always))
+
+    return ToolSelectionResult(
+        selected_tools=selected,
+        reasoning=f"Fallback ({config.fallback}): {reason}",
+        confidence=0.0,
+        token_usage=TokenUsage(),
+        duration_ms=0,
+        model="fallback",
+        fallback=True,
+    )
+
+
+async def _select_tools(
+    context: Context,
+    provider: Any,
+    config: ToolSelectionConfig,
+    runtime: Any,
+    trace_id: str,
+) -> ToolSelectionResult:
+    """Run a lightweight LLM call to select tools for the current step.
+
+    Returns a ToolSelectionResult with the selected tool IDs.
+    On any failure, returns a fallback selection based on config.fallback.
+    """
+    import time
+
+    all_tool_ids = tuple(tool.id for tool in context.affordances.tools)
+
+    # Short circuit: not enough tools to bother selecting
+    if len(all_tool_ids) <= max(config.min_tools, 2):
+        return ToolSelectionResult(
+            selected_tools=all_tool_ids,
+            reasoning="Tool count below selection threshold, using all.",
+            confidence=1.0,
+            token_usage=TokenUsage(),
+            duration_ms=0,
+            model=provider.model,
+            fallback=False,
+        )
+
+    prompt = build_tool_selection_prompt(context)
+    selection_messages = (
+        LlmMessage("system", "You are a tool selection assistant. Return ONLY valid JSON."),
+        LlmMessage("user", prompt),
+    )
+
+    started_ms = time.monotonic()
+    selection_call_id = f"{trace_id}-tool-selection"
+    step_number = as_step_number(len(context.state.observations))
+
+    # Emit selection request event
+    await _emit_runtime_event(
+        runtime,
+        {
+            "type": "tool_selection.requested",
+            "run_id": context.run_id,
+            "loop_id": runtime.loop_id,
+            "trace_id": trace_id,
+            "selection_call_id": selection_call_id,
+            "step_number": step_number,
+            "model": provider.model,
+            "available_tools": all_tool_ids,
+            "at": runtime.now(),
+        },
+    )
+
+    # Call LLM (no tools in this call — it's a pure text response)
+    response = await provider.chat(selection_messages, tools=None, cancellation=getattr(runtime, "cancellation", None))
+
+    duration_ms = int((time.monotonic() - started_ms) * 1000)
+
+    if not response.ok:
+        await _emit_runtime_event(
+            runtime,
+            {
+                "type": "tool_selection.failed",
+                "run_id": context.run_id,
+                "loop_id": runtime.loop_id,
+                "trace_id": trace_id,
+                "selection_call_id": selection_call_id,
+                "step_number": step_number,
+                "model": provider.model,
+                "error": response.error,
+                "duration_ms": duration_ms,
+                "at": runtime.now(),
+            },
+        )
+        return _fallback_tool_selection(config, all_tool_ids, f"LLM call failed: {response.error.message}")
+
+    llm_response = response.value
+    content = llm_response.content or ""
+    usage = llm_response.usage
+
+    # Parse the selection
+    parsed = _parse_json_object(content)
+    if parsed is None:
+        await _emit_runtime_event(
+            runtime,
+            {
+                "type": "tool_selection.failed",
+                "run_id": context.run_id,
+                "loop_id": runtime.loop_id,
+                "trace_id": trace_id,
+                "selection_call_id": selection_call_id,
+                "step_number": step_number,
+                "model": provider.model,
+                "error": make_loom_error("LLM_PARSE_ERROR", "Failed to parse tool selection JSON", retryable=False),
+                "raw_content": content,
+                "duration_ms": duration_ms,
+                "at": runtime.now(),
+            },
+        )
+        return _fallback_tool_selection(config, all_tool_ids, "LLM returned unparseable response")
+
+    # Extract selected tool IDs
+    raw_selected = parsed.get("selected_tools", [])
+    if isinstance(raw_selected, str):
+        raw_selected = [raw_selected]
+    if not isinstance(raw_selected, list | tuple):
+        raw_selected = []
+
+    # Validate: only keep tools that actually exist
+    valid_selected = tuple(tid for tid in raw_selected if tid in all_tool_ids)
+    reasoning = parsed.get("reasoning", "No reasoning provided")
+    confidence = parsed.get("confidence", 0.0)
+    if not isinstance(confidence, int | float):
+        confidence = 0.0
+
+    # Enforce min_tools
+    if len(valid_selected) < config.min_tools:
+        # Add tools from the full set until we meet the minimum
+        remaining = tuple(tid for tid in all_tool_ids if tid not in valid_selected)
+        valid_selected = valid_selected + remaining[: config.min_tools - len(valid_selected)]
+
+    # Enforce max_tools
+    if config.max_tools is not None and len(valid_selected) > config.max_tools:
+        valid_selected = valid_selected[: config.max_tools]
+
+    # Always include always_include tools
+    always = tuple(tid for tid in config.always_include if tid in all_tool_ids and tid not in valid_selected)
+    valid_selected = valid_selected + always
+
+    result = ToolSelectionResult(
+        selected_tools=valid_selected,
+        reasoning=reasoning,
+        confidence=max(0.0, min(1.0, float(confidence))),
+        token_usage=usage,
+        duration_ms=duration_ms,
+        model=provider.model,
+        fallback=False,
+    )
+
+    # Emit selection decided event
+    await _emit_runtime_event(
+        runtime,
+        {
+            "type": "tool_selection.decided",
+            "run_id": context.run_id,
+            "loop_id": runtime.loop_id,
+            "trace_id": trace_id,
+            "selection_call_id": selection_call_id,
+            "step_number": step_number,
+            "model": provider.model,
+            "available_tools": all_tool_ids,
+            "selected_tools": valid_selected,
+            "excluded_tools": tuple(tid for tid in all_tool_ids if tid not in valid_selected),
+            "reasoning": reasoning,
+            "confidence": result.confidence,
+            "token_usage": _token_usage_metadata(usage),
+            "duration_ms": duration_ms,
+            "raw_content": content,
+            "at": runtime.now(),
+        },
+    )
+
+    return result
+
+
 def _parse_tool_arguments(tool_call: LlmToolCall) -> Result:
     try:
         return ok(freeze_json(json.loads(tool_call.arguments)))
@@ -656,25 +1039,59 @@ def _parse_action(value: Any, action_id: str, fallback_description: str) -> Acti
 
 async def _emit_llm_events(runtime: Any, trace: Trace, observations, decision: Decision) -> Result:
     events = [
-        {"type": "decision.recorded", "trace_id": trace.id, "decision": decision, "at": decision.at},
-        {"type": "action.started", "trace_id": trace.id, "action": decision.action, "at": decision.at},
+        {
+            "type": "decision.recorded",
+            "run_id": trace.run_id,
+            "loop_id": trace.loop_id,
+            "trace_id": trace.id,
+            "step_number": trace.step_number,
+            "decision": decision,
+            "at": decision.at,
+        },
+        {
+            "type": "action.started",
+            "run_id": trace.run_id,
+            "loop_id": trace.loop_id,
+            "trace_id": trace.id,
+            "step_number": trace.step_number,
+            "action": decision.action,
+            "at": decision.at,
+        },
         *[
             {
                 "type": "observation.recorded",
+                "run_id": trace.run_id,
+                "loop_id": trace.loop_id,
                 "trace_id": trace.id,
+                "step_number": trace.step_number,
                 "observation": observation,
                 "at": observation.at,
             }
             for observation in observations
         ],
+        {
+            "type": "action.completed",
+            "run_id": trace.run_id,
+            "loop_id": trace.loop_id,
+            "trace_id": trace.id,
+            "step_number": trace.step_number,
+            "action": decision.action,
+            "outcome": trace.outcome,
+            "at": trace.ended_at,
+        },
     ]
     for event in events:
-        emitted = runtime.trace_sink.emit(event)
-        if inspect.isawaitable(emitted):
-            emitted = await emitted
+        emitted = await _emit_runtime_event(runtime, event)
         if not emitted.ok:
             return emitted
     return ok(None)
+
+
+async def _emit_runtime_event(runtime: Any, event: Mapping[str, Any]) -> Result:
+    emitted = runtime.trace_sink.emit(event)
+    if inspect.isawaitable(emitted):
+        emitted = await emitted
+    return emitted
 
 
 def _token_usage_metadata(usage: TokenUsage) -> dict[str, int]:

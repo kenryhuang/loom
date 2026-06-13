@@ -160,12 +160,22 @@ def test_live_llm_loop_runs_full_runtime_tool_trace_chain():
 
         event_types = [event["type"] for event in trace_store.events()]
         assert event_types == [
+            "run.started",
             "step.started",
+            "llm.requested",
+            "llm.completed",
+            "tool.started",
+            "tool.completed",
+            "llm.requested",
+            "llm.completed",
             "decision.recorded",
             "action.started",
             "observation.recorded",
             "observation.recorded",
+            "action.completed",
+            "action.recorded",
             "step.completed",
+            "run.completed",
         ]
 
     asyncio.run(scenario())

@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections import defaultdict
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, fields, is_dataclass, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,29 @@ from loom.core.models import (
     make_loom_error,
     ok,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class EventRecordingPolicy:
+    enabled: bool = True
+    event_types: tuple[str, ...] | None = None
+    include_llm_io: bool = True
+    include_tool_io: bool = True
+    include_context_snapshots: bool = False
+
+    def __post_init__(self) -> None:
+        if self.event_types is not None:
+            object.__setattr__(self, "event_types", tuple(self.event_types))
+
+    def allows(self, event: Mapping[str, Any]) -> bool:
+        event_type = str(event.get("type", ""))
+        if not self.enabled:
+            return False
+        if self.event_types is not None and event_type not in self.event_types:
+            return False
+        if event_type.startswith("llm.") and not self.include_llm_io:
+            return False
+        return not (event_type.startswith("tool.") and not self.include_tool_io)
 
 
 class InMemoryTraceStore:
@@ -127,13 +150,41 @@ class InMemoryTraceStore:
 @dataclass(frozen=True, slots=True)
 class TraceSink:
     store: InMemoryTraceStore
+    policy: EventRecordingPolicy = field(default_factory=EventRecordingPolicy)
 
     async def emit(self, event: Mapping[str, Any]) -> Result:
-        return await self.store.append_event(event)
+        if self.policy.allows(event):
+            return await self.store.append_event(event)
+        if event.get("type") == "step.completed" and event.get("trace") is not None:
+            return await self.store.append(event["trace"])
+        return ok(None)
 
 
-def create_in_memory_trace_sink(store: InMemoryTraceStore) -> TraceSink:
-    return TraceSink(store)
+@dataclass(frozen=True, slots=True)
+class CompositeTraceSink:
+    sinks: tuple[Any, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "sinks", tuple(self.sinks))
+
+    async def emit(self, event: Mapping[str, Any]) -> Result:
+        for sink in self.sinks:
+            emitted = sink.emit(event)
+            if hasattr(emitted, "__await__"):
+                emitted = await emitted
+            if not emitted.ok:
+                return emitted
+        return ok(None)
+
+
+@dataclass(frozen=True, slots=True)
+class NoOpTraceSink:
+    async def emit(self, _event: Mapping[str, Any]) -> Result:
+        return ok(None)
+
+
+def create_in_memory_trace_sink(store: InMemoryTraceStore, *, policy: EventRecordingPolicy | None = None) -> TraceSink:
+    return TraceSink(store, policy or EventRecordingPolicy())
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,7 +263,10 @@ def _matches_trace(trace: Trace, query: Mapping[str, Any]) -> bool:
 
 def _event_trace_id(event: Mapping[str, Any]) -> str | None:
     if event.get("type") == "step.completed":
-        return event["trace"].id
+        trace = event["trace"]
+        if isinstance(trace, Mapping):
+            return trace.get("id")
+        return trace.id
     return event.get("trace_id")
 
 
@@ -237,6 +291,8 @@ class JsonlTraceStore(InMemoryTraceStore):
                     self._by_outcome[trace.outcome].append(trace.id)
                     for tag in trace.tags:
                         self._by_tag[tag].append(trace.id)
+                elif record.get("type") == "event":
+                    self._events.append(record["payload"])
 
     async def append(self, trace: Trace) -> Result:
         result = await super().append(trace)
@@ -250,6 +306,27 @@ class JsonlTraceStore(InMemoryTraceStore):
                             "type": "trace",
                             "id": trace.id,
                             "runId": trace.run_id,
+                            "payload": payload,
+                            "hash": stable_json_hash(payload),
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+        return result
+
+    async def append_event(self, event: Mapping[str, Any]) -> Result:
+        result = await super().append_event(event)
+        if result.ok:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            payload = _to_plain(event)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "type": "event",
+                            "eventType": event.get("type"),
+                            "traceId": _event_trace_id(event),
                             "payload": payload,
                             "hash": stable_json_hash(payload),
                         },
@@ -398,9 +475,12 @@ def _file_hash(path: Path) -> str:
 
 
 __all__ = [
+    "CompositeTraceSink",
     "DefaultTraceReader",
+    "EventRecordingPolicy",
     "InMemoryTraceStore",
     "JsonlTraceStore",
+    "NoOpTraceSink",
     "TraceSink",
     "TraceArchiveManifest",
     "TraceSamplePolicy",

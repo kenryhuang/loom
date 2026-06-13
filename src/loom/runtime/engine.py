@@ -27,7 +27,9 @@ from loom.core.models import (
     to_loom_error,
 )
 from loom.observability.traces import (
+    CompositeTraceSink,
     DefaultTraceReader,
+    EventRecordingPolicy,
     InMemoryTraceStore,
     TraceSink,
     create_in_memory_trace_sink,
@@ -98,6 +100,7 @@ class RuntimeState:
 class StepRuntime:
     run_id: str
     loop_id: str
+    trace_id: str
     cancellation: CancellationToken
     registry: RuntimeRegistry
     trace_sink: Any
@@ -118,6 +121,8 @@ def create(
     definition: MinimalLoopDefinition,
     *,
     trace_store: InMemoryTraceStore | None = None,
+    event_recorder: Any | None = None,
+    event_policy: EventRecordingPolicy | None = None,
     registry: RuntimeRegistry | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> Result:
@@ -125,9 +130,12 @@ def create(
     if not validation.ok:
         return validation
     store = trace_store or InMemoryTraceStore()
+    store_sink = create_in_memory_trace_sink(store, policy=event_policy)
+    recorder_enabled = event_policy is None or event_policy.enabled
+    trace_sink = CompositeTraceSink((store_sink, event_recorder)) if event_recorder is not None and recorder_enabled else store_sink
     state = RuntimeState(
         trace_store=store,
-        trace_sink=create_in_memory_trace_sink(store),
+        trace_sink=trace_sink,
         registry=registry or default_runtime_registry,
     )
     handle = LoopHandle(
@@ -155,8 +163,21 @@ async def step(
     trace_id = new_trace_id()
     started_at = now_iso()
     started_ms = time.monotonic()
+    step_number = as_step_number(len(context.state.observations))
     emit = _make_emitter(state.trace_sink, trace_sink)
-    started = await emit({"type": "step.started", "trace_id": trace_id, "at": started_at, "context_id": context.id})
+    started = await emit(
+        {
+            "type": "step.started",
+            "run_id": context.run_id,
+            "loop_id": loop.id,
+            "loop_version": loop.version,
+            "trace_id": trace_id,
+            "step_number": step_number,
+            "at": started_at,
+            "context_id": context.id,
+            "metadata": dict(metadata or {}),
+        }
+    )
     if not started.ok:
         return started
 
@@ -166,7 +187,7 @@ async def step(
         persisted = await _persist_completed(emit, terminal)
         return err(error) if persisted.ok else persisted
 
-    runtime = _make_step_runtime(loop, context, state, token, emit)
+    runtime = _make_step_runtime(loop, context, state, token, emit, trace_id, step_number)
     try:
         result = await _maybe_await(loop.definition.step(context, runtime), timeout_ms)
     except BaseException as exc:
@@ -184,6 +205,9 @@ async def step(
         return err(loom_error) if persisted.ok else persisted
 
     step_result = _normalize_step_result(result.value)
+    recorded = await _emit_trace_actions(emit, step_result.trace)
+    if not recorded.ok:
+        return recorded
     persisted = await _persist_completed(emit, step_result.trace)
     if not persisted.ok:
         return persisted
@@ -227,36 +251,74 @@ async def run(
     trace_sink: Any | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> Result:
+    state = _RUNTIME_STATE.get(id(loop)) or RuntimeState(InMemoryTraceStore(), create_in_memory_trace_sink(InMemoryTraceStore()), default_runtime_registry)
+    emit = _make_emitter(state.trace_sink, trace_sink)
     started_ms = time.monotonic()
     started_at = now_iso()
     current = initial_context
     traces: list[Trace] = []
     output = None
     steps = 0
+    started = await emit(
+        {
+            "type": "run.started",
+            "run_id": initial_context.run_id,
+            "loop_id": loop.id,
+            "loop_version": loop.version,
+            "at": started_at,
+            "context_id": initial_context.id,
+            "metadata": dict(metadata or {}),
+        }
+    )
+    if not started.ok:
+        return started
 
     while True:
         is_done = await done(loop, current, cancellation=cancellation, timeout_ms=timeout_ms)
         if not is_done.ok:
+            failed = await _emit_run_failed(emit, loop, current, started_at, started_ms, is_done.error, steps)
+            if not failed.ok:
+                return failed
             return is_done
         if is_done.value:
             ended_at = now_iso()
+            metrics = RunMetrics(
+                steps=steps,
+                started_at=started_at,
+                ended_at=ended_at,
+                duration_ms=_duration_ms(started_ms),
+                trace_count=len(traces),
+                outcome="pass",
+            )
+            completed = await emit(
+                {
+                    "type": "run.completed",
+                    "run_id": initial_context.run_id,
+                    "loop_id": loop.id,
+                    "loop_version": loop.version,
+                    "at": ended_at,
+                    "started_at": started_at,
+                    "duration_ms": metrics.duration_ms,
+                    "steps": steps,
+                    "trace_count": len(traces),
+                    "outcome": "pass",
+                    "context_id": current.id,
+                }
+            )
+            if not completed.ok:
+                return completed
             return ok(
                 RunResult(
                     context=current,
                     traces=tuple(traces),
                     output=output,
-                    metrics=RunMetrics(
-                        steps=steps,
-                        started_at=started_at,
-                        ended_at=ended_at,
-                        duration_ms=_duration_ms(started_ms),
-                        trace_count=len(traces),
-                        outcome="pass",
-                    ),
+                    metrics=metrics,
                 )
             )
         if max_steps is not None and steps >= max_steps:
-            return err(make_loom_error("BUDGET_EXCEEDED", "Run max_steps exceeded", retryable=False))
+            error = make_loom_error("BUDGET_EXCEEDED", "Run max_steps exceeded", retryable=False)
+            failed = await _emit_run_failed(emit, loop, current, started_at, started_ms, error, steps)
+            return err(error) if failed.ok else failed
         stepped = await step(
             loop,
             current,
@@ -266,6 +328,9 @@ async def run(
             metadata=metadata,
         )
         if not stepped.ok:
+            failed = await _emit_run_failed(emit, loop, current, started_at, started_ms, stepped.error, steps)
+            if not failed.ok:
+                return failed
             return stepped
         current = stepped.value.context
         traces.append(stepped.value.trace)
@@ -359,13 +424,86 @@ def _make_step_runtime(
     state: RuntimeState,
     token: CancellationToken,
     emit: Callable[[Mapping[str, Any]], Awaitable[Result]],
+    trace_id: str,
+    step_number: int,
 ) -> StepRuntime:
     async def call_tool(tool_id: str, input_value: Any, **options: Any) -> Result:
+        metadata = dict(options.get("metadata") or {})
+        tool_call_id = metadata.get("tool_call_id")
+        started_at = now_iso()
+        started = await emit(
+            {
+                "type": "tool.started",
+                "run_id": context.run_id,
+                "loop_id": loop.id,
+                "tool_id": tool_id,
+                "tool_call_id": tool_call_id,
+                "trace_id": trace_id,
+                "step_number": step_number,
+                "input": input_value,
+                "metadata": metadata,
+                "at": started_at,
+            }
+        )
+        if not started.ok:
+            return started
         handler = state.registry.tools.get(tool_id)
         if not handler.ok:
+            failed = await emit(
+                {
+                    "type": "tool.failed",
+                    "run_id": context.run_id,
+                    "loop_id": loop.id,
+                    "tool_id": tool_id,
+                    "tool_call_id": tool_call_id,
+                    "trace_id": trace_id,
+                    "step_number": step_number,
+                    "error": handler.error,
+                    "at": now_iso(),
+                }
+            )
+            if not failed.ok:
+                return failed
             return handler
         invoke = getattr(handler.value, "invoke", handler.value)
-        return await _maybe_await(invoke(input_value, options))
+        try:
+            result = await _maybe_await(invoke(input_value, options))
+        except BaseException as exc:
+            result = err(to_loom_error(exc))
+        if not isinstance(result, Result):
+            result = ok(result)
+        if not result.ok:
+            failed = await emit(
+                {
+                    "type": "tool.failed",
+                    "run_id": context.run_id,
+                    "loop_id": loop.id,
+                    "tool_id": tool_id,
+                    "tool_call_id": tool_call_id,
+                    "trace_id": trace_id,
+                    "step_number": step_number,
+                    "error": result.error,
+                    "at": now_iso(),
+                }
+            )
+            return result if failed.ok else failed
+        completed = await emit(
+            {
+                "type": "tool.completed",
+                "run_id": context.run_id,
+                "loop_id": loop.id,
+                "tool_id": tool_id,
+                "tool_call_id": tool_call_id,
+                "trace_id": trace_id,
+                "step_number": step_number,
+                "input": input_value,
+                "output": result.value,
+                "metadata": metadata,
+                "started_at": started_at,
+                "at": now_iso(),
+            }
+        )
+        return result if completed.ok else completed
 
     async def run_loop(loop_id: str, child_context: Context, **options: Any) -> Result:
         child = state.registry.loops.get(loop_id)
@@ -376,6 +514,7 @@ def _make_step_runtime(
     return StepRuntime(
         run_id=context.run_id,
         loop_id=loop.id,
+        trace_id=trace_id,
         cancellation=token,
         registry=state.registry,
         trace_sink=type("RuntimeSink", (), {"emit": staticmethod(emit)})(),
@@ -400,6 +539,49 @@ def _make_emitter(primary: Any, secondary: Any | None):
 
 async def _persist_completed(emit: Callable[[Mapping[str, Any]], Awaitable[Result]], trace: Trace) -> Result:
     return await emit({"type": "step.completed", "trace": trace, "at": now_iso()})
+
+
+async def _emit_trace_actions(emit: Callable[[Mapping[str, Any]], Awaitable[Result]], trace: Trace) -> Result:
+    for action in trace.actions:
+        recorded = await emit(
+            {
+                "type": "action.recorded",
+                "run_id": trace.run_id,
+                "loop_id": trace.loop_id,
+                "trace_id": trace.id,
+                "step_number": trace.step_number,
+                "action": action,
+                "at": trace.ended_at,
+            }
+        )
+        if not recorded.ok:
+            return recorded
+    return ok(None)
+
+
+async def _emit_run_failed(
+    emit: Callable[[Mapping[str, Any]], Awaitable[Result]],
+    loop: LoopHandle,
+    context: Context,
+    started_at: str,
+    started_ms: float,
+    error: Any,
+    steps: int,
+) -> Result:
+    return await emit(
+        {
+            "type": "run.failed",
+            "run_id": context.run_id,
+            "loop_id": loop.id,
+            "loop_version": loop.version,
+            "at": now_iso(),
+            "started_at": started_at,
+            "duration_ms": _duration_ms(started_ms),
+            "steps": steps,
+            "context_id": context.id,
+            "error": error,
+        }
+    )
 
 
 def _terminal_trace(
