@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+import pytest
+
+pytest.importorskip("textual")
+
+from loom.tui.tui_app import DetailPanel, LoomTuiApp, LoopHeader
+from loom.tui.tui_collector import TuiEvent, TuiEventCollector
+
+
+@pytest.mark.asyncio
+async def test_set_loop_info_before_mount_updates_header_after_mount():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    app.set_loop_info(role="counter loop", goal="count to five")
+
+    async with app.run_test():
+        header = app.query_one("#loop_header", LoopHeader)
+
+        assert header.loop_role == "counter loop"
+        assert header.loop_goal == "count to five"
+
+
+def test_detail_panel_appends_events_and_includes_tool_result(monkeypatch):
+    panel = DetailPanel()
+    cleared = 0
+    writes = []
+
+    def fake_clear():
+        nonlocal cleared
+        cleared += 1
+
+    monkeypatch.setattr(panel, "clear", fake_clear)
+    monkeypatch.setattr(panel, "write", writes.append)
+
+    panel.show_event(
+        TuiEvent(
+            timestamp=0,
+            event_type="run.started",
+            data={"type": "run.started", "context_id": "ctx-1"},
+        )
+    )
+    panel.show_event(
+        TuiEvent(
+            timestamp=1,
+            event_type="tool.completed",
+            data={
+                "type": "tool.completed",
+                "tool_id": "search-notes",
+                "output": {
+                    "id": "obs-1",
+                    "source": "search-notes",
+                    "value": {
+                        "matches": [
+                            {
+                                "title": "Live Loom smoke test",
+                                "summary": "real tool result",
+                            }
+                        ]
+                    },
+                },
+            },
+        )
+    )
+
+    assert cleared == 0
+    assert len(writes) == 2
+    assert "Run Started" in writes[0]
+    assert "Tool Result" in writes[1]
+    assert "search-notes" in writes[1]
+    assert "Live Loom smoke test" in writes[1]
+    assert "real tool result" in writes[1]
+
+
+def test_detail_panel_pretty_prints_json_strings(monkeypatch):
+    panel = DetailPanel()
+    writes = []
+
+    monkeypatch.setattr(panel, "write", writes.append)
+
+    panel.show_event(
+        TuiEvent(
+            timestamp=0,
+            event_type="tool.completed",
+            data={
+                "type": "tool.completed",
+                "tool_id": "search-notes",
+                "output": '{"matches":[{"title":"Live Loom smoke test","summary":"real tool result"}]}',
+            },
+        )
+    )
+
+    assert len(writes) == 1
+    assert '  {\n    "matches": [\n      {' in writes[0]
+    assert '"title": "Live Loom smoke test"' in writes[0]
+    assert '"summary": "real tool result"' in writes[0]

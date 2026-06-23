@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 from rich.text import Text
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenStackError
 from textual.containers import Container, VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import Footer, Label, RichLog, Static
@@ -186,7 +186,8 @@ def _format_event_detail(event: TuiEvent) -> str:
             content = resp.get("content")
             if content:
                 lines.append(f"[bold {COLORS['magenta']}]content:[/]")
-                _append_wrapped(lines, str(content), indent="  ")
+                if not _append_jsonish(lines, content, indent="  "):
+                    _append_wrapped(lines, str(content), indent="  ")
                 lines.append("")
             tool_calls = resp.get("tool_calls", [])
             if isinstance(tool_calls, (list, tuple)) and tool_calls:
@@ -195,10 +196,7 @@ def _format_event_detail(event: TuiEvent) -> str:
                     if isinstance(tc, dict):
                         lines.append(f"  [{COLORS['orange']}]{tc.get('name', '?')}[/]({tc.get('id', '')[:8]})")
                         args = tc.get("arguments", "{}")
-                        try:
-                            parsed = json.loads(args) if isinstance(args, str) else args
-                            lines.append(f"    {json.dumps(parsed, ensure_ascii=False, indent=2)}")
-                        except (json.JSONDecodeError, TypeError):
+                        if not _append_jsonish(lines, args, indent="    "):
                             lines.append(f"    {args}")
                 lines.append("")
             usage = resp.get("usage", {})
@@ -218,9 +216,7 @@ def _format_event_detail(event: TuiEvent) -> str:
         inp = data.get("input")
         if inp is not None:
             lines.append("[dim]input:[/]")
-            if isinstance(inp, dict):
-                lines.append(f"  {json.dumps(inp, ensure_ascii=False, indent=2)}")
-            else:
+            if not _append_jsonish(lines, inp, indent="  "):
                 lines.append(f"  {inp}")
         lines.append("")
 
@@ -230,12 +226,9 @@ def _format_event_detail(event: TuiEvent) -> str:
         out = data.get("output")
         if out is not None:
             lines.append("[dim]output:[/]")
-            if isinstance(out, dict):
-                lines.append(f"  {json.dumps(out, ensure_ascii=False, indent=2)}")
-            elif hasattr(out, "value"):
-                lines.append(f"  {out.value}")
-            else:
-                lines.append(f"  {out}")
+            value = out.value if hasattr(out, "value") else out
+            if not _append_jsonish(lines, value, indent="  "):
+                lines.append(f"  {value}")
         lines.append("")
 
     elif event.event_type == "step.completed":
@@ -327,10 +320,49 @@ def _format_event_detail(event: TuiEvent) -> str:
         interesting = {k: v for k, v in data.items() if k not in ("type", "run_id", "loop_id", "trace_id", "step_number", "at")}
         if interesting:
             lines.append("[dim]data:[/]")
-            lines.append(f"  {json.dumps(interesting, ensure_ascii=False, indent=2, default=str)[:2000]}")
+            if not _append_jsonish(lines, interesting, indent="  ", max_chars=2000):
+                lines.append(f"  {interesting}")
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _append_jsonish(lines: list[str], value: Any, *, indent: str = "", max_chars: int | None = None) -> bool:
+    """Append dict/list values or JSON strings as pretty JSON."""
+    parsed = _jsonish_value(value)
+    if parsed is None:
+        return False
+    rendered = json.dumps(parsed, ensure_ascii=False, indent=2, default=str)
+    if max_chars is not None:
+        rendered = rendered[:max_chars]
+    lines.extend(f"{indent}{line}" for line in rendered.splitlines())
+    return True
+
+
+def _jsonish_value(value: Any) -> Any | None:
+    if isinstance(value, dict):
+        normalized = {}
+        for key, item in value.items():
+            jsonish = _jsonish_value(item)
+            normalized[key] = item if jsonish is None else jsonish
+        return normalized
+    if isinstance(value, list | tuple):
+        normalized = []
+        for item in value:
+            jsonish = _jsonish_value(item)
+            normalized.append(item if jsonish is None else jsonish)
+        return normalized
+    if not isinstance(value, str):
+        return None
+
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "[{":
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict | list) else None
 
 
 def _append_wrapped(lines: list[str], text: str, indent: str = "", max_width: int = 80) -> None:
@@ -371,8 +403,8 @@ class TimelineWidget(VerticalScroll):
     }}
     """
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
         self._event_labels: list[tuple[Label, TuiEvent]] = []
         self._selected_index: int = -1
 
@@ -421,7 +453,7 @@ class TimelineWidget(VerticalScroll):
 
 
 class DetailPanel(RichLog):
-    """Detail panel showing selected event data."""
+    """Append-only panel showing loop event details."""
 
     DEFAULT_CSS = f"""
     DetailPanel {{
@@ -436,14 +468,18 @@ class DetailPanel(RichLog):
     }}
     """
 
-    def __init__(self) -> None:
-        super().__init__(markup=True, highlight=True, wrap=True)
-        self.border_title = f"[bold {COLORS['magenta']}] EVENT DETAIL [/]"
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(markup=True, highlight=True, wrap=True, **kwargs)
+        self.border_title = f"[bold {COLORS['magenta']}] LOOP EVENT DETAILS [/]"
+        self._event_count = 0
 
     def show_event(self, event: TuiEvent) -> None:
-        """Show event detail."""
-        self.clear()
-        self.write(_format_event_detail(event))
+        """Append event detail to the log."""
+        detail = _format_event_detail(event)
+        if self._event_count:
+            detail = f"\n[dim]{'─' * 72}[/]\n{detail}"
+        self.write(detail)
+        self._event_count += 1
 
 
 class StatusBar(Static):
@@ -560,6 +596,8 @@ class LoomTuiApp(App[None]):
         self._step_count = 0
         self._start_time = time.monotonic()
         self._run_done = False
+        self._loop_role = ""
+        self._loop_goal = ""
 
     def compose(self) -> ComposeResult:
         yield LoopHeader(id="loop_header")
@@ -571,6 +609,7 @@ class LoomTuiApp(App[None]):
 
     def on_mount(self) -> None:
         """Start listening for events."""
+        self._apply_loop_info()
         self.set_interval(0.05, self._poll_events)
 
     def _poll_events(self) -> None:
@@ -637,43 +676,39 @@ class LoomTuiApp(App[None]):
         timeline = self.query_one("#timeline", TimelineWidget)
         idx = timeline.get_selected_index()
         if idx < timeline.event_count - 1:
-            event = timeline.select_event(idx + 1)
-            if event:
-                detail = self.query_one("#detail", DetailPanel)
-                detail.show_event(event)
+            timeline.select_event(idx + 1)
 
     def action_cursor_up(self) -> None:
         """Move selection up in timeline."""
         timeline = self.query_one("#timeline", TimelineWidget)
         idx = timeline.get_selected_index()
         if idx > 0:
-            event = timeline.select_event(idx - 1)
-            if event:
-                detail = self.query_one("#detail", DetailPanel)
-                detail.show_event(event)
+            timeline.select_event(idx - 1)
 
     def action_scroll_top(self) -> None:
         """Scroll to top of timeline."""
         timeline = self.query_one("#timeline", TimelineWidget)
         if timeline.event_count > 0:
-            event = timeline.select_event(0)
-            if event:
-                detail = self.query_one("#detail", DetailPanel)
-                detail.show_event(event)
+            timeline.select_event(0)
         timeline.scroll_home(animate=False)
 
     def action_scroll_bottom(self) -> None:
         """Scroll to bottom of timeline."""
         timeline = self.query_one("#timeline", TimelineWidget)
         if timeline.event_count > 0:
-            event = timeline.select_event(timeline.event_count - 1)
-            if event:
-                detail = self.query_one("#detail", DetailPanel)
-                detail.show_event(event)
+            timeline.select_event(timeline.event_count - 1)
         timeline.scroll_end(animate=False)
 
     def set_loop_info(self, role: str, goal: str) -> None:
         """Set loop metadata in the header."""
-        header = self.query_one("#loop_header", LoopHeader)
-        header.loop_role = role
-        header.loop_goal = goal
+        self._loop_role = role
+        self._loop_goal = goal
+        self._apply_loop_info()
+
+    def _apply_loop_info(self) -> None:
+        try:
+            header = self.query_one("#loop_header", LoopHeader)
+        except ScreenStackError:
+            return
+        header.loop_role = self._loop_role
+        header.loop_goal = self._loop_goal
