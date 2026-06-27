@@ -306,6 +306,53 @@ class TestCreateLlmStepWithToolSelection:
         )
         assert callable(step_fn)
 
+
+class TestCreateLlmStepWithToolResolver:
+    """Tests for catalog pruning before LLM tool selection."""
+
+    @pytest.mark.asyncio
+    async def test_tool_resolver_runs_before_llm_tool_selection(self):
+        from loom.core.models import MinimalLoopDefinition, new_loop_id, new_loop_version
+        from loom.llm.api import create_llm_step_function
+        from loom.runtime import create, create_runtime_registry, run
+
+        ctx = _make_context_with_tools(["search", "write", "delete"])
+        captured_tool_names = []
+
+        class Provider:
+            model = "resolver-test"
+
+            async def chat(self, messages, tools=None, cancellation=None):
+                if tools:
+                    captured_tool_names.append(tuple(tool["function"]["name"] for tool in tools))
+                return ok(
+                    LlmResponse(
+                        content='{"reasoning":"done","action":{"kind":"none","description":"done"},"alternatives":[],"confidence":1}',
+                    )
+                )
+
+        def resolver(context):
+            return (tool for tool in context.affordances.tools if tool.id == "search")
+
+        loop = create(
+            MinimalLoopDefinition(
+                id=new_loop_id(),
+                version=new_loop_version(),
+                identity=IdentityLayer(role="test"),
+                goal=GoalLayer(objective="test"),
+                step=create_llm_step_function(Provider(), tool_resolver=resolver),
+                done=lambda context, runtime: ok(len(context.state.decisions) > 0),
+            ),
+            registry=create_runtime_registry(),
+        ).unwrap()
+
+        result = await run(loop, ctx, max_steps=1)
+
+        assert result.ok
+        assert captured_tool_names == [("search",)]
+        assert result.value.traces[0].metadata["toolResolution"]["included"] == ("search",)
+        assert set(result.value.traces[0].metadata["toolResolution"]["pruned"]) == {"write", "delete"}
+
     @pytest.mark.asyncio
     async def test_tool_selection_disabled_via_config(self):
         """Config with enabled=False skips tool selection."""
