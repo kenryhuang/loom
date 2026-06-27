@@ -9,6 +9,7 @@ from loom.tools.contracts import (
     ToolResolution,
     estimate_tool_schema_tokens,
 )
+from loom.tools.resolver import ToolResolver
 
 __all__ = [
     "AffordanceBudget",
@@ -17,5 +18,6 @@ __all__ = [
     "ToolLayer",
     "ToolLifecycle",
     "ToolResolution",
+    "ToolResolver",
     "estimate_tool_schema_tokens",
 ]
