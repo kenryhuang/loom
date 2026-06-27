@@ -36,7 +36,7 @@ def test_top_level_package_api_is_intentionally_thin():
     import loom
 
     public_names = {name for name in dir(loom) if not name.startswith("_")}
-    submodule_names = {"composition", "core", "evolution", "examples", "llm", "observability", "runtime", "tui"}
+    submodule_names = {"composition", "core", "evolution", "examples", "llm", "observability", "runtime", "tools", "tui"}
 
     assert public_names - submodule_names == set()
     assert loom.__version__ == "0.1.0"

@@ -239,27 +239,43 @@ def create_llm_step_function(
     enable_tool_calling: bool = True,
     max_tool_calls_per_step: int = 5,
     tool_selection: ToolSelectionConfig | None = None,
+    tool_resolver: Any = None,
 ):
     async def llm_step(context: Context, runtime: Any) -> Result:
         started_at = runtime.now()
         trace_id = getattr(runtime, "trace_id", None) or new_trace_id()
         tracker = create_token_tracker()
 
-        # ── Phase 1: Tool Selection ────────────────────────────────────
+        # ── Phase 0: Tool Resolution ───────────────────────────────────
         all_tools = context.affordances.tools
+        prompt_context = context
+        tool_resolution_metadata: dict[str, Any] | None = None
+
+        if enable_tool_calling and tool_resolver is not None:
+            resolved = tool_resolver(context)
+            if inspect.isawaitable(resolved):
+                resolved = await resolved
+            if isinstance(resolved, Result):
+                if not resolved.ok:
+                    return resolved
+                resolved = resolved.value
+            all_tools, tool_resolution_metadata = _normalize_tool_resolution(all_tools, resolved)
+            prompt_context = replace(context, affordances=replace(context.affordances, tools=all_tools))
+
+        # ── Phase 1: Tool Selection ────────────────────────────────────
         effective_tools = all_tools
         tool_selection_result: ToolSelectionResult | None = None
 
         if enable_tool_calling and all_tools and tool_selection is not None and tool_selection.enabled:
             selection_provider = tool_selection.provider or provider
-            tool_selection_result = await _select_tools(context, selection_provider, tool_selection, runtime, trace_id)
+            tool_selection_result = await _select_tools(prompt_context, selection_provider, tool_selection, runtime, trace_id)
 
             # Build the effective tool list from selection
             selected_ids = set(tool_selection_result.selected_tools)
             effective_tools = tuple(t for t in all_tools if t.id in selected_ids)
 
         tools = to_llm_tools(effective_tools) if enable_tool_calling and effective_tools else None
-        messages = list(build_messages(context, **(prompt_options or {})))
+        messages = list(build_messages(prompt_context, **(prompt_options or {})))
         final_response: LlmResponse | None = None
         llm_call_count = 0
         tool_call_count = 0
@@ -380,6 +396,8 @@ def create_llm_step_function(
             "finishReason": final_response.finish_reason,
             "tokenUsage": _token_usage_metadata(tracker.total),
         }
+        if tool_resolution_metadata is not None:
+            trace_metadata["toolResolution"] = tool_resolution_metadata
         if tool_selection_result is not None:
             trace_metadata["toolSelection"] = {
                 "selected": tool_selection_result.selected_tools,
@@ -658,6 +676,25 @@ def _field(value: Any, key: str, default: Any = "") -> Any:
 
 
 # ─── Tool Selection ────────────────────────────────────────────────────
+
+
+def _normalize_tool_resolution(original_tools: tuple[Any, ...], resolved: Any) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    if hasattr(resolved, "tools"):
+        tools = tuple(resolved.tools)
+        included = tuple(getattr(resolved, "included_ids", tuple(tool.id for tool in tools)))
+        pruned = tuple(getattr(resolved, "pruned_ids", tuple(tool.id for tool in original_tools if tool.id not in included)))
+        metadata = {
+            "included": included,
+            "pruned": pruned,
+            "tokenEstimate": getattr(resolved, "token_estimate", None),
+            "overBudget": getattr(resolved, "over_budget", False),
+        }
+        return tools, metadata
+
+    tools = tuple(resolved)
+    included = tuple(tool.id for tool in tools)
+    pruned = tuple(tool.id for tool in original_tools if tool.id not in included)
+    return tools, {"included": included, "pruned": pruned, "tokenEstimate": None, "overBudget": False}
 
 
 def build_tool_selection_prompt(
