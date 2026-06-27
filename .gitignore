@@ -35,6 +35,7 @@ pip-wheel-metadata/
 
 # Runtime artifacts
 runs/
+.worktrees/
 
 # Editor and OS-local files
 .vscode/
