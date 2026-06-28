@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from loom.evolution.artifacts import EvolutionArtifacts, render_evolution_report, write_evolution_artifacts
 from loom.evolution.proposals import EvolutionProposal, EvolutionSignal
@@ -73,3 +74,70 @@ def test_render_evolution_report_summarizes_counts_and_proposals():
     assert "signals: 1" in report
     assert "proposals: 1" in report
     assert "Improve system prompt" in report
+
+
+def test_render_evolution_report_includes_operator_context():
+    report = render_evolution_report((_score(),), (_signal(),), (_proposal(),))
+
+    assert "## Signals" in report
+    assert "surface: system_prompt" in report
+    assert "kind: repeated_attribution" in report
+    assert "severity: 0.5" in report
+    assert "frequency: 2" in report
+    assert "confidence: 0.8" in report
+    assert "trace_ids: trace-1, trace-2" in report
+    assert "evidence_event_hashes: hash-1" in report
+    assert "Output contract unclear." in report
+    assert "created_from_trace_ids: trace-1" in report
+    assert '"severity": 0.5' in report
+    assert "reversible: True" in report
+    assert "ttl_runs: 10" in report
+    assert "```json" in report
+    assert '"operation": "add_rule"' in report
+    assert '"text": "Return valid JSON."' in report
+
+
+def test_write_evolution_artifacts_accepts_single_pass_generators(tmp_path):
+    artifacts = write_evolution_artifacts(
+        tmp_path,
+        (_score() for _ in range(1)),
+        (_signal() for _ in range(1)),
+        (_proposal() for _ in range(1)),
+    )
+
+    assert len(artifacts.scores_path.read_text(encoding="utf-8").splitlines()) == 1
+    assert len(artifacts.signals_path.read_text(encoding="utf-8").splitlines()) == 1
+    assert len(artifacts.proposals_path.read_text(encoding="utf-8").splitlines()) == 1
+    report = artifacts.report_path.read_text(encoding="utf-8")
+    assert "scores: 1" in report
+    assert "signals: 1" in report
+    assert "proposals: 1" in report
+
+
+def test_jsonl_serialization_handles_nested_paths_and_sequences(tmp_path):
+    proposal = EvolutionProposal(
+        id="proposal-1",
+        surface="system_prompt",
+        kind="prompt_rule",
+        title="Improve system prompt",
+        rationale="Output contract unclear.",
+        created_from_trace_ids=("trace-1",),
+        expected_impact={"severity": 0.5, "paths": (Path("one"), Path("two"))},
+        risk="low",
+        reversible=True,
+        ttl_runs=10,
+        patch={
+            "operation": "add_rule",
+            "text": "Return valid JSON.",
+            "metadata": {"paths": [Path("rules/system.md")], "tags": ("json", "contract")},
+        },
+        confidence=0.8,
+        evidence_event_hashes=("hash-1",),
+    )
+
+    artifacts = write_evolution_artifacts(tmp_path, (_score(),), (_signal(),), (proposal,))
+    proposal_record = json.loads(artifacts.proposals_path.read_text(encoding="utf-8").splitlines()[0])
+
+    assert proposal_record["expected_impact"]["paths"] == ["one", "two"]
+    assert proposal_record["patch"]["metadata"]["paths"] == ["rules/system.md"]
+    assert proposal_record["patch"]["metadata"]["tags"] == ["json", "contract"]

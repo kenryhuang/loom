@@ -71,8 +71,32 @@ def render_evolution_report(
         f"- signals: {len(signal_items)}",
         f"- proposals: {len(proposal_items)}",
         "",
-        "## Proposals",
+        "## Signals",
     ]
+    if not signal_items:
+        lines.extend(["", "No signals generated."])
+    for signal in signal_items:
+        lines.extend(
+            [
+                "",
+                f"### {signal.surface}",
+                "",
+                f"- surface: {signal.surface}",
+                f"- kind: {signal.kind}",
+                f"- severity: {signal.severity}",
+                f"- frequency: {signal.frequency}",
+                f"- confidence: {signal.confidence}",
+                f"- trace_ids: {_format_sequence(signal.trace_ids)}",
+                f"- evidence_event_hashes: {_format_sequence(signal.evidence_event_hashes)}",
+                f"- explanation: {signal.explanation}",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Proposals",
+        ]
+    )
     if not proposal_items:
         lines.extend(["", "No proposals generated."])
     for proposal in proposal_items:
@@ -86,7 +110,16 @@ def render_evolution_report(
                 f"- kind: {proposal.kind}",
                 f"- risk: {proposal.risk}",
                 f"- confidence: {proposal.confidence}",
+                f"- created_from_trace_ids: {_format_sequence(proposal.created_from_trace_ids)}",
+                f"- evidence_event_hashes: {_format_sequence(proposal.evidence_event_hashes)}",
+                f"- expected_impact: {_to_json(proposal.expected_impact)}",
+                f"- reversible: {proposal.reversible}",
+                f"- ttl_runs: {proposal.ttl_runs}",
                 f"- rationale: {proposal.rationale}",
+                "",
+                "```json",
+                _to_json(proposal.patch, indent=2),
+                "```",
             ]
         )
     return "\n".join(lines) + "\n"
@@ -95,8 +128,19 @@ def render_evolution_report(
 def _write_jsonl(path: Path, records: Iterable[Any]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for record in records:
-            handle.write(json.dumps(_to_plain(record), sort_keys=True))
+            handle.write(json.dumps(_to_plain(record), separators=(",", ":"), sort_keys=True))
             handle.write("\n")
+
+
+def _format_sequence(values: Iterable[Any]) -> str:
+    items = tuple(values)
+    if not items:
+        return "(none)"
+    return ", ".join(str(item) for item in items)
+
+
+def _to_json(value: Any, *, indent: int | None = None) -> str:
+    return json.dumps(_to_plain(value), indent=indent, sort_keys=True)
 
 
 def _to_plain(value: Any) -> Any:
