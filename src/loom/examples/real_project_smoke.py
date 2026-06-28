@@ -46,7 +46,7 @@ DEFAULT_YAKDB_PATH = "/Users/huanggui/workspace/yakDB"
 @dataclass(frozen=True, slots=True)
 class RealProjectSmokeConfig:
     target_path: Path
-    smoke_command: tuple[str, ...] = ("uv", "run", "pytest", "-q")
+    smoke_command: tuple[str, ...] = ("uv", "run", "--no-sync", "pytest", "-q")
     cli_smoke_enabled: bool = True
     command_timeout_seconds: int = 120
 
@@ -169,10 +169,10 @@ def run_yakdb_cli_smoke(config: RealProjectSmokeConfig, project_info: ProjectInf
             encoding="utf-8",
         )
         commands = (
-            ("uv", "run", "yakdb", "init", str(workspace), "--no-ocr"),
-            ("uv", "run", "yakdb", "index", str(workspace), "--workspace", str(workspace)),
-            ("uv", "run", "yakdb", "grep", "loom-real-case", str(workspace), "--workspace", str(workspace)),
-            ("uv", "run", "yakdb", "read", "docs/notes.txt", "--workspace", str(workspace), "--numbered"),
+            ("uv", "run", "--no-sync", "yakdb", "init", str(workspace), "--no-ocr"),
+            ("uv", "run", "--no-sync", "yakdb", "index", str(workspace), "--workspace", str(workspace)),
+            ("uv", "run", "--no-sync", "yakdb", "grep", "loom-real-case", str(workspace), "--workspace", str(workspace)),
+            ("uv", "run", "--no-sync", "yakdb", "read", "docs/notes.txt", "--workspace", str(workspace), "--numbered"),
         )
         results = []
         for command in commands:
@@ -311,7 +311,7 @@ def parse_args(argv: tuple[str, ...] | list[str] | None = None) -> RealProjectSm
     parser.add_argument("path", nargs="?", default=DEFAULT_YAKDB_PATH, help="Target project path")
     parser.add_argument(
         "--smoke-command",
-        default="uv run pytest -q",
+        default="uv run --no-sync pytest -q",
         help="Smoke command to run in the target project",
     )
     parser.add_argument("--no-cli-smoke", action="store_true", help="Disable project-specific CLI smoke")

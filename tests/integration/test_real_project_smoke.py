@@ -4,6 +4,7 @@ from pathlib import Path
 
 from loom.examples.real_project_smoke import (
     DEFAULT_YAKDB_PATH,
+    CommandResult,
     RealProjectSmokeConfig,
     inspect_project,
     make_real_project_smoke_context,
@@ -115,6 +116,7 @@ def test_parse_args_defaults_to_yakdb_path():
     config = parse_args(())
 
     assert str(config.target_path) == DEFAULT_YAKDB_PATH
+    assert config.smoke_command == ("uv", "run", "--no-sync", "pytest", "-q")
 
 
 def test_parse_args_accepts_custom_path_and_smoke_command(tmp_path: Path):
@@ -123,3 +125,23 @@ def test_parse_args_accepts_custom_path_and_smoke_command(tmp_path: Path):
     assert config.target_path == tmp_path
     assert config.smoke_command == ("python", "-c", "pass")
     assert config.cli_smoke_enabled is False
+
+
+def test_yakdb_cli_smoke_uses_no_sync_to_avoid_lockfile_writes(tmp_path: Path, monkeypatch):
+    project = tmp_path / "yakdb"
+    project.mkdir()
+    (project / "pyproject.toml").write_text('[project]\nname = "yakdb"\n', encoding="utf-8")
+    project_info = inspect_project(project)
+    commands = []
+
+    def fake_run_command(command, *, cwd, timeout_seconds):
+        commands.append(command)
+        return CommandResult(command, str(cwd), 0, "loom-real-case", "", 1)
+
+    monkeypatch.setattr("loom.examples.real_project_smoke.run_command", fake_run_command)
+
+    result = run_yakdb_cli_smoke(RealProjectSmokeConfig(target_path=project), project_info)
+
+    assert not result.skipped
+    assert commands
+    assert all(command[:3] == ("uv", "run", "--no-sync") for command in commands)
