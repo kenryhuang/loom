@@ -1,6 +1,6 @@
 import asyncio
-from pathlib import Path
 import sys
+from pathlib import Path
 
 from loom.examples.real_project_smoke import (
     DEFAULT_YAKDB_PATH,
