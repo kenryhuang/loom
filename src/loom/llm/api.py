@@ -1418,9 +1418,6 @@ async def _parse_openai_sse_stream(chunks: Any):
         if payload == "[DONE]":
             break
         data = json.loads(payload)
-        choice = data.get("choices", [{}])[0]
-        delta = choice.get("delta", {})
-        finish_reason = choice.get("finish_reason") or finish_reason
         usage_data = data.get("usage") or {}
         if usage_data:
             usage = TokenUsage(
@@ -1428,6 +1425,16 @@ async def _parse_openai_sse_stream(chunks: Any):
                 usage_data.get("completion_tokens", 0),
                 usage_data.get("total_tokens", 0),
             )
+        choices = data.get("choices") or []
+        if not choices:
+            continue
+        choice = choices[0]
+        if not isinstance(choice, Mapping):
+            continue
+        delta = choice.get("delta") or {}
+        if not isinstance(delta, Mapping):
+            delta = {}
+        finish_reason = choice.get("finish_reason") or finish_reason
 
         content = delta.get("content")
         if content:

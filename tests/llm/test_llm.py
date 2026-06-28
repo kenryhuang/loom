@@ -388,6 +388,47 @@ def test_openai_provider_stream_chat_parses_sse_chunks():
     asyncio.run(scenario())
 
 
+def test_openai_provider_stream_chat_handles_empty_choice_chunks():
+    async def scenario():
+        empty_choice_usage_chunk = {
+            "choices": [],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+        }
+        content_chunk = {
+            "choices": [
+                {
+                    "delta": {"content": '{"reasoning":"ok","action":{"kind":"none","description":"Stop"},"alternatives":[],"confidence":0.7}'},
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+
+        async def http_client(_url, _request):
+            return {
+                "status": 200,
+                "ok": True,
+                "chunks": [
+                    f"data: {json.dumps(empty_choice_usage_chunk)}\n\n",
+                    f"data: {json.dumps(content_chunk)}\n\n",
+                    "data: [DONE]\n\n",
+                ],
+            }
+
+        provider = create_openai_provider(
+            api_key="test-key",
+            model="gpt-test",
+            base_url="https://proxy.example/v1",
+            http_client=http_client,
+        )
+
+        events = [event async for event in provider.stream_chat([LlmMessage("user", "hello")])]
+
+        assert [event.kind for event in events] == ["content.delta", "completed"]
+        assert events[-1].response.usage.total_tokens == 7
+
+    asyncio.run(scenario())
+
+
 def test_default_env_config_loads_project_dotenv_when_present():
     env_path = Path(".env")
     if not env_path.exists():
