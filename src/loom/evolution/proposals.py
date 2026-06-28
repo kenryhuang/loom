@@ -11,6 +11,8 @@ from typing import Any
 from loom.core import err, make_loom_error, ok
 from loom.evolution.scoring import StepScore
 
+_RISK_RANKS = {"low": 0, "medium": 1, "high": 2}
+
 
 @dataclass(frozen=True, slots=True)
 class EvolutionSignal:
@@ -50,10 +52,20 @@ class ProposalGateConfig:
 
 def aggregate_step_scores(scores: Iterable[StepScore], min_frequency: int = 2) -> tuple[EvolutionSignal, ...]:
     grouped: dict[str, list[tuple[StepScore, tuple[str, ...]]]] = defaultdict(list)
+    seen: set[tuple[str, str, int, str]] = set()
     for score in scores:
         for surface, explanations in score.attribution.items():
-            if explanations:
-                grouped[str(surface)].append((score, tuple(explanations)))
+            normalized = _normalize_explanations(explanations)
+            if not normalized:
+                continue
+
+            surface = str(surface)
+            key = (score.run_id, score.trace_id, score.step_number, surface)
+            if key in seen:
+                continue
+
+            seen.add(key)
+            grouped[surface].append((score, normalized))
 
     signals: list[EvolutionSignal] = []
     for surface, items in grouped.items():
@@ -85,11 +97,21 @@ def generate_evolution_proposals(
     signals: Iterable[EvolutionSignal],
     max_proposals: int = 3,
 ) -> tuple[EvolutionProposal, ...]:
-    return tuple(_proposal_from_signal(signal) for signal in tuple(signals)[:max_proposals])
+    limit = max(0, max_proposals)
+    return tuple(_proposal_from_signal(signal) for signal in tuple(signals)[:limit])
 
 
 def gate_proposal(proposal: EvolutionProposal, config: ProposalGateConfig | None = None):
     config = config or ProposalGateConfig()
+    if config.max_risk not in _RISK_RANKS:
+        return err(
+            make_loom_error(
+                "MUTATION_REJECTED",
+                "Proposal gate max_risk is invalid",
+                retryable=False,
+                metadata={"proposal_id": proposal.id, "surface": proposal.surface, "max_risk": config.max_risk},
+            )
+        )
     if proposal.confidence < config.min_confidence:
         return err(
             make_loom_error(
@@ -200,13 +222,17 @@ def _summarize_explanations(explanation_groups: Iterable[tuple[str, ...]]) -> st
     return sorted(counts, key=lambda item: (-counts[item], first_seen[item], item))[0]
 
 
+def _normalize_explanations(explanations: Iterable[str]) -> tuple[str, ...]:
+    return tuple(explanation.strip() for explanation in explanations if explanation.strip())
+
+
 def _proposal_id(signal: EvolutionSignal) -> str:
     digest = hashlib.sha256(
         "|".join(
             (
                 signal.kind,
                 signal.surface,
-                ",".join(signal.trace_ids),
+                ",".join(sorted(signal.trace_ids)),
                 signal.explanation,
             )
         ).encode("utf-8")
@@ -215,7 +241,7 @@ def _proposal_id(signal: EvolutionSignal) -> str:
 
 
 def _risk_rank(risk: str) -> int:
-    return {"low": 0, "medium": 1, "high": 2}.get(risk, 2)
+    return _RISK_RANKS.get(risk, _RISK_RANKS["high"])
 
 
 __all__ = [
