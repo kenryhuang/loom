@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from loom.core import ok
+from loom.core import err, make_loom_error, ok
 from loom.evolution.analyze import AnalyzeConfig, analyze_trace, parse_args
 from loom.evolution.scoring import SCORE_DIMENSIONS
 from loom.llm import LlmResponse, TokenUsage
@@ -23,6 +23,20 @@ class FakeScoreProvider:
                     }
                 ),
                 usage=TokenUsage(3, 4, 7),
+            )
+        )
+
+
+class FailingScoreProvider:
+    model = "fake-score-model"
+
+    async def chat(self, messages, tools=None, cancellation=None):
+        return err(
+            make_loom_error(
+                "LLM_FAILED",
+                "Score provider failed",
+                retryable=True,
+                metadata={"provider": "fake"},
             )
         )
 
@@ -148,5 +162,89 @@ def test_analyze_trace_scores_and_writes_artifacts(tmp_path):
         assert len(result.value.signals) == 1
         assert len(result.value.proposals) == 1
         assert result.value.artifacts.report_path.exists()
+        assert result.value.report == result.value.artifacts.report_path.read_text(encoding="utf-8")
+
+    asyncio.run(scenario())
+
+
+def test_analyze_trace_missing_path_returns_validation_error(tmp_path):
+    async def scenario():
+        result = await analyze_trace(
+            AnalyzeConfig(trace_path=tmp_path / "missing.jsonl", out_dir=tmp_path / "evolution"),
+            provider=FakeScoreProvider(),
+        )
+
+        assert not result.ok
+        assert result.error.code == "VALIDATION_FAILED"
+
+    asyncio.run(scenario())
+
+
+def test_analyze_trace_directory_path_returns_validation_error(tmp_path):
+    async def scenario():
+        result = await analyze_trace(
+            AnalyzeConfig(trace_path=tmp_path, out_dir=tmp_path / "evolution"),
+            provider=FakeScoreProvider(),
+        )
+
+        assert not result.ok
+        assert result.error.code == "VALIDATION_FAILED"
+
+    asyncio.run(scenario())
+
+
+def test_analyze_trace_malformed_jsonl_returns_error(tmp_path):
+    async def scenario():
+        trace_path = tmp_path / "trace.jsonl"
+        trace_path.write_text("{not-json\n", encoding="utf-8")
+
+        result = await analyze_trace(
+            AnalyzeConfig(trace_path=trace_path, out_dir=tmp_path / "evolution"),
+            provider=FakeScoreProvider(),
+        )
+
+        assert not result.ok
+        assert result.error.code == "VALIDATION_FAILED"
+
+    asyncio.run(scenario())
+
+
+def test_analyze_trace_invalid_numeric_config_returns_validation_error(tmp_path):
+    async def scenario():
+        trace_path = tmp_path / "trace.jsonl"
+        _write_trace(trace_path)
+
+        cases = [
+            AnalyzeConfig(trace_path=trace_path, out_dir=tmp_path / "confidence", min_confidence=1.1),
+            AnalyzeConfig(trace_path=trace_path, out_dir=tmp_path / "frequency", min_signal_frequency=0),
+            AnalyzeConfig(trace_path=trace_path, out_dir=tmp_path / "proposals", max_proposals=-1),
+        ]
+
+        for config in cases:
+            result = await analyze_trace(config, provider=FakeScoreProvider())
+
+            assert not result.ok
+            assert result.error.code == "VALIDATION_FAILED"
+
+    asyncio.run(scenario())
+
+
+def test_analyze_trace_scorer_failure_returns_error_without_artifacts(tmp_path):
+    async def scenario():
+        trace_path = tmp_path / "trace.jsonl"
+        out_dir = tmp_path / "evolution"
+        _write_trace(trace_path)
+
+        result = await analyze_trace(
+            AnalyzeConfig(trace_path=trace_path, out_dir=out_dir, min_signal_frequency=1),
+            provider=FailingScoreProvider(),
+        )
+
+        assert not result.ok
+        assert result.error.code == "LLM_FAILED"
+        assert result.error.trace_id == "trace-1"
+        assert result.error.metadata["step_number"] == 0
+        assert result.error.metadata["provider"] == "fake"
+        assert not out_dir.exists()
 
     asyncio.run(scenario())

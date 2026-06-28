@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,11 +49,24 @@ class AnalyzeResult:
 
 
 async def analyze_trace(config: AnalyzeConfig, provider: Any = None) -> Result:
+    config_error = _validate_config(config)
+    if config_error is not None:
+        return err(config_error)
+
     if not config.trace_path.exists():
         return err(
             make_loom_error(
                 "VALIDATION_FAILED",
                 "Trace path does not exist",
+                retryable=False,
+                metadata={"trace_path": str(config.trace_path)},
+            )
+        )
+    if not config.trace_path.is_file():
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Trace path must be a file",
                 retryable=False,
                 metadata={"trace_path": str(config.trace_path)},
             )
@@ -64,15 +78,20 @@ async def analyze_trace(config: AnalyzeConfig, provider: Any = None) -> Result:
             return provider_result
         provider = provider_result.value
 
-    records = load_trace_records(config.trace_path)
+    records_result = _load_records(config.trace_path)
+    if not records_result.ok:
+        return records_result
+
+    records = records_result.value
     episodes = tuple(build_step_episodes(records))
     scorer = LlmStepScorer(provider)
 
     scores: list[StepScore] = []
     for episode in episodes:
         score_result = await scorer.score(episode)
-        if score_result.ok:
-            scores.append(score_result.value)
+        if not score_result.ok:
+            return err(_score_error(score_result.error, episode))
+        scores.append(score_result.value)
 
     score_items = tuple(scores)
     signals = aggregate_step_scores(score_items, min_frequency=config.min_signal_frequency)
@@ -93,6 +112,84 @@ async def analyze_trace(config: AnalyzeConfig, provider: Any = None) -> Result:
             artifacts=artifacts,
             report=report,
         )
+    )
+
+
+def _validate_config(config: AnalyzeConfig) -> Any | None:
+    if config.min_confidence < 0.0 or config.min_confidence > 1.0:
+        return make_loom_error(
+            "VALIDATION_FAILED",
+            "min_confidence must be between 0.0 and 1.0",
+            retryable=False,
+            metadata={"min_confidence": config.min_confidence},
+        )
+    if config.min_signal_frequency < 1:
+        return make_loom_error(
+            "VALIDATION_FAILED",
+            "min_signal_frequency must be at least 1",
+            retryable=False,
+            metadata={"min_signal_frequency": config.min_signal_frequency},
+        )
+    if config.max_proposals < 0:
+        return make_loom_error(
+            "VALIDATION_FAILED",
+            "max_proposals must be at least 0",
+            retryable=False,
+            metadata={"max_proposals": config.max_proposals},
+        )
+    return None
+
+
+def _load_records(trace_path: Path) -> Result:
+    try:
+        return ok(load_trace_records(trace_path))
+    except json.JSONDecodeError as exc:
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Trace JSONL is malformed",
+                retryable=False,
+                cause={"message": str(exc), "line": exc.lineno, "column": exc.colno},
+                metadata={"trace_path": str(trace_path)},
+            )
+        )
+    except OSError as exc:
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Could not read trace path",
+                retryable=False,
+                cause={"name": type(exc).__name__, "message": str(exc)},
+                metadata={"trace_path": str(trace_path)},
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Could not load trace records",
+                retryable=False,
+                cause={"name": type(exc).__name__, "message": str(exc)},
+                metadata={"trace_path": str(trace_path)},
+            )
+        )
+
+
+def _score_error(error: Any, episode: StepEpisode) -> Any:
+    metadata = {
+        "run_id": episode.run_id,
+        "trace_id": episode.trace_id,
+        "step_number": episode.step_number,
+    }
+    if error is not None and error.metadata is not None:
+        metadata.update(dict(error.metadata))
+    return make_loom_error(
+        error.code if error is not None else "LLM_FAILED",
+        error.message if error is not None else "Step scoring failed",
+        retryable=error.retryable if error is not None else True,
+        trace_id=episode.trace_id,
+        cause=error.cause if error is not None else None,
+        metadata=metadata,
     )
 
 
