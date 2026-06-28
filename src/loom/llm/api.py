@@ -746,9 +746,7 @@ class OpenAIProvider:
         if self.http_client is not None:
             return await self.http_client(url, request)
 
-        import asyncio
-
-        return await asyncio.to_thread(_send_stream_sync, url, request)
+        return {"status": 200, "ok": True, "chunks": _urlopen_stream_chunks(url, request)}
 
 
 def create_openai_provider(**config: Any) -> OpenAIProvider:
@@ -1488,6 +1486,44 @@ async def _aiter_chunks(chunks: Any):
         return
     for chunk in chunks or ():
         yield chunk
+
+
+async def _urlopen_stream_chunks(url: str, request: dict[str, Any]):
+    import asyncio
+    import threading
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    sentinel = object()
+
+    def put(item: Any) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, item)
+
+    def read_stream() -> None:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(request["body"]).encode("utf-8"),
+            method="POST",
+            headers=request["headers"],
+        )
+        try:
+            with urllib.request.urlopen(req) as response:  # noqa: S310
+                for line in response:
+                    put(line)
+        except BaseException as exc:
+            put(exc)
+        finally:
+            put(sentinel)
+
+    threading.Thread(target=read_stream, daemon=True).start()
+
+    while True:
+        item = await queue.get()
+        if item is sentinel:
+            return
+        if isinstance(item, BaseException):
+            raise item
+        yield item
 
 
 def _sse_payload(event: str) -> str | None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytest.importorskip("textual")
@@ -129,3 +131,41 @@ def test_detail_panel_renders_llm_stream_deltas(monkeypatch):
     assert '"partial": true' in writes[0]
     assert "Tool Arguments" in writes[1]
     assert '"query": "loom"' in writes[1]
+
+
+def test_detail_panel_renders_llm_completed_report_with_real_newlines(monkeypatch):
+    panel = DetailPanel()
+    writes = []
+    monkeypatch.setattr(panel, "write", writes.append)
+    report = "# Smoke Report\n\nThe LLM made this judgment."
+    content = json.dumps(
+        {
+            "reasoning": "Evidence is enough.",
+            "action": {
+                "kind": "custom",
+                "description": "Write report",
+                "input": {"report": report},
+            },
+            "alternatives": [],
+            "confidence": 0.8,
+        }
+    )
+
+    panel.show_event(
+        TuiEvent(
+            timestamp=0,
+            event_type="llm.completed",
+            data={
+                "type": "llm.completed",
+                "response": {
+                    "content": content,
+                    "tool_calls": [],
+                    "usage": {"total_tokens": 10},
+                    "finish_reason": "stop",
+                },
+            },
+        )
+    )
+
+    assert "# Smoke Report\n\nThe LLM made this judgment." in writes[0]
+    assert "\\n\\nThe LLM" not in writes[0]

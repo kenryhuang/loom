@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -425,6 +426,48 @@ def test_openai_provider_stream_chat_handles_empty_choice_chunks():
 
         assert [event.kind for event in events] == ["content.delta", "completed"]
         assert events[-1].response.usage.total_tokens == 7
+
+    asyncio.run(scenario())
+
+
+def test_openai_provider_stream_chat_yields_before_urlopen_stream_completes(monkeypatch):
+    async def scenario():
+        release_second_chunk = threading.Event()
+
+        class SlowStreamingResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                release_second_chunk.set()
+
+            def __iter__(self):
+                first_chunk = {"choices": [{"delta": {"content": "hello"}, "finish_reason": None}]}
+                yield f"data: {json.dumps(first_chunk)}\n\n".encode()
+                release_second_chunk.wait(timeout=2)
+                done_chunk = {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+                yield f"data: {json.dumps(done_chunk)}\n\n".encode()
+                yield b"data: [DONE]\n\n"
+
+        def fake_urlopen(_request):
+            return SlowStreamingResponse()
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        provider = create_openai_provider(api_key="test-key", model="gpt-test")
+        stream = provider.stream_chat([LlmMessage("user", "hello")]).__aiter__()
+
+        try:
+            first_event = await asyncio.wait_for(stream.__anext__(), timeout=0.2)
+        finally:
+            release_second_chunk.set()
+
+        completed_event = await asyncio.wait_for(stream.__anext__(), timeout=1.0)
+
+        assert first_event.kind == "content.delta"
+        assert first_event.content_delta == "hello"
+        assert completed_event.kind == "completed"
 
     asyncio.run(scenario())
 

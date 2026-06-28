@@ -200,7 +200,7 @@ def _format_event_detail(event: TuiEvent) -> str:
             content = resp.get("content")
             if content:
                 lines.append(f"[bold {COLORS['magenta']}]content:[/]")
-                if not _append_jsonish(lines, content, indent="  "):
+                if not _append_llm_content(lines, content, indent="  "):
                     _append_wrapped(lines, str(content), indent="  ")
                 lines.append("")
             tool_calls = resp.get("tool_calls", [])
@@ -378,6 +378,32 @@ def _append_jsonish(lines: list[str], value: Any, *, indent: str = "", max_chars
     return True
 
 
+def _append_llm_content(lines: list[str], value: Any, *, indent: str = "") -> bool:
+    parsed = _jsonish_value(value)
+    if parsed is None:
+        return False
+    report = _extract_report_text(parsed)
+    if report is not None:
+        _append_wrapped(lines, report)
+        return True
+    rendered = json.dumps(parsed, ensure_ascii=False, indent=2, default=str)
+    lines.extend(f"{indent}{line}" for line in rendered.splitlines())
+    return True
+
+
+def _extract_report_text(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    action = value.get("action")
+    if not isinstance(action, dict):
+        return None
+    input_value = action.get("input")
+    if not isinstance(input_value, dict):
+        return None
+    report = input_value.get("report")
+    return report if isinstance(report, str) else None
+
+
 def _jsonish_value(value: Any) -> Any | None:
     if isinstance(value, dict):
         normalized = {}
@@ -408,19 +434,28 @@ def _append_wrapped(lines: list[str], text: str, indent: str = "", max_width: in
     """Append text with basic word wrapping."""
     if not text:
         return
+    text = _normalize_display_text(text)
     prefix_len = len(indent)
     available = max_width - prefix_len
-    words = text.split()
-    current = ""
-    for word in words:
-        if len(current) + len(word) + 1 <= available:
-            current = f"{current} {word}" if current else word
-        else:
-            if current:
-                lines.append(f"{indent}{current}")
-            current = word
-    if current:
-        lines.append(f"{indent}{current}")
+    for raw_line in text.splitlines():
+        if not raw_line:
+            lines.append("")
+            continue
+        words = raw_line.split()
+        current = ""
+        for word in words:
+            if len(current) + len(word) + 1 <= available:
+                current = f"{current} {word}" if current else word
+            else:
+                if current:
+                    lines.append(f"{indent}{current}")
+                current = word
+        if current:
+            lines.append(f"{indent}{current}")
+
+
+def _normalize_display_text(text: str) -> str:
+    return text.replace("\\n", "\n").replace("\\t", "\t")
 
 
 # ─── Widgets ───────────────────────────────────────────────────────────
