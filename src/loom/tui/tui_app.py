@@ -45,6 +45,14 @@ EVENT_STYLES: dict[str, dict[str, str]] = {
     "llm.requested": {"icon": "◎", "color": COLORS["magenta"], "label": "LLM →"},
     "llm.completed": {"icon": "◉", "color": COLORS["magenta"], "label": "LLM ←"},
     "llm.failed": {"icon": "✗", "color": COLORS["red"], "label": "LLM FAIL"},
+    "llm.stream.started": {"icon": "◎", "color": COLORS["magenta"], "label": "LLM STREAM"},
+    "llm.stream.completed": {"icon": "◉", "color": COLORS["magenta"], "label": "LLM DONE"},
+    "llm.content.delta": {"icon": "…", "color": COLORS["magenta"], "label": "LLM TEXT"},
+    "llm.reasoning.delta": {"icon": "…", "color": COLORS["blue"], "label": "LLM REASON"},
+    "llm.reasoning_context.delta": {"icon": "…", "color": COLORS["blue"], "label": "LLM CTX"},
+    "llm.tool_call.started": {"icon": "⚙", "color": COLORS["orange"], "label": "LLM TOOL"},
+    "llm.tool_call.arguments.delta": {"icon": "⚙", "color": COLORS["orange"], "label": "TOOL ARGS"},
+    "llm.tool_call.completed": {"icon": "⚙", "color": COLORS["green"], "label": "TOOL READY"},
     "tool.started": {"icon": "⚙", "color": COLORS["orange"], "label": "TOOL →"},
     "tool.completed": {"icon": "⚙", "color": COLORS["green"], "label": "TOOL ←"},
     "tool.failed": {"icon": "⚙", "color": COLORS["red"], "label": "TOOL FAIL"},
@@ -83,6 +91,12 @@ def _format_event_line(event: TuiEvent) -> Text:
                 total = usage.get("total_tokens", 0)
                 if total:
                     parts.append((f"{total}tok ", COLORS["yellow"]))
+    elif event.event_type.startswith("llm.") and event.event_type.endswith(".delta"):
+        delta = str(event.data.get("delta", ""))
+        parts.append((delta[:60], COLORS["text_dim"]))
+    elif event.event_type in {"llm.tool_call.started", "llm.tool_call.completed"}:
+        tool = event.data.get("tool_name") or event.data.get("tool_call_id") or ""
+        parts.append((str(tool)[:60], COLORS["orange"]))
     elif event.event_type == "tool.started":
         tool_id = event.data.get("tool_id", "")
         parts.append((tool_id, COLORS["orange"]))
@@ -208,6 +222,31 @@ def _format_event_detail(event: TuiEvent) -> str:
             finish = resp.get("finish_reason")
             if finish:
                 lines.append(f"[dim]finish_reason:[/] {finish}")
+        lines.append("")
+
+    elif event.event_type in {"llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
+        lines.append(f"[bold {COLORS['magenta']}]─── LLM Stream ───[/]")
+        delta = data.get("delta", "")
+        if not _append_jsonish(lines, delta, indent="  "):
+            _append_wrapped(lines, str(delta), indent="  ")
+        lines.append("")
+
+    elif event.event_type == "llm.tool_call.arguments.delta":
+        lines.append(f"[bold {COLORS['orange']}]─── Tool Arguments ───[/]")
+        tool = data.get("tool_name") or data.get("tool_call_id") or "unknown"
+        lines.append(f"[dim]tool:[/] {tool}")
+        delta = data.get("delta", "")
+        if not _append_jsonish(lines, delta, indent="  "):
+            _append_wrapped(lines, str(delta), indent="  ")
+        lines.append("")
+
+    elif event.event_type in {"llm.stream.started", "llm.stream.completed", "llm.tool_call.started", "llm.tool_call.completed"}:
+        lines.append(f"[bold {COLORS['magenta']}]─── LLM Stream Event ───[/]")
+        tool = data.get("tool_name") or data.get("tool_call_id")
+        if tool:
+            lines.append(f"[dim]tool:[/] {tool}")
+        if event.duration_ms is not None:
+            lines.append(f"[dim]duration:[/] {event.duration_ms}ms")
         lines.append("")
 
     elif event.event_type == "tool.started":
