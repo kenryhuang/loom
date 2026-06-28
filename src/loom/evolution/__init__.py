@@ -1,6 +1,6 @@
 """Evolution public API for Loom."""
 
-from loom.evolution.analyze import AnalyzeConfig, AnalyzeResult, analyze_trace
+from loom.evolution.analyze import AnalyzeConfig, AnalyzeResult, analyze_trace, main, parse_args
 from loom.evolution.episodes import StepEpisode, TraceRecord, build_step_episodes, load_trace_records
 from loom.evolution.mutations import (
     CompositionEdge,
@@ -63,6 +63,8 @@ __all__ = [
     "build_step_episodes",
     "decide_evolution",
     "load_trace_records",
+    "main",
+    "parse_args",
     "run_shadow_evaluation",
     "validate_composition_graph",
     "validate_mutation_bundle_shape",

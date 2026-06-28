@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from loom.core import Result, err, make_loom_error, ok
-from loom.evolution.artifacts import EvolutionArtifacts, render_evolution_report, write_evolution_artifacts
+from loom.evolution.artifacts import EvolutionArtifacts, write_evolution_artifacts
 from loom.evolution.episodes import StepEpisode, build_step_episodes, load_trace_records
 from loom.evolution.proposals import (
     EvolutionProposal,
@@ -100,8 +101,12 @@ async def analyze_trace(config: AnalyzeConfig, provider: Any = None) -> Result:
         for proposal in generate_evolution_proposals(signals, max_proposals=config.max_proposals)
         if (gate_result := gate_proposal(proposal, ProposalGateConfig(min_confidence=config.min_confidence))).ok
     )
-    artifacts = write_evolution_artifacts(config.out_dir, score_items, signals, proposals)
-    report = render_evolution_report(score_items, signals, proposals)
+    artifacts_result = _write_artifacts(config.out_dir, score_items, signals, proposals)
+    if not artifacts_result.ok:
+        return artifacts_result
+
+    artifacts = artifacts_result.value
+    report = artifacts.report_path.read_text(encoding="utf-8")
 
     return ok(
         AnalyzeResult(
@@ -116,10 +121,10 @@ async def analyze_trace(config: AnalyzeConfig, provider: Any = None) -> Result:
 
 
 def _validate_config(config: AnalyzeConfig) -> Any | None:
-    if config.min_confidence < 0.0 or config.min_confidence > 1.0:
+    if not math.isfinite(config.min_confidence) or config.min_confidence < 0.0 or config.min_confidence > 1.0:
         return make_loom_error(
             "VALIDATION_FAILED",
-            "min_confidence must be between 0.0 and 1.0",
+            "min_confidence must be finite and between 0.0 and 1.0",
             retryable=False,
             metadata={"min_confidence": config.min_confidence},
         )
@@ -163,7 +168,7 @@ def _load_records(trace_path: Path) -> Result:
                 metadata={"trace_path": str(trace_path)},
             )
         )
-    except (TypeError, ValueError) as exc:
+    except (AttributeError, TypeError, ValueError) as exc:
         return err(
             make_loom_error(
                 "VALIDATION_FAILED",
@@ -171,6 +176,36 @@ def _load_records(trace_path: Path) -> Result:
                 retryable=False,
                 cause={"name": type(exc).__name__, "message": str(exc)},
                 metadata={"trace_path": str(trace_path)},
+            )
+        )
+
+
+def _write_artifacts(
+    out_dir: Path,
+    scores: tuple[StepScore, ...],
+    signals: tuple[EvolutionSignal, ...],
+    proposals: tuple[EvolutionProposal, ...],
+) -> Result:
+    try:
+        return ok(write_evolution_artifacts(out_dir, scores, signals, proposals))
+    except OSError as exc:
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Could not write evolution artifacts",
+                retryable=False,
+                cause={"name": type(exc).__name__, "message": str(exc)},
+                metadata={"out_dir": str(out_dir)},
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Could not serialize evolution artifacts",
+                retryable=False,
+                cause={"name": type(exc).__name__, "message": str(exc)},
+                metadata={"out_dir": str(out_dir)},
             )
         )
 

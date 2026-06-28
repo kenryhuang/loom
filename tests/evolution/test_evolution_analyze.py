@@ -141,6 +141,14 @@ def test_parse_args_accepts_trace_and_output_paths(tmp_path):
     assert options.max_proposals == 3
 
 
+def test_package_exports_analyzer_cli_contracts():
+    from loom.evolution import main as package_main
+    from loom.evolution import parse_args as package_parse_args
+
+    assert package_parse_args is not None
+    assert package_main is not None
+
+
 def test_analyze_trace_scores_and_writes_artifacts(tmp_path):
     async def scenario():
         trace_path = tmp_path / "trace.jsonl"
@@ -209,6 +217,22 @@ def test_analyze_trace_malformed_jsonl_returns_error(tmp_path):
     asyncio.run(scenario())
 
 
+def test_analyze_trace_non_object_jsonl_record_returns_error(tmp_path):
+    async def scenario():
+        trace_path = tmp_path / "trace.jsonl"
+        trace_path.write_text("[]\n", encoding="utf-8")
+
+        result = await analyze_trace(
+            AnalyzeConfig(trace_path=trace_path, out_dir=tmp_path / "evolution"),
+            provider=FakeScoreProvider(),
+        )
+
+        assert not result.ok
+        assert result.error.code == "VALIDATION_FAILED"
+
+    asyncio.run(scenario())
+
+
 def test_analyze_trace_invalid_numeric_config_returns_validation_error(tmp_path):
     async def scenario():
         trace_path = tmp_path / "trace.jsonl"
@@ -216,6 +240,8 @@ def test_analyze_trace_invalid_numeric_config_returns_validation_error(tmp_path)
 
         cases = [
             AnalyzeConfig(trace_path=trace_path, out_dir=tmp_path / "confidence", min_confidence=1.1),
+            AnalyzeConfig(trace_path=trace_path, out_dir=tmp_path / "nan", min_confidence=float("nan")),
+            AnalyzeConfig(trace_path=trace_path, out_dir=tmp_path / "inf", min_confidence=float("inf")),
             AnalyzeConfig(trace_path=trace_path, out_dir=tmp_path / "frequency", min_signal_frequency=0),
             AnalyzeConfig(trace_path=trace_path, out_dir=tmp_path / "proposals", max_proposals=-1),
         ]
@@ -225,6 +251,24 @@ def test_analyze_trace_invalid_numeric_config_returns_validation_error(tmp_path)
 
             assert not result.ok
             assert result.error.code == "VALIDATION_FAILED"
+
+    asyncio.run(scenario())
+
+
+def test_analyze_trace_artifact_write_failure_returns_error(tmp_path):
+    async def scenario():
+        trace_path = tmp_path / "trace.jsonl"
+        out_dir = tmp_path / "evolution"
+        _write_trace(trace_path)
+        out_dir.write_text("not a directory", encoding="utf-8")
+
+        result = await analyze_trace(
+            AnalyzeConfig(trace_path=trace_path, out_dir=out_dir, min_signal_frequency=1),
+            provider=FakeScoreProvider(),
+        )
+
+        assert not result.ok
+        assert result.error.code == "VALIDATION_FAILED"
 
     asyncio.run(scenario())
 
