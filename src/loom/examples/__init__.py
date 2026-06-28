@@ -15,8 +15,17 @@ from loom.examples.factories import (
     run_llm_loop,
     run_trace_query_example,
 )
+from loom.examples.real_project_smoke import (
+    ProjectInfo,
+    RealProjectSmokeConfig,
+    inspect_project,
+    synthesize_report,
+)
 
 __all__ = [
+    "ProjectInfo",
+    "RealProjectSmokeConfig",
+    "inspect_project",
     "make_chain_pipeline_example",
     "make_fork_reviewers_example",
     "make_initial_counter_context",
@@ -30,4 +39,5 @@ __all__ = [
     "run_context_boundary_example",
     "run_llm_loop",
     "run_trace_query_example",
+    "synthesize_report",
 ]
