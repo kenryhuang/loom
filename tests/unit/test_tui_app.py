@@ -125,6 +125,58 @@ async def test_tui_app_aggregates_tool_input_and_output_into_one_event():
 
 
 @pytest.mark.asyncio
+async def test_tui_app_keeps_tool_event_detail_expanded_after_following_events():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test():
+        app._handle_event(
+            TuiEvent(
+                timestamp=0,
+                event_type="tool.started",
+                data={
+                    "type": "tool.started",
+                    "tool_id": "search",
+                    "tool_call_id": "tool-call-1",
+                    "input": {"query": "loom"},
+                },
+                tool_call_id="tool-call-1",
+            )
+        )
+        app._handle_event(
+            TuiEvent(
+                timestamp=1,
+                event_type="tool.completed",
+                data={
+                    "type": "tool.completed",
+                    "tool_id": "search",
+                    "tool_call_id": "tool-call-1",
+                    "input": {"query": "loom"},
+                    "output": {"value": {"summary": "found docs"}},
+                },
+                tool_call_id="tool-call-1",
+            )
+        )
+        app._handle_event(
+            TuiEvent(
+                timestamp=2,
+                event_type="run.completed",
+                data={"type": "run.completed", "outcome": "pass", "steps": 1},
+            )
+        )
+
+        feed = app.query_one("#event_feed", EventFeedWidget)
+        tool_item = feed.get_item(0)
+        tool_event = feed.get_event(0)
+
+        assert feed.event_count == 2
+        assert tool_item.is_expanded is True
+        assert tool_event is not None
+        assert tool_event.data["input"] == {"query": "loom"}
+        assert tool_event.data["output"] == {"value": {"summary": "found docs"}}
+
+
+@pytest.mark.asyncio
 async def test_tui_app_aggregates_llm_input_stream_and_response_and_keeps_it_expanded():
     collector = TuiEventCollector()
     app = LoomTuiApp(collector)
@@ -256,6 +308,7 @@ def test_event_detail_box_includes_tool_result(monkeypatch):
             data={
                 "type": "tool.completed",
                 "tool_id": "search-notes",
+                "input": {"query": "loom"},
                 "output": {
                     "id": "obs-1",
                     "source": "search-notes",
@@ -276,6 +329,9 @@ def test_event_detail_box_includes_tool_result(monkeypatch):
     assert len(writes) == 1
     assert "Tool Result" in writes[0]
     assert "search-notes" in writes[0]
+    assert "[dim]input:[/]" in writes[0]
+    assert '"query": "loom"' in writes[0]
+    assert "[dim]output:[/]" in writes[0]
     assert "Live Loom smoke test" in writes[0]
     assert "real tool result" in writes[0]
 

@@ -1211,7 +1211,7 @@ class LoomTuiApp(App[None]):
         if execution is None:
             execution = _ToolExecutionState.from_event(event)
             self._tool_executions[key] = execution
-            feed.add_event(execution.current_event or event)
+            feed.add_event(execution.current_event or event, pinned_expanded=True)
             index = feed.event_count - 1
             self._tool_execution_indices[key] = index
         else:
