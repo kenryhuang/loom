@@ -130,6 +130,15 @@ def gate_proposal(proposal: EvolutionProposal, config: ProposalGateConfig | None
                 metadata={"proposal_id": proposal.id, "surface": proposal.surface},
             )
         )
+    if proposal.risk not in _RISK_RANKS:
+        return err(
+            make_loom_error(
+                "MUTATION_REJECTED",
+                "Proposal risk is invalid",
+                retryable=False,
+                metadata={"proposal_id": proposal.id, "surface": proposal.surface, "risk": proposal.risk},
+            )
+        )
     if _risk_rank(proposal.risk) > _risk_rank(config.max_risk):
         return err(
             make_loom_error(
@@ -210,16 +219,12 @@ def _proposal_kind_and_patch(signal: EvolutionSignal) -> tuple[str, Mapping[str,
 
 def _summarize_explanations(explanation_groups: Iterable[tuple[str, ...]]) -> str:
     counts: dict[str, int] = defaultdict(int)
-    first_seen: dict[str, int] = {}
-    index = 0
     for explanations in explanation_groups:
         for explanation in explanations:
             counts[explanation] += 1
-            first_seen.setdefault(explanation, index)
-            index += 1
     if not counts:
         return "Repeated attribution without explanation."
-    return sorted(counts, key=lambda item: (-counts[item], first_seen[item], item))[0]
+    return sorted(counts, key=lambda item: (-counts[item], item))[0]
 
 
 def _normalize_explanations(explanations: Iterable[str]) -> tuple[str, ...]:

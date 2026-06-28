@@ -86,6 +86,28 @@ def test_generate_evolution_proposals_uses_stable_id_for_reordered_evidence():
     assert forward.id == reversed_.id
 
 
+def test_generate_evolution_proposals_uses_stable_id_for_tied_explanations():
+    forward_signal = aggregate_step_scores(
+        (
+            _score("trace-1", explanation="Missing schema detail."),
+            _score("trace-2", explanation="Output contract is unclear."),
+        ),
+        min_frequency=2,
+    )[0]
+    reversed_signal = aggregate_step_scores(
+        (
+            _score("trace-2", explanation="Output contract is unclear."),
+            _score("trace-1", explanation="Missing schema detail."),
+        ),
+        min_frequency=2,
+    )[0]
+
+    forward = generate_evolution_proposals((forward_signal,), max_proposals=1)[0]
+    reversed_ = generate_evolution_proposals((reversed_signal,), max_proposals=1)[0]
+
+    assert forward.id == reversed_.id
+
+
 def test_gate_proposal_rejects_non_reversible_proposal_when_required():
     signal = aggregate_step_scores((_score("trace-1"), _score("trace-2")), min_frequency=2)[0]
     proposal = replace(generate_evolution_proposals((signal,), max_proposals=1)[0], reversible=False)
@@ -111,6 +133,16 @@ def test_gate_proposal_rejects_invalid_max_risk_config():
     proposal = replace(generate_evolution_proposals((signal,), max_proposals=1)[0], risk="high")
 
     result = gate_proposal(proposal, ProposalGateConfig(max_risk="medum"))
+
+    assert not result.ok
+    assert result.error.code == "MUTATION_REJECTED"
+
+
+def test_gate_proposal_rejects_unknown_proposal_risk_even_when_max_allows_high():
+    signal = aggregate_step_scores((_score("trace-1"), _score("trace-2")), min_frequency=2)[0]
+    proposal = replace(generate_evolution_proposals((signal,), max_proposals=1)[0], risk="critical")
+
+    result = gate_proposal(proposal, ProposalGateConfig(max_risk="high"))
 
     assert not result.ok
     assert result.error.code == "MUTATION_REJECTED"
