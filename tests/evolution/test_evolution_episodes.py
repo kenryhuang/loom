@@ -45,6 +45,17 @@ def _trace(trace_id="trace-1", run_id="run-1"):
     }
 
 
+def _persisted_step_completed(trace_id="trace-1", run_id="run-1"):
+    trace = _trace(trace_id=trace_id, run_id=run_id)["payload"]
+    return {
+        "type": "event",
+        "eventType": "step.completed",
+        "traceId": trace_id,
+        "payload": {"type": "step.completed", "trace": trace, "at": "2026-06-28T00:00:01Z"},
+        "hash": "hash-step.completed",
+    }
+
+
 def test_load_trace_records_reads_jsonl_in_order(tmp_path):
     path = tmp_path / "trace.jsonl"
     path.write_text(
@@ -105,6 +116,52 @@ def test_build_step_episodes_groups_llm_tool_and_completed_trace():
         "hash-trace",
     )
     assert episode.completed_trace["id"] == "trace-1"
+
+
+def test_build_step_episodes_keeps_persisted_trace_before_step_completed_complete():
+    records = (
+        _event("step.started"),
+        _event("llm.requested", payload={"messages": [{"role": "user", "content": "inspect"}]}),
+        _event("action.proposed", payload={"action": {"kind": "tool", "target": "inspect-project"}}),
+        _event("tool.started", payload={"tool_id": "inspect-project", "input": {}}),
+        _trace(),
+        _persisted_step_completed(),
+    )
+
+    episodes = build_step_episodes(records)
+
+    assert len(episodes) == 1
+    assert episodes[0].complete is True
+    assert episodes[0].completed_event["type"] == "step.completed"
+    assert episodes[0].completed_trace["id"] == "trace-1"
+    assert episodes[0].event_hashes == (
+        "hash-step.started",
+        "hash-llm.requested",
+        "hash-action.proposed",
+        "hash-tool.started",
+        "hash-trace",
+        "hash-step.completed",
+    )
+
+
+def test_build_step_episodes_allows_interleaved_episode_identities():
+    records = (
+        _event("step.started", trace_id="trace-1", run_id="run-1"),
+        _event("step.started", trace_id="trace-2", run_id="run-2"),
+        _event("llm.requested", trace_id="trace-1", run_id="run-1"),
+        _event("tool.started", trace_id="trace-2", run_id="run-2"),
+        _trace(trace_id="trace-2", run_id="run-2"),
+        _trace(trace_id="trace-1", run_id="run-1"),
+        _persisted_step_completed(trace_id="trace-1", run_id="run-1"),
+        _persisted_step_completed(trace_id="trace-2", run_id="run-2"),
+    )
+
+    episodes = build_step_episodes(records)
+
+    assert [episode.trace_id for episode in episodes] == ["trace-1", "trace-2"]
+    assert [episode.complete for episode in episodes] == [True, True]
+    assert [event["type"] for event in episodes[0].llm_requests] == ["llm.requested"]
+    assert [event["type"] for event in episodes[1].tool_events] == ["tool.started"]
 
 
 def test_build_step_episodes_marks_missing_completion_incomplete():

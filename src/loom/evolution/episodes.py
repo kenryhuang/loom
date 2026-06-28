@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+EpisodeIdentity = tuple[str, str, str, int]
+
 
 @dataclass(frozen=True, slots=True)
 class TraceRecord:
@@ -58,18 +60,20 @@ def load_trace_records(path: str | Path) -> list[TraceRecord]:
 
 
 def build_step_episodes(records: Iterable[TraceRecord | Mapping[str, Any]]) -> list[StepEpisode]:
-    episodes: list[StepEpisode] = []
-    bucket: dict[str, Any] | None = None
+    buckets: dict[EpisodeIdentity, dict[str, Any]] = {}
 
     for item in records:
         record = item if isinstance(item, TraceRecord) else _record_from_raw(item)
-        if record.record_type == "event" and record.event_type == "step.started":
-            if bucket is not None:
-                episodes.append(_episode_from_bucket(bucket))
-            bucket = _new_bucket(record)
+        identity = _episode_identity(record)
+        if identity is None:
             continue
 
-        if bucket is None or not _belongs_to_bucket(record, bucket):
+        if record.record_type == "event" and record.event_type == "step.started":
+            buckets.setdefault(identity, _new_bucket(record, identity))
+            continue
+
+        bucket = buckets.get(identity)
+        if bucket is None:
             continue
 
         if record.record_type == "event":
@@ -80,12 +84,8 @@ def build_step_episodes(records: Iterable[TraceRecord | Mapping[str, Any]]) -> l
         elif record.record_type == "trace":
             bucket["completed_trace"] = record.payload
             bucket["event_hashes"].extend(_hashes(record))
-            episodes.append(_episode_from_bucket(bucket))
-            bucket = None
 
-    if bucket is not None:
-        episodes.append(_episode_from_bucket(bucket))
-    return episodes
+    return [_episode_from_bucket(bucket) for bucket in buckets.values()]
 
 
 def _record_from_raw(raw: Mapping[str, Any]) -> TraceRecord:
@@ -136,12 +136,13 @@ def _episode_from_bucket(bucket: Mapping[str, Any]) -> StepEpisode:
     )
 
 
-def _new_bucket(record: TraceRecord) -> dict[str, Any]:
+def _new_bucket(record: TraceRecord, identity: EpisodeIdentity) -> dict[str, Any]:
+    run_id, trace_id, loop_id, step_number = identity
     return {
-        "run_id": record.run_id,
-        "trace_id": record.trace_id,
-        "loop_id": _loop_id(record),
-        "step_number": _step_number(record),
+        "run_id": run_id,
+        "trace_id": trace_id,
+        "loop_id": loop_id,
+        "step_number": step_number,
         "events": [record.payload],
         "started_event": record.payload,
         "completed_event": None,
@@ -150,18 +151,19 @@ def _new_bucket(record: TraceRecord) -> dict[str, Any]:
     }
 
 
-def _belongs_to_bucket(record: TraceRecord, bucket: Mapping[str, Any]) -> bool:
-    return (
-        record.trace_id == bucket["trace_id"]
-        and record.run_id == bucket["run_id"]
-        and _loop_id(record) == bucket["loop_id"]
-        and _step_number(record) == bucket["step_number"]
-    )
-
-
 def _payload(raw: Mapping[str, Any]) -> Mapping[str, Any]:
     payload = raw.get("payload")
     return payload if isinstance(payload, Mapping) else raw
+
+
+def _episode_identity(record: TraceRecord) -> EpisodeIdentity | None:
+    run_id = record.run_id
+    trace_id = record.trace_id
+    loop_id = _loop_id(record)
+    step_number = _step_number(record)
+    if run_id is None or trace_id is None or loop_id is None or step_number is None:
+        return None
+    return (run_id, trace_id, loop_id, step_number)
 
 
 def _loop_id(record: TraceRecord) -> str | None:
