@@ -24,6 +24,7 @@ from loom.core import (
 )
 from loom.llm import (
     LlmResponse,
+    LlmStreamEvent,
     LlmToolCall,
     TokenUsage,
     build_messages,
@@ -416,6 +417,70 @@ def test_llm_step_emits_full_provider_io_events():
     asyncio.run(scenario())
 
 
+def test_llm_step_streaming_provider_emits_delta_events_and_executes_tool_calls():
+    async def scenario():
+        events = []
+        provider = FakeStreamingProvider(
+            [
+                [
+                    LlmStreamEvent(kind="tool_call.started", tool_call_id="call_1", tool_name="search"),
+                    LlmStreamEvent(kind="tool_call.arguments.delta", tool_call_id="call_1", tool_arguments_delta='{"query":"loom"}'),
+                    LlmStreamEvent(
+                        kind="tool_call.completed",
+                        tool_call_id="call_1",
+                        tool_name="search",
+                        tool_arguments_delta='{"query":"loom"}',
+                    ),
+                    LlmStreamEvent(
+                        kind="completed",
+                        response=LlmResponse(
+                            content=None,
+                            tool_calls=(LlmToolCall("call_1", "search", '{"query":"loom"}'),),
+                            finish_reason="tool_calls",
+                        ),
+                    ),
+                ],
+                [
+                    LlmStreamEvent(kind="reasoning.delta", reasoning_delta="Evidence is enough."),
+                    LlmStreamEvent(kind="content.delta", content_delta='{"reasoning":"Tool result is enough",'),
+                    LlmStreamEvent(
+                        kind="content.delta",
+                        content_delta='"action":{"kind":"tool","target":"search","description":"Use the search result","input":{"query":"loom"}},"alternatives":[],"confidence":0.8}',
+                    ),
+                    LlmStreamEvent(
+                        kind="completed",
+                        response=LlmResponse(
+                            content='{"reasoning":"Tool result is enough","action":{"kind":"tool","target":"search","description":"Use the search result","input":{"query":"loom"}},"alternatives":[],"confidence":0.8}',
+                            usage=TokenUsage(12, 6, 18),
+                        ),
+                    ),
+                ],
+            ]
+        )
+        tool_calls = []
+
+        async def call_tool(name, input_value, **options):
+            tool_calls.append((name, input_value, options))
+            return ok(Observation("search-obs", "search", {"result": "found"}, NOW))
+
+        result = await create_llm_step_function(provider, stream=True)(make_context(), make_runtime(call_tool=call_tool, events=events))
+
+        assert result.ok
+        assert tool_calls[0][0] == "search"
+        event_types = [event["type"] for event in events]
+        assert "llm.stream.started" in event_types
+        assert "llm.tool_call.started" in event_types
+        assert "llm.tool_call.arguments.delta" in event_types
+        assert "llm.tool_call.completed" in event_types
+        assert "llm.reasoning.delta" in event_types
+        assert "llm.content.delta" in event_types
+        assert event_types.count("llm.stream.completed") == 2
+        assert events[event_types.index("llm.content.delta")]["delta"]
+        assert result.value.trace.metadata["streaming"] is True
+
+    asyncio.run(scenario())
+
+
 class FakeProvider:
     model = "mock-model"
 
@@ -428,6 +493,17 @@ class FakeProvider:
         if self.results:
             return self.results.pop(0)
         return ok(LlmResponse(content='{"reasoning":"default","action":{"kind":"none","description":"Stop"},"alternatives":[],"confidence":0.1}'))
+
+
+class FakeStreamingProvider(FakeProvider):
+    def __init__(self, streams):
+        super().__init__([])
+        self.streams = list(streams)
+
+    async def stream_chat(self, messages, tools=None, cancellation=None):
+        self.messages.append((tuple(messages), tools))
+        for event in self.streams.pop(0):
+            yield event
 
 
 def make_context(max_tokens=None):

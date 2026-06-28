@@ -92,6 +92,19 @@ class LlmResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class LlmStreamEvent:
+    kind: str
+    content_delta: str | None = None
+    reasoning_delta: str | None = None
+    reasoning_context_delta: str | None = None
+    tool_call_id: str | None = None
+    tool_name: str | None = None
+    tool_arguments_delta: str | None = None
+    response: LlmResponse | None = None
+    raw: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class EnvOpenAIConfig:
     model: str
     base_url: str
@@ -240,6 +253,7 @@ def create_llm_step_function(
     max_tool_calls_per_step: int = 5,
     tool_selection: ToolSelectionConfig | None = None,
     tool_resolver: Any = None,
+    stream: bool = False,
 ):
     async def llm_step(context: Context, runtime: Any) -> Result:
         started_at = runtime.now()
@@ -301,7 +315,17 @@ def create_llm_step_function(
             )
             if not requested.ok:
                 return requested
-            response = await provider.chat(messages, tools, getattr(runtime, "cancellation", None))
+            response = await _chat_or_stream(
+                provider,
+                messages,
+                tools,
+                getattr(runtime, "cancellation", None),
+                runtime=runtime,
+                context=context,
+                trace_id=trace_id,
+                llm_call_id=llm_call_id,
+                stream=stream,
+            )
             if not response.ok:
                 failed = await _emit_runtime_event(
                     runtime,
@@ -395,6 +419,7 @@ def create_llm_step_function(
             "model": provider.model,
             "finishReason": final_response.finish_reason,
             "tokenUsage": _token_usage_metadata(tracker.total),
+            "streaming": bool(stream and hasattr(provider, "stream_chat")),
         }
         if tool_resolution_metadata is not None:
             trace_metadata["toolResolution"] = tool_resolution_metadata
@@ -471,6 +496,137 @@ def create_llm_step_function(
         return ok(StepResult(next_context, trace, llm_observation, parsed["output"]))
 
     return llm_step
+
+
+async def _chat_or_stream(
+    provider: Any,
+    messages: list[LlmMessage],
+    tools: tuple[dict[str, Any], ...] | None,
+    cancellation: Any,
+    *,
+    runtime: Any,
+    context: Context,
+    trace_id: str,
+    llm_call_id: str,
+    stream: bool,
+) -> Result:
+    if not stream or not hasattr(provider, "stream_chat"):
+        return await provider.chat(messages, tools, cancellation)
+    return await _consume_streaming_chat(
+        provider,
+        messages,
+        tools,
+        cancellation,
+        runtime,
+        context,
+        trace_id,
+        llm_call_id,
+    )
+
+
+async def _consume_streaming_chat(
+    provider: Any,
+    messages: list[LlmMessage],
+    tools: tuple[dict[str, Any], ...] | None,
+    cancellation: Any,
+    runtime: Any,
+    context: Context,
+    trace_id: str,
+    llm_call_id: str,
+) -> Result:
+    step_number = as_step_number(len(context.state.observations))
+    started = await _emit_runtime_event(
+        runtime,
+        {
+            "type": "llm.stream.started",
+            "run_id": context.run_id,
+            "loop_id": runtime.loop_id,
+            "trace_id": trace_id,
+            "llm_call_id": llm_call_id,
+            "step_number": step_number,
+            "model": provider.model,
+            "at": runtime.now(),
+        },
+    )
+    if not started.ok:
+        return started
+
+    final_response: LlmResponse | None = None
+    try:
+        async for event in provider.stream_chat(messages, tools=tools, cancellation=cancellation):
+            if event.kind == "completed":
+                final_response = event.response
+                continue
+            emitted = await _emit_stream_delta_event(runtime, event, context, trace_id, llm_call_id, provider.model, step_number)
+            if not emitted.ok:
+                return emitted
+    except BaseException as exc:
+        return err(
+            make_loom_error(
+                "LLM_FAILED",
+                str(exc),
+                retryable=True,
+                cause={"name": type(exc).__name__, "message": str(exc)},
+            )
+        )
+
+    if final_response is None:
+        return err(make_loom_error("LLM_FAILED", "Streaming provider returned no completed response", retryable=True))
+
+    completed = await _emit_runtime_event(
+        runtime,
+        {
+            "type": "llm.stream.completed",
+            "run_id": context.run_id,
+            "loop_id": runtime.loop_id,
+            "trace_id": trace_id,
+            "llm_call_id": llm_call_id,
+            "step_number": step_number,
+            "model": provider.model,
+            "at": runtime.now(),
+        },
+    )
+    if not completed.ok:
+        return completed
+    return ok(final_response)
+
+
+async def _emit_stream_delta_event(
+    runtime: Any,
+    event: LlmStreamEvent,
+    context: Context,
+    trace_id: str,
+    llm_call_id: str,
+    model: str,
+    step_number: int,
+) -> Result:
+    event_type = {
+        "content.delta": "llm.content.delta",
+        "reasoning.delta": "llm.reasoning.delta",
+        "reasoning_context.delta": "llm.reasoning_context.delta",
+        "tool_call.started": "llm.tool_call.started",
+        "tool_call.arguments.delta": "llm.tool_call.arguments.delta",
+        "tool_call.completed": "llm.tool_call.completed",
+    }.get(event.kind)
+    if event_type is None:
+        return ok(None)
+    return await _emit_runtime_event(
+        runtime,
+        {
+            "type": event_type,
+            "run_id": context.run_id,
+            "loop_id": runtime.loop_id,
+            "trace_id": trace_id,
+            "llm_call_id": llm_call_id,
+            "step_number": step_number,
+            "model": model,
+            "delta": event.content_delta or event.reasoning_delta or event.reasoning_context_delta or event.tool_arguments_delta,
+            "tool_call_id": event.tool_call_id,
+            "tool_name": event.tool_name,
+            "raw": event.raw,
+            "at": runtime.now(),
+        },
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1256,6 +1412,7 @@ def _first_env(env: dict[str, str], names: tuple[str, ...]) -> str | None:
 __all__ = [
     "LlmMessage",
     "LlmResponse",
+    "LlmStreamEvent",
     "LlmToolCall",
     "EnvOpenAIConfig",
     "OpenAIProvider",
