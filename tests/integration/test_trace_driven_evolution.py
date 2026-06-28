@@ -116,6 +116,7 @@ def test_real_project_smoke_trace_can_be_analyzed_for_evolution(tmp_path: Path):
         assert analyzed.value.proposals
         assert score_provider.calls == len(analyzed.value.episodes)
         assert analyzed.value.artifacts.scores_path.exists()
+        assert analyzed.value.artifacts.signals_path.exists()
         assert analyzed.value.artifacts.proposals_path.exists()
         assert analyzed.value.artifacts.report_path.exists()
         assert "Trace Driven Evolution Report" in analyzed.value.artifacts.report_path.read_text(encoding="utf-8")
