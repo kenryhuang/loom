@@ -119,9 +119,12 @@ def test_parse_args_accepts_trace_and_output_paths(tmp_path):
         )
     )
 
+    assert isinstance(options, AnalyzeConfig)
     assert options.trace_path == tmp_path / "trace.jsonl"
     assert options.out_dir == tmp_path / "evolution"
     assert options.min_confidence == 0.8
+    assert options.min_signal_frequency == 2
+    assert options.max_proposals == 3
 
 
 def test_analyze_trace_scores_and_writes_artifacts(tmp_path):

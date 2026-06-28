@@ -96,29 +96,26 @@ async def analyze_trace(config: AnalyzeConfig, provider: Any = None) -> Result:
     )
 
 
-def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> AnalyzeConfig:
     parser = argparse.ArgumentParser(description="Analyze Loom trace JSONL for evolution proposals.")
     parser.add_argument("--trace-path", required=True, type=Path)
     parser.add_argument("--out-dir", default=Path(".loom/evolution"), type=Path)
     parser.add_argument("--min-confidence", default=0.7, type=float)
     parser.add_argument("--min-signal-frequency", default=2, type=int)
     parser.add_argument("--max-proposals", default=3, type=int)
-    return parser.parse_args(argv)
+    options = parser.parse_args(argv)
+    return AnalyzeConfig(
+        trace_path=options.trace_path,
+        out_dir=options.out_dir,
+        min_confidence=options.min_confidence,
+        min_signal_frequency=options.min_signal_frequency,
+        max_proposals=options.max_proposals,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    options = parse_args(argv)
-    result = asyncio.run(
-        analyze_trace(
-            AnalyzeConfig(
-                trace_path=options.trace_path,
-                out_dir=options.out_dir,
-                min_confidence=options.min_confidence,
-                min_signal_frequency=options.min_signal_frequency,
-                max_proposals=options.max_proposals,
-            )
-        )
-    )
+    config = parse_args(argv)
+    result = asyncio.run(analyze_trace(config))
     if not result.ok:
         message = result.error.message if result.error else "Trace analysis failed"
         raise SystemExit(message)
