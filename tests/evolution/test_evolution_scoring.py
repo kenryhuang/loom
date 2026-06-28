@@ -1,9 +1,15 @@
 import asyncio
 import json
 
-from loom.core import ok
+from loom.core import freeze_json, ok
 from loom.evolution.episodes import StepEpisode
-from loom.evolution.scoring import LlmStepScorer, StepScore, build_step_scoring_messages, parse_step_score
+from loom.evolution.scoring import (
+    SCORE_DIMENSIONS,
+    LlmStepScorer,
+    StepScore,
+    build_step_scoring_messages,
+    parse_step_score,
+)
 from loom.llm import LlmResponse, TokenUsage
 
 
@@ -68,6 +74,32 @@ def test_build_step_scoring_messages_contains_episode_evidence():
     assert "tokenUsage" in messages[1].content
 
 
+def test_build_step_scoring_messages_handles_non_plain_values():
+    episode = StepEpisode(
+        run_id="run-1",
+        trace_id="trace-1",
+        loop_id="loop-1",
+        step_number=0,
+        started_event=freeze_json({"type": "step.started", "metadata": {"tags": ["scoring"]}}),
+        llm_requests=(
+            freeze_json({"type": "llm.requested", "messages": [{"role": "user", "content": "audit"}]}),
+        ),
+        llm_completions=(),
+        tool_events=(),
+        action_events=(),
+        observation_events=(),
+        completed_trace=freeze_json({"id": "trace-1", "metadata": {"tokenUsage": {"totalTokens": 42}}}),
+        completed_event=freeze_json({"type": "step.completed"}),
+        event_hashes=("hash-1",),
+    )
+
+    messages = build_step_scoring_messages(episode)
+
+    evidence = json.loads(messages[1].content)
+    assert evidence["started_event"]["metadata"]["tags"] == ["scoring"]
+    assert evidence["completed_trace"]["metadata"]["tokenUsage"]["totalTokens"] == 42
+
+
 def test_parse_step_score_returns_structured_score():
     score = parse_step_score(
         _score_json(),
@@ -91,6 +123,63 @@ def test_parse_step_score_rejects_invalid_json():
 
     assert not result.ok
     assert result.error.code == "LLM_PARSE_ERROR"
+
+
+def test_parse_step_score_rejects_missing_required_keys():
+    payload = json.loads(_score_json())
+    del payload["confidence"]
+
+    result = parse_step_score(json.dumps(payload), _episode(), evaluator_model="fake-score-model", token_usage=TokenUsage())
+
+    assert not result.ok
+    assert result.error.code == "LLM_PARSE_ERROR"
+
+
+def test_parse_step_score_rejects_out_of_range_or_non_numeric_scores():
+    cases = [
+        {"overall": 1.1},
+        {"confidence": "high"},
+        {"dimensions": {**{dimension: 0.5 for dimension in SCORE_DIMENSIONS}, "prompt_following": -0.1}},
+        {"dimensions": {**{dimension: 0.5 for dimension in SCORE_DIMENSIONS}, "cost_efficiency": "cheap"}},
+    ]
+
+    for override in cases:
+        payload = json.loads(_score_json())
+        payload.update(override)
+
+        result = parse_step_score(
+            json.dumps(payload),
+            _episode(),
+            evaluator_model="fake-score-model",
+            token_usage=TokenUsage(),
+        )
+
+        assert not result.ok
+        assert result.error.code == "LLM_PARSE_ERROR"
+
+
+def test_parse_step_score_rejects_malformed_attribution_and_fixes():
+    cases = [
+        {"attribution": ["system_prompt"]},
+        {"attribution": {"system_prompt": "bad"}},
+        {"attribution": {"system_prompt": [7]}},
+        {"proposed_fixes": "Clarify JSON."},
+        {"proposed_fixes": ["Clarify JSON.", 7]},
+    ]
+
+    for override in cases:
+        payload = json.loads(_score_json())
+        payload.update(override)
+
+        result = parse_step_score(
+            json.dumps(payload),
+            _episode(),
+            evaluator_model="fake-score-model",
+            token_usage=TokenUsage(),
+        )
+
+        assert not result.ok
+        assert result.error.code == "LLM_PARSE_ERROR"
 
 
 def test_llm_step_scorer_calls_provider_and_parses_score():

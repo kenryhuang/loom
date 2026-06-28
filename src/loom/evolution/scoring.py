@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Any
 
-from loom.core import Result, err, make_loom_error, ok
+from loom.core import Result, err, make_loom_error, ok, thaw_json
 from loom.evolution.episodes import StepEpisode
 from loom.llm import LlmMessage, TokenUsage
 
@@ -65,7 +67,7 @@ def build_step_scoring_messages(episode: StepEpisode) -> tuple[LlmMessage, LlmMe
     )
     user = LlmMessage(
         role="user",
-        content=json.dumps(_episode_evidence(episode), sort_keys=True, indent=2),
+        content=json.dumps(_to_plain(_episode_evidence(episode)), sort_keys=True, indent=2),
     )
     return (system, user)
 
@@ -93,17 +95,22 @@ def parse_step_score(
     if not isinstance(payload, Mapping):
         return err(_parse_error("Step score response must be a JSON object", episode))
 
+    validated = _validate_score_payload(payload, episode)
+    if not validated.ok:
+        return validated
+    overall, dimensions, attribution, proposed_fixes, confidence = validated.value
+
     return ok(
         StepScore(
             run_id=episode.run_id,
             trace_id=episode.trace_id,
             step_number=episode.step_number,
-            overall=_float_field(payload, "overall"),
-            dimensions=_score_dimensions(payload.get("dimensions")),
-            attribution=_string_tuple_mapping(payload.get("attribution")),
-            proposed_fixes=_string_tuple(payload.get("proposed_fixes")),
+            overall=overall,
+            dimensions=dimensions,
+            attribution=attribution,
+            proposed_fixes=proposed_fixes,
             evidence_event_hashes=episode.event_hashes,
-            confidence=_float_field(payload, "confidence"),
+            confidence=confidence,
             evaluator_model=evaluator_model,
             token_usage=token_usage,
         )
@@ -128,32 +135,95 @@ def _episode_evidence(episode: StepEpisode) -> Mapping[str, Any]:
     }
 
 
-def _score_dimensions(value: Any) -> Mapping[str, float]:
-    source = value if isinstance(value, Mapping) else {}
-    return {dimension: _to_float(source.get(dimension, 0.0)) for dimension in SCORE_DIMENSIONS}
+def _to_plain(value: Any) -> Any:
+    value = thaw_json(value)
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, os.PathLike):
+        return os.fspath(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: _to_plain(getattr(value, field.name)) for field in fields(value)}
+    if isinstance(value, Mapping):
+        return {str(key): _to_plain(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_to_plain(item) for item in value]
+    return str(value)
 
 
-def _string_tuple_mapping(value: Any) -> Mapping[str, tuple[str, ...]]:
+def _validate_score_payload(payload: Mapping[str, Any], episode: StepEpisode) -> Result:
+    required_keys = ("overall", "dimensions", "attribution", "proposed_fixes", "confidence")
+    missing = [key for key in required_keys if key not in payload]
+    if missing:
+        return err(_parse_error(f"Step score response missing required keys: {', '.join(missing)}", episode))
+
+    overall = _validate_score_number(payload["overall"], "overall", episode)
+    if not overall.ok:
+        return overall
+
+    confidence = _validate_score_number(payload["confidence"], "confidence", episode)
+    if not confidence.ok:
+        return confidence
+
+    dimensions = _validate_dimensions(payload["dimensions"], episode)
+    if not dimensions.ok:
+        return dimensions
+
+    attribution = _validate_attribution(payload["attribution"], episode)
+    if not attribution.ok:
+        return attribution
+
+    proposed_fixes = _validate_string_tuple(payload["proposed_fixes"], "proposed_fixes", episode)
+    if not proposed_fixes.ok:
+        return proposed_fixes
+
+    return ok((overall.value, dimensions.value, attribution.value, proposed_fixes.value, confidence.value))
+
+
+def _validate_dimensions(value: Any, episode: StepEpisode) -> Result:
     if not isinstance(value, Mapping):
-        return {}
-    return {str(key): _string_tuple(items) for key, items in value.items()}
+        return err(_parse_error("dimensions must be a JSON object", episode))
+
+    missing = [dimension for dimension in SCORE_DIMENSIONS if dimension not in value]
+    if missing:
+        return err(_parse_error(f"dimensions missing required keys: {', '.join(missing)}", episode))
+
+    dimensions: dict[str, float] = {}
+    for dimension in SCORE_DIMENSIONS:
+        score = _validate_score_number(value[dimension], f"dimensions.{dimension}", episode)
+        if not score.ok:
+            return score
+        dimensions[dimension] = score.value
+    return ok(dimensions)
 
 
-def _string_tuple(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)):
-        return ()
-    return tuple(str(item) for item in value)
+def _validate_attribution(value: Any, episode: StepEpisode) -> Result:
+    if not isinstance(value, Mapping):
+        return err(_parse_error("attribution must be a JSON object", episode))
+
+    attribution: dict[str, tuple[str, ...]] = {}
+    for key, items in value.items():
+        result = _validate_string_tuple(items, f"attribution.{key}", episode)
+        if not result.ok:
+            return result
+        attribution[str(key)] = result.value
+    return ok(attribution)
 
 
-def _float_field(payload: Mapping[str, Any], key: str) -> float:
-    return _to_float(payload.get(key, 0.0))
+def _validate_string_tuple(value: Any, path: str, episode: StepEpisode) -> Result:
+    if not isinstance(value, list | tuple):
+        return err(_parse_error(f"{path} must be a list of strings", episode))
+    if not all(isinstance(item, str) for item in value):
+        return err(_parse_error(f"{path} must contain only strings", episode))
+    return ok(tuple(value))
 
 
-def _to_float(value: Any) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+def _validate_score_number(value: Any, path: str, episode: StepEpisode) -> Result:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return err(_parse_error(f"{path} must be a number from 0.0 to 1.0", episode))
+    score = float(value)
+    if not math.isfinite(score) or score < 0.0 or score > 1.0:
+        return err(_parse_error(f"{path} must be a finite number from 0.0 to 1.0", episode))
+    return ok(score)
 
 
 def _parse_error(message: str, episode: StepEpisode) -> Any:
