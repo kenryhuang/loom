@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 EpisodeIdentity = tuple[str, str, str, int]
+EpisodePosition = tuple[str, str, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,18 +62,25 @@ def load_trace_records(path: str | Path) -> list[TraceRecord]:
 
 def build_step_episodes(records: Iterable[TraceRecord | Mapping[str, Any]]) -> list[StepEpisode]:
     buckets: dict[EpisodeIdentity, dict[str, Any]] = {}
+    buckets_by_position: dict[EpisodePosition, list[dict[str, Any]]] = {}
+    ordered_buckets: list[dict[str, Any]] = []
 
     for item in records:
         record = item if isinstance(item, TraceRecord) else _record_from_raw(item)
         identity = _episode_identity(record)
-        if identity is None:
+        position = _episode_position(record)
+        if identity is None or position is None:
             continue
 
         if record.record_type == "event" and record.event_type == "step.started":
-            buckets.setdefault(identity, _new_bucket(record, identity))
+            if identity not in buckets:
+                bucket = _new_bucket(record, identity)
+                buckets[identity] = bucket
+                buckets_by_position.setdefault(position, []).append(bucket)
+                ordered_buckets.append(bucket)
             continue
 
-        bucket = buckets.get(identity)
+        bucket = buckets.get(identity) or _bucket_by_position(buckets_by_position, position)
         if bucket is None:
             continue
 
@@ -84,8 +92,9 @@ def build_step_episodes(records: Iterable[TraceRecord | Mapping[str, Any]]) -> l
         elif record.record_type == "trace":
             bucket["completed_trace"] = record.payload
             bucket["event_hashes"].extend(_hashes(record))
+            _alias_bucket(buckets, bucket, identity)
 
-    return [_episode_from_bucket(bucket) for bucket in buckets.values()]
+    return [_episode_from_bucket(bucket) for bucket in ordered_buckets]
 
 
 def _record_from_raw(raw: Mapping[str, Any]) -> TraceRecord:
@@ -164,6 +173,32 @@ def _episode_identity(record: TraceRecord) -> EpisodeIdentity | None:
     if run_id is None or trace_id is None or loop_id is None or step_number is None:
         return None
     return (run_id, trace_id, loop_id, step_number)
+
+
+def _episode_position(record: TraceRecord) -> EpisodePosition | None:
+    run_id = record.run_id
+    loop_id = _loop_id(record)
+    step_number = _step_number(record)
+    if run_id is None or loop_id is None or step_number is None:
+        return None
+    return (run_id, loop_id, step_number)
+
+
+def _bucket_by_position(
+    buckets_by_position: Mapping[EpisodePosition, list[dict[str, Any]]],
+    position: EpisodePosition,
+) -> dict[str, Any] | None:
+    candidates = buckets_by_position.get(position, [])
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _alias_bucket(
+    buckets: dict[EpisodeIdentity, dict[str, Any]],
+    bucket: dict[str, Any],
+    identity: EpisodeIdentity,
+) -> None:
+    buckets.setdefault(identity, bucket)
+    bucket["trace_id"] = identity[1]
 
 
 def _loop_id(record: TraceRecord) -> str | None:

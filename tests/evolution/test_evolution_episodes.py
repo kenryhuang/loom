@@ -164,6 +164,30 @@ def test_build_step_episodes_allows_interleaved_episode_identities():
     assert [event["type"] for event in episodes[1].tool_events] == ["tool.started"]
 
 
+def test_build_step_episodes_joins_runtime_started_trace_to_returned_trace():
+    records = (
+        _event("step.started", trace_id="runtime-trace"),
+        _event("action.recorded", payload={"trace_id": "trace-1", "action": {"kind": "tool"}}),
+        _trace(),
+        _persisted_step_completed(),
+    )
+
+    episodes = build_step_episodes(records)
+
+    assert len(episodes) == 1
+    episode = episodes[0]
+    assert episode.complete is True
+    assert episode.trace_id == "trace-1"
+    assert episode.started_event["trace_id"] == "runtime-trace"
+    assert [event["type"] for event in episode.action_events] == ["action.recorded"]
+    assert episode.event_hashes == (
+        "hash-step.started",
+        "hash-action.recorded",
+        "hash-trace",
+        "hash-step.completed",
+    )
+
+
 def test_build_step_episodes_marks_missing_completion_incomplete():
     episodes = build_step_episodes((_event("step.started"), _event("llm.requested")))
 
