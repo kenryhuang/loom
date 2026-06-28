@@ -25,7 +25,6 @@ class EvolutionArtifacts:
 
 def write_evolution_artifacts(
     out_dir: os.PathLike[str] | str,
-    *,
     scores: Iterable[StepScore],
     signals: Iterable[EvolutionSignal],
     proposals: Iterable[EvolutionProposal],
@@ -48,14 +47,13 @@ def write_evolution_artifacts(
     _write_jsonl(artifacts.signals_path, signal_items)
     _write_jsonl(artifacts.proposals_path, proposal_items)
     artifacts.report_path.write_text(
-        render_evolution_report(scores=score_items, signals=signal_items, proposals=proposal_items),
+        render_evolution_report(score_items, signal_items, proposal_items),
         encoding="utf-8",
     )
     return artifacts
 
 
 def render_evolution_report(
-    *,
     scores: Iterable[StepScore],
     signals: Iterable[EvolutionSignal],
     proposals: Iterable[EvolutionProposal],

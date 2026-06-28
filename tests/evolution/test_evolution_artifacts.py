@@ -54,7 +54,7 @@ def _proposal():
 
 
 def test_write_evolution_artifacts_writes_jsonl_streams(tmp_path):
-    artifacts = write_evolution_artifacts(tmp_path, scores=(_score(),), signals=(_signal(),), proposals=(_proposal(),))
+    artifacts = write_evolution_artifacts(tmp_path, (_score(),), (_signal(),), (_proposal(),))
 
     assert isinstance(artifacts, EvolutionArtifacts)
     assert artifacts.scores_path.exists()
@@ -66,7 +66,7 @@ def test_write_evolution_artifacts_writes_jsonl_streams(tmp_path):
 
 
 def test_render_evolution_report_summarizes_counts_and_proposals():
-    report = render_evolution_report(scores=(_score(),), signals=(_signal(),), proposals=(_proposal(),))
+    report = render_evolution_report((_score(),), (_signal(),), (_proposal(),))
 
     assert "Trace Driven Evolution Report" in report
     assert "scores: 1" in report
