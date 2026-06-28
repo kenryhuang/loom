@@ -12,6 +12,7 @@ from loom.examples.real_project_smoke import (
     make_real_project_smoke_context,
     make_real_project_smoke_loop,
     parse_args,
+    parse_run_options,
     run_command,
     run_real_project_smoke,
     run_smoke_test,
@@ -158,6 +159,43 @@ def test_real_project_smoke_llm_mode_uses_model_report(tmp_path: Path):
     assert "Exclude .yakdb" not in result.value.output
 
 
+def test_real_project_smoke_persists_full_llm_loop_trace(tmp_path: Path):
+    project = tmp_path / "sample"
+    project.mkdir()
+    (project / "README.md").write_text("# Sample\n\nA tiny sample project.\n", encoding="utf-8")
+    (project / "pyproject.toml").write_text('[project]\nname = "sample"\n', encoding="utf-8")
+    trace_path = tmp_path / "traces" / "real-project-smoke.jsonl"
+
+    config = RealProjectSmokeConfig(
+        target_path=project,
+        smoke_command=(sys.executable, "-c", "print('smoke ok')"),
+        cli_smoke_enabled=False,
+        command_timeout_seconds=10,
+        trace_path=trace_path,
+    )
+
+    result = asyncio.run(run_real_project_smoke(config, provider=FakeSmokeProvider(), llm=True))
+
+    assert result.ok
+    records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    event_records = [record for record in records if record["type"] == "event"]
+    event_types = [record["eventType"] for record in event_records]
+    for event_type in (
+        "run.started",
+        "step.started",
+        "llm.requested",
+        "llm.completed",
+        "tool.started",
+        "tool.completed",
+        "step.completed",
+        "run.completed",
+    ):
+        assert event_type in event_types
+    assert any(record["type"] == "trace" for record in records)
+    assert any(record["eventType"] == "tool.completed" and "input" in record["payload"] and "output" in record["payload"] for record in event_records)
+    assert any(record["eventType"] == "llm.requested" and "messages" in record["payload"] for record in event_records)
+
+
 def test_real_project_smoke_context_rejects_missing_target(tmp_path: Path):
     config = RealProjectSmokeConfig(target_path=tmp_path / "missing")
 
@@ -189,6 +227,15 @@ def test_parse_args_accepts_custom_path_and_smoke_command(tmp_path: Path):
     assert config.target_path == tmp_path
     assert config.smoke_command == ("python", "-c", "pass")
     assert config.cli_smoke_enabled is False
+
+
+def test_parse_run_options_accepts_trace_path(tmp_path: Path):
+    trace_path = tmp_path / "real-smoke.jsonl"
+
+    options = parse_run_options((str(tmp_path), "--llm", "--trace-path", str(trace_path)))
+
+    assert options.llm is True
+    assert options.config.trace_path == trace_path
 
 
 def test_yakdb_cli_smoke_uses_no_sync_to_avoid_lockfile_writes(tmp_path: Path, monkeypatch):

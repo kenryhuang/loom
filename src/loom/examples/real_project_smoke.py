@@ -40,6 +40,7 @@ from loom.core.models import (
     thaw_json,
 )
 from loom.llm.api import create_env_openai_provider, create_llm_step_function
+from loom.observability.traces import JsonlTraceStore
 from loom.runtime.engine import create, create_runtime_registry, run
 from loom.runtime.plugins import run_with_plugins
 from loom.tui.plugin import TuiPlugin
@@ -53,10 +54,13 @@ class RealProjectSmokeConfig:
     smoke_command: tuple[str, ...] = ("uv", "run", "--no-sync", "pytest", "-q")
     cli_smoke_enabled: bool = True
     command_timeout_seconds: int = 120
+    trace_path: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "target_path", Path(self.target_path))
         object.__setattr__(self, "smoke_command", tuple(self.smoke_command))
+        if self.trace_path is not None:
+            object.__setattr__(self, "trace_path", Path(self.trace_path))
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,6 +423,7 @@ async def run_real_project_smoke(
         handle = create(
             make_real_project_smoke_llm_loop(config, provider, stream=stream),
             registry=create_runtime_registry(tools=make_real_project_smoke_tools(config)),
+            trace_store=_make_trace_store(config),
         )
         if not handle.ok:
             return handle
@@ -433,10 +438,20 @@ async def run_real_project_smoke(
     context = make_real_project_smoke_context(config)
     if not context.ok:
         return context
-    handle = create(make_real_project_smoke_loop(config), registry=create_runtime_registry())
+    handle = create(
+        make_real_project_smoke_loop(config),
+        registry=create_runtime_registry(),
+        trace_store=_make_trace_store(config),
+    )
     if not handle.ok:
         return handle
     return await run(handle.value, context.value, max_steps=1)
+
+
+def _make_trace_store(config: RealProjectSmokeConfig) -> JsonlTraceStore | None:
+    if config.trace_path is None:
+        return None
+    return JsonlTraceStore(config.trace_path)
 
 
 def _report_from_run_result(run_result) -> str:
@@ -468,6 +483,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llm", action="store_true", help="Use an LLM to judge evidence and write the report")
     parser.add_argument("--tui", action="store_true", help="Show live TUI events while the loop runs")
     parser.add_argument("--stream", action="store_true", help="Stream LLM deltas when provider supports it")
+    parser.add_argument("--trace-path", type=Path, help="Persist full loop trace events and traces to a JSONL file")
     return parser
 
 
@@ -478,6 +494,7 @@ def parse_args(argv: tuple[str, ...] | list[str] | None = None) -> RealProjectSm
         smoke_command=tuple(shlex.split(args.smoke_command)),
         cli_smoke_enabled=not args.no_cli_smoke,
         command_timeout_seconds=args.timeout,
+        trace_path=args.trace_path,
     )
 
 
@@ -488,6 +505,7 @@ def parse_run_options(argv: tuple[str, ...] | list[str] | None = None) -> RealPr
         smoke_command=tuple(shlex.split(args.smoke_command)),
         cli_smoke_enabled=not args.no_cli_smoke,
         command_timeout_seconds=args.timeout,
+        trace_path=args.trace_path,
     )
     return RealProjectSmokeRunOptions(
         config=config,
