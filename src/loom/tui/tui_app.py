@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from rich.text import Text
@@ -61,6 +62,134 @@ EVENT_STYLES: dict[str, dict[str, str]] = {
     "tool_selection.failed": {"icon": "🔧", "color": COLORS["red"], "label": "TOOLSEL ✗"},
     "_tui_done": {"icon": "■", "color": COLORS["text_dim"], "label": "END"},
 }
+
+LLM_STREAM_PRESENTATION_EVENTS = {
+    "llm.stream.started",
+    "llm.stream.completed",
+    "llm.content.delta",
+    "llm.reasoning.delta",
+    "llm.reasoning_context.delta",
+    "llm.tool_call.started",
+    "llm.tool_call.arguments.delta",
+    "llm.tool_call.completed",
+}
+
+
+@dataclass
+class _ToolCallStreamState:
+    tool_call_id: str
+    tool_name: str | None = None
+    arguments_parts: list[str] = field(default_factory=list)
+    completed: bool = False
+
+    def to_data(self) -> dict[str, Any]:
+        return {
+            "id": self.tool_call_id,
+            "name": self.tool_name,
+            "arguments": "".join(self.arguments_parts),
+            "completed": self.completed,
+        }
+
+
+@dataclass
+class _LlmStreamState:
+    first_event: TuiEvent
+    metadata: dict[str, Any] = field(default_factory=dict)
+    content_parts: list[str] = field(default_factory=list)
+    reasoning_parts: list[str] = field(default_factory=list)
+    reasoning_context_parts: list[str] = field(default_factory=list)
+    tool_calls: dict[str, _ToolCallStreamState] = field(default_factory=dict)
+    delta_count: int = 0
+    completed: bool = False
+    duration_ms: int | None = None
+    current_event: TuiEvent | None = None
+
+    @classmethod
+    def from_event(cls, event: TuiEvent) -> _LlmStreamState:
+        state = cls(first_event=event)
+        state.absorb(event)
+        return state
+
+    def absorb(self, event: TuiEvent) -> TuiEvent:
+        self._merge_metadata(event)
+        delta = event.data.get("delta")
+
+        if event.event_type == "llm.content.delta" and delta:
+            self.content_parts.append(str(delta))
+            self.delta_count += 1
+        elif event.event_type == "llm.reasoning.delta" and delta:
+            self.reasoning_parts.append(str(delta))
+            self.delta_count += 1
+        elif event.event_type == "llm.reasoning_context.delta" and delta:
+            self.reasoning_context_parts.append(str(delta))
+            self.delta_count += 1
+        elif event.event_type == "llm.tool_call.started":
+            tool = self._tool_state(event)
+            tool.tool_name = _event_tool_name(event) or tool.tool_name
+        elif event.event_type == "llm.tool_call.arguments.delta" and delta:
+            tool = self._tool_state(event)
+            tool.tool_name = _event_tool_name(event) or tool.tool_name
+            tool.arguments_parts.append(str(delta))
+            self.delta_count += 1
+        elif event.event_type == "llm.tool_call.completed":
+            tool = self._tool_state(event)
+            tool.tool_name = _event_tool_name(event) or tool.tool_name
+            tool.completed = True
+        elif event.event_type == "llm.stream.completed":
+            self.completed = True
+            self.duration_ms = event.duration_ms
+
+        self.current_event = self._to_event()
+        return self.current_event
+
+    def _merge_metadata(self, event: TuiEvent) -> None:
+        for key, value in event.data.items():
+            if key not in {"delta", "raw", "tool_call_id", "tool_name"}:
+                self.metadata[key] = value
+
+    def _tool_state(self, event: TuiEvent) -> _ToolCallStreamState:
+        tool_call_id = _event_tool_call_id(event) or f"tool-{len(self.tool_calls) + 1}"
+        tool = self.tool_calls.get(tool_call_id)
+        if tool is None:
+            tool = _ToolCallStreamState(tool_call_id=tool_call_id, tool_name=_event_tool_name(event))
+            self.tool_calls[tool_call_id] = tool
+        return tool
+
+    def _to_event(self) -> TuiEvent:
+        event_type = "llm.stream.completed" if self.completed else "llm.stream.started"
+        data = dict(self.metadata)
+        data.update(
+            {
+                "type": event_type,
+                "status": "completed" if self.completed else "streaming",
+                "content": "".join(self.content_parts),
+                "reasoning": "".join(self.reasoning_parts),
+                "reasoning_context": "".join(self.reasoning_context_parts),
+                "tool_calls": [tool.to_data() for tool in self.tool_calls.values()],
+                "delta_count": self.delta_count,
+            }
+        )
+        return replace(
+            self.first_event,
+            event_type=event_type,
+            data=data,
+            duration_ms=self.duration_ms,
+        )
+
+
+def _event_tool_call_id(event: TuiEvent) -> str | None:
+    value = event.tool_call_id or event.data.get("tool_call_id")
+    return str(value) if value else None
+
+
+def _event_tool_name(event: TuiEvent) -> str | None:
+    value = event.data.get("tool_name")
+    return str(value) if value else None
+
+
+def _event_llm_call_id(event: TuiEvent) -> str | None:
+    value = event.llm_call_id or event.data.get("llm_call_id")
+    return str(value) if value else None
 
 
 def _format_event_line(event: TuiEvent) -> Text:
@@ -241,12 +370,55 @@ def _format_event_detail(event: TuiEvent) -> str:
         lines.append("")
 
     elif event.event_type in {"llm.stream.started", "llm.stream.completed", "llm.tool_call.started", "llm.tool_call.completed"}:
-        lines.append(f"[bold {COLORS['magenta']}]─── LLM Stream Event ───[/]")
+        lines.append(f"[bold {COLORS['magenta']}]─── LLM Stream ───[/]")
+        model = data.get("model")
+        if model:
+            lines.append(f"[dim]model:[/] {model}")
+        status = data.get("status")
+        if status:
+            lines.append(f"[dim]status:[/] {status}")
         tool = data.get("tool_name") or data.get("tool_call_id")
         if tool:
             lines.append(f"[dim]tool:[/] {tool}")
         if event.duration_ms is not None:
             lines.append(f"[dim]duration:[/] {event.duration_ms}ms")
+        delta_count = data.get("delta_count")
+        if delta_count:
+            lines.append(f"[dim]chunks:[/] {delta_count}")
+        lines.append("")
+
+        content = data.get("content")
+        if isinstance(content, str) and content:
+            lines.append(f"[bold {COLORS['magenta']}]content:[/]")
+            _append_wrapped(lines, content, indent="  ")
+            lines.append("")
+
+        reasoning = data.get("reasoning")
+        if isinstance(reasoning, str) and reasoning:
+            lines.append(f"[bold {COLORS['blue']}]reasoning:[/]")
+            _append_wrapped(lines, reasoning, indent="  ")
+            lines.append("")
+
+        reasoning_context = data.get("reasoning_context")
+        if isinstance(reasoning_context, str) and reasoning_context:
+            lines.append(f"[bold {COLORS['blue']}]reasoning_context:[/]")
+            _append_wrapped(lines, reasoning_context, indent="  ")
+            lines.append("")
+
+        tool_calls = data.get("tool_calls", [])
+        if isinstance(tool_calls, (list, tuple)) and tool_calls:
+            lines.append(f"[bold {COLORS['orange']}]tool_calls:[/]")
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                name = tc.get("name") or "?"
+                tid = str(tc.get("id") or "")
+                status_text = "done" if tc.get("completed") else "streaming"
+                lines.append(f"  [{COLORS['orange']}]{name}[/]({tid[:8]}) [{COLORS['text_dim']}]{status_text}[/]")
+                arguments = tc.get("arguments")
+                if isinstance(arguments, str) and arguments and not _append_jsonish(lines, arguments, indent="    "):
+                    _append_wrapped(lines, arguments, indent="    ")
+            lines.append("")
         lines.append("")
 
     elif event.event_type == "tool.started":
@@ -545,6 +717,13 @@ class TimelineWidget(VerticalScroll):
         # Auto-scroll to bottom
         self.scroll_end(animate=False)
 
+    def update_event(self, index: int, event: TuiEvent) -> None:
+        """Replace an existing timeline event in place."""
+        if 0 <= index < len(self._event_labels):
+            label, _ = self._event_labels[index]
+            self._event_labels[index] = (label, event)
+            label.update(_format_event_line(event))
+
     def get_event(self, index: int) -> TuiEvent | None:
         if 0 <= index < len(self._event_labels):
             return self._event_labels[index][1]
@@ -600,6 +779,12 @@ class DetailPanel(RichLog):
             detail = f"\n[dim]{'─' * 72}[/]\n{detail}"
         self.write(detail)
         self._event_count += 1
+
+    def replace_event(self, event: TuiEvent) -> None:
+        """Render one event as the current detail view."""
+        self.clear()
+        self.write(_format_event_detail(event))
+        self._event_count = 1
 
 
 class StatusBar(Static):
@@ -718,6 +903,8 @@ class LoomTuiApp(App[None]):
         self._run_done = False
         self._loop_role = ""
         self._loop_goal = ""
+        self._llm_streams: dict[str, _LlmStreamState] = {}
+        self._llm_stream_indices: dict[str, int] = {}
 
     def compose(self) -> ComposeResult:
         yield LoopHeader(id="loop_header")
@@ -747,6 +934,9 @@ class LoomTuiApp(App[None]):
             self._run_done = True
             status_bar = self.query_one("#status", StatusBar)
             status_bar.status = "completed"
+            return
+
+        if self._handle_llm_stream_event(event):
             return
 
         # Add to timeline
@@ -790,6 +980,34 @@ class LoomTuiApp(App[None]):
             status_bar = self.query_one("#status", StatusBar)
             status_bar.status = "completed"
             status_bar.duration = event.duration_ms or 0
+
+    def _handle_llm_stream_event(self, event: TuiEvent) -> bool:
+        if event.event_type not in LLM_STREAM_PRESENTATION_EVENTS:
+            return False
+
+        llm_call_id = _event_llm_call_id(event)
+        if not llm_call_id:
+            return False
+
+        timeline = self.query_one("#timeline", TimelineWidget)
+        detail = self.query_one("#detail", DetailPanel)
+        stream = self._llm_streams.get(llm_call_id)
+
+        if stream is None:
+            stream = _LlmStreamState.from_event(event)
+            self._llm_streams[llm_call_id] = stream
+            timeline.add_event(stream.current_event or event)
+            index = timeline.event_count - 1
+            self._llm_stream_indices[llm_call_id] = index
+        else:
+            aggregate = stream.absorb(event)
+            index = self._llm_stream_indices[llm_call_id]
+            timeline.update_event(index, aggregate)
+
+        selected = timeline.select_event(self._llm_stream_indices[llm_call_id])
+        if selected:
+            detail.replace_event(selected)
+        return True
 
     def action_cursor_down(self) -> None:
         """Move selection down in timeline."""

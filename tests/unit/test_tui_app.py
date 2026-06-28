@@ -7,7 +7,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from loom.tui.tui_app import DetailPanel, LoomTuiApp, LoopHeader
+from loom.tui.tui_app import DetailPanel, LoomTuiApp, LoopHeader, TimelineWidget
 from loom.tui.tui_collector import TuiEvent, TuiEventCollector
 
 
@@ -161,6 +161,56 @@ def test_detail_panel_renders_llm_stream_deltas(monkeypatch):
     assert '"partial": true' in writes[0]
     assert "Tool Arguments" in writes[1]
     assert '"query": "loom"' in writes[1]
+
+
+@pytest.mark.asyncio
+async def test_tui_app_aggregates_llm_stream_tokens_into_one_timeline_event(monkeypatch):
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test():
+        detail = app.query_one("#detail", DetailPanel)
+        writes = []
+        monkeypatch.setattr(detail, "write", writes.append)
+
+        for event in (
+            TuiEvent(
+                timestamp=0,
+                event_type="llm.stream.started",
+                data={"type": "llm.stream.started", "llm_call_id": "call-1", "model": "test-model"},
+                llm_call_id="call-1",
+            ),
+            TuiEvent(
+                timestamp=1,
+                event_type="llm.content.delta",
+                data={"type": "llm.content.delta", "llm_call_id": "call-1", "delta": "hello "},
+                llm_call_id="call-1",
+            ),
+            TuiEvent(
+                timestamp=2,
+                event_type="llm.content.delta",
+                data={"type": "llm.content.delta", "llm_call_id": "call-1", "delta": "world"},
+                llm_call_id="call-1",
+            ),
+            TuiEvent(
+                timestamp=3,
+                event_type="llm.stream.completed",
+                data={"type": "llm.stream.completed", "llm_call_id": "call-1", "model": "test-model"},
+                llm_call_id="call-1",
+                duration_ms=42,
+            ),
+        ):
+            app._handle_event(event)
+
+        timeline = app.query_one("#timeline", TimelineWidget)
+        stream_event = timeline.get_event(0)
+
+        assert timeline.event_count == 1
+        assert stream_event is not None
+        assert stream_event.event_type == "llm.stream.completed"
+        assert stream_event.duration_ms == 42
+        assert stream_event.data["content"] == "hello world"
+        assert "hello world" in writes[-1]
 
 
 def test_detail_panel_renders_llm_completed_report_with_real_newlines(monkeypatch):
