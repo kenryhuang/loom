@@ -1,6 +1,6 @@
 import json
 
-from loom.evolution.episodes import StepEpisode, build_step_episodes, load_trace_records
+from loom.evolution.episodes import StepEpisode, TraceRecord, build_step_episodes, load_trace_records
 
 
 def _event(event_type, trace_id="trace-1", run_id="run-1", payload=None):
@@ -69,8 +69,10 @@ def test_build_step_episodes_groups_llm_tool_and_completed_trace():
         _event("step.started"),
         _event("llm.requested", payload={"messages": [{"role": "user", "content": "inspect"}]}),
         _event("llm.completed", payload={"response": {"content": "use tool"}}),
+        _event("action.proposed", payload={"action": {"kind": "tool", "target": "inspect-project"}}),
         _event("tool.started", payload={"tool_id": "inspect-project", "input": {}}),
         _event("tool.completed", payload={"tool_id": "inspect-project", "output": {"ok": True}}),
+        _event("observation.recorded", payload={"observation": {"source": "inspect-project"}}),
         _event("step.completed"),
         _trace(),
         _event("run.completed", trace_id=None),
@@ -89,6 +91,19 @@ def test_build_step_episodes_groups_llm_tool_and_completed_trace():
     assert [event["type"] for event in episode.llm_requests] == ["llm.requested"]
     assert [event["type"] for event in episode.llm_completions] == ["llm.completed"]
     assert [event["type"] for event in episode.tool_events] == ["tool.started", "tool.completed"]
+    assert [event["type"] for event in episode.action_events] == ["action.proposed"]
+    assert [event["type"] for event in episode.observation_events] == ["observation.recorded"]
+    assert episode.event_hashes == (
+        "hash-step.started",
+        "hash-llm.requested",
+        "hash-llm.completed",
+        "hash-action.proposed",
+        "hash-tool.started",
+        "hash-tool.completed",
+        "hash-observation.recorded",
+        "hash-step.completed",
+        "hash-trace",
+    )
     assert episode.completed_trace["id"] == "trace-1"
 
 
@@ -99,3 +114,32 @@ def test_build_step_episodes_marks_missing_completion_incomplete():
     assert episodes[0].complete is False
     assert episodes[0].completed_event is None
     assert episodes[0].completed_trace is None
+
+
+def test_episode_and_record_constructors_match_planned_contract():
+    record = TraceRecord(
+        record_type="event",
+        payload={"type": "step.started"},
+        event_type="step.started",
+        trace_id="trace-1",
+        run_id="run-1",
+        hash="hash-step.started",
+    )
+    episode = StepEpisode(
+        run_id="run-1",
+        trace_id="trace-1",
+        loop_id="loop-1",
+        step_number=0,
+        started_event={"type": "step.started"},
+        llm_requests=(),
+        llm_completions=(),
+        tool_events=(),
+        action_events=(),
+        observation_events=(),
+        completed_trace=None,
+        completed_event=None,
+        event_hashes=("hash-step.started",),
+    )
+
+    assert record.raw is None
+    assert episode.complete is False

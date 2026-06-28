@@ -13,13 +13,11 @@ from typing import Any
 class TraceRecord:
     record_type: str
     payload: Mapping[str, Any]
-    raw: Mapping[str, Any]
     event_type: str | None = None
     trace_id: str | None = None
     run_id: str | None = None
-    loop_id: str | None = None
-    step_number: int | None = None
     hash: str | None = None
+    raw: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,20 +26,27 @@ class StepEpisode:
     trace_id: str
     loop_id: str
     step_number: int
-    events: tuple[Mapping[str, Any], ...]
+    started_event: Mapping[str, Any]
     llm_requests: tuple[Mapping[str, Any], ...]
     llm_completions: tuple[Mapping[str, Any], ...]
     tool_events: tuple[Mapping[str, Any], ...]
-    started_event: Mapping[str, Any] | None = None
-    completed_event: Mapping[str, Any] | None = None
+    action_events: tuple[Mapping[str, Any], ...]
+    observation_events: tuple[Mapping[str, Any], ...]
     completed_trace: Mapping[str, Any] | None = None
-    complete: bool = False
+    completed_event: Mapping[str, Any] | None = None
+    event_hashes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "events", tuple(self.events))
         object.__setattr__(self, "llm_requests", tuple(self.llm_requests))
         object.__setattr__(self, "llm_completions", tuple(self.llm_completions))
         object.__setattr__(self, "tool_events", tuple(self.tool_events))
+        object.__setattr__(self, "action_events", tuple(self.action_events))
+        object.__setattr__(self, "observation_events", tuple(self.observation_events))
+        object.__setattr__(self, "event_hashes", tuple(self.event_hashes))
+
+    @property
+    def complete(self) -> bool:
+        return self.completed_event is not None and self.completed_trace is not None
 
 
 def load_trace_records(path: str | Path) -> list[TraceRecord]:
@@ -69,10 +74,12 @@ def build_step_episodes(records: Iterable[TraceRecord | Mapping[str, Any]]) -> l
 
         if record.record_type == "event":
             bucket["events"].append(record.payload)
+            bucket["event_hashes"].extend(_hashes(record))
             if record.event_type == "step.completed":
                 bucket["completed_event"] = record.payload
         elif record.record_type == "trace":
             bucket["completed_trace"] = record.payload
+            bucket["event_hashes"].extend(_hashes(record))
             episodes.append(_episode_from_bucket(bucket))
             bucket = None
 
@@ -97,19 +104,14 @@ def _record_from_raw(raw: Mapping[str, Any]) -> TraceRecord:
     if trace_id is None:
         trace_id = payload.get("trace_id") or payload.get("id") or nested_trace.get("id")
 
-    run_id = raw.get("runId") or payload.get("run_id") or nested_trace.get("run_id")
-    loop_id = payload.get("loop_id") or nested_trace.get("loop_id")
-    step_number = payload.get("step_number") if "step_number" in payload else nested_trace.get("step_number")
     return TraceRecord(
         record_type=record_type,
         payload=payload,
-        raw=raw,
         event_type=event_type,
         trace_id=trace_id,
-        run_id=run_id,
-        loop_id=loop_id,
-        step_number=step_number,
+        run_id=raw.get("runId") or payload.get("run_id") or nested_trace.get("run_id"),
         hash=raw.get("hash"),
+        raw=raw,
     )
 
 
@@ -122,14 +124,15 @@ def _episode_from_bucket(bucket: Mapping[str, Any]) -> StepEpisode:
         trace_id=bucket["trace_id"],
         loop_id=bucket["loop_id"],
         step_number=bucket["step_number"],
-        events=events,
+        started_event=bucket["started_event"],
         llm_requests=tuple(event for event in events if event.get("type") == "llm.requested"),
         llm_completions=tuple(event for event in events if event.get("type") == "llm.completed"),
         tool_events=tuple(event for event in events if str(event.get("type") or "").startswith("tool.")),
-        started_event=bucket.get("started_event"),
-        completed_event=completed_event,
+        action_events=tuple(event for event in events if str(event.get("type") or "").startswith("action.")),
+        observation_events=tuple(event for event in events if str(event.get("type") or "").startswith("observation.")),
         completed_trace=completed_trace,
-        complete=completed_event is not None and completed_trace is not None,
+        completed_event=completed_event,
+        event_hashes=tuple(bucket["event_hashes"]),
     )
 
 
@@ -137,12 +140,13 @@ def _new_bucket(record: TraceRecord) -> dict[str, Any]:
     return {
         "run_id": record.run_id,
         "trace_id": record.trace_id,
-        "loop_id": record.loop_id,
-        "step_number": record.step_number,
+        "loop_id": _loop_id(record),
+        "step_number": _step_number(record),
         "events": [record.payload],
         "started_event": record.payload,
         "completed_event": None,
         "completed_trace": None,
+        "event_hashes": _hashes(record),
     }
 
 
@@ -150,14 +154,32 @@ def _belongs_to_bucket(record: TraceRecord, bucket: Mapping[str, Any]) -> bool:
     return (
         record.trace_id == bucket["trace_id"]
         and record.run_id == bucket["run_id"]
-        and record.loop_id == bucket["loop_id"]
-        and record.step_number == bucket["step_number"]
+        and _loop_id(record) == bucket["loop_id"]
+        and _step_number(record) == bucket["step_number"]
     )
 
 
 def _payload(raw: Mapping[str, Any]) -> Mapping[str, Any]:
     payload = raw.get("payload")
     return payload if isinstance(payload, Mapping) else raw
+
+
+def _loop_id(record: TraceRecord) -> str | None:
+    nested_trace = record.payload.get("trace")
+    if not isinstance(nested_trace, Mapping):
+        nested_trace = {}
+    return record.payload.get("loop_id") or nested_trace.get("loop_id")
+
+
+def _step_number(record: TraceRecord) -> int | None:
+    nested_trace = record.payload.get("trace")
+    if not isinstance(nested_trace, Mapping):
+        nested_trace = {}
+    return record.payload.get("step_number") if "step_number" in record.payload else nested_trace.get("step_number")
+
+
+def _hashes(record: TraceRecord) -> list[str]:
+    return [record.hash] if record.hash is not None else []
 
 
 __all__ = [
