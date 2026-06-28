@@ -1,10 +1,14 @@
+import asyncio
 from pathlib import Path
 import sys
 
 from loom.examples.real_project_smoke import (
     RealProjectSmokeConfig,
     inspect_project,
+    make_real_project_smoke_context,
+    make_real_project_smoke_loop,
     run_command,
+    run_real_project_smoke,
     run_smoke_test,
     run_yakdb_cli_smoke,
     synthesize_report,
@@ -66,3 +70,40 @@ def test_yakdb_cli_smoke_skips_non_yakdb_projects(tmp_path: Path):
 
     assert result.skipped is True
     assert "not detected" in result.reason
+
+
+def test_real_project_smoke_loop_produces_report_and_trace(tmp_path: Path):
+    project = tmp_path / "loop-project"
+    project.mkdir()
+    (project / "README.md").write_text("# Loop Project\n\nA project for loop smoke testing.\n", encoding="utf-8")
+    config = RealProjectSmokeConfig(
+        target_path=project,
+        smoke_command=(sys.executable, "-c", "print('loop smoke ok')"),
+        cli_smoke_enabled=False,
+    )
+
+    result = asyncio.run(run_real_project_smoke(config))
+
+    assert result.ok
+    assert result.value.metrics.steps == 1
+    assert "loop smoke ok" in result.value.output
+    assert len(result.value.traces) == 1
+    assert len(result.value.traces[0].observations) == 4
+
+
+def test_real_project_smoke_context_rejects_missing_target(tmp_path: Path):
+    config = RealProjectSmokeConfig(target_path=tmp_path / "missing")
+
+    result = make_real_project_smoke_context(config)
+
+    assert not result.ok
+    assert result.error.code == "VALIDATION_FAILED"
+
+
+def test_loop_factory_returns_one_step_loop(tmp_path: Path):
+    config = RealProjectSmokeConfig(target_path=tmp_path)
+
+    loop = make_real_project_smoke_loop(config)
+
+    assert loop.identity.role == "real project smoke auditor"
+    assert loop.goal.objective.startswith("Audit")

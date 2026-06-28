@@ -6,6 +6,35 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+from loom.core.models import (
+    Action,
+    Context,
+    Decision,
+    GoalLayer,
+    IdentityLayer,
+    MinimalLoopDefinition,
+    Observation,
+    StateLayer,
+    StepResult,
+    ToolRef,
+    Trace,
+    as_step_number,
+    empty_affordances,
+    empty_knowledge,
+    err,
+    freeze_context,
+    make_loom_error,
+    new_context_id,
+    new_loop_id,
+    new_loop_version,
+    new_run_id,
+    new_trace_id,
+    now_iso,
+    ok,
+)
+from loom.runtime.engine import create, create_runtime_registry, run
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +177,129 @@ def run_yakdb_cli_smoke(config: RealProjectSmokeConfig, project_info: ProjectInf
         return CliSmokeResult(False, "CLI smoke completed.", tuple(results), _cli_findings(tuple(results)))
 
 
+def make_real_project_smoke_context(config: RealProjectSmokeConfig):
+    if not config.target_path.exists():
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Real project smoke target does not exist",
+                retryable=False,
+                metadata={"target_path": str(config.target_path)},
+            )
+        )
+    return ok(
+        freeze_context(
+            Context(
+                id=new_context_id(),
+                run_id=new_run_id(),
+                created_at=now_iso(),
+                identity=IdentityLayer(role="real project smoke auditor"),
+                goal=GoalLayer(objective=f"Audit real project smoke path for {config.target_path}", budget={"max_steps": 1}),
+                state=StateLayer(),
+                knowledge=empty_knowledge(),
+                affordances=empty_affordances(
+                    tools=(
+                        ToolRef("inspect-project", "Inspect project metadata and repository state"),
+                        ToolRef("run-smoke-test", "Run configured smoke command"),
+                        ToolRef("run-cli-smoke", "Run project-specific CLI smoke path"),
+                        ToolRef("synthesize-report", "Create deterministic markdown audit report"),
+                    )
+                ),
+            )
+        )
+    )
+
+
+def make_real_project_smoke_loop(config: RealProjectSmokeConfig) -> MinimalLoopDefinition:
+    loop_id = new_loop_id()
+    version = new_loop_version()
+
+    async def step_fn(context: Context, _runtime: Any):
+        started_at = now_iso()
+        trace_id = new_trace_id()
+        project_info = inspect_project(config.target_path)
+        smoke = run_smoke_test(config)
+        cli_smoke = run_yakdb_cli_smoke(config, project_info)
+        report = synthesize_report(config, project_info, smoke=smoke, cli_smoke=cli_smoke)
+        at = now_iso()
+        actions = (
+            Action(f"{trace_id}-inspect-action", "tool", "Inspect project", target="inspect-project", input={"target_path": str(config.target_path)}),
+            Action(f"{trace_id}-smoke-action", "tool", "Run smoke test", target="run-smoke-test", input={"command": config.smoke_command}),
+            Action(f"{trace_id}-cli-action", "tool", "Run CLI smoke", target="run-cli-smoke", input={"enabled": config.cli_smoke_enabled}),
+            Action(f"{trace_id}-report-action", "tool", "Synthesize report", target="synthesize-report"),
+        )
+        observations = (
+            Observation(f"{trace_id}-inspect-observation", "inspect-project", _project_info_value(project_info), at),
+            Observation(f"{trace_id}-smoke-observation", "run-smoke-test", _command_result_value(smoke), at),
+            Observation(f"{trace_id}-cli-observation", "run-cli-smoke", _cli_smoke_value(cli_smoke), at),
+            Observation(f"{trace_id}-report-observation", "synthesize-report", {"report": report}, at),
+        )
+        decision = Decision(
+            f"{trace_id}-decision",
+            actions[-1],
+            "Ran real project smoke audit and synthesized report.",
+            actions[:-1],
+            1.0,
+            at,
+        )
+        next_context = freeze_context(
+            Context(
+                id=new_context_id(),
+                run_id=context.run_id,
+                created_at=context.created_at,
+                identity=context.identity,
+                goal=context.goal,
+                state=StateLayer(observations=(*context.state.observations, *observations), decisions=(*context.state.decisions, decision)),
+                knowledge=context.knowledge,
+                affordances=context.affordances,
+                parent_context_id=context.parent_context_id,
+                metadata=context.metadata,
+            )
+        )
+        trace = Trace(
+            id=trace_id,
+            run_id=context.run_id,
+            loop_id=loop_id,
+            loop_version=version,
+            step_number=as_step_number(len(context.state.observations)),
+            root_trace_id=trace_id,
+            started_at=started_at,
+            ended_at=now_iso(),
+            duration_ms=0,
+            input_context_id=context.id,
+            output_context_id=next_context.id,
+            outcome="pass" if smoke.exit_code == 0 else "fail",
+            observations=observations,
+            decisions=(decision,),
+            actions=actions,
+            tags=("example", "real-project-smoke"),
+            metadata={"targetPath": str(config.target_path), "projectName": project_info.name},
+        )
+        return ok(StepResult(next_context, trace, observations[-1], report))
+
+    def done_fn(context: Context, _runtime: Any):
+        return ok(bool(context.state.decisions))
+
+    return MinimalLoopDefinition(
+        id=loop_id,
+        version=version,
+        identity=IdentityLayer(role="real project smoke auditor"),
+        goal=GoalLayer(objective=f"Audit real project smoke path for {config.target_path}"),
+        step=step_fn,
+        done=done_fn,
+    )
+
+
+async def run_real_project_smoke(config: RealProjectSmokeConfig):
+    context = make_real_project_smoke_context(config)
+    if not context.ok:
+        return context
+    handle = create(make_real_project_smoke_loop(config), registry=create_runtime_registry())
+    if not handle.ok:
+        return handle
+    return await run(handle.value, context.value, max_steps=1)
+
+
 def synthesize_report(
     config: RealProjectSmokeConfig,
     project_info: ProjectInfo,
@@ -247,6 +399,9 @@ def _summarize_optional_result(result) -> str:
     exit_code = getattr(result, "exit_code", None)
     if exit_code is not None:
         status = "passed" if exit_code == 0 else "failed"
+        output = _first_non_empty_line(getattr(result, "stdout", "")) or _first_non_empty_line(getattr(result, "stderr", ""))
+        if output:
+            return f"Command {status} with exit code {exit_code}. Output: {output}"
         return f"Command {status} with exit code {exit_code}."
     return str(result)
 
@@ -278,3 +433,43 @@ def _cli_findings(commands: tuple[CommandResult, ...]) -> tuple[str, ...]:
     if "loom-real-case" in combined:
         findings.append("CLI smoke marker was searchable and readable.")
     return tuple(findings)
+
+
+def _first_non_empty_line(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:240]
+    return ""
+
+
+def _project_info_value(project_info: ProjectInfo) -> dict[str, Any]:
+    return {
+        "path": project_info.path,
+        "name": project_info.name,
+        "purpose": project_info.purpose,
+        "files": project_info.files,
+        "git_status": project_info.git_status,
+        "tech_stack": project_info.tech_stack,
+    }
+
+
+def _command_result_value(result: CommandResult) -> dict[str, Any]:
+    return {
+        "command": result.command,
+        "cwd": result.cwd,
+        "exit_code": result.exit_code,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "duration_ms": result.duration_ms,
+        "timed_out": result.timed_out,
+    }
+
+
+def _cli_smoke_value(result: CliSmokeResult) -> dict[str, Any]:
+    return {
+        "skipped": result.skipped,
+        "reason": result.reason,
+        "commands": tuple(_command_result_value(command) for command in result.commands),
+        "findings": result.findings,
+    }
