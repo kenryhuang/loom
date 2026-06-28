@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,32 @@ class ProjectInfo:
     tech_stack: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class CommandResult:
+    command: tuple[str, ...]
+    cwd: str
+    exit_code: int
+    stdout: str
+    stderr: str
+    duration_ms: int
+    timed_out: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command", tuple(self.command))
+
+
+@dataclass(frozen=True, slots=True)
+class CliSmokeResult:
+    skipped: bool
+    reason: str
+    commands: tuple[CommandResult, ...] = ()
+    findings: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "commands", tuple(self.commands))
+        object.__setattr__(self, "findings", tuple(self.findings))
+
+
 def inspect_project(path: str | Path) -> ProjectInfo:
     target = Path(path)
     files = tuple(sorted(item.name for item in target.iterdir())) if target.exists() else ()
@@ -44,6 +71,81 @@ def inspect_project(path: str | Path) -> ProjectInfo:
         git_status=_git_status(target),
         tech_stack=_infer_tech_stack(files),
     )
+
+
+def run_command(command: tuple[str, ...], *, cwd: str | Path, timeout_seconds: int) -> CommandResult:
+    import time
+
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            tuple(command),
+            cwd=Path(cwd),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+        return CommandResult(
+            command=tuple(command),
+            cwd=str(Path(cwd)),
+            exit_code=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+        )
+    except subprocess.TimeoutExpired as exc:
+        return CommandResult(
+            command=tuple(command),
+            cwd=str(Path(cwd)),
+            exit_code=124,
+            stdout=exc.stdout or "",
+            stderr=exc.stderr or f"Command timed out after {timeout_seconds}s",
+            duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+            timed_out=True,
+        )
+    except OSError as exc:
+        return CommandResult(
+            command=tuple(command),
+            cwd=str(Path(cwd)),
+            exit_code=127,
+            stdout="",
+            stderr=str(exc),
+            duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+        )
+
+
+def run_smoke_test(config: RealProjectSmokeConfig) -> CommandResult:
+    return run_command(config.smoke_command, cwd=config.target_path, timeout_seconds=config.command_timeout_seconds)
+
+
+def run_yakdb_cli_smoke(config: RealProjectSmokeConfig, project_info: ProjectInfo) -> CliSmokeResult:
+    if not config.cli_smoke_enabled:
+        return CliSmokeResult(True, "CLI smoke disabled.")
+    if not _is_yakdb_project(project_info):
+        return CliSmokeResult(True, "yakDB project not detected.")
+
+    with tempfile.TemporaryDirectory(prefix="loom-yakdb-smoke-") as tmpdir:
+        workspace = Path(tmpdir)
+        notes = workspace / "docs" / "notes.txt"
+        notes.parent.mkdir(parents=True, exist_ok=True)
+        notes.write_text(
+            "YakDB turns files into searchable text for agent workflows.\nSmoke test marker: loom-real-case.\n",
+            encoding="utf-8",
+        )
+        commands = (
+            ("uv", "run", "yakdb", "init", str(workspace), "--no-ocr"),
+            ("uv", "run", "yakdb", "index", str(workspace), "--workspace", str(workspace)),
+            ("uv", "run", "yakdb", "grep", "loom-real-case", str(workspace), "--workspace", str(workspace)),
+            ("uv", "run", "yakdb", "read", "docs/notes.txt", "--workspace", str(workspace), "--numbered"),
+        )
+        results = []
+        for command in commands:
+            result = run_command(command, cwd=config.target_path, timeout_seconds=config.command_timeout_seconds)
+            results.append(result)
+            if result.exit_code != 0:
+                return CliSmokeResult(False, "CLI smoke failed.", tuple(results), _cli_findings(tuple(results)))
+        return CliSmokeResult(False, "CLI smoke completed.", tuple(results), _cli_findings(tuple(results)))
 
 
 def synthesize_report(
@@ -162,3 +264,17 @@ def _recommendations(project_info: ProjectInfo, smoke, cli_smoke) -> tuple[str, 
     if not recommendations:
         recommendations.append("Keep smoke coverage close to primary user workflows.")
     return tuple(recommendations)
+
+
+def _is_yakdb_project(project_info: ProjectInfo) -> bool:
+    return project_info.name.lower() == "yakdb" or "yakdb_core" in project_info.files
+
+
+def _cli_findings(commands: tuple[CommandResult, ...]) -> tuple[str, ...]:
+    findings = []
+    combined = "\n".join((*[command.stdout for command in commands], *[command.stderr for command in commands]))
+    if ".yakdb/blobs" in combined:
+        findings.append("CLI grep output included .yakdb/blobs internal storage.")
+    if "loom-real-case" in combined:
+        findings.append("CLI smoke marker was searchable and readable.")
+    return tuple(findings)

@@ -16,16 +16,26 @@ from loom.examples.factories import (
     run_trace_query_example,
 )
 from loom.examples.real_project_smoke import (
+    CliSmokeResult,
+    CommandResult,
     ProjectInfo,
     RealProjectSmokeConfig,
     inspect_project,
+    run_command,
+    run_smoke_test,
+    run_yakdb_cli_smoke,
     synthesize_report,
 )
 
 __all__ = [
+    "CliSmokeResult",
+    "CommandResult",
     "ProjectInfo",
     "RealProjectSmokeConfig",
     "inspect_project",
+    "run_command",
+    "run_smoke_test",
+    "run_yakdb_cli_smoke",
     "make_chain_pipeline_example",
     "make_fork_reviewers_example",
     "make_initial_counter_context",
