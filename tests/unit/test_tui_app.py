@@ -95,3 +95,37 @@ def test_detail_panel_pretty_prints_json_strings(monkeypatch):
     assert '  {\n    "matches": [\n      {' in writes[0]
     assert '"title": "Live Loom smoke test"' in writes[0]
     assert '"summary": "real tool result"' in writes[0]
+
+
+def test_detail_panel_renders_llm_stream_deltas(monkeypatch):
+    panel = DetailPanel()
+    writes = []
+    monkeypatch.setattr(panel, "write", writes.append)
+
+    panel.show_event(
+        TuiEvent(
+            timestamp=0,
+            event_type="llm.content.delta",
+            data={"type": "llm.content.delta", "delta": '{"partial": true}', "llm_call_id": "call-1"},
+            llm_call_id="call-1",
+        )
+    )
+    panel.show_event(
+        TuiEvent(
+            timestamp=1,
+            event_type="llm.tool_call.arguments.delta",
+            data={
+                "type": "llm.tool_call.arguments.delta",
+                "delta": '{"query":"loom"}',
+                "tool_name": "search",
+                "tool_call_id": "tool-1",
+            },
+            llm_call_id="call-1",
+            tool_call_id="tool-1",
+        )
+    )
+
+    assert "LLM Stream" in writes[0]
+    assert '"partial": true' in writes[0]
+    assert "Tool Arguments" in writes[1]
+    assert '"query": "loom"' in writes[1]

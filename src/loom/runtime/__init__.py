@@ -16,6 +16,7 @@ from loom.runtime.engine import (
     step,
     step_stream,
 )
+from loom.runtime.plugins import LoopPlugin, RunPluginContext, run_with_plugins
 
 __all__ = [
     "CancellationToken",
@@ -32,4 +33,7 @@ __all__ = [
     "run",
     "step",
     "step_stream",
+    "LoopPlugin",
+    "RunPluginContext",
+    "run_with_plugins",
 ]

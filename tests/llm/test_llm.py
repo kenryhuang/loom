@@ -23,7 +23,9 @@ from loom.core import (
     ok,
 )
 from loom.llm import (
+    LlmMessage,
     LlmResponse,
+    LlmStreamEvent,
     LlmToolCall,
     TokenUsage,
     build_messages,
@@ -336,6 +338,56 @@ def test_env_config_loads_openai_compatible_provider(tmp_path):
     asyncio.run(scenario())
 
 
+def test_openai_provider_stream_chat_parses_sse_chunks():
+    async def scenario():
+        calls = []
+        first_chunk = {"choices": [{"delta": {"content": '{"reasoning":"ok",'}, "finish_reason": None}]}
+        second_chunk = {
+            "choices": [
+                {
+                    "delta": {
+                        "content": '"action":{"kind":"none","description":"Stop"},"alternatives":[],"confidence":0.7}',
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        }
+        usage_chunk = {
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+        }
+
+        async def http_client(url, request):
+            calls.append((url, request))
+            return {
+                "status": 200,
+                "ok": True,
+                "chunks": [
+                    f"data: {json.dumps(first_chunk)}\n\n",
+                    f"data: {json.dumps(second_chunk)}\n\n",
+                    f"data: {json.dumps(usage_chunk)}\n\n",
+                    "data: [DONE]\n\n",
+                ],
+            }
+
+        provider = create_openai_provider(
+            api_key="test-key",
+            model="gpt-test",
+            base_url="https://proxy.example/v1",
+            http_client=http_client,
+        )
+
+        events = [event async for event in provider.stream_chat([LlmMessage("user", "hello")])]
+
+        assert calls[0][0] == "https://proxy.example/v1/chat/completions"
+        assert calls[0][1]["body"]["stream"] is True
+        assert [event.kind for event in events] == ["content.delta", "content.delta", "completed"]
+        assert events[-1].response.content.startswith('{"reasoning":"ok"')
+        assert events[-1].response.usage.total_tokens == 7
+
+    asyncio.run(scenario())
+
+
 def test_default_env_config_loads_project_dotenv_when_present():
     env_path = Path(".env")
     if not env_path.exists():
@@ -416,6 +468,85 @@ def test_llm_step_emits_full_provider_io_events():
     asyncio.run(scenario())
 
 
+def test_llm_step_streaming_provider_emits_delta_events_and_executes_tool_calls():
+    async def scenario():
+        events = []
+        final_content = json.dumps(
+            {
+                "reasoning": "Tool result is enough",
+                "action": {
+                    "kind": "tool",
+                    "target": "search",
+                    "description": "Use the search result",
+                    "input": {"query": "loom"},
+                },
+                "alternatives": [],
+                "confidence": 0.8,
+            },
+            separators=(",", ":"),
+        )
+        split_at = final_content.index('"action"')
+        provider = FakeStreamingProvider(
+            [
+                [
+                    LlmStreamEvent(kind="tool_call.started", tool_call_id="call_1", tool_name="search"),
+                    LlmStreamEvent(kind="tool_call.arguments.delta", tool_call_id="call_1", tool_arguments_delta='{"query":"loom"}'),
+                    LlmStreamEvent(
+                        kind="tool_call.completed",
+                        tool_call_id="call_1",
+                        tool_name="search",
+                        tool_arguments_delta='{"query":"loom"}',
+                    ),
+                    LlmStreamEvent(
+                        kind="completed",
+                        response=LlmResponse(
+                            content=None,
+                            tool_calls=(LlmToolCall("call_1", "search", '{"query":"loom"}'),),
+                            finish_reason="tool_calls",
+                        ),
+                    ),
+                ],
+                [
+                    LlmStreamEvent(kind="reasoning.delta", reasoning_delta="Evidence is enough."),
+                    LlmStreamEvent(kind="content.delta", content_delta=final_content[:split_at]),
+                    LlmStreamEvent(
+                        kind="content.delta",
+                        content_delta=final_content[split_at:],
+                    ),
+                    LlmStreamEvent(
+                        kind="completed",
+                        response=LlmResponse(
+                            content=final_content,
+                            usage=TokenUsage(12, 6, 18),
+                        ),
+                    ),
+                ],
+            ]
+        )
+        tool_calls = []
+
+        async def call_tool(name, input_value, **options):
+            tool_calls.append((name, input_value, options))
+            return ok(Observation("search-obs", "search", {"result": "found"}, NOW))
+
+        result = await create_llm_step_function(provider, stream=True)(make_context(), make_runtime(call_tool=call_tool, events=events))
+
+        assert result.ok
+        assert tool_calls[0][0] == "search"
+        event_types = [event["type"] for event in events]
+        assert "llm.stream.started" in event_types
+        assert "llm.tool_call.started" in event_types
+        assert "llm.tool_call.arguments.delta" in event_types
+        assert "llm.tool_call.completed" in event_types
+        assert "llm.reasoning.delta" in event_types
+        assert "llm.content.delta" in event_types
+        assert event_types.count("llm.stream.completed") == 2
+        assert events[event_types.index("llm.content.delta")]["delta"]
+        assert result.value.trace.metadata["streaming"] is True
+
+    asyncio.run(scenario())
+
+
 class FakeProvider:
     model = "mock-model"
 
@@ -428,6 +559,17 @@ class FakeProvider:
         if self.results:
             return self.results.pop(0)
         return ok(LlmResponse(content='{"reasoning":"default","action":{"kind":"none","description":"Stop"},"alternatives":[],"confidence":0.1}'))
+
+
+class FakeStreamingProvider(FakeProvider):
+    def __init__(self, streams):
+        super().__init__([])
+        self.streams = list(streams)
+
+    async def stream_chat(self, messages, tools=None, cancellation=None):
+        self.messages.append((tuple(messages), tools))
+        for event in self.streams.pop(0):
+            yield event
 
 
 def make_context(max_tokens=None):

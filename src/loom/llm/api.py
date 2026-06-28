@@ -92,6 +92,19 @@ class LlmResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class LlmStreamEvent:
+    kind: str
+    content_delta: str | None = None
+    reasoning_delta: str | None = None
+    reasoning_context_delta: str | None = None
+    tool_call_id: str | None = None
+    tool_name: str | None = None
+    tool_arguments_delta: str | None = None
+    response: LlmResponse | None = None
+    raw: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class EnvOpenAIConfig:
     model: str
     base_url: str
@@ -240,6 +253,7 @@ def create_llm_step_function(
     max_tool_calls_per_step: int = 5,
     tool_selection: ToolSelectionConfig | None = None,
     tool_resolver: Any = None,
+    stream: bool = False,
 ):
     async def llm_step(context: Context, runtime: Any) -> Result:
         started_at = runtime.now()
@@ -301,7 +315,17 @@ def create_llm_step_function(
             )
             if not requested.ok:
                 return requested
-            response = await provider.chat(messages, tools, getattr(runtime, "cancellation", None))
+            response = await _chat_or_stream(
+                provider,
+                messages,
+                tools,
+                getattr(runtime, "cancellation", None),
+                runtime=runtime,
+                context=context,
+                trace_id=trace_id,
+                llm_call_id=llm_call_id,
+                stream=stream,
+            )
             if not response.ok:
                 failed = await _emit_runtime_event(
                     runtime,
@@ -395,6 +419,7 @@ def create_llm_step_function(
             "model": provider.model,
             "finishReason": final_response.finish_reason,
             "tokenUsage": _token_usage_metadata(tracker.total),
+            "streaming": bool(stream and hasattr(provider, "stream_chat")),
         }
         if tool_resolution_metadata is not None:
             trace_metadata["toolResolution"] = tool_resolution_metadata
@@ -473,6 +498,137 @@ def create_llm_step_function(
     return llm_step
 
 
+async def _chat_or_stream(
+    provider: Any,
+    messages: list[LlmMessage],
+    tools: tuple[dict[str, Any], ...] | None,
+    cancellation: Any,
+    *,
+    runtime: Any,
+    context: Context,
+    trace_id: str,
+    llm_call_id: str,
+    stream: bool,
+) -> Result:
+    if not stream or not hasattr(provider, "stream_chat"):
+        return await provider.chat(messages, tools, cancellation)
+    return await _consume_streaming_chat(
+        provider,
+        messages,
+        tools,
+        cancellation,
+        runtime,
+        context,
+        trace_id,
+        llm_call_id,
+    )
+
+
+async def _consume_streaming_chat(
+    provider: Any,
+    messages: list[LlmMessage],
+    tools: tuple[dict[str, Any], ...] | None,
+    cancellation: Any,
+    runtime: Any,
+    context: Context,
+    trace_id: str,
+    llm_call_id: str,
+) -> Result:
+    step_number = as_step_number(len(context.state.observations))
+    started = await _emit_runtime_event(
+        runtime,
+        {
+            "type": "llm.stream.started",
+            "run_id": context.run_id,
+            "loop_id": runtime.loop_id,
+            "trace_id": trace_id,
+            "llm_call_id": llm_call_id,
+            "step_number": step_number,
+            "model": provider.model,
+            "at": runtime.now(),
+        },
+    )
+    if not started.ok:
+        return started
+
+    final_response: LlmResponse | None = None
+    try:
+        async for event in provider.stream_chat(messages, tools=tools, cancellation=cancellation):
+            if event.kind == "completed":
+                final_response = event.response
+                continue
+            emitted = await _emit_stream_delta_event(runtime, event, context, trace_id, llm_call_id, provider.model, step_number)
+            if not emitted.ok:
+                return emitted
+    except BaseException as exc:
+        return err(
+            make_loom_error(
+                "LLM_FAILED",
+                str(exc),
+                retryable=True,
+                cause={"name": type(exc).__name__, "message": str(exc)},
+            )
+        )
+
+    if final_response is None:
+        return err(make_loom_error("LLM_FAILED", "Streaming provider returned no completed response", retryable=True))
+
+    completed = await _emit_runtime_event(
+        runtime,
+        {
+            "type": "llm.stream.completed",
+            "run_id": context.run_id,
+            "loop_id": runtime.loop_id,
+            "trace_id": trace_id,
+            "llm_call_id": llm_call_id,
+            "step_number": step_number,
+            "model": provider.model,
+            "at": runtime.now(),
+        },
+    )
+    if not completed.ok:
+        return completed
+    return ok(final_response)
+
+
+async def _emit_stream_delta_event(
+    runtime: Any,
+    event: LlmStreamEvent,
+    context: Context,
+    trace_id: str,
+    llm_call_id: str,
+    model: str,
+    step_number: int,
+) -> Result:
+    event_type = {
+        "content.delta": "llm.content.delta",
+        "reasoning.delta": "llm.reasoning.delta",
+        "reasoning_context.delta": "llm.reasoning_context.delta",
+        "tool_call.started": "llm.tool_call.started",
+        "tool_call.arguments.delta": "llm.tool_call.arguments.delta",
+        "tool_call.completed": "llm.tool_call.completed",
+    }.get(event.kind)
+    if event_type is None:
+        return ok(None)
+    return await _emit_runtime_event(
+        runtime,
+        {
+            "type": event_type,
+            "run_id": context.run_id,
+            "loop_id": runtime.loop_id,
+            "trace_id": trace_id,
+            "llm_call_id": llm_call_id,
+            "step_number": step_number,
+            "model": model,
+            "delta": event.content_delta or event.reasoning_delta or event.reasoning_context_delta or event.tool_arguments_delta,
+            "tool_call_id": event.tool_call_id,
+            "tool_name": event.tool_name,
+            "raw": event.raw,
+            "at": runtime.now(),
+        },
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class OpenAIProvider:
     api_key: str
@@ -531,6 +687,38 @@ class OpenAIProvider:
 
         return _parse_openai_chat_response(response.get("json"))
 
+    async def stream_chat(self, messages, tools=None, cancellation=None):
+        base_url = self.base_url.rstrip("/")
+        body = {
+            "model": self.model,
+            "messages": [_to_openai_message(message) for message in messages],
+            "stream": True,
+        }
+        if self.temperature is not None:
+            body["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            body["max_tokens"] = self.max_tokens
+        if tools:
+            body["tools"] = tools
+
+        request = {
+            "method": "POST",
+            "headers": {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            "body": body,
+        }
+        response = await self._send_stream(f"{base_url}/chat/completions", request)
+        if not response.get("ok", False):
+            status = int(response.get("status", 0))
+            payload = response.get("json") or {}
+            message = (payload.get("error", {}).get("message") if isinstance(payload, dict) else None) or f"OpenAI stream request failed with status {status}"
+            raise RuntimeError(message)
+
+        async for event in _parse_openai_sse_stream(response.get("chunks", ())):
+            yield event
+
     async def _send(self, url: str, request: dict[str, Any]) -> dict[str, Any]:
         if self.http_client is not None:
             return await self.http_client(url, request)
@@ -553,6 +741,14 @@ class OpenAIProvider:
         import asyncio
 
         return await asyncio.to_thread(send_sync)
+
+    async def _send_stream(self, url: str, request: dict[str, Any]) -> dict[str, Any]:
+        if self.http_client is not None:
+            return await self.http_client(url, request)
+
+        import asyncio
+
+        return await asyncio.to_thread(_send_stream_sync, url, request)
 
 
 def create_openai_provider(**config: Any) -> OpenAIProvider:
@@ -1212,6 +1408,171 @@ def _parse_openai_chat_response(payload: Any) -> Result:
     )
 
 
+async def _parse_openai_sse_stream(chunks: Any):
+    content_parts: list[str] = []
+    tool_parts: dict[int, dict[str, Any]] = {}
+    finish_reason = "stop"
+    usage = TokenUsage()
+
+    async for payload in _iter_sse_payloads(chunks):
+        if payload == "[DONE]":
+            break
+        data = json.loads(payload)
+        choice = data.get("choices", [{}])[0]
+        delta = choice.get("delta", {})
+        finish_reason = choice.get("finish_reason") or finish_reason
+        usage_data = data.get("usage") or {}
+        if usage_data:
+            usage = TokenUsage(
+                usage_data.get("prompt_tokens", 0),
+                usage_data.get("completion_tokens", 0),
+                usage_data.get("total_tokens", 0),
+            )
+
+        content = delta.get("content")
+        if content:
+            content_parts.append(content)
+            yield LlmStreamEvent(kind="content.delta", content_delta=content, raw=data)
+
+        for stream_event in _parse_openai_stream_tool_deltas(delta, tool_parts, data):
+            yield stream_event
+
+        reasoning = delta.get("reasoning") or delta.get("reasoning_content")
+        if reasoning:
+            yield LlmStreamEvent(kind="reasoning.delta", reasoning_delta=reasoning, raw=data)
+
+        reasoning_context = delta.get("reasoning_context")
+        if reasoning_context:
+            yield LlmStreamEvent(kind="reasoning_context.delta", reasoning_context_delta=reasoning_context, raw=data)
+
+    yield LlmStreamEvent(
+        kind="completed",
+        response=LlmResponse(
+            content="".join(content_parts) or None,
+            tool_calls=tuple(_assembled_openai_stream_tool_calls(tool_parts)),
+            usage=usage,
+            finish_reason=finish_reason,
+        ),
+    )
+
+
+async def _iter_sse_payloads(chunks: Any):
+    buffer = ""
+    async for chunk in _aiter_chunks(chunks):
+        text = chunk.decode("utf-8") if isinstance(chunk, bytes) else str(chunk)
+        buffer += text
+        while "\n\n" in buffer:
+            event, buffer = buffer.split("\n\n", 1)
+            payload = _sse_payload(event)
+            if payload is not None:
+                yield payload
+    payload = _sse_payload(buffer)
+    if payload is not None:
+        yield payload
+
+
+async def _aiter_chunks(chunks: Any):
+    if hasattr(chunks, "__aiter__"):
+        async for chunk in chunks:
+            yield chunk
+        return
+    if isinstance(chunks, str | bytes):
+        yield chunks
+        return
+    for chunk in chunks or ():
+        yield chunk
+
+
+def _sse_payload(event: str) -> str | None:
+    lines = []
+    for line in event.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(":"):
+            continue
+        if stripped.startswith("data:"):
+            lines.append(stripped.removeprefix("data:").strip())
+    return "\n".join(lines) if lines else None
+
+
+def _parse_openai_stream_tool_deltas(delta: Mapping[str, Any], tool_parts: dict[int, dict[str, Any]], raw: Mapping[str, Any]) -> list[LlmStreamEvent]:
+    events: list[LlmStreamEvent] = []
+    tool_calls = delta.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return events
+
+    for item in tool_calls:
+        if not isinstance(item, Mapping):
+            continue
+        index = int(item.get("index", len(tool_parts)))
+        state = tool_parts.setdefault(index, {"id": "", "name": "", "arguments": "", "started": False})
+        call_id = item.get("id")
+        if call_id:
+            state["id"] = call_id
+        function = item.get("function", {})
+        if isinstance(function, Mapping):
+            name = function.get("name")
+            if name:
+                state["name"] = name
+            arguments = function.get("arguments")
+        else:
+            arguments = None
+
+        if not state["started"] and (state["id"] or state["name"]):
+            state["started"] = True
+            events.append(
+                LlmStreamEvent(
+                    kind="tool_call.started",
+                    tool_call_id=state["id"] or None,
+                    tool_name=state["name"] or None,
+                    raw=raw,
+                )
+            )
+
+        if arguments:
+            state["arguments"] += arguments
+            events.append(
+                LlmStreamEvent(
+                    kind="tool_call.arguments.delta",
+                    tool_call_id=state["id"] or None,
+                    tool_name=state["name"] or None,
+                    tool_arguments_delta=arguments,
+                    raw=raw,
+                )
+            )
+    return events
+
+
+def _assembled_openai_stream_tool_calls(tool_parts: dict[int, dict[str, Any]]) -> list[LlmToolCall]:
+    calls: list[LlmToolCall] = []
+    for index in sorted(tool_parts):
+        state = tool_parts[index]
+        if state.get("id") or state.get("name"):
+            calls.append(
+                LlmToolCall(
+                    state.get("id", ""),
+                    state.get("name", ""),
+                    state.get("arguments", "{}") or "{}",
+                )
+            )
+    return calls
+
+
+def _send_stream_sync(url: str, request: dict[str, Any]) -> dict[str, Any]:
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(request["body"]).encode("utf-8"),
+        method="POST",
+        headers=request["headers"],
+    )
+    try:
+        with urllib.request.urlopen(req) as response:  # noqa: S310
+            chunks = [line.decode("utf-8") for line in response]
+            return {"status": response.status, "ok": 200 <= response.status < 300, "chunks": chunks}
+    except urllib.error.HTTPError as exc:
+        payload = json.loads(exc.read().decode("utf-8"))
+        return {"status": exc.code, "ok": False, "json": payload}
+
+
 def _parse_openai_tool_calls(value: Any) -> list[LlmToolCall]:
     if not isinstance(value, list):
         return []
@@ -1256,6 +1617,7 @@ def _first_env(env: dict[str, str], names: tuple[str, ...]) -> str | None:
 __all__ = [
     "LlmMessage",
     "LlmResponse",
+    "LlmStreamEvent",
     "LlmToolCall",
     "EnvOpenAIConfig",
     "OpenAIProvider",
