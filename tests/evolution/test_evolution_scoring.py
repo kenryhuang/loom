@@ -81,9 +81,7 @@ def test_build_step_scoring_messages_handles_non_plain_values():
         loop_id="loop-1",
         step_number=0,
         started_event=freeze_json({"type": "step.started", "metadata": {"tags": ["scoring"]}}),
-        llm_requests=(
-            freeze_json({"type": "llm.requested", "messages": [{"role": "user", "content": "audit"}]}),
-        ),
+        llm_requests=(freeze_json({"type": "llm.requested", "messages": [{"role": "user", "content": "audit"}]}),),
         llm_completions=(),
         tool_events=(),
         action_events=(),

@@ -37,9 +37,7 @@ class FakeSmokeProvider:
                         "action": {
                             "kind": "custom",
                             "description": "Write the smoke audit report",
-                            "input": {
-                                "report": "# Fake LLM Smoke Report\n\nThe persisted trace contains smoke evidence."
-                            },
+                            "input": {"report": "# Fake LLM Smoke Report\n\nThe persisted trace contains smoke evidence."},
                         },
                         "alternatives": [],
                         "confidence": 0.84,

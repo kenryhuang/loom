@@ -59,11 +59,7 @@ def _persisted_step_completed(trace_id="trace-1", run_id="run-1"):
 def test_load_trace_records_reads_jsonl_in_order(tmp_path):
     path = tmp_path / "trace.jsonl"
     path.write_text(
-        "\n".join(
-            json.dumps(record, sort_keys=True)
-            for record in (_event("run.started", trace_id=None), _event("step.started"), _trace())
-        )
-        + "\n",
+        "\n".join(json.dumps(record, sort_keys=True) for record in (_event("run.started", trace_id=None), _event("step.started"), _trace())) + "\n",
         encoding="utf-8",
     )
 
