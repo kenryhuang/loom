@@ -649,12 +649,6 @@ def _has_llm_stream_details(data: dict[str, Any]) -> bool:
 
 
 def _append_llm_stream_details(lines: list[str], data: dict[str, Any]) -> None:
-    content = data.get("content")
-    if isinstance(content, str) and content:
-        lines.append(f"[bold {COLORS['magenta']}]content:[/]")
-        _append_wrapped(lines, content, indent="  ")
-        lines.append("")
-
     reasoning = data.get("reasoning")
     if isinstance(reasoning, str) and reasoning:
         lines.append(f"[bold {COLORS['blue']}]thinking:[/]")
@@ -680,6 +674,12 @@ def _append_llm_stream_details(lines: list[str], data: dict[str, Any]) -> None:
             arguments = tc.get("arguments")
             if isinstance(arguments, str) and arguments and not _append_jsonish(lines, arguments, indent="    "):
                 _append_wrapped(lines, arguments, indent="    ")
+        lines.append("")
+
+    content = data.get("content")
+    if isinstance(content, str) and content:
+        lines.append(f"[bold {COLORS['magenta']}]content:[/]")
+        _append_wrapped(lines, content, indent="  ")
         lines.append("")
 
 
@@ -846,6 +846,7 @@ class EventDetailBox(RichLog):
     def set_event(self, event: TuiEvent) -> None:
         self.clear()
         self.write(_format_event_detail(event))
+        self.scroll_end(animate=False)
 
 
 class EventItem(Container):

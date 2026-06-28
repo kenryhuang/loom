@@ -423,6 +423,34 @@ def test_detail_panel_renders_llm_stream_deltas(monkeypatch):
     assert '"query": "loom"' in writes[1]
 
 
+def test_llm_stream_content_renders_at_detail_tail(monkeypatch):
+    panel = EventDetailBox()
+    writes = []
+    monkeypatch.setattr(panel, "write", writes.append)
+
+    panel.set_event(
+        TuiEvent(
+            timestamp=0,
+            event_type="llm.stream.started",
+            data={
+                "type": "llm.stream.started",
+                "llm_call_id": "call-1",
+                "model": "test-model",
+                "reasoning": "thinking through evidence",
+                "reasoning_context": "context window",
+                "tool_calls": [{"id": "tool-1", "name": "search", "arguments": '{"query":"loom"}'}],
+                "content": "final visible answer",
+            },
+            llm_call_id="call-1",
+        )
+    )
+
+    detail = writes[0]
+    assert detail.index("thinking through evidence") < detail.index("final visible answer")
+    assert detail.index("context window") < detail.index("final visible answer")
+    assert detail.index('"query": "loom"') < detail.index("final visible answer")
+
+
 @pytest.mark.asyncio
 async def test_tui_app_aggregates_llm_stream_tokens_into_one_timeline_event():
     collector = TuiEventCollector()
