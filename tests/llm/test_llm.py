@@ -23,6 +23,7 @@ from loom.core import (
     ok,
 )
 from loom.llm import (
+    LlmMessage,
     LlmResponse,
     LlmStreamEvent,
     LlmToolCall,
@@ -333,6 +334,41 @@ def test_env_config_loads_openai_compatible_provider(tmp_path):
         assert calls[0][0] == "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
         assert calls[0][1]["headers"]["Authorization"] == "Bearer test-loom-key"
         assert calls[0][1]["body"]["model"] == "qwen3.6-max-preview"
+
+    asyncio.run(scenario())
+
+
+def test_openai_provider_stream_chat_parses_sse_chunks():
+    async def scenario():
+        calls = []
+
+        async def http_client(url, request):
+            calls.append((url, request))
+            return {
+                "status": 200,
+                "ok": True,
+                "chunks": [
+                    'data: {"choices":[{"delta":{"content":"{\\"reasoning\\":\\"ok\\","},"finish_reason":null}]}\n\n',
+                    'data: {"choices":[{"delta":{"content":"\\"action\\":{\\"kind\\":\\"none\\",\\"description\\":\\"Stop\\"},\\"alternatives\\":[],\\"confidence\\":0.7}"},"finish_reason":null}]}\n\n',
+                    'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}\n\n',
+                    "data: [DONE]\n\n",
+                ],
+            }
+
+        provider = create_openai_provider(
+            api_key="test-key",
+            model="gpt-test",
+            base_url="https://proxy.example/v1",
+            http_client=http_client,
+        )
+
+        events = [event async for event in provider.stream_chat([LlmMessage("user", "hello")])]
+
+        assert calls[0][0] == "https://proxy.example/v1/chat/completions"
+        assert calls[0][1]["body"]["stream"] is True
+        assert [event.kind for event in events] == ["content.delta", "content.delta", "completed"]
+        assert events[-1].response.content.startswith('{"reasoning":"ok"')
+        assert events[-1].response.usage.total_tokens == 7
 
     asyncio.run(scenario())
 

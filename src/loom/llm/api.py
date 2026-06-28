@@ -687,6 +687,38 @@ class OpenAIProvider:
 
         return _parse_openai_chat_response(response.get("json"))
 
+    async def stream_chat(self, messages, tools=None, cancellation=None):
+        base_url = self.base_url.rstrip("/")
+        body = {
+            "model": self.model,
+            "messages": [_to_openai_message(message) for message in messages],
+            "stream": True,
+        }
+        if self.temperature is not None:
+            body["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            body["max_tokens"] = self.max_tokens
+        if tools:
+            body["tools"] = tools
+
+        request = {
+            "method": "POST",
+            "headers": {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            "body": body,
+        }
+        response = await self._send_stream(f"{base_url}/chat/completions", request)
+        if not response.get("ok", False):
+            status = int(response.get("status", 0))
+            payload = response.get("json") or {}
+            message = (payload.get("error", {}).get("message") if isinstance(payload, dict) else None) or f"OpenAI stream request failed with status {status}"
+            raise RuntimeError(message)
+
+        async for event in _parse_openai_sse_stream(response.get("chunks", ())):
+            yield event
+
     async def _send(self, url: str, request: dict[str, Any]) -> dict[str, Any]:
         if self.http_client is not None:
             return await self.http_client(url, request)
@@ -709,6 +741,14 @@ class OpenAIProvider:
         import asyncio
 
         return await asyncio.to_thread(send_sync)
+
+    async def _send_stream(self, url: str, request: dict[str, Any]) -> dict[str, Any]:
+        if self.http_client is not None:
+            return await self.http_client(url, request)
+
+        import asyncio
+
+        return await asyncio.to_thread(_send_stream_sync, url, request)
 
 
 def create_openai_provider(**config: Any) -> OpenAIProvider:
@@ -1366,6 +1406,171 @@ def _parse_openai_chat_response(payload: Any) -> Result:
             finish_reason=choice.get("finish_reason", "unknown"),
         )
     )
+
+
+async def _parse_openai_sse_stream(chunks: Any):
+    content_parts: list[str] = []
+    tool_parts: dict[int, dict[str, Any]] = {}
+    finish_reason = "stop"
+    usage = TokenUsage()
+
+    async for payload in _iter_sse_payloads(chunks):
+        if payload == "[DONE]":
+            break
+        data = json.loads(payload)
+        choice = data.get("choices", [{}])[0]
+        delta = choice.get("delta", {})
+        finish_reason = choice.get("finish_reason") or finish_reason
+        usage_data = data.get("usage") or {}
+        if usage_data:
+            usage = TokenUsage(
+                usage_data.get("prompt_tokens", 0),
+                usage_data.get("completion_tokens", 0),
+                usage_data.get("total_tokens", 0),
+            )
+
+        content = delta.get("content")
+        if content:
+            content_parts.append(content)
+            yield LlmStreamEvent(kind="content.delta", content_delta=content, raw=data)
+
+        for stream_event in _parse_openai_stream_tool_deltas(delta, tool_parts, data):
+            yield stream_event
+
+        reasoning = delta.get("reasoning") or delta.get("reasoning_content")
+        if reasoning:
+            yield LlmStreamEvent(kind="reasoning.delta", reasoning_delta=reasoning, raw=data)
+
+        reasoning_context = delta.get("reasoning_context")
+        if reasoning_context:
+            yield LlmStreamEvent(kind="reasoning_context.delta", reasoning_context_delta=reasoning_context, raw=data)
+
+    yield LlmStreamEvent(
+        kind="completed",
+        response=LlmResponse(
+            content="".join(content_parts) or None,
+            tool_calls=tuple(_assembled_openai_stream_tool_calls(tool_parts)),
+            usage=usage,
+            finish_reason=finish_reason,
+        ),
+    )
+
+
+async def _iter_sse_payloads(chunks: Any):
+    buffer = ""
+    async for chunk in _aiter_chunks(chunks):
+        text = chunk.decode("utf-8") if isinstance(chunk, bytes) else str(chunk)
+        buffer += text
+        while "\n\n" in buffer:
+            event, buffer = buffer.split("\n\n", 1)
+            payload = _sse_payload(event)
+            if payload is not None:
+                yield payload
+    payload = _sse_payload(buffer)
+    if payload is not None:
+        yield payload
+
+
+async def _aiter_chunks(chunks: Any):
+    if hasattr(chunks, "__aiter__"):
+        async for chunk in chunks:
+            yield chunk
+        return
+    if isinstance(chunks, str | bytes):
+        yield chunks
+        return
+    for chunk in chunks or ():
+        yield chunk
+
+
+def _sse_payload(event: str) -> str | None:
+    lines = []
+    for line in event.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(":"):
+            continue
+        if stripped.startswith("data:"):
+            lines.append(stripped.removeprefix("data:").strip())
+    return "\n".join(lines) if lines else None
+
+
+def _parse_openai_stream_tool_deltas(delta: Mapping[str, Any], tool_parts: dict[int, dict[str, Any]], raw: Mapping[str, Any]) -> list[LlmStreamEvent]:
+    events: list[LlmStreamEvent] = []
+    tool_calls = delta.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return events
+
+    for item in tool_calls:
+        if not isinstance(item, Mapping):
+            continue
+        index = int(item.get("index", len(tool_parts)))
+        state = tool_parts.setdefault(index, {"id": "", "name": "", "arguments": "", "started": False})
+        call_id = item.get("id")
+        if call_id:
+            state["id"] = call_id
+        function = item.get("function", {})
+        if isinstance(function, Mapping):
+            name = function.get("name")
+            if name:
+                state["name"] = name
+            arguments = function.get("arguments")
+        else:
+            arguments = None
+
+        if not state["started"] and (state["id"] or state["name"]):
+            state["started"] = True
+            events.append(
+                LlmStreamEvent(
+                    kind="tool_call.started",
+                    tool_call_id=state["id"] or None,
+                    tool_name=state["name"] or None,
+                    raw=raw,
+                )
+            )
+
+        if arguments:
+            state["arguments"] += arguments
+            events.append(
+                LlmStreamEvent(
+                    kind="tool_call.arguments.delta",
+                    tool_call_id=state["id"] or None,
+                    tool_name=state["name"] or None,
+                    tool_arguments_delta=arguments,
+                    raw=raw,
+                )
+            )
+    return events
+
+
+def _assembled_openai_stream_tool_calls(tool_parts: dict[int, dict[str, Any]]) -> list[LlmToolCall]:
+    calls: list[LlmToolCall] = []
+    for index in sorted(tool_parts):
+        state = tool_parts[index]
+        if state.get("id") or state.get("name"):
+            calls.append(
+                LlmToolCall(
+                    state.get("id", ""),
+                    state.get("name", ""),
+                    state.get("arguments", "{}") or "{}",
+                )
+            )
+    return calls
+
+
+def _send_stream_sync(url: str, request: dict[str, Any]) -> dict[str, Any]:
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(request["body"]).encode("utf-8"),
+        method="POST",
+        headers=request["headers"],
+    )
+    try:
+        with urllib.request.urlopen(req) as response:  # noqa: S310
+            chunks = [line.decode("utf-8") for line in response]
+            return {"status": response.status, "ok": 200 <= response.status < 300, "chunks": chunks}
+    except urllib.error.HTTPError as exc:
+        payload = json.loads(exc.read().decode("utf-8"))
+        return {"status": exc.code, "ok": False, "json": payload}
 
 
 def _parse_openai_tool_calls(value: Any) -> list[LlmToolCall]:
