@@ -679,112 +679,173 @@ def _normalize_display_text(text: str) -> str:
 # ─── Widgets ───────────────────────────────────────────────────────────
 
 
-class TimelineWidget(VerticalScroll):
-    """Scrollable timeline of events."""
+class EventDetailBox(RichLog):
+    """Fixed-height scrollable detail area embedded inside an event item."""
+
+    DETAIL_HEIGHT = 12
 
     DEFAULT_CSS = f"""
-    TimelineWidget {{
-        background: {COLORS["bg_panel"]};
+    EventDetailBox {{
+        height: {DETAIL_HEIGHT};
+        max-height: {DETAIL_HEIGHT};
+        background: {COLORS["bg_dark"]};
         border: tall {COLORS["border"]};
-        width: 40%;
-        min-width: 30;
+        padding: 0 1;
+        margin: 0 0 1 2;
+    }}
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(markup=True, highlight=True, wrap=True, **kwargs)
+
+    def set_event(self, event: TuiEvent) -> None:
+        self.clear()
+        self.write(_format_event_detail(event))
+
+
+class EventItem(Container):
+    """One event row with an inline collapsible detail box."""
+
+    DEFAULT_CSS = f"""
+    EventItem {{
+        width: 100%;
+        height: auto;
+        min-height: 1;
+    }}
+    EventItem.-selected {{
+        background: {COLORS["bg_dark"]};
+    }}
+    .event-summary {{
+        height: 1;
+        color: {COLORS["text"]};
         padding: 0 1;
     }}
-    TimelineWidget:focus {{
+    .event-summary:hover {{
+        background: {COLORS["border"]};
+    }}
+    """
+
+    def __init__(self, event: TuiEvent, *, expanded: bool = False, selected: bool = False, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.event = event
+        self.is_expanded = expanded
+        self.is_selected = selected
+        self.detail_height = EventDetailBox.DETAIL_HEIGHT
+        self._summary = Label(_format_event_line(self.event), classes="event-summary")
+        self._detail = EventDetailBox(classes="event-detail")
+
+    def compose(self) -> ComposeResult:
+        yield self._summary
+        yield self._detail
+
+    def on_mount(self) -> None:
+        self._apply_event()
+        self._apply_state()
+
+    def set_event(self, event: TuiEvent) -> None:
+        self.event = event
+        self._apply_event()
+
+    def set_selected(self, selected: bool) -> None:
+        self.is_selected = selected
+        self._apply_state()
+
+    def set_expanded(self, expanded: bool) -> None:
+        self.is_expanded = expanded
+        self._apply_state()
+
+    def toggle_expanded(self) -> None:
+        self.set_expanded(not self.is_expanded)
+
+    def _apply_event(self) -> None:
+        self._summary.update(_format_event_line(self.event))
+        self._detail.set_event(self.event)
+
+    def _apply_state(self) -> None:
+        if self.is_selected:
+            self.add_class("-selected")
+        else:
+            self.remove_class("-selected")
+        self._detail.display = self.is_expanded
+
+
+class EventFeedWidget(VerticalScroll):
+    """Single-column event stream with inline details."""
+
+    DEFAULT_CSS = f"""
+    EventFeedWidget {{
+        background: {COLORS["bg_panel"]};
+        border: tall {COLORS["border"]};
+        height: 1fr;
+        padding: 0 1;
+    }}
+    EventFeedWidget:focus {{
         border: tall {COLORS["cyan"]};
     }}
     """
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._event_labels: list[tuple[Label, TuiEvent]] = []
-        self._selected_index: int = -1
+        self._event_items: list[EventItem] = []
+        self._selected_index = -1
 
     def compose(self) -> ComposeResult:
         yield Label(
-            f"[bold {COLORS['cyan']}]  EVENT TIMELINE[/]",
-            classes="timeline-header",
+            f"[bold {COLORS['cyan']}]  EVENT STREAM[/]",
+            classes="event-feed-header",
         )
-        yield Static("", classes="timeline-separator")
+        yield Static("", classes="event-feed-separator")
 
     def add_event(self, event: TuiEvent) -> None:
-        """Add an event to the timeline."""
-        text = _format_event_line(event)
-        label = Label(text, classes="timeline-item")
-        label.styles.padding = (0, 1)
-        self.mount(label)
-        self._event_labels.append((label, event))
-        # Auto-scroll to bottom
+        """Append an event item and expand it as the active event."""
+        for item in self._event_items:
+            item.set_selected(False)
+            item.set_expanded(False)
+
+        item = EventItem(event, expanded=True, selected=True)
+        self.mount(item)
+        self._event_items.append(item)
+        self._selected_index = len(self._event_items) - 1
         self.scroll_end(animate=False)
 
     def update_event(self, index: int, event: TuiEvent) -> None:
-        """Replace an existing timeline event in place."""
-        if 0 <= index < len(self._event_labels):
-            label, _ = self._event_labels[index]
-            self._event_labels[index] = (label, event)
-            label.update(_format_event_line(event))
+        """Update one existing event item in place."""
+        if 0 <= index < len(self._event_items):
+            self._event_items[index].set_event(event)
 
     def get_event(self, index: int) -> TuiEvent | None:
-        if 0 <= index < len(self._event_labels):
-            return self._event_labels[index][1]
+        if 0 <= index < len(self._event_items):
+            return self._event_items[index].event
         return None
+
+    def get_item(self, index: int) -> EventItem:
+        return self._event_items[index]
 
     @property
     def event_count(self) -> int:
-        return len(self._event_labels)
+        return len(self._event_items)
 
     def select_event(self, index: int) -> TuiEvent | None:
-        """Select an event and return it."""
-        # Clear previous selection
-        if 0 <= self._selected_index < len(self._event_labels):
-            prev_label = self._event_labels[self._selected_index][0]
-            prev_label.styles.background = "transparent"
+        if not 0 <= index < len(self._event_items):
+            return None
 
-        if 0 <= index < len(self._event_labels):
-            self._selected_index = index
-            label, event = self._event_labels[index]
-            label.styles.background = COLORS["border"]
-            return event
-        return None
+        if 0 <= self._selected_index < len(self._event_items) and self._selected_index != index:
+            previous = self._event_items[self._selected_index]
+            previous.set_selected(False)
+            previous.set_expanded(False)
+
+        self._selected_index = index
+        item = self._event_items[index]
+        item.set_selected(True)
+        item.set_expanded(True)
+        return item.event
+
+    def toggle_selected_detail(self) -> None:
+        if 0 <= self._selected_index < len(self._event_items):
+            self._event_items[self._selected_index].toggle_expanded()
 
     def get_selected_index(self) -> int:
         return self._selected_index
-
-
-class DetailPanel(RichLog):
-    """Append-only panel showing loop event details."""
-
-    DEFAULT_CSS = f"""
-    DetailPanel {{
-        background: {COLORS["bg_panel"]};
-        border: tall {COLORS["border"]};
-        width: 60%;
-        min-width: 40;
-        padding: 0 1;
-    }}
-    DetailPanel:focus {{
-        border: tall {COLORS["cyan"]};
-    }}
-    """
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(markup=True, highlight=True, wrap=True, **kwargs)
-        self.border_title = f"[bold {COLORS['magenta']}] LOOP EVENT DETAILS [/]"
-        self._event_count = 0
-
-    def show_event(self, event: TuiEvent) -> None:
-        """Append event detail to the log."""
-        detail = _format_event_detail(event)
-        if self._event_count:
-            detail = f"\n[dim]{'─' * 72}[/]\n{detail}"
-        self.write(detail)
-        self._event_count += 1
-
-    def replace_event(self, event: TuiEvent) -> None:
-        """Render one event as the current detail view."""
-        self.clear()
-        self.write(_format_event_detail(event))
-        self._event_count = 1
 
 
 class StatusBar(Static):
@@ -861,26 +922,14 @@ class LoomTuiApp(App[None]):
         background: {COLORS["bg"]};
     }}
 
-    #main_container {{
-        layout: horizontal;
-        height: 1fr;
-    }}
-
-    .timeline-header {{
+    .event-feed-header {{
         color: {COLORS["cyan"]};
         text-style: bold;
         padding: 1 0 0 0;
     }}
 
-    .timeline-separator {{
+    .event-feed-separator {{
         height: 1;
-        background: {COLORS["border"]};
-    }}
-
-    .timeline-item {{
-        color: {COLORS["text"]};
-    }}
-    .timeline-item:hover {{
         background: {COLORS["border"]};
     }}
     """
@@ -891,7 +940,8 @@ class LoomTuiApp(App[None]):
         ("k", "cursor_up", "Up"),
         ("g", "scroll_top", "Top"),
         ("G", "scroll_bottom", "Bottom"),
-        ("tab", "focus_next", "Next Panel"),
+        ("enter", "toggle_detail", "Toggle Detail"),
+        ("space", "toggle_detail", "Toggle Detail"),
     ]
 
     def __init__(self, collector: Any) -> None:
@@ -908,9 +958,7 @@ class LoomTuiApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield LoopHeader(id="loop_header")
-        with Container(id="main_container"):
-            yield TimelineWidget(id="timeline")
-            yield DetailPanel(id="detail")
+        yield EventFeedWidget(id="event_feed")
         yield StatusBar(id="status")
         yield Footer()
 
@@ -939,16 +987,8 @@ class LoomTuiApp(App[None]):
         if self._handle_llm_stream_event(event):
             return
 
-        # Add to timeline
-        timeline = self.query_one("#timeline", TimelineWidget)
-        timeline.add_event(event)
-
-        # Auto-select latest event
-        idx = timeline.event_count - 1
-        selected = timeline.select_event(idx)
-        if selected:
-            detail = self.query_one("#detail", DetailPanel)
-            detail.show_event(selected)
+        feed = self.query_one("#event_feed", EventFeedWidget)
+        feed.add_event(event)
 
         # Update metrics
         if event.event_type == "step.completed":
@@ -989,53 +1029,55 @@ class LoomTuiApp(App[None]):
         if not llm_call_id:
             return False
 
-        timeline = self.query_one("#timeline", TimelineWidget)
-        detail = self.query_one("#detail", DetailPanel)
+        feed = self.query_one("#event_feed", EventFeedWidget)
         stream = self._llm_streams.get(llm_call_id)
 
         if stream is None:
             stream = _LlmStreamState.from_event(event)
             self._llm_streams[llm_call_id] = stream
-            timeline.add_event(stream.current_event or event)
-            index = timeline.event_count - 1
+            feed.add_event(stream.current_event or event)
+            index = feed.event_count - 1
             self._llm_stream_indices[llm_call_id] = index
         else:
             aggregate = stream.absorb(event)
             index = self._llm_stream_indices[llm_call_id]
-            timeline.update_event(index, aggregate)
+            feed.update_event(index, aggregate)
 
-        selected = timeline.select_event(self._llm_stream_indices[llm_call_id])
-        if selected:
-            detail.replace_event(selected)
+        feed.select_event(self._llm_stream_indices[llm_call_id])
         return True
 
     def action_cursor_down(self) -> None:
         """Move selection down in timeline."""
-        timeline = self.query_one("#timeline", TimelineWidget)
-        idx = timeline.get_selected_index()
-        if idx < timeline.event_count - 1:
-            timeline.select_event(idx + 1)
+        feed = self.query_one("#event_feed", EventFeedWidget)
+        idx = feed.get_selected_index()
+        if idx < feed.event_count - 1:
+            feed.select_event(idx + 1)
 
     def action_cursor_up(self) -> None:
         """Move selection up in timeline."""
-        timeline = self.query_one("#timeline", TimelineWidget)
-        idx = timeline.get_selected_index()
+        feed = self.query_one("#event_feed", EventFeedWidget)
+        idx = feed.get_selected_index()
         if idx > 0:
-            timeline.select_event(idx - 1)
+            feed.select_event(idx - 1)
 
     def action_scroll_top(self) -> None:
         """Scroll to top of timeline."""
-        timeline = self.query_one("#timeline", TimelineWidget)
-        if timeline.event_count > 0:
-            timeline.select_event(0)
-        timeline.scroll_home(animate=False)
+        feed = self.query_one("#event_feed", EventFeedWidget)
+        if feed.event_count > 0:
+            feed.select_event(0)
+        feed.scroll_home(animate=False)
 
     def action_scroll_bottom(self) -> None:
         """Scroll to bottom of timeline."""
-        timeline = self.query_one("#timeline", TimelineWidget)
-        if timeline.event_count > 0:
-            timeline.select_event(timeline.event_count - 1)
-        timeline.scroll_end(animate=False)
+        feed = self.query_one("#event_feed", EventFeedWidget)
+        if feed.event_count > 0:
+            feed.select_event(feed.event_count - 1)
+        feed.scroll_end(animate=False)
+
+    def action_toggle_detail(self) -> None:
+        """Toggle the selected event detail."""
+        feed = self.query_one("#event_feed", EventFeedWidget)
+        feed.toggle_selected_detail()
 
     def set_loop_info(self, role: str, goal: str) -> None:
         """Set loop metadata in the header."""

@@ -7,7 +7,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from loom.tui.tui_app import DetailPanel, LoomTuiApp, LoopHeader, TimelineWidget
+from loom.tui.tui_app import EventDetailBox, EventFeedWidget, LoomTuiApp, LoopHeader
 from loom.tui.tui_collector import TuiEvent, TuiEventCollector
 
 
@@ -25,8 +25,61 @@ async def test_set_loop_info_before_mount_updates_header_after_mount():
         assert header.loop_goal == "count to five"
 
 
-def test_detail_panel_appends_events_and_includes_tool_result(monkeypatch):
-    panel = DetailPanel()
+@pytest.mark.asyncio
+async def test_tui_app_uses_single_event_feed_with_inline_details():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test():
+        assert len(list(app.query("#event_feed"))) == 1
+        assert list(app.query("#timeline")) == []
+        assert list(app.query("#detail")) == []
+
+        app._handle_event(
+            TuiEvent(
+                timestamp=0,
+                event_type="run.started",
+                data={"type": "run.started", "context_id": "ctx-1"},
+            )
+        )
+
+        feed = app.query_one("#event_feed")
+        assert feed.event_count == 1
+        assert feed.get_selected_index() == 0
+
+
+@pytest.mark.asyncio
+async def test_event_feed_collapses_previous_event_and_uses_fixed_detail_height():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test():
+        app._handle_event(
+            TuiEvent(
+                timestamp=0,
+                event_type="run.started",
+                data={"type": "run.started", "context_id": "ctx-1"},
+            )
+        )
+        app._handle_event(
+            TuiEvent(
+                timestamp=1,
+                event_type="tool.completed",
+                data={"type": "tool.completed", "tool_id": "search", "output": {"value": {"summary": "done"}}},
+            )
+        )
+
+        feed = app.query_one("#event_feed")
+        first_item = feed.get_item(0)
+        second_item = feed.get_item(1)
+
+        assert first_item.is_expanded is False
+        assert second_item.is_expanded is True
+        assert second_item.detail_height == 12
+
+
+def test_event_detail_box_includes_tool_result(monkeypatch):
+    panel = EventDetailBox()
     cleared = 0
     writes = []
 
@@ -37,14 +90,7 @@ def test_detail_panel_appends_events_and_includes_tool_result(monkeypatch):
     monkeypatch.setattr(panel, "clear", fake_clear)
     monkeypatch.setattr(panel, "write", writes.append)
 
-    panel.show_event(
-        TuiEvent(
-            timestamp=0,
-            event_type="run.started",
-            data={"type": "run.started", "context_id": "ctx-1"},
-        )
-    )
-    panel.show_event(
+    panel.set_event(
         TuiEvent(
             timestamp=1,
             event_type="tool.completed",
@@ -67,22 +113,21 @@ def test_detail_panel_appends_events_and_includes_tool_result(monkeypatch):
         )
     )
 
-    assert cleared == 0
-    assert len(writes) == 2
-    assert "Run Started" in writes[0]
-    assert "Tool Result" in writes[1]
-    assert "search-notes" in writes[1]
-    assert "Live Loom smoke test" in writes[1]
-    assert "real tool result" in writes[1]
+    assert cleared == 1
+    assert len(writes) == 1
+    assert "Tool Result" in writes[0]
+    assert "search-notes" in writes[0]
+    assert "Live Loom smoke test" in writes[0]
+    assert "real tool result" in writes[0]
 
 
 def test_detail_panel_pretty_prints_json_strings(monkeypatch):
-    panel = DetailPanel()
+    panel = EventDetailBox()
     writes = []
 
     monkeypatch.setattr(panel, "write", writes.append)
 
-    panel.show_event(
+    panel.set_event(
         TuiEvent(
             timestamp=0,
             event_type="tool.completed",
@@ -101,12 +146,12 @@ def test_detail_panel_pretty_prints_json_strings(monkeypatch):
 
 
 def test_detail_panel_renders_json_string_values_with_real_newlines(monkeypatch):
-    panel = DetailPanel()
+    panel = EventDetailBox()
     writes = []
 
     monkeypatch.setattr(panel, "write", writes.append)
 
-    panel.show_event(
+    panel.set_event(
         TuiEvent(
             timestamp=0,
             event_type="tool.completed",
@@ -130,11 +175,11 @@ def test_detail_panel_renders_json_string_values_with_real_newlines(monkeypatch)
 
 
 def test_detail_panel_renders_llm_stream_deltas(monkeypatch):
-    panel = DetailPanel()
+    panel = EventDetailBox()
     writes = []
     monkeypatch.setattr(panel, "write", writes.append)
 
-    panel.show_event(
+    panel.set_event(
         TuiEvent(
             timestamp=0,
             event_type="llm.content.delta",
@@ -142,7 +187,7 @@ def test_detail_panel_renders_llm_stream_deltas(monkeypatch):
             llm_call_id="call-1",
         )
     )
-    panel.show_event(
+    panel.set_event(
         TuiEvent(
             timestamp=1,
             event_type="llm.tool_call.arguments.delta",
@@ -164,15 +209,11 @@ def test_detail_panel_renders_llm_stream_deltas(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_tui_app_aggregates_llm_stream_tokens_into_one_timeline_event(monkeypatch):
+async def test_tui_app_aggregates_llm_stream_tokens_into_one_timeline_event():
     collector = TuiEventCollector()
     app = LoomTuiApp(collector)
 
     async with app.run_test():
-        detail = app.query_one("#detail", DetailPanel)
-        writes = []
-        monkeypatch.setattr(detail, "write", writes.append)
-
         for event in (
             TuiEvent(
                 timestamp=0,
@@ -202,19 +243,20 @@ async def test_tui_app_aggregates_llm_stream_tokens_into_one_timeline_event(monk
         ):
             app._handle_event(event)
 
-        timeline = app.query_one("#timeline", TimelineWidget)
-        stream_event = timeline.get_event(0)
+        feed = app.query_one("#event_feed", EventFeedWidget)
+        stream_event = feed.get_event(0)
+        stream_item = feed.get_item(0)
 
-        assert timeline.event_count == 1
+        assert feed.event_count == 1
         assert stream_event is not None
         assert stream_event.event_type == "llm.stream.completed"
         assert stream_event.duration_ms == 42
         assert stream_event.data["content"] == "hello world"
-        assert "hello world" in writes[-1]
+        assert stream_item.is_expanded is True
 
 
 def test_detail_panel_renders_llm_completed_report_with_real_newlines(monkeypatch):
-    panel = DetailPanel()
+    panel = EventDetailBox()
     writes = []
     monkeypatch.setattr(panel, "write", writes.append)
     report = "# Smoke Report\n\nThe LLM made this judgment."
@@ -231,7 +273,7 @@ def test_detail_panel_renders_llm_completed_report_with_real_newlines(monkeypatc
         }
     )
 
-    panel.show_event(
+    panel.set_event(
         TuiEvent(
             timestamp=0,
             event_type="llm.completed",

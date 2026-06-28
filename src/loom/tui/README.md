@@ -6,8 +6,8 @@ Real-time terminal visualization for Loom loop execution — Codex/Claude style.
 
 The TUI provides a live, interactive view of a Loom loop as it runs:
 
-- **Event Timeline** (left panel): Chronological stream of all events — loop start, steps, LLM calls, tool calls, completions
-- **Event Detail** (right panel): Full details of the selected event — LLM prompts/responses, tool inputs/outputs, trace data
+- **Event Stream**: Chronological stream of loop events with inline collapsible detail boxes
+- **Inline Details**: Fixed-height scrollable detail area for LLM prompts/responses, tool inputs/outputs, and trace data
 - **Status Bar**: Live metrics — step count, token usage, duration, run status
 
 ## Style
@@ -76,15 +76,15 @@ result = await loop_task
 | `k` | Select previous event |
 | `g` | Jump to first event |
 | `G` | Jump to latest event |
-| `Tab` | Switch focus between panels |
+| `Enter` / `Space` | Expand or collapse selected event detail |
 | `q` | Quit |
 
 ## Architecture
 
 ```
 Loop Execution → Trace Events → TuiEventCollector → asyncio.Queue → LoomTuiApp
-                                                                     ├── TimelineWidget (left)
-                                                                     ├── DetailPanel (right)
+                                                                     ├── EventFeedWidget
+                                                                     │   └── EventItem + EventDetailBox
                                                                      └── StatusBar (bottom)
 ```
 
@@ -114,7 +114,7 @@ pip install textual rich
 ## Files
 
 - `tui_collector.py` — Async trace sink that captures events into a queue
-- `tui_app.py` — Textual app with timeline, detail panel, and status bar
+- `tui_app.py` — Textual app with event stream, inline detail boxes, and status bar
 - `tui_runner.py` — High-level `run_with_tui()` that wires everything together
 - `demo.py` — Standalone demo script
 - `__init__.py` — Public API
