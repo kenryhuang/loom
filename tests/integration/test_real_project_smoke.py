@@ -1,7 +1,9 @@
 import asyncio
+import json
 import sys
 from pathlib import Path
 
+from loom.core.models import ok
 from loom.examples.real_project_smoke import (
     DEFAULT_YAKDB_PATH,
     CommandResult,
@@ -16,6 +18,46 @@ from loom.examples.real_project_smoke import (
     run_yakdb_cli_smoke,
     synthesize_report,
 )
+from loom.llm import LlmResponse, LlmToolCall, TokenUsage
+
+
+class FakeSmokeProvider:
+    model = "fake-smoke-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(self, messages, tools=None, cancellation=None):
+        self.calls += 1
+        if self.calls == 1:
+            return ok(
+                LlmResponse(
+                    content=None,
+                    tool_calls=(
+                        LlmToolCall("inspect-call", "inspect-project", "{}"),
+                        LlmToolCall("smoke-call", "run-smoke-test", "{}"),
+                        LlmToolCall("cli-call", "run-cli-smoke", "{}"),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            )
+        return ok(
+            LlmResponse(
+                content=json.dumps(
+                    {
+                        "reasoning": "I judged the evidence from the tools.",
+                        "action": {
+                            "kind": "custom",
+                            "description": "Write the smoke audit report",
+                            "input": {"report": "# Fake LLM Smoke Report\n\nThe LLM made this judgment."},
+                        },
+                        "alternatives": [],
+                        "confidence": 0.83,
+                    }
+                ),
+                usage=TokenUsage(10, 10, 20),
+            )
+        )
 
 
 def test_inspect_project_extracts_readme_purpose_and_pyproject_name(tmp_path: Path):
@@ -92,6 +134,28 @@ def test_real_project_smoke_loop_produces_report_and_trace(tmp_path: Path):
     assert "loop smoke ok" in result.value.output
     assert len(result.value.traces) == 1
     assert len(result.value.traces[0].observations) == 4
+
+
+def test_real_project_smoke_llm_mode_uses_model_report(tmp_path: Path):
+    project = tmp_path / "sample"
+    project.mkdir()
+    (project / "README.md").write_text("# Sample\n\nA tiny sample project.\n", encoding="utf-8")
+    (project / "pyproject.toml").write_text('[project]\nname = "sample"\n', encoding="utf-8")
+
+    config = RealProjectSmokeConfig(
+        target_path=project,
+        smoke_command=(sys.executable, "-c", "print('smoke ok')"),
+        cli_smoke_enabled=False,
+        command_timeout_seconds=10,
+    )
+    provider = FakeSmokeProvider()
+
+    result = asyncio.run(run_real_project_smoke(config, provider=provider, llm=True))
+
+    assert result.ok
+    assert result.value.output == "# Fake LLM Smoke Report\n\nThe LLM made this judgment."
+    assert provider.calls == 2
+    assert "Exclude .yakdb" not in result.value.output
 
 
 def test_real_project_smoke_context_rejects_missing_target(tmp_path: Path):

@@ -8,7 +8,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -37,8 +37,12 @@ from loom.core.models import (
     new_trace_id,
     now_iso,
     ok,
+    thaw_json,
 )
+from loom.llm.api import create_env_openai_provider, create_llm_step_function
 from loom.runtime.engine import create, create_runtime_registry, run
+from loom.runtime.plugins import run_with_plugins
+from loom.tui.plugin import TuiPlugin
 
 DEFAULT_YAKDB_PATH = "/Users/huanggui/workspace/yakDB"
 
@@ -89,6 +93,14 @@ class CliSmokeResult:
     def __post_init__(self) -> None:
         object.__setattr__(self, "commands", tuple(self.commands))
         object.__setattr__(self, "findings", tuple(self.findings))
+
+
+@dataclass(frozen=True, slots=True)
+class RealProjectSmokeRunOptions:
+    config: RealProjectSmokeConfig
+    llm: bool = False
+    tui: bool = False
+    stream: bool = False
 
 
 def inspect_project(path: str | Path) -> ProjectInfo:
@@ -296,7 +308,128 @@ def make_real_project_smoke_loop(config: RealProjectSmokeConfig) -> MinimalLoopD
     )
 
 
-async def run_real_project_smoke(config: RealProjectSmokeConfig):
+def make_real_project_smoke_tools(config: RealProjectSmokeConfig) -> dict[str, Any]:
+    async def inspect_tool(_input_value, _options=None):
+        info = inspect_project(config.target_path)
+        return ok(Observation(new_trace_id(), "inspect-project", _project_info_value(info), now_iso()))
+
+    async def smoke_tool(_input_value, _options=None):
+        result = run_smoke_test(config)
+        return ok(Observation(new_trace_id(), "run-smoke-test", _command_result_value(result), now_iso()))
+
+    async def cli_tool(_input_value, _options=None):
+        info = inspect_project(config.target_path)
+        result = run_yakdb_cli_smoke(config, info)
+        return ok(Observation(new_trace_id(), "run-cli-smoke", _cli_smoke_value(result), now_iso()))
+
+    return {
+        "inspect-project": inspect_tool,
+        "run-smoke-test": smoke_tool,
+        "run-cli-smoke": cli_tool,
+    }
+
+
+def make_real_project_smoke_llm_context(config: RealProjectSmokeConfig):
+    if not config.target_path.exists():
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Real project smoke target does not exist",
+                retryable=False,
+                metadata={"target_path": str(config.target_path)},
+            )
+        )
+    return ok(
+        freeze_context(
+            Context(
+                id=new_context_id(),
+                run_id=new_run_id(),
+                created_at=now_iso(),
+                identity=IdentityLayer(
+                    role="real project smoke auditor",
+                    constraints=(
+                        {
+                            "id": "llm-judgment-only",
+                            "description": "Use tools for evidence, but make purpose, risk, and improvement judgments yourself.",
+                            "severity": "must",
+                        },
+                    ),
+                ),
+                goal=GoalLayer(
+                    objective=(
+                        f"Audit {config.target_path}. Use available tools to collect evidence, then return JSON whose action.input.report is a markdown "
+                        "report with purpose, smoke result, risks, and improvement directions."
+                    ),
+                    budget={"max_steps": 1},
+                ),
+                state=StateLayer(),
+                knowledge=empty_knowledge(),
+                affordances=empty_affordances(
+                    tools=(
+                        ToolRef(
+                            "inspect-project",
+                            "Inspect project metadata, README, files, and git status",
+                            input_schema={"type": "object", "properties": {}},
+                        ),
+                        ToolRef(
+                            "run-smoke-test",
+                            "Run the configured smoke command and return stdout, stderr, exit code, and timing",
+                            input_schema={"type": "object", "properties": {}},
+                        ),
+                        ToolRef(
+                            "run-cli-smoke",
+                            "Run project-specific CLI smoke if applicable and return command evidence",
+                            input_schema={"type": "object", "properties": {}},
+                        ),
+                    )
+                ),
+            )
+        )
+    )
+
+
+def make_real_project_smoke_llm_loop(config: RealProjectSmokeConfig, provider: Any, *, stream: bool = False) -> MinimalLoopDefinition:
+    return MinimalLoopDefinition(
+        id=new_loop_id(),
+        version=new_loop_version(),
+        identity=IdentityLayer(role="real project smoke auditor"),
+        goal=GoalLayer(objective=f"LLM audit real project smoke path for {config.target_path}"),
+        step=create_llm_step_function(provider, stream=stream),
+        done=lambda context, _runtime: ok(bool(context.state.decisions)),
+    )
+
+
+async def run_real_project_smoke(
+    config: RealProjectSmokeConfig,
+    *,
+    provider: Any | None = None,
+    llm: bool = False,
+    tui: bool = False,
+    stream: bool = False,
+):
+    if llm:
+        if provider is None:
+            provider_result = create_env_openai_provider()
+            if not provider_result.ok:
+                return provider_result
+            provider = provider_result.value
+        context = make_real_project_smoke_llm_context(config)
+        if not context.ok:
+            return context
+        handle = create(
+            make_real_project_smoke_llm_loop(config, provider, stream=stream),
+            registry=create_runtime_registry(tools=make_real_project_smoke_tools(config)),
+        )
+        if not handle.ok:
+            return handle
+        if tui:
+            result = await run_with_plugins(handle.value, context.value, max_steps=1, plugins=(TuiPlugin(),))
+        else:
+            result = await run(handle.value, context.value, max_steps=1)
+        if result.ok:
+            return ok(replace(result.value, output=_report_from_run_result(result.value)))
+        return result
+
     context = make_real_project_smoke_context(config)
     if not context.ok:
         return context
@@ -306,7 +439,23 @@ async def run_real_project_smoke(config: RealProjectSmokeConfig):
     return await run(handle.value, context.value, max_steps=1)
 
 
-def parse_args(argv: tuple[str, ...] | list[str] | None = None) -> RealProjectSmokeConfig:
+def _report_from_run_result(run_result) -> str:
+    output = thaw_json(run_result.output)
+    if isinstance(output, dict):
+        action = output.get("action", {})
+        if isinstance(action, dict):
+            input_value = action.get("input", {})
+            if isinstance(input_value, dict) and isinstance(input_value.get("report"), str):
+                return input_value["report"]
+    latest = run_result.context.state.decisions[-1] if run_result.context.state.decisions else None
+    if latest is not None:
+        action_input = thaw_json(latest.action.input)
+        if isinstance(action_input, dict) and isinstance(action_input.get("report"), str):
+            return action_input["report"]
+    return "" if output is None else str(output)
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a Loom real project smoke audit.")
     parser.add_argument("path", nargs="?", default=DEFAULT_YAKDB_PATH, help="Target project path")
     parser.add_argument(
@@ -316,7 +465,14 @@ def parse_args(argv: tuple[str, ...] | list[str] | None = None) -> RealProjectSm
     )
     parser.add_argument("--no-cli-smoke", action="store_true", help="Disable project-specific CLI smoke")
     parser.add_argument("--timeout", type=int, default=120, help="Command timeout in seconds")
-    args = parser.parse_args(None if argv is None else list(argv))
+    parser.add_argument("--llm", action="store_true", help="Use an LLM to judge evidence and write the report")
+    parser.add_argument("--tui", action="store_true", help="Show live TUI events while the loop runs")
+    parser.add_argument("--stream", action="store_true", help="Stream LLM deltas when provider supports it")
+    return parser
+
+
+def parse_args(argv: tuple[str, ...] | list[str] | None = None) -> RealProjectSmokeConfig:
+    args = _build_parser().parse_args(None if argv is None else list(argv))
     return RealProjectSmokeConfig(
         target_path=Path(args.path),
         smoke_command=tuple(shlex.split(args.smoke_command)),
@@ -325,9 +481,32 @@ def parse_args(argv: tuple[str, ...] | list[str] | None = None) -> RealProjectSm
     )
 
 
+def parse_run_options(argv: tuple[str, ...] | list[str] | None = None) -> RealProjectSmokeRunOptions:
+    args = _build_parser().parse_args(None if argv is None else list(argv))
+    config = RealProjectSmokeConfig(
+        target_path=Path(args.path),
+        smoke_command=tuple(shlex.split(args.smoke_command)),
+        cli_smoke_enabled=not args.no_cli_smoke,
+        command_timeout_seconds=args.timeout,
+    )
+    return RealProjectSmokeRunOptions(
+        config=config,
+        llm=args.llm,
+        tui=args.tui,
+        stream=args.stream,
+    )
+
+
 def main(argv: tuple[str, ...] | list[str] | None = None) -> None:
-    config = parse_args(argv)
-    result = asyncio.run(run_real_project_smoke(config))
+    options = parse_run_options(argv)
+    result = asyncio.run(
+        run_real_project_smoke(
+            options.config,
+            llm=options.llm,
+            tui=options.tui,
+            stream=options.stream or options.tui,
+        )
+    )
     if not result.ok:
         raise SystemExit(result.error.message if result.error else "Real project smoke failed")
     print(result.value.output)
