@@ -63,7 +63,10 @@ EVENT_STYLES: dict[str, dict[str, str]] = {
     "_tui_done": {"icon": "■", "color": COLORS["text_dim"], "label": "END"},
 }
 
-LLM_STREAM_PRESENTATION_EVENTS = {
+LLM_PRESENTATION_EVENTS = {
+    "llm.requested",
+    "llm.completed",
+    "llm.failed",
     "llm.stream.started",
     "llm.stream.completed",
     "llm.content.delta",
@@ -72,6 +75,12 @@ LLM_STREAM_PRESENTATION_EVENTS = {
     "llm.tool_call.started",
     "llm.tool_call.arguments.delta",
     "llm.tool_call.completed",
+}
+
+TOOL_PRESENTATION_EVENTS = {
+    "tool.started",
+    "tool.completed",
+    "tool.failed",
 }
 
 
@@ -99,8 +108,12 @@ class _LlmStreamState:
     reasoning_parts: list[str] = field(default_factory=list)
     reasoning_context_parts: list[str] = field(default_factory=list)
     tool_calls: dict[str, _ToolCallStreamState] = field(default_factory=dict)
+    response: Any | None = None
+    error: Any | None = None
     delta_count: int = 0
+    stream_started: bool = False
     completed: bool = False
+    failed: bool = False
     duration_ms: int | None = None
     current_event: TuiEvent | None = None
 
@@ -114,7 +127,9 @@ class _LlmStreamState:
         self._merge_metadata(event)
         delta = event.data.get("delta")
 
-        if event.event_type == "llm.content.delta" and delta:
+        if event.event_type == "llm.stream.started":
+            self.stream_started = True
+        elif event.event_type == "llm.content.delta" and delta:
             self.content_parts.append(str(delta))
             self.delta_count += 1
         elif event.event_type == "llm.reasoning.delta" and delta:
@@ -138,13 +153,21 @@ class _LlmStreamState:
         elif event.event_type == "llm.stream.completed":
             self.completed = True
             self.duration_ms = event.duration_ms
+        elif event.event_type == "llm.completed":
+            self.completed = True
+            self.response = event.data.get("response")
+            self.duration_ms = event.duration_ms or self.duration_ms
+        elif event.event_type == "llm.failed":
+            self.failed = True
+            self.error = event.data.get("error") or event.error
+            self.duration_ms = event.duration_ms or self.duration_ms
 
         self.current_event = self._to_event()
         return self.current_event
 
     def _merge_metadata(self, event: TuiEvent) -> None:
         for key, value in event.data.items():
-            if key not in {"delta", "raw", "tool_call_id", "tool_name"}:
+            if key not in {"delta", "raw", "tool_call_id", "tool_name", "response", "error"}:
                 self.metadata[key] = value
 
     def _tool_state(self, event: TuiEvent) -> _ToolCallStreamState:
@@ -156,12 +179,22 @@ class _LlmStreamState:
         return tool
 
     def _to_event(self) -> TuiEvent:
-        event_type = "llm.stream.completed" if self.completed else "llm.stream.started"
+        if self.failed:
+            event_type = "llm.failed"
+        elif self.response is not None:
+            event_type = "llm.completed"
+        elif self.completed:
+            event_type = "llm.stream.completed"
+        elif self.stream_started or self.delta_count or self.tool_calls:
+            event_type = "llm.stream.started"
+        else:
+            event_type = "llm.requested"
         data = dict(self.metadata)
+        status = "failed" if self.failed else "completed" if self.completed else "streaming" if self.stream_started else "requested"
         data.update(
             {
                 "type": event_type,
-                "status": "completed" if self.completed else "streaming",
+                "status": status,
                 "content": "".join(self.content_parts),
                 "reasoning": "".join(self.reasoning_parts),
                 "reasoning_context": "".join(self.reasoning_context_parts),
@@ -169,11 +202,74 @@ class _LlmStreamState:
                 "delta_count": self.delta_count,
             }
         )
+        if self.response is not None:
+            data["response"] = self.response
+        if self.error is not None:
+            data["error"] = self.error
         return replace(
             self.first_event,
             event_type=event_type,
             data=data,
             duration_ms=self.duration_ms,
+        )
+
+
+@dataclass
+class _ToolExecutionState:
+    first_event: TuiEvent
+    metadata: dict[str, Any] = field(default_factory=dict)
+    input_value: Any | None = None
+    output_value: Any | None = None
+    error: Any | None = None
+    completed: bool = False
+    failed: bool = False
+    duration_ms: int | None = None
+    current_event: TuiEvent | None = None
+
+    @classmethod
+    def from_event(cls, event: TuiEvent) -> _ToolExecutionState:
+        state = cls(first_event=event)
+        state.absorb(event)
+        return state
+
+    def absorb(self, event: TuiEvent) -> TuiEvent:
+        self._merge_metadata(event)
+        if "input" in event.data:
+            self.input_value = event.data.get("input")
+        if event.event_type == "tool.completed":
+            self.completed = True
+            self.output_value = event.data.get("output")
+            self.duration_ms = event.duration_ms
+        elif event.event_type == "tool.failed":
+            self.failed = True
+            self.error = event.data.get("error") or event.error
+            self.duration_ms = event.duration_ms
+
+        self.current_event = self._to_event()
+        return self.current_event
+
+    def _merge_metadata(self, event: TuiEvent) -> None:
+        for key, value in event.data.items():
+            if key not in {"input", "output", "error"}:
+                self.metadata[key] = value
+
+    def _to_event(self) -> TuiEvent:
+        event_type = "tool.failed" if self.failed else "tool.completed" if self.completed else "tool.started"
+        data = dict(self.metadata)
+        data["type"] = event_type
+        data["status"] = "failed" if self.failed else "completed" if self.completed else "running"
+        if self.input_value is not None:
+            data["input"] = self.input_value
+        if self.output_value is not None:
+            data["output"] = self.output_value
+        if self.error is not None:
+            data["error"] = self.error
+        return replace(
+            self.first_event,
+            event_type=event_type,
+            data=data,
+            duration_ms=self.duration_ms,
+            error=str(self.error) if self.error is not None else None,
         )
 
 
@@ -190,6 +286,17 @@ def _event_tool_name(event: TuiEvent) -> str | None:
 def _event_llm_call_id(event: TuiEvent) -> str | None:
     value = event.llm_call_id or event.data.get("llm_call_id")
     return str(value) if value else None
+
+
+def _event_tool_execution_key(event: TuiEvent) -> str:
+    tool_call_id = _event_tool_call_id(event)
+    if tool_call_id:
+        return tool_call_id
+    tool_id = str(event.data.get("tool_id") or "unknown")
+    trace_id = event.trace_id or str(event.data.get("trace_id") or "")
+    step_number = event.step_number if event.step_number is not None else event.data.get("step_number", "")
+    started_at = event.data.get("started_at") or event.data.get("at") or ""
+    return f"{trace_id}:{step_number}:{tool_id}:{started_at}"
 
 
 def _format_event_line(event: TuiEvent) -> Text:
@@ -295,34 +402,17 @@ def _format_event_detail(event: TuiEvent) -> str:
 
     if event.event_type == "llm.requested":
         lines.append(f"[bold {COLORS['magenta']}]─── LLM Request ───[/]")
-        lines.append(f"[dim]model:[/] {data.get('model', 'unknown')}")
-        lines.append("")
-        messages = data.get("messages", [])
-        if isinstance(messages, (list, tuple)):
-            for msg in messages:
-                if isinstance(msg, dict):
-                    role = msg.get("role", "?")
-                    content = msg.get("content", "")
-                    role_color = COLORS["blue"] if role == "system" else COLORS["green"] if role == "user" else COLORS["magenta"]
-                    lines.append(f"[bold {role_color}]{role}:[/]")
-                    if isinstance(content, str):
-                        _append_wrapped(lines, content, indent="  ")
-                    elif isinstance(content, list):
-                        for item in content:
-                            if isinstance(item, dict) and item.get("type") == "text":
-                                _append_wrapped(lines, item.get("text", ""), indent="  ")
-                    lines.append("")
-        tools = data.get("tools", [])
-        if tools:
-            lines.append(f"[bold {COLORS['orange']}]tools:[/]")
-            for tool in tools:
-                if isinstance(tool, dict):
-                    fn = tool.get("function", {})
-                    if isinstance(fn, dict):
-                        lines.append(f"  [{COLORS['orange']}]{fn.get('name', '?')}[/] - {fn.get('description', '')}")
-            lines.append("")
+        _append_llm_input_details(lines, data)
 
     elif event.event_type == "llm.completed":
+        if data.get("messages") or data.get("tools"):
+            lines.append(f"[bold {COLORS['magenta']}]─── LLM Input ───[/]")
+            _append_llm_input_details(lines, data)
+
+        if _has_llm_stream_details(data):
+            lines.append(f"[bold {COLORS['magenta']}]─── LLM SSE ───[/]")
+            _append_llm_stream_details(lines, data)
+
         lines.append(f"[bold {COLORS['magenta']}]─── LLM Response ───[/]")
         resp = data.get("response", {})
         if isinstance(resp, dict):
@@ -387,38 +477,7 @@ def _format_event_detail(event: TuiEvent) -> str:
             lines.append(f"[dim]chunks:[/] {delta_count}")
         lines.append("")
 
-        content = data.get("content")
-        if isinstance(content, str) and content:
-            lines.append(f"[bold {COLORS['magenta']}]content:[/]")
-            _append_wrapped(lines, content, indent="  ")
-            lines.append("")
-
-        reasoning = data.get("reasoning")
-        if isinstance(reasoning, str) and reasoning:
-            lines.append(f"[bold {COLORS['blue']}]reasoning:[/]")
-            _append_wrapped(lines, reasoning, indent="  ")
-            lines.append("")
-
-        reasoning_context = data.get("reasoning_context")
-        if isinstance(reasoning_context, str) and reasoning_context:
-            lines.append(f"[bold {COLORS['blue']}]reasoning_context:[/]")
-            _append_wrapped(lines, reasoning_context, indent="  ")
-            lines.append("")
-
-        tool_calls = data.get("tool_calls", [])
-        if isinstance(tool_calls, (list, tuple)) and tool_calls:
-            lines.append(f"[bold {COLORS['orange']}]tool_calls:[/]")
-            for tc in tool_calls:
-                if not isinstance(tc, dict):
-                    continue
-                name = tc.get("name") or "?"
-                tid = str(tc.get("id") or "")
-                status_text = "done" if tc.get("completed") else "streaming"
-                lines.append(f"  [{COLORS['orange']}]{name}[/]({tid[:8]}) [{COLORS['text_dim']}]{status_text}[/]")
-                arguments = tc.get("arguments")
-                if isinstance(arguments, str) and arguments and not _append_jsonish(lines, arguments, indent="    "):
-                    _append_wrapped(lines, arguments, indent="    ")
-            lines.append("")
+        _append_llm_stream_details(lines, data)
         lines.append("")
 
     elif event.event_type == "tool.started":
@@ -434,12 +493,30 @@ def _format_event_detail(event: TuiEvent) -> str:
     elif event.event_type == "tool.completed":
         lines.append(f"[bold {COLORS['green']}]─── Tool Result ───[/]")
         lines.append(f"[dim]tool:[/] {data.get('tool_id', '?')}")
+        inp = data.get("input")
+        if inp is not None:
+            lines.append("[dim]input:[/]")
+            if not _append_jsonish(lines, inp, indent="  "):
+                lines.append(f"  {inp}")
         out = data.get("output")
         if out is not None:
             lines.append("[dim]output:[/]")
             value = out.value if hasattr(out, "value") else out
             if not _append_jsonish(lines, value, indent="  "):
                 lines.append(f"  {value}")
+        lines.append("")
+
+    elif event.event_type == "tool.failed":
+        lines.append(f"[bold {COLORS['red']}]─── Tool Failed ───[/]")
+        lines.append(f"[dim]tool:[/] {data.get('tool_id', '?')}")
+        inp = data.get("input")
+        if inp is not None:
+            lines.append("[dim]input:[/]")
+            if not _append_jsonish(lines, inp, indent="  "):
+                lines.append(f"  {inp}")
+        err_data = data.get("error") or event.error
+        if err_data:
+            lines.append(f"[{COLORS['red']}]error:[/] {err_data}")
         lines.append("")
 
     elif event.event_type == "step.completed":
@@ -536,6 +613,74 @@ def _format_event_detail(event: TuiEvent) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _append_llm_input_details(lines: list[str], data: dict[str, Any]) -> None:
+    lines.append(f"[dim]model:[/] {data.get('model', 'unknown')}")
+    lines.append("")
+    messages = data.get("messages", [])
+    if isinstance(messages, (list, tuple)):
+        for msg in messages:
+            if isinstance(msg, dict):
+                role = msg.get("role", "?")
+                content = msg.get("content", "")
+                role_color = COLORS["blue"] if role == "system" else COLORS["green"] if role == "user" else COLORS["magenta"]
+                lines.append(f"[bold {role_color}]{role}:[/]")
+                if isinstance(content, str):
+                    _append_wrapped(lines, content, indent="  ")
+                elif isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            _append_wrapped(lines, item.get("text", ""), indent="  ")
+                lines.append("")
+    tools = data.get("tools", [])
+    if tools:
+        lines.append(f"[bold {COLORS['orange']}]tools:[/]")
+        for tool in tools:
+            if isinstance(tool, dict):
+                fn = tool.get("function", {})
+                if isinstance(fn, dict):
+                    lines.append(f"  [{COLORS['orange']}]{fn.get('name', '?')}[/] - {fn.get('description', '')}")
+        lines.append("")
+
+
+def _has_llm_stream_details(data: dict[str, Any]) -> bool:
+    return any(data.get(key) for key in ("content", "reasoning", "reasoning_context", "tool_calls"))
+
+
+def _append_llm_stream_details(lines: list[str], data: dict[str, Any]) -> None:
+    content = data.get("content")
+    if isinstance(content, str) and content:
+        lines.append(f"[bold {COLORS['magenta']}]content:[/]")
+        _append_wrapped(lines, content, indent="  ")
+        lines.append("")
+
+    reasoning = data.get("reasoning")
+    if isinstance(reasoning, str) and reasoning:
+        lines.append(f"[bold {COLORS['blue']}]thinking:[/]")
+        _append_wrapped(lines, reasoning, indent="  ")
+        lines.append("")
+
+    reasoning_context = data.get("reasoning_context")
+    if isinstance(reasoning_context, str) and reasoning_context:
+        lines.append(f"[bold {COLORS['blue']}]reasoning_context:[/]")
+        _append_wrapped(lines, reasoning_context, indent="  ")
+        lines.append("")
+
+    tool_calls = data.get("tool_calls", [])
+    if isinstance(tool_calls, (list, tuple)) and tool_calls:
+        lines.append(f"[bold {COLORS['orange']}]tool_calls:[/]")
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            name = tc.get("name") or "?"
+            tid = str(tc.get("id") or "")
+            status_text = "done" if tc.get("completed") else "streaming"
+            lines.append(f"  [{COLORS['orange']}]{name}[/]({tid[:8]}) [{COLORS['text_dim']}]{status_text}[/]")
+            arguments = tc.get("arguments")
+            if isinstance(arguments, str) and arguments and not _append_jsonish(lines, arguments, indent="    "):
+                _append_wrapped(lines, arguments, indent="    ")
+        lines.append("")
 
 
 def _append_jsonish(lines: list[str], value: Any, *, indent: str = "", max_chars: int | None = None) -> bool:
@@ -725,11 +870,12 @@ class EventItem(Container):
     }}
     """
 
-    def __init__(self, event: TuiEvent, *, expanded: bool = False, selected: bool = False, **kwargs: Any) -> None:
+    def __init__(self, event: TuiEvent, *, expanded: bool = False, selected: bool = False, pinned_expanded: bool = False, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.event = event
         self.is_expanded = expanded
         self.is_selected = selected
+        self.is_pinned_expanded = pinned_expanded
         self.detail_height = EventDetailBox.DETAIL_HEIGHT
         self._summary = Label(_format_event_line(self.event), classes="event-summary")
         self._detail = EventDetailBox(classes="event-detail")
@@ -755,6 +901,8 @@ class EventItem(Container):
         self._apply_state()
 
     def toggle_expanded(self) -> None:
+        if self.is_pinned_expanded and self.is_expanded:
+            self.is_pinned_expanded = False
         self.set_expanded(not self.is_expanded)
 
     def _apply_event(self) -> None:
@@ -796,13 +944,14 @@ class EventFeedWidget(VerticalScroll):
         )
         yield Static("", classes="event-feed-separator")
 
-    def add_event(self, event: TuiEvent) -> None:
+    def add_event(self, event: TuiEvent, *, pinned_expanded: bool = False) -> None:
         """Append an event item and expand it as the active event."""
         for item in self._event_items:
             item.set_selected(False)
-            item.set_expanded(False)
+            if not item.is_pinned_expanded:
+                item.set_expanded(False)
 
-        item = EventItem(event, expanded=True, selected=True)
+        item = EventItem(event, expanded=True, selected=True, pinned_expanded=pinned_expanded)
         self.mount(item)
         self._event_items.append(item)
         self._selected_index = len(self._event_items) - 1
@@ -832,7 +981,8 @@ class EventFeedWidget(VerticalScroll):
         if 0 <= self._selected_index < len(self._event_items) and self._selected_index != index:
             previous = self._event_items[self._selected_index]
             previous.set_selected(False)
-            previous.set_expanded(False)
+            if not previous.is_pinned_expanded:
+                previous.set_expanded(False)
 
         self._selected_index = index
         item = self._event_items[index]
@@ -955,6 +1105,8 @@ class LoomTuiApp(App[None]):
         self._loop_goal = ""
         self._llm_streams: dict[str, _LlmStreamState] = {}
         self._llm_stream_indices: dict[str, int] = {}
+        self._tool_executions: dict[str, _ToolExecutionState] = {}
+        self._tool_execution_indices: dict[str, int] = {}
 
     def compose(self) -> ComposeResult:
         yield LoopHeader(id="loop_header")
@@ -984,7 +1136,9 @@ class LoomTuiApp(App[None]):
             status_bar.status = "completed"
             return
 
-        if self._handle_llm_stream_event(event):
+        if self._handle_llm_event(event):
+            return
+        if self._handle_tool_event(event):
             return
 
         feed = self.query_one("#event_feed", EventFeedWidget)
@@ -1021,8 +1175,8 @@ class LoomTuiApp(App[None]):
             status_bar.status = "completed"
             status_bar.duration = event.duration_ms or 0
 
-    def _handle_llm_stream_event(self, event: TuiEvent) -> bool:
-        if event.event_type not in LLM_STREAM_PRESENTATION_EVENTS:
+    def _handle_llm_event(self, event: TuiEvent) -> bool:
+        if event.event_type not in LLM_PRESENTATION_EVENTS:
             return False
 
         llm_call_id = _event_llm_call_id(event)
@@ -1035,7 +1189,7 @@ class LoomTuiApp(App[None]):
         if stream is None:
             stream = _LlmStreamState.from_event(event)
             self._llm_streams[llm_call_id] = stream
-            feed.add_event(stream.current_event or event)
+            feed.add_event(stream.current_event or event, pinned_expanded=True)
             index = feed.event_count - 1
             self._llm_stream_indices[llm_call_id] = index
         else:
@@ -1044,6 +1198,28 @@ class LoomTuiApp(App[None]):
             feed.update_event(index, aggregate)
 
         feed.select_event(self._llm_stream_indices[llm_call_id])
+        return True
+
+    def _handle_tool_event(self, event: TuiEvent) -> bool:
+        if event.event_type not in TOOL_PRESENTATION_EVENTS:
+            return False
+
+        key = _event_tool_execution_key(event)
+        feed = self.query_one("#event_feed", EventFeedWidget)
+        execution = self._tool_executions.get(key)
+
+        if execution is None:
+            execution = _ToolExecutionState.from_event(event)
+            self._tool_executions[key] = execution
+            feed.add_event(execution.current_event or event)
+            index = feed.event_count - 1
+            self._tool_execution_indices[key] = index
+        else:
+            aggregate = execution.absorb(event)
+            index = self._tool_execution_indices[key]
+            feed.update_event(index, aggregate)
+
+        feed.select_event(self._tool_execution_indices[key])
         return True
 
     def action_cursor_down(self) -> None:

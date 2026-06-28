@@ -78,6 +78,165 @@ async def test_event_feed_collapses_previous_event_and_uses_fixed_detail_height(
         assert second_item.detail_height == 12
 
 
+@pytest.mark.asyncio
+async def test_tui_app_aggregates_tool_input_and_output_into_one_event():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test():
+        app._handle_event(
+            TuiEvent(
+                timestamp=0,
+                event_type="tool.started",
+                data={
+                    "type": "tool.started",
+                    "tool_id": "search",
+                    "tool_call_id": "tool-call-1",
+                    "input": {"query": "loom"},
+                },
+                tool_call_id="tool-call-1",
+            )
+        )
+        app._handle_event(
+            TuiEvent(
+                timestamp=1,
+                event_type="tool.completed",
+                data={
+                    "type": "tool.completed",
+                    "tool_id": "search",
+                    "tool_call_id": "tool-call-1",
+                    "input": {"query": "loom"},
+                    "output": {"value": {"summary": "found docs"}},
+                },
+                tool_call_id="tool-call-1",
+                duration_ms=9,
+            )
+        )
+
+        feed = app.query_one("#event_feed", EventFeedWidget)
+        tool_event = feed.get_event(0)
+
+        assert feed.event_count == 1
+        assert tool_event is not None
+        assert tool_event.event_type == "tool.completed"
+        assert tool_event.duration_ms == 9
+        assert tool_event.data["input"] == {"query": "loom"}
+        assert tool_event.data["output"] == {"value": {"summary": "found docs"}}
+
+
+@pytest.mark.asyncio
+async def test_tui_app_aggregates_llm_input_stream_and_response_and_keeps_it_expanded():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test():
+        for event in (
+            TuiEvent(
+                timestamp=0,
+                event_type="llm.requested",
+                data={
+                    "type": "llm.requested",
+                    "llm_call_id": "llm-1",
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "inspect project"}],
+                    "tools": [{"function": {"name": "search", "description": "Search files"}}],
+                },
+                llm_call_id="llm-1",
+            ),
+            TuiEvent(
+                timestamp=1,
+                event_type="llm.stream.started",
+                data={"type": "llm.stream.started", "llm_call_id": "llm-1", "model": "test-model"},
+                llm_call_id="llm-1",
+            ),
+            TuiEvent(
+                timestamp=2,
+                event_type="llm.reasoning.delta",
+                data={"type": "llm.reasoning.delta", "llm_call_id": "llm-1", "delta": "thinking "},
+                llm_call_id="llm-1",
+            ),
+            TuiEvent(
+                timestamp=3,
+                event_type="llm.reasoning_context.delta",
+                data={"type": "llm.reasoning_context.delta", "llm_call_id": "llm-1", "delta": "ctx"},
+                llm_call_id="llm-1",
+            ),
+            TuiEvent(
+                timestamp=4,
+                event_type="llm.content.delta",
+                data={"type": "llm.content.delta", "llm_call_id": "llm-1", "delta": "answer"},
+                llm_call_id="llm-1",
+            ),
+            TuiEvent(
+                timestamp=5,
+                event_type="llm.tool_call.started",
+                data={"type": "llm.tool_call.started", "llm_call_id": "llm-1", "tool_call_id": "tc-1", "tool_name": "search"},
+                llm_call_id="llm-1",
+                tool_call_id="tc-1",
+            ),
+            TuiEvent(
+                timestamp=6,
+                event_type="llm.tool_call.arguments.delta",
+                data={
+                    "type": "llm.tool_call.arguments.delta",
+                    "llm_call_id": "llm-1",
+                    "tool_call_id": "tc-1",
+                    "tool_name": "search",
+                    "delta": '{"query":"loom"}',
+                },
+                llm_call_id="llm-1",
+                tool_call_id="tc-1",
+            ),
+            TuiEvent(
+                timestamp=7,
+                event_type="llm.stream.completed",
+                data={"type": "llm.stream.completed", "llm_call_id": "llm-1", "model": "test-model"},
+                llm_call_id="llm-1",
+                duration_ms=17,
+            ),
+            TuiEvent(
+                timestamp=8,
+                event_type="llm.completed",
+                data={
+                    "type": "llm.completed",
+                    "llm_call_id": "llm-1",
+                    "model": "test-model",
+                    "response": {
+                        "content": "final answer",
+                        "tool_calls": [{"id": "tc-1", "name": "search", "arguments": '{"query":"loom"}'}],
+                        "usage": {"total_tokens": 42},
+                        "finish_reason": "stop",
+                    },
+                },
+                llm_call_id="llm-1",
+            ),
+        ):
+            app._handle_event(event)
+
+        app._handle_event(
+            TuiEvent(
+                timestamp=9,
+                event_type="run.completed",
+                data={"type": "run.completed", "outcome": "pass", "steps": 1},
+            )
+        )
+
+        feed = app.query_one("#event_feed", EventFeedWidget)
+        llm_event = feed.get_event(0)
+        llm_item = feed.get_item(0)
+
+        assert feed.event_count == 2
+        assert llm_event is not None
+        assert llm_event.event_type == "llm.completed"
+        assert llm_event.data["messages"] == [{"role": "user", "content": "inspect project"}]
+        assert llm_event.data["content"] == "answer"
+        assert llm_event.data["reasoning"] == "thinking "
+        assert llm_event.data["reasoning_context"] == "ctx"
+        assert llm_event.data["tool_calls"][0]["arguments"] == '{"query":"loom"}'
+        assert llm_event.data["response"]["content"] == "final answer"
+        assert llm_item.is_expanded is True
+
+
 def test_event_detail_box_includes_tool_result(monkeypatch):
     panel = EventDetailBox()
     cleared = 0
