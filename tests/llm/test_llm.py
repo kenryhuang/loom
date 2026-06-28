@@ -341,6 +341,21 @@ def test_env_config_loads_openai_compatible_provider(tmp_path):
 def test_openai_provider_stream_chat_parses_sse_chunks():
     async def scenario():
         calls = []
+        first_chunk = {"choices": [{"delta": {"content": '{"reasoning":"ok",'}, "finish_reason": None}]}
+        second_chunk = {
+            "choices": [
+                {
+                    "delta": {
+                        "content": '"action":{"kind":"none","description":"Stop"},"alternatives":[],"confidence":0.7}',
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        }
+        usage_chunk = {
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+        }
 
         async def http_client(url, request):
             calls.append((url, request))
@@ -348,9 +363,9 @@ def test_openai_provider_stream_chat_parses_sse_chunks():
                 "status": 200,
                 "ok": True,
                 "chunks": [
-                    'data: {"choices":[{"delta":{"content":"{\\"reasoning\\":\\"ok\\","},"finish_reason":null}]}\n\n',
-                    'data: {"choices":[{"delta":{"content":"\\"action\\":{\\"kind\\":\\"none\\",\\"description\\":\\"Stop\\"},\\"alternatives\\":[],\\"confidence\\":0.7}"},"finish_reason":null}]}\n\n',
-                    'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}\n\n',
+                    f"data: {json.dumps(first_chunk)}\n\n",
+                    f"data: {json.dumps(second_chunk)}\n\n",
+                    f"data: {json.dumps(usage_chunk)}\n\n",
                     "data: [DONE]\n\n",
                 ],
             }
@@ -456,6 +471,21 @@ def test_llm_step_emits_full_provider_io_events():
 def test_llm_step_streaming_provider_emits_delta_events_and_executes_tool_calls():
     async def scenario():
         events = []
+        final_content = json.dumps(
+            {
+                "reasoning": "Tool result is enough",
+                "action": {
+                    "kind": "tool",
+                    "target": "search",
+                    "description": "Use the search result",
+                    "input": {"query": "loom"},
+                },
+                "alternatives": [],
+                "confidence": 0.8,
+            },
+            separators=(",", ":"),
+        )
+        split_at = final_content.index('"action"')
         provider = FakeStreamingProvider(
             [
                 [
@@ -478,15 +508,15 @@ def test_llm_step_streaming_provider_emits_delta_events_and_executes_tool_calls(
                 ],
                 [
                     LlmStreamEvent(kind="reasoning.delta", reasoning_delta="Evidence is enough."),
-                    LlmStreamEvent(kind="content.delta", content_delta='{"reasoning":"Tool result is enough",'),
+                    LlmStreamEvent(kind="content.delta", content_delta=final_content[:split_at]),
                     LlmStreamEvent(
                         kind="content.delta",
-                        content_delta='"action":{"kind":"tool","target":"search","description":"Use the search result","input":{"query":"loom"}},"alternatives":[],"confidence":0.8}',
+                        content_delta=final_content[split_at:],
                     ),
                     LlmStreamEvent(
                         kind="completed",
                         response=LlmResponse(
-                            content='{"reasoning":"Tool result is enough","action":{"kind":"tool","target":"search","description":"Use the search result","input":{"query":"loom"}},"alternatives":[],"confidence":0.8}',
+                            content=final_content,
                             usage=TokenUsage(12, 6, 18),
                         ),
                     ),

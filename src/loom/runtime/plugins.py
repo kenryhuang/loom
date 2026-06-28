@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from loom.core.models import Context, LoopHandle, Result, err, make_loom_error, ok
+from loom.core.models import Context, LoopHandle, Result, err, make_loom_error
 from loom.observability.traces import CompositeTraceSink
 from loom.runtime.engine import CancellationToken, run
 

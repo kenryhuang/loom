@@ -74,16 +74,10 @@ class TuiEventCollector:
         error = None
 
         # Track durations
-        if event_type == "llm.requested":
+        if event_type in {"llm.requested", "llm.stream.started"}:
             if llm_call_id:
                 self._llm_request_times[llm_call_id] = now
-        elif event_type == "llm.stream.started":
-            if llm_call_id:
-                self._llm_request_times[llm_call_id] = now
-        elif event_type == "llm.stream.completed":
-            if llm_call_id and llm_call_id in self._llm_request_times:
-                duration_ms = int((now - self._llm_request_times.pop(llm_call_id)) * 1000)
-        elif event_type == "llm.completed":
+        elif event_type in {"llm.stream.completed", "llm.completed"}:
             if llm_call_id and llm_call_id in self._llm_request_times:
                 duration_ms = int((now - self._llm_request_times.pop(llm_call_id)) * 1000)
         elif event_type == "llm.failed":
