@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -97,6 +98,35 @@ def test_detail_panel_pretty_prints_json_strings(monkeypatch):
     assert '  {\n    "matches": [\n      {' in writes[0]
     assert '"title": "Live Loom smoke test"' in writes[0]
     assert '"summary": "real tool result"' in writes[0]
+
+
+def test_detail_panel_renders_json_string_values_with_real_newlines(monkeypatch):
+    panel = DetailPanel()
+    writes = []
+
+    monkeypatch.setattr(panel, "write", writes.append)
+
+    panel.show_event(
+        TuiEvent(
+            timestamp=0,
+            event_type="tool.completed",
+            data={
+                "type": "tool.completed",
+                "tool_id": "smoke-test",
+                "output": {
+                    "value": {
+                        "report": "first finding\n\nsecond finding",
+                        "escaped": "alpha\\nbeta",
+                    }
+                },
+            },
+        )
+    )
+
+    assert re.search(r"first finding\n\n\s*second finding", writes[0])
+    assert re.search(r"alpha\n\s*beta", writes[0])
+    assert "first finding\\n\\nsecond finding" not in writes[0]
+    assert "alpha\\nbeta" not in writes[0]
 
 
 def test_detail_panel_renders_llm_stream_deltas(monkeypatch):

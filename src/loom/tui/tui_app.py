@@ -367,14 +367,19 @@ def _format_event_detail(event: TuiEvent) -> str:
 
 
 def _append_jsonish(lines: list[str], value: Any, *, indent: str = "", max_chars: int | None = None) -> bool:
-    """Append dict/list values or JSON strings as pretty JSON."""
+    """Append dict/list values or JSON strings as readable structured text."""
     parsed = _jsonish_value(value)
     if parsed is None:
         return False
-    rendered = json.dumps(parsed, ensure_ascii=False, indent=2, default=str)
+
+    rendered_lines: list[str] = []
+    _append_jsonish_rendered(rendered_lines, parsed, indent=indent)
     if max_chars is not None:
+        rendered = "\n".join(rendered_lines)
         rendered = rendered[:max_chars]
-    lines.extend(f"{indent}{line}" for line in rendered.splitlines())
+        lines.extend(rendered.splitlines())
+    else:
+        lines.extend(rendered_lines)
     return True
 
 
@@ -386,9 +391,50 @@ def _append_llm_content(lines: list[str], value: Any, *, indent: str = "") -> bo
     if report is not None:
         _append_wrapped(lines, report)
         return True
-    rendered = json.dumps(parsed, ensure_ascii=False, indent=2, default=str)
-    lines.extend(f"{indent}{line}" for line in rendered.splitlines())
+    _append_jsonish_rendered(lines, parsed, indent=indent)
     return True
+
+
+def _append_jsonish_rendered(lines: list[str], value: Any, *, indent: str = "", prefix: str = "", trailing_comma: bool = False) -> None:
+    comma = "," if trailing_comma else ""
+
+    if isinstance(value, dict):
+        lines.append(f"{indent}{prefix}{{")
+        items = list(value.items())
+        for index, (key, item) in enumerate(items):
+            item_prefix = f"{json.dumps(str(key), ensure_ascii=False)}: "
+            _append_jsonish_rendered(
+                lines,
+                item,
+                indent=f"{indent}  ",
+                prefix=item_prefix,
+                trailing_comma=index < len(items) - 1,
+            )
+        lines.append(f"{indent}}}{comma}")
+        return
+
+    if isinstance(value, list | tuple):
+        lines.append(f"{indent}{prefix}[")
+        for index, item in enumerate(value):
+            _append_jsonish_rendered(
+                lines,
+                item,
+                indent=f"{indent}  ",
+                trailing_comma=index < len(value) - 1,
+            )
+        lines.append(f"{indent}]{comma}")
+        return
+
+    if isinstance(value, str):
+        normalized = _normalize_display_text(value)
+        if "\n" in normalized:
+            lines.append(f"{indent}{prefix}".rstrip())
+            _append_wrapped(lines, normalized, indent=f"{indent}  ")
+            return
+        lines.append(f"{indent}{prefix}{json.dumps(normalized, ensure_ascii=False)}{comma}")
+        return
+
+    lines.append(f"{indent}{prefix}{json.dumps(value, ensure_ascii=False, default=str)}{comma}")
 
 
 def _extract_report_text(value: Any) -> str | None:
