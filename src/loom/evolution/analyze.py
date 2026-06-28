@@ -73,18 +73,22 @@ async def analyze_trace(config: AnalyzeConfig, provider: Any = None) -> Result:
             )
         )
 
-    if provider is None:
-        provider_result = create_env_openai_provider()
-        if not provider_result.ok:
-            return provider_result
-        provider = provider_result.value
-
     records_result = _load_records(config.trace_path)
     if not records_result.ok:
         return records_result
 
     records = records_result.value
     episodes = tuple(build_step_episodes(records))
+    incomplete_episodes = tuple(episode for episode in episodes if not episode.complete)
+    if incomplete_episodes:
+        return err(_incomplete_episodes_error(incomplete_episodes, config.trace_path))
+
+    if provider is None:
+        provider_result = create_env_openai_provider()
+        if not provider_result.ok:
+            return provider_result
+        provider = provider_result.value
+
     scorer = LlmStepScorer(provider)
 
     scores: list[StepScore] = []
@@ -208,6 +212,26 @@ def _write_artifacts(
                 metadata={"out_dir": str(out_dir)},
             )
         )
+
+
+def _incomplete_episodes_error(episodes: tuple[StepEpisode, ...], trace_path: Path) -> Any:
+    return make_loom_error(
+        "VALIDATION_FAILED",
+        "Trace contains incomplete step episodes",
+        retryable=False,
+        metadata={
+            "trace_path": str(trace_path),
+            "incomplete_trace_ids": tuple(episode.trace_id for episode in episodes),
+            "incomplete_steps": tuple(
+                {
+                    "run_id": episode.run_id,
+                    "trace_id": episode.trace_id,
+                    "step_number": episode.step_number,
+                }
+                for episode in episodes
+            ),
+        },
+    )
 
 
 def _score_error(error: Any, episode: StepEpisode) -> Any:

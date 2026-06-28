@@ -41,6 +41,15 @@ class FailingScoreProvider:
         )
 
 
+class RecordingScoreProvider(FakeScoreProvider):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(self, messages, tools=None, cancellation=None):
+        self.calls += 1
+        return await super().chat(messages, tools=tools, cancellation=cancellation)
+
+
 def _write_trace(path):
     records = [
         {
@@ -121,6 +130,39 @@ def _write_trace(path):
     path.write_text("\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n", encoding="utf-8")
 
 
+def _write_incomplete_trace(path):
+    records = [
+        {
+            "type": "event",
+            "eventType": "step.started",
+            "traceId": "trace-1",
+            "payload": {
+                "type": "step.started",
+                "run_id": "run-1",
+                "loop_id": "loop-1",
+                "trace_id": "trace-1",
+                "step_number": 0,
+            },
+            "hash": "hash-start",
+        },
+        {
+            "type": "event",
+            "eventType": "llm.requested",
+            "traceId": "trace-1",
+            "payload": {
+                "type": "llm.requested",
+                "run_id": "run-1",
+                "loop_id": "loop-1",
+                "trace_id": "trace-1",
+                "step_number": 0,
+                "messages": [],
+            },
+            "hash": "hash-llm-request",
+        },
+    ]
+    path.write_text("\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n", encoding="utf-8")
+
+
 def test_parse_args_accepts_trace_and_output_paths(tmp_path):
     options = parse_args(
         (
@@ -171,6 +213,27 @@ def test_analyze_trace_scores_and_writes_artifacts(tmp_path):
         assert len(result.value.proposals) == 1
         assert result.value.artifacts.report_path.exists()
         assert result.value.report == result.value.artifacts.report_path.read_text(encoding="utf-8")
+
+    asyncio.run(scenario())
+
+
+def test_analyze_trace_rejects_incomplete_episodes_without_scoring_or_artifacts(tmp_path):
+    async def scenario():
+        trace_path = tmp_path / "trace.jsonl"
+        out_dir = tmp_path / "evolution"
+        _write_incomplete_trace(trace_path)
+        provider = RecordingScoreProvider()
+
+        result = await analyze_trace(
+            AnalyzeConfig(trace_path=trace_path, out_dir=out_dir, min_signal_frequency=1),
+            provider=provider,
+        )
+
+        assert not result.ok
+        assert result.error.code == "VALIDATION_FAILED"
+        assert result.error.metadata["incomplete_trace_ids"] == ("trace-1",)
+        assert provider.calls == 0
+        assert not out_dir.exists()
 
     asyncio.run(scenario())
 
