@@ -1,5 +1,7 @@
 """Evolution public API for Loom."""
 
+from loom.evolution.analyze import AnalyzeConfig, AnalyzeResult, analyze_trace
+from loom.evolution.episodes import StepEpisode, TraceRecord, build_step_episodes, load_trace_records
 from loom.evolution.mutations import (
     CompositionEdge,
     CompositionGraph,
@@ -25,8 +27,12 @@ from loom.evolution.mutations import (
     validate_composition_graph,
     validate_mutation_bundle_shape,
 )
+from loom.evolution.proposals import EvolutionProposal, EvolutionSignal, ProposalGateConfig
+from loom.evolution.scoring import LlmStepScorer, StepScore
 
 __all__ = [
+    "AnalyzeConfig",
+    "AnalyzeResult",
     "CompositionEdge",
     "CompositionGraph",
     "CompositionNode",
@@ -34,19 +40,29 @@ __all__ = [
     "DefaultEvolutionEvaluator",
     "EvolutionDecision",
     "EvolutionEvaluation",
+    "EvolutionProposal",
+    "EvolutionSignal",
     "InMemoryImplementationRegistry",
     "InMemoryLoopRegistry",
+    "LlmStepScorer",
     "LoopMutation",
     "MutationBundle",
     "MutationPolicy",
     "MutationTransaction",
+    "ProposalGateConfig",
     "ScoreSummary",
     "ShadowEvaluationResult",
     "ShadowSummary",
+    "StepEpisode",
+    "StepScore",
     "StructureMutation",
+    "TraceRecord",
     "apply_loop_mutation",
     "apply_structure_mutation",
+    "analyze_trace",
+    "build_step_episodes",
     "decide_evolution",
+    "load_trace_records",
     "run_shadow_evaluation",
     "validate_composition_graph",
     "validate_mutation_bundle_shape",
