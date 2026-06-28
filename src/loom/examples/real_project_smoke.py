@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
+import asyncio
+import shlex
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +39,8 @@ from loom.core.models import (
     ok,
 )
 from loom.runtime.engine import create, create_runtime_registry, run
+
+DEFAULT_YAKDB_PATH = "/Users/huanggui/workspace/yakDB"
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,6 +306,33 @@ async def run_real_project_smoke(config: RealProjectSmokeConfig):
     return await run(handle.value, context.value, max_steps=1)
 
 
+def parse_args(argv: tuple[str, ...] | list[str] | None = None) -> RealProjectSmokeConfig:
+    parser = argparse.ArgumentParser(description="Run a Loom real project smoke audit.")
+    parser.add_argument("path", nargs="?", default=DEFAULT_YAKDB_PATH, help="Target project path")
+    parser.add_argument(
+        "--smoke-command",
+        default="uv run pytest -q",
+        help="Smoke command to run in the target project",
+    )
+    parser.add_argument("--no-cli-smoke", action="store_true", help="Disable project-specific CLI smoke")
+    parser.add_argument("--timeout", type=int, default=120, help="Command timeout in seconds")
+    args = parser.parse_args(None if argv is None else list(argv))
+    return RealProjectSmokeConfig(
+        target_path=Path(args.path),
+        smoke_command=tuple(shlex.split(args.smoke_command)),
+        cli_smoke_enabled=not args.no_cli_smoke,
+        command_timeout_seconds=args.timeout,
+    )
+
+
+def main(argv: tuple[str, ...] | list[str] | None = None) -> None:
+    config = parse_args(argv)
+    result = asyncio.run(run_real_project_smoke(config))
+    if not result.ok:
+        raise SystemExit(result.error.message if result.error else "Real project smoke failed")
+    print(result.value.output)
+
+
 def synthesize_report(
     config: RealProjectSmokeConfig,
     project_info: ProjectInfo,
@@ -396,6 +429,14 @@ def _summarize_optional_result(result) -> str:
         return "Not run."
     if getattr(result, "skipped", False):
         return f"Skipped: {getattr(result, 'reason', 'no reason provided')}"
+    commands = getattr(result, "commands", None)
+    if commands is not None:
+        failed = tuple(command for command in commands if command.exit_code != 0)
+        status = "failed" if failed else "passed"
+        lines = [f"CLI smoke {status}: {getattr(result, 'reason', '')}".strip()]
+        findings = getattr(result, "findings", ())
+        lines.extend(f"- {finding}" for finding in findings)
+        return "\n".join(lines)
     exit_code = getattr(result, "exit_code", None)
     if exit_code is not None:
         status = "passed" if exit_code == 0 else "failed"
@@ -473,3 +514,7 @@ def _cli_smoke_value(result: CliSmokeResult) -> dict[str, Any]:
         "commands": tuple(_command_result_value(command) for command in result.commands),
         "findings": result.findings,
     }
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

@@ -15,33 +15,8 @@ from loom.examples.factories import (
     run_llm_loop,
     run_trace_query_example,
 )
-from loom.examples.real_project_smoke import (
-    CliSmokeResult,
-    CommandResult,
-    ProjectInfo,
-    RealProjectSmokeConfig,
-    inspect_project,
-    make_real_project_smoke_context,
-    make_real_project_smoke_loop,
-    run_command,
-    run_real_project_smoke,
-    run_smoke_test,
-    run_yakdb_cli_smoke,
-    synthesize_report,
-)
 
 __all__ = [
-    "CliSmokeResult",
-    "CommandResult",
-    "ProjectInfo",
-    "RealProjectSmokeConfig",
-    "inspect_project",
-    "make_real_project_smoke_context",
-    "make_real_project_smoke_loop",
-    "run_command",
-    "run_real_project_smoke",
-    "run_smoke_test",
-    "run_yakdb_cli_smoke",
     "make_chain_pipeline_example",
     "make_fork_reviewers_example",
     "make_initial_counter_context",
@@ -55,5 +30,4 @@ __all__ = [
     "run_context_boundary_example",
     "run_llm_loop",
     "run_trace_query_example",
-    "synthesize_report",
 ]

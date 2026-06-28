@@ -3,10 +3,12 @@ from pathlib import Path
 import sys
 
 from loom.examples.real_project_smoke import (
+    DEFAULT_YAKDB_PATH,
     RealProjectSmokeConfig,
     inspect_project,
     make_real_project_smoke_context,
     make_real_project_smoke_loop,
+    parse_args,
     run_command,
     run_real_project_smoke,
     run_smoke_test,
@@ -107,3 +109,17 @@ def test_loop_factory_returns_one_step_loop(tmp_path: Path):
 
     assert loop.identity.role == "real project smoke auditor"
     assert loop.goal.objective.startswith("Audit")
+
+
+def test_parse_args_defaults_to_yakdb_path():
+    config = parse_args(())
+
+    assert str(config.target_path) == DEFAULT_YAKDB_PATH
+
+
+def test_parse_args_accepts_custom_path_and_smoke_command(tmp_path: Path):
+    config = parse_args((str(tmp_path), "--smoke-command", "python -c pass", "--no-cli-smoke"))
+
+    assert config.target_path == tmp_path
+    assert config.smoke_command == ("python", "-c", "pass")
+    assert config.cli_smoke_enabled is False
