@@ -8,6 +8,7 @@ The TUI provides a live, interactive view of a Loom loop as it runs:
 
 - **Event Stream**: Chronological stream of loop events with inline collapsible detail boxes
 - **Inline Details**: Fixed-height scrollable detail area for LLM prompts/responses, tool inputs/outputs, and trace data
+- **LLM Rounds**: Each round is shown as separate request, SSE, tool call, and response rows
 - **Status Bar**: Live metrics — step count, token usage, duration, run status
 
 ## Style
@@ -15,7 +16,8 @@ The TUI provides a live, interactive view of a Loom loop as it runs:
 Dark theme inspired by Codex CLI and Claude's terminal interface:
 - Tokyo Night color palette
 - Monospace typography
-- Colored event icons (green for success, magenta for LLM, orange for tools, red for errors)
+- Timeline gutter with `●` event nodes and inline detail blocks connected by `│`
+- Flat columns: scope, event, description, step, and status
 - Keyboard-driven navigation
 
 ## Usage
@@ -28,6 +30,9 @@ from loom.tui import run_with_tui
 result = await run_with_tui(loop_handle, initial_context)
 ```
 
+After the loop completes, the TUI stays in the foreground with the final event
+state visible. Press `q` to exit and return the run result.
+
 ### Demo
 
 ```bash
@@ -37,6 +42,8 @@ uv run python -m loom.tui.demo
 # LLM loop (requires .env with API key)
 LOOM_RUN_LIVE_LLM=1 uv run python -m loom.tui.demo
 ```
+
+The demo also remains open after completion until `q` is pressed.
 
 ### Programmatic usage
 
@@ -77,6 +84,8 @@ result = await loop_task
 | `g` | Jump to first event |
 | `G` | Jump to latest event |
 | `Enter` / `Space` | Expand or collapse selected event detail |
+| `y` | Copy selected event detail as plain text |
+| `Y` | Copy full event transcript as plain text |
 | `q` | Quit |
 
 ## Architecture
@@ -88,20 +97,20 @@ Loop Execution → Trace Events → TuiEventCollector → asyncio.Queue → Loom
                                                                      └── StatusBar (bottom)
 ```
 
-### Event types visualized
+### Event Rows
 
-| Event | Icon | Color | Description |
-|-------|------|-------|-------------|
-| `run.started` | ▶ | Green | Loop run begins |
-| `run.completed` | ✓ | Green | Loop run finishes |
-| `step.started` | → | Cyan | Step iteration begins |
-| `step.completed` | ← | Cyan | Step iteration finishes |
-| `llm.requested` | ◎ | Magenta | LLM API call sent |
-| `llm.completed` | ◉ | Magenta | LLM response received |
-| `llm.failed` | ✗ | Red | LLM call failed |
-| `tool.started` | ⚙ | Orange | Tool execution begins |
-| `tool.completed` | ⚙ | Green | Tool execution finishes |
-| `tool.failed` | ⚙ | Red | Tool execution failed |
+Rows use a flat timeline layout:
+
+```text
+● SCOPE   event        description                                   step     status
+│  ┌─ details
+│  │ ...
+│  └─
+```
+
+LLM calls are not collapsed into one large event. A single round is represented
+as request, SSE, tool call, and response rows. SSE token deltas update one SSE
+row in place, and tool calls merge function arguments with the final tool result.
 
 ## Dependencies
 

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from rich.text import Text
@@ -36,32 +38,9 @@ COLORS = {
     "teal": "#73daca",
 }
 
-# ─── Event type styling ────────────────────────────────────────────────
+# ─── Event presentation grouping ───────────────────────────────────────
 
-EVENT_STYLES: dict[str, dict[str, str]] = {
-    "run.started": {"icon": "▶", "color": COLORS["green"], "label": "RUN START"},
-    "run.completed": {"icon": "✓", "color": COLORS["green"], "label": "RUN DONE"},
-    "step.started": {"icon": "→", "color": COLORS["cyan"], "label": "STEP"},
-    "step.completed": {"icon": "←", "color": COLORS["cyan"], "label": "STEP DONE"},
-    "llm.requested": {"icon": "◎", "color": COLORS["magenta"], "label": "LLM →"},
-    "llm.completed": {"icon": "◉", "color": COLORS["magenta"], "label": "LLM ←"},
-    "llm.failed": {"icon": "✗", "color": COLORS["red"], "label": "LLM FAIL"},
-    "llm.stream.started": {"icon": "◎", "color": COLORS["magenta"], "label": "LLM STREAM"},
-    "llm.stream.completed": {"icon": "◉", "color": COLORS["magenta"], "label": "LLM DONE"},
-    "llm.content.delta": {"icon": "…", "color": COLORS["magenta"], "label": "LLM TEXT"},
-    "llm.reasoning.delta": {"icon": "…", "color": COLORS["blue"], "label": "LLM REASON"},
-    "llm.reasoning_context.delta": {"icon": "…", "color": COLORS["blue"], "label": "LLM CTX"},
-    "llm.tool_call.started": {"icon": "⚙", "color": COLORS["orange"], "label": "LLM TOOL"},
-    "llm.tool_call.arguments.delta": {"icon": "⚙", "color": COLORS["orange"], "label": "TOOL ARGS"},
-    "llm.tool_call.completed": {"icon": "⚙", "color": COLORS["green"], "label": "TOOL READY"},
-    "tool.started": {"icon": "⚙", "color": COLORS["orange"], "label": "TOOL →"},
-    "tool.completed": {"icon": "⚙", "color": COLORS["green"], "label": "TOOL ←"},
-    "tool.failed": {"icon": "⚙", "color": COLORS["red"], "label": "TOOL FAIL"},
-    "tool_selection.requested": {"icon": "🔧", "color": COLORS["teal"], "label": "TOOLSEL →"},
-    "tool_selection.decided": {"icon": "🔧", "color": COLORS["teal"], "label": "TOOLSEL ✓"},
-    "tool_selection.failed": {"icon": "🔧", "color": COLORS["red"], "label": "TOOLSEL ✗"},
-    "_tui_done": {"icon": "■", "color": COLORS["text_dim"], "label": "END"},
-}
+_RICH_TAG_RE = re.compile(r"\[(?:/|dim|bold(?: [^\]]+)?|#[0-9a-fA-F]{6})\]")
 
 LLM_PRESENTATION_EVENTS = {
     "llm.requested",
@@ -72,32 +51,16 @@ LLM_PRESENTATION_EVENTS = {
     "llm.content.delta",
     "llm.reasoning.delta",
     "llm.reasoning_context.delta",
-    "llm.tool_call.started",
-    "llm.tool_call.arguments.delta",
-    "llm.tool_call.completed",
 }
 
 TOOL_PRESENTATION_EVENTS = {
+    "llm.tool_call.started",
+    "llm.tool_call.arguments.delta",
+    "llm.tool_call.completed",
     "tool.started",
     "tool.completed",
     "tool.failed",
 }
-
-
-@dataclass
-class _ToolCallStreamState:
-    tool_call_id: str
-    tool_name: str | None = None
-    arguments_parts: list[str] = field(default_factory=list)
-    completed: bool = False
-
-    def to_data(self) -> dict[str, Any]:
-        return {
-            "id": self.tool_call_id,
-            "name": self.tool_name,
-            "arguments": "".join(self.arguments_parts),
-            "completed": self.completed,
-        }
 
 
 @dataclass
@@ -107,7 +70,6 @@ class _LlmStreamState:
     content_parts: list[str] = field(default_factory=list)
     reasoning_parts: list[str] = field(default_factory=list)
     reasoning_context_parts: list[str] = field(default_factory=list)
-    tool_calls: dict[str, _ToolCallStreamState] = field(default_factory=dict)
     response: Any | None = None
     error: Any | None = None
     delta_count: int = 0
@@ -138,18 +100,6 @@ class _LlmStreamState:
         elif event.event_type == "llm.reasoning_context.delta" and delta:
             self.reasoning_context_parts.append(str(delta))
             self.delta_count += 1
-        elif event.event_type == "llm.tool_call.started":
-            tool = self._tool_state(event)
-            tool.tool_name = _event_tool_name(event) or tool.tool_name
-        elif event.event_type == "llm.tool_call.arguments.delta" and delta:
-            tool = self._tool_state(event)
-            tool.tool_name = _event_tool_name(event) or tool.tool_name
-            tool.arguments_parts.append(str(delta))
-            self.delta_count += 1
-        elif event.event_type == "llm.tool_call.completed":
-            tool = self._tool_state(event)
-            tool.tool_name = _event_tool_name(event) or tool.tool_name
-            tool.completed = True
         elif event.event_type == "llm.stream.completed":
             self.completed = True
             self.duration_ms = event.duration_ms
@@ -170,14 +120,6 @@ class _LlmStreamState:
             if key not in {"delta", "raw", "tool_call_id", "tool_name", "response", "error"}:
                 self.metadata[key] = value
 
-    def _tool_state(self, event: TuiEvent) -> _ToolCallStreamState:
-        tool_call_id = _event_tool_call_id(event) or f"tool-{len(self.tool_calls) + 1}"
-        tool = self.tool_calls.get(tool_call_id)
-        if tool is None:
-            tool = _ToolCallStreamState(tool_call_id=tool_call_id, tool_name=_event_tool_name(event))
-            self.tool_calls[tool_call_id] = tool
-        return tool
-
     def _to_event(self) -> TuiEvent:
         if self.failed:
             event_type = "llm.failed"
@@ -185,7 +127,7 @@ class _LlmStreamState:
             event_type = "llm.completed"
         elif self.completed:
             event_type = "llm.stream.completed"
-        elif self.stream_started or self.delta_count or self.tool_calls:
+        elif self.stream_started or self.delta_count:
             event_type = "llm.stream.started"
         else:
             event_type = "llm.requested"
@@ -198,7 +140,6 @@ class _LlmStreamState:
                 "content": "".join(self.content_parts),
                 "reasoning": "".join(self.reasoning_parts),
                 "reasoning_context": "".join(self.reasoning_context_parts),
-                "tool_calls": [tool.to_data() for tool in self.tool_calls.values()],
                 "delta_count": self.delta_count,
             }
         )
@@ -218,9 +159,12 @@ class _LlmStreamState:
 class _ToolExecutionState:
     first_event: TuiEvent
     metadata: dict[str, Any] = field(default_factory=dict)
+    tool_name: str | None = None
+    arguments_parts: list[str] = field(default_factory=list)
     input_value: Any | None = None
     output_value: Any | None = None
     error: Any | None = None
+    arguments_completed: bool = False
     completed: bool = False
     failed: bool = False
     duration_ms: int | None = None
@@ -234,9 +178,16 @@ class _ToolExecutionState:
 
     def absorb(self, event: TuiEvent) -> TuiEvent:
         self._merge_metadata(event)
+        self.tool_name = _event_tool_name(event) or self.tool_name
         if "input" in event.data:
             self.input_value = event.data.get("input")
-        if event.event_type == "tool.completed":
+        if event.event_type == "llm.tool_call.arguments.delta":
+            delta = event.data.get("delta")
+            if delta:
+                self.arguments_parts.append(str(delta))
+        elif event.event_type == "llm.tool_call.completed":
+            self.arguments_completed = True
+        elif event.event_type == "tool.completed":
             self.completed = True
             self.output_value = event.data.get("output")
             self.duration_ms = event.duration_ms
@@ -250,14 +201,19 @@ class _ToolExecutionState:
 
     def _merge_metadata(self, event: TuiEvent) -> None:
         for key, value in event.data.items():
-            if key not in {"input", "output", "error"}:
+            if key not in {"input", "output", "error", "delta"}:
                 self.metadata[key] = value
 
     def _to_event(self) -> TuiEvent:
         event_type = "tool.failed" if self.failed else "tool.completed" if self.completed else "tool.started"
         data = dict(self.metadata)
         data["type"] = event_type
-        data["status"] = "failed" if self.failed else "completed" if self.completed else "running"
+        data["status"] = "failed" if self.failed else "done" if self.completed else "ready" if self.arguments_completed else "running"
+        if self.tool_name is not None:
+            data["tool_name"] = self.tool_name
+        arguments = "".join(self.arguments_parts)
+        if arguments:
+            data["arguments"] = arguments
         if self.input_value is not None:
             data["input"] = self.input_value
         if self.output_value is not None:
@@ -279,7 +235,7 @@ def _event_tool_call_id(event: TuiEvent) -> str | None:
 
 
 def _event_tool_name(event: TuiEvent) -> str | None:
-    value = event.data.get("tool_name")
+    value = event.data.get("tool_name") or event.data.get("tool_id")
     return str(value) if value else None
 
 
@@ -300,104 +256,192 @@ def _event_tool_execution_key(event: TuiEvent) -> str:
 
 
 def _format_event_line(event: TuiEvent) -> Text:
-    """Format a single event for the timeline."""
-    style = EVENT_STYLES.get(event.event_type, {"icon": "•", "color": COLORS["text_dim"], "label": event.event_type})
-    icon = style["icon"]
-    color = style["color"]
-    label = style["label"]
+    """Format one flat timeline row with fixed event metadata columns."""
+    scope, scope_color = _event_scope(event)
+    description = _event_description(event)
+    step = "-" if event.step_number is None else f"step {event.step_number}"
+    duration = "-" if event.duration_ms is None else f"{event.duration_ms}ms"
+    status = _event_status(event)
 
-    parts: list[tuple[str, str]] = []
-    parts.append((f" {icon} ", color))
-    parts.append((f"{label:<12}", color))
-
-    if event.step_number is not None:
-        parts.append((f"step:{event.step_number} ", COLORS["text_dim"]))
-
-    # Add context-specific info
-    if event.event_type == "llm.requested":
-        model = event.data.get("model", "")
-        parts.append((model, COLORS["blue"]))
-    elif event.event_type == "llm.completed":
-        if event.duration_ms is not None:
-            parts.append((f"{event.duration_ms}ms ", COLORS["text_dim"]))
-        resp = event.data.get("response", {})
-        if isinstance(resp, dict):
-            usage = resp.get("usage", {})
-            if isinstance(usage, dict):
-                total = usage.get("total_tokens", 0)
-                if total:
-                    parts.append((f"{total}tok ", COLORS["yellow"]))
-    elif event.event_type.startswith("llm.") and event.event_type.endswith(".delta"):
-        delta = str(event.data.get("delta", ""))
-        parts.append((delta[:60], COLORS["text_dim"]))
-    elif event.event_type in {"llm.tool_call.started", "llm.tool_call.completed"}:
-        tool = event.data.get("tool_name") or event.data.get("tool_call_id") or ""
-        parts.append((str(tool)[:60], COLORS["orange"]))
-    elif event.event_type == "tool.started":
-        tool_id = event.data.get("tool_id", "")
-        parts.append((tool_id, COLORS["orange"]))
-    elif event.event_type == "tool.completed":
-        tool_id = event.data.get("tool_id", "")
-        parts.append((tool_id, COLORS["green"]))
-        if event.duration_ms is not None:
-            parts.append((f" {event.duration_ms}ms", COLORS["text_dim"]))
-    elif event.event_type == "run.completed":
-        outcome = event.data.get("outcome", "")
-        steps = event.data.get("steps", 0)
-        parts.append((f"{outcome} ", COLORS["green"]))
-        parts.append((f"{steps} steps", COLORS["text_dim"]))
-    elif event.event_type in ("llm.failed", "tool.failed"):
-        err = event.error or "unknown error"
-        parts.append((err[:60], COLORS["red"]))
-    elif event.event_type == "tool_selection.decided":
-        selected = event.data.get("selected_tools", [])
-        excluded = event.data.get("excluded_tools", [])
-        if event.duration_ms is not None:
-            parts.append((f"{event.duration_ms}ms ", COLORS["text_dim"]))
-        usage = event.data.get("token_usage", {})
-        if isinstance(usage, dict):
-            total = usage.get("total_tokens", 0)
-            if total:
-                parts.append((f"{total}tok ", COLORS["yellow"]))
-        parts.append((f"select:{len(selected)} ", COLORS["teal"]))
-        parts.append((f"exclude:{len(excluded)}", COLORS["text_dim"]))
-    elif event.event_type == "tool_selection.failed":
-        err = event.error or "unknown error"
-        parts.append((err[:60], COLORS["red"]))
-
+    parts: list[tuple[str, str]] = [
+        ("● ", scope_color),
+        (f"{scope:<8}", scope_color),
+        (_row_cell(event.event_type, 22), COLORS["text_bright"]),
+        (_row_cell(description, 36), COLORS["text"]),
+        (_row_cell(event.run_id, 14), COLORS["text_dim"]),
+        (_row_cell(event.loop_id, 14), COLORS["text_dim"]),
+        (_row_cell(event.trace_id, 14), COLORS["text_dim"]),
+        (_row_cell(step, 8), COLORS["text_dim"]),
+        (_row_cell(duration, 8), COLORS["text_dim"]),
+        (status, _status_color(status)),
+    ]
     text = Text()
     for content, style_color in parts:
         text.append(content, style=style_color)
     return text
 
 
+def _row_cell(value: Any, width: int) -> str:
+    text = "-" if value is None or value == "" else str(value)
+    text = " ".join(text.split())
+    if len(text) > width:
+        text = text[: max(0, width - 2)] + ".."
+    return f"{text:<{width}}"
+
+
+def _format_event_line_plain(event: TuiEvent) -> str:
+    return str(_format_event_line(event)).rstrip()
+
+
+def _format_event_detail_plain(event: TuiEvent) -> str:
+    return _strip_rich_markup(_format_event_detail(event)).rstrip()
+
+
+def _format_event_transcript(events: list[TuiEvent]) -> str:
+    chunks: list[str] = []
+    for event in events:
+        chunks.append(_format_event_line_plain(event))
+        detail = _format_event_detail_plain(event)
+        if detail:
+            chunks.append(detail)
+        chunks.append("")
+    return "\n".join(chunks).rstrip() + "\n" if chunks else ""
+
+
+def _strip_rich_markup(value: str) -> str:
+    return _RICH_TAG_RE.sub("", value)
+
+
+def _event_scope(event: TuiEvent) -> tuple[str, str]:
+    if event.event_type.startswith("run."):
+        return "LOOP", COLORS["green"]
+    if event.event_type.startswith("step."):
+        return "STEP", COLORS["cyan"]
+    if event.event_type.startswith("llm."):
+        round_number = event.data.get("llm_round")
+        return (f"LLM#{round_number}" if round_number else "LLM", COLORS["magenta"])
+    if event.event_type.startswith("tool_selection."):
+        return "TOOLSEL", COLORS["teal"]
+    if event.event_type.startswith("tool."):
+        return "TOOL", COLORS["orange"] if event.event_type != "tool.completed" else COLORS["green"]
+    if event.event_type == "_tui_done":
+        return "TUI", COLORS["text_dim"]
+    return "EVENT", COLORS["text_dim"]
+
+
+def _event_name(event: TuiEvent) -> str:
+    mapping = {
+        "run.started": "started",
+        "run.completed": "completed",
+        "step.started": "started",
+        "step.completed": "completed",
+        "llm.requested": "request",
+        "llm.stream.started": "sse",
+        "llm.stream.completed": "sse",
+        "llm.content.delta": "sse",
+        "llm.reasoning.delta": "sse",
+        "llm.reasoning_context.delta": "sse",
+        "llm.completed": "response",
+        "llm.failed": "failed",
+        "tool.started": "call",
+        "tool.completed": "call",
+        "tool.failed": "failed",
+        "tool_selection.requested": "select",
+        "tool_selection.decided": "selected",
+        "tool_selection.failed": "failed",
+        "_tui_done": "done",
+    }
+    return mapping.get(event.event_type, event.event_type)
+
+
+def _event_description(event: TuiEvent) -> str:
+    data = event.data
+    if event.event_type == "run.started":
+        meta = data.get("metadata", {})
+        if isinstance(meta, dict):
+            return str(meta.get("role") or meta.get("objective") or data.get("context_id") or "run started")
+        return str(data.get("context_id") or "run started")
+    if event.event_type == "run.completed":
+        return f"{data.get('outcome', 'done')} / {data.get('steps', 0)} step(s)"
+    if event.event_type == "step.started":
+        return f"step {event.step_number} started" if event.step_number is not None else "step started"
+    if event.event_type == "step.completed":
+        trace = data.get("trace", {})
+        outcome = trace.get("outcome") if isinstance(trace, dict) else data.get("outcome")
+        return str(outcome or "step completed")
+    if event.event_type == "llm.requested":
+        messages = data.get("messages", [])
+        tools = data.get("tools", [])
+        message_count = len(messages) if isinstance(messages, list | tuple) else 0
+        tool_count = len(tools) if isinstance(tools, list | tuple) else 0
+        model = data.get("model") or "model"
+        return f"{model} / {message_count} messages / {tool_count} tools"
+    if event.event_type in {"llm.stream.started", "llm.stream.completed", "llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
+        labels = []
+        if data.get("reasoning"):
+            labels.append("thinking")
+        if data.get("reasoning_context"):
+            labels.append("reasoning_context")
+        if data.get("content"):
+            labels.append("content")
+        if not labels and data.get("delta_count"):
+            labels.append(f"{data.get('delta_count')} chunks")
+        return " + ".join(labels) if labels else "stream"
+    if event.event_type == "llm.completed":
+        response = data.get("response", {})
+        usage = response.get("usage", {}) if isinstance(response, dict) else {}
+        total = usage.get("total_tokens", 0) if isinstance(usage, dict) else 0
+        finish = response.get("finish_reason") if isinstance(response, dict) else None
+        return f"final response / {total} tokens / {finish or 'done'}"
+    if event.event_type == "llm.failed":
+        return str(event.error or data.get("error") or "llm failed")
+    if event.event_type.startswith("tool."):
+        name = data.get("tool_name") or data.get("tool_id") or data.get("tool_call_id") or "tool"
+        if event.event_type == "tool.completed":
+            return f"{name} / fn call + result"
+        if event.event_type == "tool.failed":
+            return f"{name} / failed"
+        return f"{name} / fn call"
+    if event.event_type == "tool_selection.decided":
+        selected = data.get("selected_tools", [])
+        excluded = data.get("excluded_tools", [])
+        return f"select:{len(selected)} exclude:{len(excluded)}"
+    if event.event_type == "tool_selection.requested":
+        available = data.get("available_tools", [])
+        return f"{len(available)} available tools" if isinstance(available, list) else "select tools"
+    if event.event_type == "tool_selection.failed":
+        return str(event.error or "tool selection failed")
+    return event.event_type
+
+
+def _event_status(event: TuiEvent) -> str:
+    data_status = event.data.get("status")
+    if isinstance(data_status, str) and data_status:
+        return data_status
+    if event.event_type.endswith(".failed"):
+        return "failed"
+    if event.event_type in {"run.completed", "step.completed", "llm.completed", "tool.completed", "tool_selection.decided", "_tui_done"}:
+        return "done"
+    if event.event_type in {"llm.stream.started", "llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
+        return "streaming"
+    if event.event_type.endswith(".started") or event.event_type.endswith(".requested"):
+        return "running"
+    return "event"
+
+
+def _status_color(status: str) -> str:
+    if status in {"done", "completed", "ready"}:
+        return COLORS["green"]
+    if status in {"running", "streaming"}:
+        return COLORS["orange"]
+    if status == "failed":
+        return COLORS["red"]
+    return COLORS["text_dim"]
+
+
 def _format_event_detail(event: TuiEvent) -> str:
     """Format full event detail for the detail panel."""
     lines: list[str] = []
-    style = EVENT_STYLES.get(event.event_type, {"icon": "•", "color": COLORS["text_dim"], "label": event.event_type})
-
-    lines.append(f"[bold {COLORS['cyan']}]{style['icon']} {style['label']}[/]")
-    lines.append("")
-
-    # Core metadata
-    lines.append(f"[dim]type:[/]      {event.event_type}")
-    if event.run_id:
-        lines.append(f"[dim]run_id:[/]    {event.run_id}")
-    if event.loop_id:
-        lines.append(f"[dim]loop_id:[/]   {event.loop_id}")
-    if event.trace_id:
-        lines.append(f"[dim]trace_id:[/]  {event.trace_id}")
-    if event.step_number is not None:
-        lines.append(f"[dim]step:[/]      {event.step_number}")
-    if event.duration_ms is not None:
-        lines.append(f"[dim]duration:[/]  {event.duration_ms}ms")
-    if event.outcome:
-        lines.append(f"[dim]outcome:[/]   {event.outcome}")
-    if event.error:
-        lines.append(f"[{COLORS['red']}]error:[/]     {event.error}")
-    lines.append("")
-
-    # Event-specific detail
     data = event.data
 
     if event.event_type == "llm.requested":
@@ -410,7 +454,6 @@ def _format_event_detail(event: TuiEvent) -> str:
             _append_llm_input_details(lines, data)
 
         if _has_llm_stream_details(data):
-            lines.append(f"[bold {COLORS['magenta']}]─── LLM SSE ───[/]")
             _append_llm_stream_details(lines, data)
 
         lines.append(f"[bold {COLORS['magenta']}]─── LLM Response ───[/]")
@@ -421,16 +464,6 @@ def _format_event_detail(event: TuiEvent) -> str:
                 lines.append(f"[bold {COLORS['magenta']}]content:[/]")
                 if not _append_llm_content(lines, content, indent="  "):
                     _append_wrapped(lines, str(content), indent="  ")
-                lines.append("")
-            tool_calls = resp.get("tool_calls", [])
-            if isinstance(tool_calls, (list, tuple)) and tool_calls:
-                lines.append(f"[bold {COLORS['orange']}]tool_calls:[/]")
-                for tc in tool_calls:
-                    if isinstance(tc, dict):
-                        lines.append(f"  [{COLORS['orange']}]{tc.get('name', '?')}[/]({tc.get('id', '')[:8]})")
-                        args = tc.get("arguments", "{}")
-                        if not _append_jsonish(lines, args, indent="    "):
-                            lines.append(f"    {args}")
                 lines.append("")
             usage = resp.get("usage", {})
             if isinstance(usage, dict):
@@ -444,60 +477,22 @@ def _format_event_detail(event: TuiEvent) -> str:
         lines.append("")
 
     elif event.event_type in {"llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
-        lines.append(f"[bold {COLORS['magenta']}]─── LLM Stream ───[/]")
         delta = data.get("delta", "")
         if not _append_jsonish(lines, delta, indent="  "):
             _append_wrapped(lines, str(delta), indent="  ")
         lines.append("")
 
-    elif event.event_type == "llm.tool_call.arguments.delta":
-        lines.append(f"[bold {COLORS['orange']}]─── Tool Arguments ───[/]")
-        tool = data.get("tool_name") or data.get("tool_call_id") or "unknown"
-        lines.append(f"[dim]tool:[/] {tool}")
-        delta = data.get("delta", "")
-        if not _append_jsonish(lines, delta, indent="  "):
-            _append_wrapped(lines, str(delta), indent="  ")
-        lines.append("")
-
-    elif event.event_type in {"llm.stream.started", "llm.stream.completed", "llm.tool_call.started", "llm.tool_call.completed"}:
-        lines.append(f"[bold {COLORS['magenta']}]─── LLM Stream ───[/]")
-        model = data.get("model")
-        if model:
-            lines.append(f"[dim]model:[/] {model}")
-        status = data.get("status")
-        if status:
-            lines.append(f"[dim]status:[/] {status}")
-        tool = data.get("tool_name") or data.get("tool_call_id")
-        if tool:
-            lines.append(f"[dim]tool:[/] {tool}")
-        if event.duration_ms is not None:
-            lines.append(f"[dim]duration:[/] {event.duration_ms}ms")
-        delta_count = data.get("delta_count")
-        if delta_count:
-            lines.append(f"[dim]chunks:[/] {delta_count}")
-        lines.append("")
-
+    elif event.event_type in {"llm.stream.started", "llm.stream.completed"}:
         _append_llm_stream_details(lines, data)
         lines.append("")
 
     elif event.event_type == "tool.started":
-        lines.append(f"[bold {COLORS['orange']}]─── Tool Call ───[/]")
-        lines.append(f"[dim]tool:[/] {data.get('tool_id', '?')}")
-        inp = data.get("input")
-        if inp is not None:
-            lines.append("[dim]input:[/]")
-            if not _append_jsonish(lines, inp, indent="  "):
-                lines.append(f"  {inp}")
+        _append_tool_call_line(lines, data)
         lines.append("")
 
     elif event.event_type == "tool.completed":
-        lines.append(f"[bold {COLORS['green']}]─── Tool Result ───[/]")
-        lines.append(f"[dim]tool:[/] {data.get('tool_id', '?')}")
-        inp = data.get("input")
-        if inp is not None:
-            lines.append("[dim]input:[/]")
-            if not _append_jsonish(lines, inp, indent="  "):
-                lines.append(f"  {inp}")
+        _append_tool_call_line(lines, data)
+        lines.append(f"[bold {COLORS['green']}]result[/]")
         out = data.get("output")
         if out is not None:
             lines.append("[dim]output:[/]")
@@ -507,13 +502,8 @@ def _format_event_detail(event: TuiEvent) -> str:
         lines.append("")
 
     elif event.event_type == "tool.failed":
-        lines.append(f"[bold {COLORS['red']}]─── Tool Failed ───[/]")
-        lines.append(f"[dim]tool:[/] {data.get('tool_id', '?')}")
-        inp = data.get("input")
-        if inp is not None:
-            lines.append("[dim]input:[/]")
-            if not _append_jsonish(lines, inp, indent="  "):
-                lines.append(f"  {inp}")
+        _append_tool_call_line(lines, data)
+        lines.append(f"[bold {COLORS['red']}]result[/]")
         err_data = data.get("error") or event.error
         if err_data:
             lines.append(f"[{COLORS['red']}]error:[/] {err_data}")
@@ -542,7 +532,6 @@ def _format_event_detail(event: TuiEvent) -> str:
         lines.append(f"[bold {COLORS['green']}]─── Run Complete ───[/]")
         lines.append(f"[dim]outcome:[/]   {data.get('outcome', '?')}")
         lines.append(f"[dim]steps:[/]     {data.get('steps', 0)}")
-        lines.append(f"[dim]duration:[/]  {data.get('duration_ms', 0)}ms")
         lines.append(f"[dim]traces:[/]    {data.get('trace_count', 0)}")
         lines.append("")
 
@@ -567,8 +556,6 @@ def _format_event_detail(event: TuiEvent) -> str:
     elif event.event_type == "tool_selection.decided":
         lines.append(f"[bold {COLORS['teal']}]─── Tool Selection Decided ───[/]")
         lines.append(f"[dim]model:[/] {data.get('model', 'unknown')}")
-        if event.duration_ms is not None:
-            lines.append(f"[dim]duration:[/] {event.duration_ms}ms")
         usage = data.get("token_usage", {})
         if isinstance(usage, dict):
             lines.append(
@@ -599,8 +586,6 @@ def _format_event_detail(event: TuiEvent) -> str:
         lines.append(f"[dim]model:[/] {data.get('model', 'unknown')}")
         if event.error:
             lines.append(f"[{COLORS['red']}]error:[/] {event.error}")
-        if event.duration_ms is not None:
-            lines.append(f"[dim]duration:[/] {event.duration_ms}ms")
         lines.append("")
 
     else:
@@ -613,6 +598,28 @@ def _format_event_detail(event: TuiEvent) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _append_tool_call_line(lines: list[str], data: dict[str, Any]) -> None:
+    name = data.get("tool_name") or data.get("tool_id") or data.get("tool_call_id") or "?"
+    arguments = data.get("arguments") if "arguments" in data else data.get("input")
+    if arguments is None:
+        lines.append(f"[bold {COLORS['orange']}]fn call:[/] {name}")
+        return
+    lines.append(f"[bold {COLORS['orange']}]fn call:[/] {name} {_compact_inline(arguments)}")
+
+
+def _compact_inline(value: Any, *, max_chars: int = 800) -> str:
+    parsed = _jsonish_value(value)
+    render_value = value if parsed is None else parsed
+    if isinstance(render_value, dict | list | tuple):
+        rendered = json.dumps(render_value, ensure_ascii=False, default=str)
+    else:
+        rendered = _normalize_display_text(str(render_value))
+        rendered = " ".join(rendered.split())
+    if len(rendered) > max_chars:
+        return rendered[: max_chars - 3] + "..."
+    return rendered
 
 
 def _append_llm_input_details(lines: list[str], data: dict[str, Any]) -> None:
@@ -645,7 +652,7 @@ def _append_llm_input_details(lines: list[str], data: dict[str, Any]) -> None:
 
 
 def _has_llm_stream_details(data: dict[str, Any]) -> bool:
-    return any(data.get(key) for key in ("content", "reasoning", "reasoning_context", "tool_calls"))
+    return any(data.get(key) for key in ("content", "reasoning", "reasoning_context"))
 
 
 def _append_llm_stream_details(lines: list[str], data: dict[str, Any]) -> None:
@@ -659,21 +666,6 @@ def _append_llm_stream_details(lines: list[str], data: dict[str, Any]) -> None:
     if isinstance(reasoning_context, str) and reasoning_context:
         lines.append(f"[bold {COLORS['blue']}]reasoning_context:[/]")
         _append_wrapped(lines, reasoning_context, indent="  ")
-        lines.append("")
-
-    tool_calls = data.get("tool_calls", [])
-    if isinstance(tool_calls, (list, tuple)) and tool_calls:
-        lines.append(f"[bold {COLORS['orange']}]tool_calls:[/]")
-        for tc in tool_calls:
-            if not isinstance(tc, dict):
-                continue
-            name = tc.get("name") or "?"
-            tid = str(tc.get("id") or "")
-            status_text = "done" if tc.get("completed") else "streaming"
-            lines.append(f"  [{COLORS['orange']}]{name}[/]({tid[:8]}) [{COLORS['text_dim']}]{status_text}[/]")
-            arguments = tc.get("arguments")
-            if isinstance(arguments, str) and arguments and not _append_jsonish(lines, arguments, indent="    "):
-                _append_wrapped(lines, arguments, indent="    ")
         lines.append("")
 
     content = data.get("content")
@@ -836,7 +828,7 @@ class EventDetailBox(RichLog):
         background: {COLORS["bg_dark"]};
         border: tall {COLORS["border"]};
         padding: 0 1;
-        margin: 0 0 1 2;
+        margin: 0 0 1 0;
     }}
     """
 
@@ -968,6 +960,12 @@ class EventFeedWidget(VerticalScroll):
             return self._event_items[index].event
         return None
 
+    def get_selected_event(self) -> TuiEvent | None:
+        return self.get_event(self._selected_index)
+
+    def get_events(self) -> list[TuiEvent]:
+        return [item.event for item in self._event_items]
+
     def get_item(self, index: int) -> EventItem:
         return self._event_items[index]
 
@@ -1093,6 +1091,8 @@ class LoomTuiApp(App[None]):
         ("G", "scroll_bottom", "Bottom"),
         ("enter", "toggle_detail", "Toggle Detail"),
         ("space", "toggle_detail", "Toggle Detail"),
+        ("y", "copy_detail", "Copy Detail"),
+        ("Y", "copy_transcript", "Copy All"),
     ]
 
     def __init__(self, collector: Any) -> None:
@@ -1106,6 +1106,7 @@ class LoomTuiApp(App[None]):
         self._loop_goal = ""
         self._llm_streams: dict[str, _LlmStreamState] = {}
         self._llm_stream_indices: dict[str, int] = {}
+        self._llm_rounds: dict[str, int] = {}
         self._tool_executions: dict[str, _ToolExecutionState] = {}
         self._tool_execution_indices: dict[str, int] = {}
 
@@ -1184,22 +1185,53 @@ class LoomTuiApp(App[None]):
         if not llm_call_id:
             return False
 
+        event = self._with_llm_round(event, llm_call_id)
         feed = self.query_one("#event_feed", EventFeedWidget)
-        stream = self._llm_streams.get(llm_call_id)
 
+        if event.event_type == "llm.requested":
+            feed.add_event(event)
+            return True
+
+        if event.event_type in {"llm.completed", "llm.failed"}:
+            feed.add_event(event, pinned_expanded=True)
+            if event.event_type == "llm.completed":
+                self._add_llm_usage(event)
+            return True
+
+        stream = self._llm_streams.get(llm_call_id)
         if stream is None:
             stream = _LlmStreamState.from_event(event)
             self._llm_streams[llm_call_id] = stream
             feed.add_event(stream.current_event or event, pinned_expanded=True)
-            index = feed.event_count - 1
-            self._llm_stream_indices[llm_call_id] = index
+            self._llm_stream_indices[llm_call_id] = feed.event_count - 1
         else:
             aggregate = stream.absorb(event)
-            index = self._llm_stream_indices[llm_call_id]
-            feed.update_event(index, aggregate)
+            feed.update_event(self._llm_stream_indices[llm_call_id], aggregate)
 
         feed.select_event(self._llm_stream_indices[llm_call_id])
         return True
+
+    def _with_llm_round(self, event: TuiEvent, llm_call_id: str) -> TuiEvent:
+        round_number = self._llm_rounds.get(llm_call_id)
+        if round_number is None:
+            round_number = len(self._llm_rounds) + 1
+            self._llm_rounds[llm_call_id] = round_number
+        data = dict(event.data)
+        data["llm_round"] = round_number
+        return replace(event, data=data)
+
+    def _add_llm_usage(self, event: TuiEvent) -> None:
+        response = event.data.get("response", {})
+        if not isinstance(response, dict):
+            return
+        usage = response.get("usage", {})
+        if not isinstance(usage, dict):
+            return
+        total_tokens = usage.get("total_tokens", 0)
+        if total_tokens:
+            self._total_tokens += total_tokens
+            status_bar = self.query_one("#status", StatusBar)
+            status_bar.tokens = self._total_tokens
 
     def _handle_tool_event(self, event: TuiEvent) -> bool:
         if event.event_type not in TOOL_PRESENTATION_EVENTS:
@@ -1255,6 +1287,39 @@ class LoomTuiApp(App[None]):
         """Toggle the selected event detail."""
         feed = self.query_one("#event_feed", EventFeedWidget)
         feed.toggle_selected_detail()
+
+    def action_copy_detail(self) -> None:
+        """Copy the selected event detail as plain text."""
+        feed = self.query_one("#event_feed", EventFeedWidget)
+        event = feed.get_selected_event()
+        if event is None:
+            self._set_status("copy-empty")
+            return
+        self._copy_text(_format_event_detail_plain(event))
+
+    def action_copy_transcript(self) -> None:
+        """Copy the full visible event transcript as plain text."""
+        feed = self.query_one("#event_feed", EventFeedWidget)
+        text = _format_event_transcript(feed.get_events())
+        if not text.strip():
+            self._set_status("copy-empty")
+            return
+        self._copy_text(text)
+
+    def _copy_text(self, text: str) -> None:
+        path = Path(".loom/tui/last-copy.md")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        try:
+            self.copy_to_clipboard(text)
+        except BaseException:
+            self._set_status(f"copy-saved:{path}")
+            return
+        self._set_status("copied")
+
+    def _set_status(self, status: str) -> None:
+        status_bar = self.query_one("#status", StatusBar)
+        status_bar.status = status
 
     def set_loop_info(self, role: str, goal: str) -> None:
         """Set loop metadata in the header."""

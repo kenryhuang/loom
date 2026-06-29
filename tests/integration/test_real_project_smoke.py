@@ -10,6 +10,7 @@ from loom.examples.real_project_smoke import (
     RealProjectSmokeConfig,
     inspect_project,
     make_real_project_smoke_context,
+    make_real_project_smoke_llm_context,
     make_real_project_smoke_loop,
     parse_args,
     parse_run_options,
@@ -19,7 +20,7 @@ from loom.examples.real_project_smoke import (
     run_yakdb_cli_smoke,
     synthesize_report,
 )
-from loom.llm import LlmResponse, LlmToolCall, TokenUsage
+from loom.llm import LlmResponse, LlmToolCall, TokenUsage, build_system_prompt
 
 
 class FakeSmokeProvider:
@@ -28,17 +29,24 @@ class FakeSmokeProvider:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def chat(self, messages, tools=None, cancellation=None):
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
         self.calls += 1
         if self.calls == 1:
             return ok(
                 LlmResponse(
                     content=None,
                     tool_calls=(
-                        LlmToolCall("inspect-call", "inspect-project", "{}"),
-                        LlmToolCall("smoke-call", "run-smoke-test", "{}"),
-                        LlmToolCall("cli-call", "run-cli-smoke", "{}"),
+                        LlmToolCall("read-call", "read_file", json.dumps({"path": "README.md"})),
+                        LlmToolCall("smoke-call", "shell_execute", json.dumps({"command": [sys.executable, "-c", "print('smoke ok')"]})),
                     ),
+                    finish_reason="tool_calls",
+                )
+            )
+        if self.calls == 2:
+            return ok(
+                LlmResponse(
+                    content=None,
+                    tool_calls=(LlmToolCall("finish-call", "finish", json.dumps({"report": "# Fake LLM Smoke Report\n\nThe LLM made this judgment."})),),
                     finish_reason="tool_calls",
                 )
             )
@@ -137,6 +145,25 @@ def test_real_project_smoke_loop_produces_report_and_trace(tmp_path: Path):
     assert len(result.value.traces[0].observations) == 4
 
 
+def test_real_project_smoke_llm_prompt_requires_evidence_tool_calls(tmp_path: Path):
+    project = tmp_path / "sample"
+    project.mkdir()
+
+    config = RealProjectSmokeConfig(target_path=project, cli_smoke_enabled=False)
+
+    context = make_real_project_smoke_llm_context(config)
+
+    assert context.ok
+    tool_ids = tuple(tool.id for tool in context.value.affordances.tools)
+    assert tool_ids == ("read_file", "write_file", "shell_execute", "finish")
+    system_prompt = build_system_prompt(context.value)
+    assert "Use read_file to inspect project files" in system_prompt
+    assert "Use shell_execute to run the configured smoke command" in system_prompt
+    assert "Do not enumerate the whole repository" in system_prompt
+    assert "Call finish exactly once" in system_prompt
+    assert "inspect-project" not in system_prompt
+
+
 def test_real_project_smoke_llm_mode_uses_model_report(tmp_path: Path):
     project = tmp_path / "sample"
     project.mkdir()
@@ -155,7 +182,7 @@ def test_real_project_smoke_llm_mode_uses_model_report(tmp_path: Path):
 
     assert result.ok
     assert result.value.output == "# Fake LLM Smoke Report\n\nThe LLM made this judgment."
-    assert provider.calls == 2
+    assert provider.calls == 3
     assert "Exclude .yakdb" not in result.value.output
 
 
@@ -193,6 +220,8 @@ def test_real_project_smoke_persists_full_llm_loop_trace(tmp_path: Path):
         assert event_type in event_types
     assert any(record["type"] == "trace" for record in records)
     assert any(record["eventType"] == "tool.completed" and "input" in record["payload"] and "output" in record["payload"] for record in event_records)
+    completed_tools = [record["payload"]["tool_id"] for record in event_records if record["eventType"] == "tool.completed"]
+    assert completed_tools == ["read_file", "shell_execute", "finish"]
     assert any(record["eventType"] == "llm.requested" and "messages" in record["payload"] for record in event_records)
 
 

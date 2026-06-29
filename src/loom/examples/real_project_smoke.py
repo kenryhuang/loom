@@ -313,23 +313,86 @@ def make_real_project_smoke_loop(config: RealProjectSmokeConfig) -> MinimalLoopD
 
 
 def make_real_project_smoke_tools(config: RealProjectSmokeConfig) -> dict[str, Any]:
-    async def inspect_tool(_input_value, _options=None):
-        info = inspect_project(config.target_path)
-        return ok(Observation(new_trace_id(), "inspect-project", _project_info_value(info), now_iso()))
+    async def read_file_tool(input_value, _options=None):
+        data = _tool_input(input_value)
+        resolved = _resolve_project_path(config.target_path, data.get("path"))
+        if not resolved.ok:
+            return resolved
+        max_bytes = _positive_int(data.get("max_bytes"), 20000)
+        path = resolved.value
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            return err(make_loom_error("TOOL_FAILED", f"Failed to read file: {exc}", retryable=False, metadata={"path": str(path)}))
+        content = raw[:max_bytes].decode("utf-8", errors="replace")
+        return ok(
+            Observation(
+                new_trace_id(),
+                "read_file",
+                {
+                    "path": _relative_to_project(config.target_path, path),
+                    "content": content,
+                    "bytes_read": min(len(raw), max_bytes),
+                    "truncated": len(raw) > max_bytes,
+                },
+                now_iso(),
+            )
+        )
 
-    async def smoke_tool(_input_value, _options=None):
-        result = run_smoke_test(config)
-        return ok(Observation(new_trace_id(), "run-smoke-test", _command_result_value(result), now_iso()))
+    async def write_file_tool(input_value, _options=None):
+        data = _tool_input(input_value)
+        resolved = _resolve_project_path(config.target_path, data.get("path"))
+        if not resolved.ok:
+            return resolved
+        content = str(data.get("content", ""))
+        path = resolved.value
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            return err(make_loom_error("TOOL_FAILED", f"Failed to write file: {exc}", retryable=False, metadata={"path": str(path)}))
+        return ok(
+            Observation(
+                new_trace_id(),
+                "write_file",
+                {
+                    "path": _relative_to_project(config.target_path, path),
+                    "bytes_written": len(content.encode("utf-8")),
+                },
+                now_iso(),
+            )
+        )
 
-    async def cli_tool(_input_value, _options=None):
-        info = inspect_project(config.target_path)
-        result = run_yakdb_cli_smoke(config, info)
-        return ok(Observation(new_trace_id(), "run-cli-smoke", _cli_smoke_value(result), now_iso()))
+    async def shell_execute_tool(input_value, _options=None):
+        data = _tool_input(input_value)
+        command = _command_from_tool_input(data.get("command"), config.smoke_command)
+        cwd = _resolve_project_path(config.target_path, data.get("cwd") or ".")
+        if not cwd.ok:
+            return cwd
+        timeout_seconds = _positive_int(data.get("timeout_seconds"), config.command_timeout_seconds)
+        result = run_command(command, cwd=cwd.value, timeout_seconds=timeout_seconds)
+        return ok(Observation(new_trace_id(), "shell_execute", _command_result_value(result), now_iso()))
+
+    async def finish_tool(input_value, _options=None):
+        data = _tool_input(input_value)
+        report = str(data.get("report") or data.get("content") or "")
+        return ok(
+            Observation(
+                new_trace_id(),
+                "finish",
+                {
+                    "report": report,
+                    "completed": bool(report.strip()),
+                },
+                now_iso(),
+            )
+        )
 
     return {
-        "inspect-project": inspect_tool,
-        "run-smoke-test": smoke_tool,
-        "run-cli-smoke": cli_tool,
+        "read_file": read_file_tool,
+        "write_file": write_file_tool,
+        "shell_execute": shell_execute_tool,
+        "finish": finish_tool,
     }
 
 
@@ -353,16 +416,51 @@ def make_real_project_smoke_llm_context(config: RealProjectSmokeConfig):
                     role="real project smoke auditor",
                     constraints=(
                         {
+                            "id": "inspect-files",
+                            "description": (
+                                "Use read_file to inspect project files such as README.md, pyproject.toml, package manifests, and focused source or test files."
+                            ),
+                            "severity": "must",
+                        },
+                        {
+                            "id": "run-smoke-command",
+                            "description": f"Use shell_execute to run the configured smoke command: {shlex.join(config.smoke_command)}.",
+                            "severity": "must",
+                        },
+                        {
+                            "id": "bounded-side-effects",
+                            "description": "Do not modify project source files. Use write_file only for optional audit artifacts under .loom/.",
+                            "severity": "must",
+                        },
+                        {
+                            "id": "focused-audit",
+                            "description": "Do not enumerate the whole repository. Prefer focused reads and commands that answer the audit question.",
+                            "severity": "must",
+                        },
+                        {
+                            "id": "finish-report",
+                            "description": (
+                                "Call finish exactly once with the final markdown audit report after gathering evidence. "
+                                "After finish returns, return final JSON whose action.input.report contains the same report."
+                            ),
+                            "severity": "must",
+                        },
+                        {
                             "id": "llm-judgment-only",
-                            "description": "Use tools for evidence, but make purpose, risk, and improvement judgments yourself.",
+                            "description": (
+                                "Make purpose, risk, and improvement judgments yourself from observed evidence; "
+                                "do not invent command results or repository facts."
+                            ),
                             "severity": "must",
                         },
                     ),
                 ),
                 goal=GoalLayer(
                     objective=(
-                        f"Audit {config.target_path}. Use available tools to collect evidence, then return JSON whose action.input.report is a markdown "
-                        "report with purpose, smoke result, risks, and improvement directions."
+                        f"Audit the real project at {config.target_path}. Use the basic tools like a coding agent: read relevant files, run shell commands "
+                        f"from the project root, run the configured smoke command `{shlex.join(config.smoke_command)}`, "
+                        "inspect failures or warnings only when needed, avoid full repository inventory, "
+                        "then call finish with a markdown report covering purpose, smoke result, risks, and improvement directions."
                     ),
                     budget={"max_steps": 1},
                 ),
@@ -371,19 +469,62 @@ def make_real_project_smoke_llm_context(config: RealProjectSmokeConfig):
                 affordances=empty_affordances(
                     tools=(
                         ToolRef(
-                            "inspect-project",
-                            "Inspect project metadata, README, files, and git status",
-                            input_schema={"type": "object", "properties": {}},
+                            "read_file",
+                            "Read a UTF-8 text file under the target project directory",
+                            input_schema={
+                                "type": "object",
+                                "properties": {
+                                    "path": {"type": "string", "description": "Project-relative path to read"},
+                                    "max_bytes": {"type": "integer", "description": "Maximum bytes to return; defaults to 20000"},
+                                },
+                                "required": ["path"],
+                                "additionalProperties": False,
+                            },
                         ),
                         ToolRef(
-                            "run-smoke-test",
-                            "Run the configured smoke command and return stdout, stderr, exit code, and timing",
-                            input_schema={"type": "object", "properties": {}},
+                            "write_file",
+                            "Write a UTF-8 text file under the target project directory; use only for optional .loom audit artifacts",
+                            input_schema={
+                                "type": "object",
+                                "properties": {
+                                    "path": {"type": "string", "description": "Project-relative path to write"},
+                                    "content": {"type": "string", "description": "File content"},
+                                },
+                                "required": ["path", "content"],
+                                "additionalProperties": False,
+                            },
                         ),
                         ToolRef(
-                            "run-cli-smoke",
-                            "Run project-specific CLI smoke if applicable and return command evidence",
-                            input_schema={"type": "object", "properties": {}},
+                            "shell_execute",
+                            "Execute a shell command inside the target project directory and return stdout, stderr, exit code, and timing",
+                            input_schema={
+                                "type": "object",
+                                "properties": {
+                                    "command": {
+                                        "oneOf": [
+                                            {"type": "string"},
+                                            {"type": "array", "items": {"type": "string"}},
+                                        ],
+                                        "description": "Command to run. String commands are split with shell-like syntax.",
+                                    },
+                                    "cwd": {"type": "string", "description": "Optional project-relative working directory"},
+                                    "timeout_seconds": {"type": "integer", "description": "Optional timeout; defaults to demo timeout"},
+                                },
+                                "required": ["command"],
+                                "additionalProperties": False,
+                            },
+                        ),
+                        ToolRef(
+                            "finish",
+                            "Finish the audit with the final markdown report",
+                            input_schema={
+                                "type": "object",
+                                "properties": {
+                                    "report": {"type": "string", "description": "Final markdown audit report"},
+                                },
+                                "required": ["report"],
+                                "additionalProperties": False,
+                            },
                         ),
                     )
                 ),
@@ -398,7 +539,7 @@ def make_real_project_smoke_llm_loop(config: RealProjectSmokeConfig, provider: A
         version=new_loop_version(),
         identity=IdentityLayer(role="real project smoke auditor"),
         goal=GoalLayer(objective=f"LLM audit real project smoke path for {config.target_path}"),
-        step=create_llm_step_function(provider, stream=stream),
+        step=create_llm_step_function(provider, stream=stream, max_tool_calls_per_step=None),
         done=lambda context, _runtime: ok(bool(context.state.decisions)),
     )
 
@@ -467,6 +608,12 @@ def _report_from_run_result(run_result) -> str:
         action_input = thaw_json(latest.action.input)
         if isinstance(action_input, dict) and isinstance(action_input.get("report"), str):
             return action_input["report"]
+    for observation in reversed(run_result.context.state.observations):
+        if observation.source != "finish":
+            continue
+        value = thaw_json(observation.value)
+        if isinstance(value, dict) and isinstance(value.get("report"), str):
+            return value["report"]
     return "" if output is None else str(output)
 
 
@@ -679,6 +826,56 @@ def _first_non_empty_line(text: str) -> str:
         if stripped:
             return stripped[:240]
     return ""
+
+
+def _tool_input(input_value: Any) -> dict[str, Any]:
+    value = thaw_json(input_value)
+    return value if isinstance(value, dict) else {}
+
+
+def _resolve_project_path(project_root: Path, raw_path: Any):
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return err(make_loom_error("VALIDATION_FAILED", "Tool path is required", retryable=False))
+    root = project_root.resolve()
+    candidate = Path(raw_path)
+    path = candidate if candidate.is_absolute() else root / candidate
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Tool path must stay inside the target project",
+                retryable=False,
+                metadata={"path": raw_path, "target_path": str(project_root)},
+            )
+        )
+    return ok(resolved)
+
+
+def _relative_to_project(project_root: Path, path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(project_root.resolve()))
+    except (OSError, ValueError):
+        return str(path)
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _command_from_tool_input(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
+    value = thaw_json(value)
+    if isinstance(value, str) and value.strip():
+        return tuple(shlex.split(value))
+    if isinstance(value, tuple | list) and value:
+        return tuple(str(item) for item in value)
+    return default
 
 
 def _project_info_value(project_info: ProjectInfo) -> dict[str, Any]:

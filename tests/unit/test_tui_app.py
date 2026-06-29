@@ -7,7 +7,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from loom.tui.tui_app import EventDetailBox, EventFeedWidget, LoomTuiApp, LoopHeader
+from loom.tui.tui_app import EventDetailBox, EventFeedWidget, LoomTuiApp, LoopHeader, _format_event_detail_plain, _format_event_line
 from loom.tui.tui_collector import TuiEvent, TuiEventCollector
 
 
@@ -46,6 +46,65 @@ async def test_tui_app_uses_single_event_feed_with_inline_details():
         feed = app.query_one("#event_feed")
         assert feed.event_count == 1
         assert feed.get_selected_index() == 0
+
+
+def test_event_line_uses_timeline_gutter_and_flat_columns():
+    line = str(
+        _format_event_line(
+            TuiEvent(
+                timestamp=0,
+                event_type="llm.completed",
+                data={
+                    "type": "llm.completed",
+                    "llm_call_id": "llm-1",
+                    "llm_round": 2,
+                    "response": {"usage": {"total_tokens": 42}, "finish_reason": "stop"},
+                },
+                step_number=3,
+                llm_call_id="llm-1",
+            )
+        )
+    )
+
+    assert line.startswith("● ")
+    assert "LLM#2" in line
+    assert "response" in line
+    assert "step 3" in line
+    assert "done" in line
+
+
+def test_event_line_carries_fixed_metadata_that_detail_omits():
+    event = TuiEvent(
+        timestamp=0,
+        event_type="tool.completed",
+        data={
+            "type": "tool.completed",
+            "tool_id": "search",
+            "arguments": {"query": "loom"},
+            "output": {"value": {"summary": "done"}},
+        },
+        run_id="run-1",
+        loop_id="loop-1",
+        trace_id="trace-1",
+        step_number=7,
+        duration_ms=123,
+    )
+
+    line = str(_format_event_line(event))
+    detail = _format_event_detail_plain(event)
+
+    assert "tool.completed" in line
+    assert "run-1" in line
+    assert "loop-1" in line
+    assert "trace-1" in line
+    assert "step 7" in line
+    assert "123ms" in line
+    assert "type:" not in detail
+    assert "run_id:" not in detail
+    assert "loop_id:" not in detail
+    assert "trace_id:" not in detail
+    assert "step:" not in detail
+    assert "duration:" not in detail
 
 
 @pytest.mark.asyncio
@@ -177,7 +236,7 @@ async def test_tui_app_keeps_tool_event_detail_expanded_after_following_events()
 
 
 @pytest.mark.asyncio
-async def test_tui_app_aggregates_llm_input_stream_and_response_and_keeps_it_expanded():
+async def test_tui_app_displays_llm_round_as_request_sse_tool_and_response_rows():
     collector = TuiEventCollector()
     app = LoomTuiApp(collector)
 
@@ -241,13 +300,36 @@ async def test_tui_app_aggregates_llm_input_stream_and_response_and_keeps_it_exp
             ),
             TuiEvent(
                 timestamp=7,
+                event_type="tool.started",
+                data={
+                    "type": "tool.started",
+                    "tool_call_id": "tc-1",
+                    "tool_id": "search",
+                    "input": {"query": "loom"},
+                },
+                tool_call_id="tc-1",
+            ),
+            TuiEvent(
+                timestamp=8,
+                event_type="tool.completed",
+                data={
+                    "type": "tool.completed",
+                    "tool_call_id": "tc-1",
+                    "tool_id": "search",
+                    "input": {"query": "loom"},
+                    "output": {"value": {"summary": "found docs"}},
+                },
+                tool_call_id="tc-1",
+            ),
+            TuiEvent(
+                timestamp=9,
                 event_type="llm.stream.completed",
                 data={"type": "llm.stream.completed", "llm_call_id": "llm-1", "model": "test-model"},
                 llm_call_id="llm-1",
                 duration_ms=17,
             ),
             TuiEvent(
-                timestamp=8,
+                timestamp=10,
                 event_type="llm.completed",
                 data={
                     "type": "llm.completed",
@@ -267,26 +349,38 @@ async def test_tui_app_aggregates_llm_input_stream_and_response_and_keeps_it_exp
 
         app._handle_event(
             TuiEvent(
-                timestamp=9,
+                timestamp=11,
                 event_type="run.completed",
                 data={"type": "run.completed", "outcome": "pass", "steps": 1},
             )
         )
 
         feed = app.query_one("#event_feed", EventFeedWidget)
-        llm_event = feed.get_event(0)
-        llm_item = feed.get_item(0)
+        request_event = feed.get_event(0)
+        sse_event = feed.get_event(1)
+        tool_event = feed.get_event(2)
+        response_event = feed.get_event(3)
+        response_item = feed.get_item(3)
 
-        assert feed.event_count == 2
-        assert llm_event is not None
-        assert llm_event.event_type == "llm.completed"
-        assert llm_event.data["messages"] == [{"role": "user", "content": "inspect project"}]
-        assert llm_event.data["content"] == "answer"
-        assert llm_event.data["reasoning"] == "thinking "
-        assert llm_event.data["reasoning_context"] == "ctx"
-        assert llm_event.data["tool_calls"][0]["arguments"] == '{"query":"loom"}'
-        assert llm_event.data["response"]["content"] == "final answer"
-        assert llm_item.is_expanded is True
+        assert feed.event_count == 5
+        assert request_event is not None
+        assert request_event.event_type == "llm.requested"
+        assert request_event.data["llm_round"] == 1
+        assert request_event.data["messages"] == [{"role": "user", "content": "inspect project"}]
+        assert sse_event is not None
+        assert sse_event.event_type == "llm.stream.completed"
+        assert sse_event.data["content"] == "answer"
+        assert sse_event.data["reasoning"] == "thinking "
+        assert sse_event.data["reasoning_context"] == "ctx"
+        assert tool_event is not None
+        assert tool_event.event_type == "tool.completed"
+        assert tool_event.data["tool_name"] == "search"
+        assert tool_event.data["arguments"] == '{"query":"loom"}'
+        assert response_event is not None
+        assert response_event.event_type == "llm.completed"
+        assert response_event.data["llm_round"] == 1
+        assert response_event.data["response"]["content"] == "final answer"
+        assert response_item.is_expanded is True
 
 
 def test_event_detail_box_includes_tool_result(monkeypatch):
@@ -327,13 +421,81 @@ def test_event_detail_box_includes_tool_result(monkeypatch):
 
     assert cleared == 1
     assert len(writes) == 1
-    assert "Tool Result" in writes[0]
+    assert "●" not in writes[0]
+    assert "┌─" not in writes[0]
+    assert "└─" not in writes[0]
+    assert "fn call" in writes[0]
     assert "search-notes" in writes[0]
-    assert "[dim]input:[/]" in writes[0]
+    assert "[dim]input:[/]" not in writes[0]
     assert '"query": "loom"' in writes[0]
-    assert "[dim]output:[/]" in writes[0]
+    assert "result" in writes[0]
     assert "Live Loom smoke test" in writes[0]
     assert "real tool result" in writes[0]
+
+
+@pytest.mark.asyncio
+async def test_tui_app_copies_selected_detail_as_plain_text(monkeypatch):
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+    copied: list[str] = []
+    monkeypatch.setattr(app, "copy_to_clipboard", copied.append)
+
+    async with app.run_test():
+        app._handle_event(
+            TuiEvent(
+                timestamp=0,
+                event_type="tool.completed",
+                data={
+                    "type": "tool.completed",
+                    "tool_id": "search-notes",
+                    "input": {"query": "loom"},
+                    "output": {"value": {"summary": "found docs"}},
+                },
+            )
+        )
+
+        app.action_copy_detail()
+
+    assert len(copied) == 1
+    assert "fn call" in copied[0]
+    assert "result" in copied[0]
+    assert '"query": "loom"' in copied[0]
+    assert "input:" not in copied[0]
+    assert "[dim]" not in copied[0]
+    assert "[bold" not in copied[0]
+
+
+@pytest.mark.asyncio
+async def test_tui_app_copies_full_transcript_as_plain_text(monkeypatch):
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+    copied: list[str] = []
+    monkeypatch.setattr(app, "copy_to_clipboard", copied.append)
+
+    async with app.run_test():
+        app._handle_event(
+            TuiEvent(
+                timestamp=0,
+                event_type="run.started",
+                data={"type": "run.started", "metadata": {"role": "tester"}},
+            )
+        )
+        app._handle_event(
+            TuiEvent(
+                timestamp=1,
+                event_type="run.completed",
+                data={"type": "run.completed", "outcome": "pass", "steps": 1},
+            )
+        )
+
+        app.action_copy_transcript()
+
+    assert len(copied) == 1
+    assert "LOOP" in copied[0]
+    assert "started" in copied[0]
+    assert "completed" in copied[0]
+    assert "Run Complete" in copied[0]
+    assert "[dim]" not in copied[0]
 
 
 def test_detail_panel_pretty_prints_json_strings(monkeypatch):
@@ -389,7 +551,7 @@ def test_detail_panel_renders_json_string_values_with_real_newlines(monkeypatch)
     assert "alpha\\nbeta" not in writes[0]
 
 
-def test_detail_panel_renders_llm_stream_deltas(monkeypatch):
+def test_detail_panel_renders_llm_content_delta(monkeypatch):
     panel = EventDetailBox()
     writes = []
     monkeypatch.setattr(panel, "write", writes.append)
@@ -402,28 +564,12 @@ def test_detail_panel_renders_llm_stream_deltas(monkeypatch):
             llm_call_id="call-1",
         )
     )
-    panel.set_event(
-        TuiEvent(
-            timestamp=1,
-            event_type="llm.tool_call.arguments.delta",
-            data={
-                "type": "llm.tool_call.arguments.delta",
-                "delta": '{"query":"loom"}',
-                "tool_name": "search",
-                "tool_call_id": "tool-1",
-            },
-            llm_call_id="call-1",
-            tool_call_id="tool-1",
-        )
-    )
 
-    assert "LLM Stream" in writes[0]
+    assert "LLM Stream" not in writes[0]
     assert '"partial": true' in writes[0]
-    assert "Tool Arguments" in writes[1]
-    assert '"query": "loom"' in writes[1]
 
 
-def test_llm_stream_content_renders_at_detail_tail(monkeypatch):
+def test_llm_stream_detail_starts_with_stream_content_and_does_not_render_headers_or_tool_calls(monkeypatch):
     panel = EventDetailBox()
     writes = []
     monkeypatch.setattr(panel, "write", writes.append)
@@ -446,13 +592,46 @@ def test_llm_stream_content_renders_at_detail_tail(monkeypatch):
     )
 
     detail = writes[0]
+    assert detail.startswith("[bold #7aa2f7]thinking:")
     assert detail.index("thinking through evidence") < detail.index("final visible answer")
     assert detail.index("context window") < detail.index("final visible answer")
-    assert detail.index('"query": "loom"') < detail.index("final visible answer")
+    assert "LLM Stream" not in detail
+    assert "model:" not in detail
+    assert "status:" not in detail
+    assert "chunks:" not in detail
+    assert "tool_calls" not in detail
+    assert '"query": "loom"' not in detail
+
+
+def test_llm_response_detail_does_not_render_tool_calls(monkeypatch):
+    panel = EventDetailBox()
+    writes = []
+    monkeypatch.setattr(panel, "write", writes.append)
+
+    panel.set_event(
+        TuiEvent(
+            timestamp=0,
+            event_type="llm.completed",
+            data={
+                "type": "llm.completed",
+                "response": {
+                    "content": "final answer",
+                    "tool_calls": [{"id": "tool-1", "name": "search", "arguments": '{"query":"loom"}'}],
+                    "usage": {"total_tokens": 10},
+                    "finish_reason": "stop",
+                },
+            },
+        )
+    )
+
+    detail = writes[0]
+    assert "final answer" in detail
+    assert "tool_calls" not in detail
+    assert '"query": "loom"' not in detail
 
 
 @pytest.mark.asyncio
-async def test_tui_app_aggregates_llm_stream_tokens_into_one_timeline_event():
+async def test_tui_app_aggregates_llm_stream_tokens_into_one_sse_row():
     collector = TuiEventCollector()
     app = LoomTuiApp(collector)
 

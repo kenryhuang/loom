@@ -16,15 +16,29 @@ class FakeSmokeProvider:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def chat(self, messages, tools=None, cancellation=None):
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
         self.calls += 1
         if self.calls == 1:
             return ok(
                 LlmResponse(
                     content=None,
                     tool_calls=(
-                        LlmToolCall("inspect-call", "inspect-project", "{}"),
-                        LlmToolCall("smoke-call", "run-smoke-test", "{}"),
+                        LlmToolCall("read-call", "read_file", json.dumps({"path": "README.md"})),
+                        LlmToolCall("smoke-call", "shell_execute", json.dumps({"command": [sys.executable, "-c", "print('smoke ok')"]})),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            )
+        if self.calls == 2:
+            return ok(
+                LlmResponse(
+                    content=None,
+                    tool_calls=(
+                        LlmToolCall(
+                            "finish-call",
+                            "finish",
+                            json.dumps({"report": "# Fake LLM Smoke Report\n\nThe persisted trace contains smoke evidence."}),
+                        ),
                     ),
                     finish_reason="tool_calls",
                 )
@@ -95,7 +109,7 @@ def test_real_project_smoke_trace_can_be_analyzed_for_evolution(tmp_path: Path):
 
         assert smoke.ok
         assert trace_path.exists()
-        assert smoke_provider.calls == 2
+        assert smoke_provider.calls == 3
 
         score_provider = FakeEvolutionScoreProvider()
         analyzed = await analyze_trace(

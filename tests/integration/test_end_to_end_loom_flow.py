@@ -75,8 +75,7 @@ def test_end_to_end_llm_loop_runs_tool_and_records_queryable_trace(tmp_path):
                                 {
                                     "reasoning": "The tool result identifies trace-backed loop execution as the next useful path.",
                                     "action": {
-                                        "kind": "tool",
-                                        "target": "search-notes",
+                                        "kind": "custom",
                                         "description": "Use the retrieved trace guidance",
                                         "input": {"query": "loom runtime traces"},
                                     },
@@ -130,7 +129,7 @@ def test_end_to_end_llm_loop_runs_tool_and_records_queryable_trace(tmp_path):
         assert result.metrics.trace_count == 1
         assert len(result.context.state.decisions) == 1
         assert [observation.source for observation in result.context.state.observations] == ["search-notes", "llm"]
-        assert result.context.state.decisions[0].action.target == "search-notes"
+        assert result.context.state.decisions[0].action.kind == "custom"
         assert result.context.state.decisions[0].confidence == 0.92
 
         assert len(http_requests) == 2
@@ -140,7 +139,8 @@ def test_end_to_end_llm_loop_runs_tool_and_records_queryable_trace(tmp_path):
         assert first_request["body"]["model"] == "qwen3.6-max-preview"
         assert first_request["body"]["tools"][0]["function"]["name"] == "search-notes"
         assert [message["role"] for message in first_request["body"]["messages"]] == ["system", "user"]
-        assert [message["role"] for message in http_requests[1][1]["body"]["messages"]] == ["system", "user", "assistant", "tool"]
+        assert [message["role"] for message in http_requests[1][1]["body"]["messages"]] == ["system", "user", "assistant", "tool", "assistant"]
+        assert "Tool execution transcript" in http_requests[1][1]["body"]["messages"][-1]["content"]
 
         assert tool_invocations[0][0] == {"query": "loom runtime traces"}
         assert tool_invocations[0][1]["metadata"]["tool_call_id"] == "call_search_notes"

@@ -35,6 +35,7 @@ pip-wheel-metadata/
 
 # Runtime artifacts
 runs/
+.loom/
 .worktrees/
 
 # Editor and OS-local files

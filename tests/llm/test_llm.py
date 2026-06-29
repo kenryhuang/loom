@@ -127,8 +127,7 @@ def test_llm_step_structured_tool_calls_fallback_and_budget():
                             {
                                 "reasoning": "Tool result is enough",
                                 "action": {
-                                    "kind": "tool",
-                                    "target": "search",
+                                    "kind": "custom",
                                     "description": "Use the search result",
                                     "input": {"query": "loom"},
                                 },
@@ -223,6 +222,344 @@ def test_llm_step_structured_tool_calls_fallback_and_budget():
     asyncio.run(scenario())
 
 
+def test_llm_step_executes_json_tool_action_when_model_does_not_emit_native_tool_call():
+    async def scenario():
+        provider = FakeProvider(
+            [
+                ok(
+                    LlmResponse(
+                        content=None,
+                        tool_calls=(LlmToolCall("call_1", "search", '{"query":"loom"}'),),
+                        finish_reason="tool_calls",
+                    )
+                ),
+                ok(
+                    LlmResponse(
+                        content=json.dumps(
+                            {
+                                "reasoning": "Need another tool result before final answer",
+                                "action": {
+                                    "kind": "tool",
+                                    "target": "search",
+                                    "description": "Search again",
+                                    "input": {"query": "loom traces"},
+                                },
+                                "alternatives": [],
+                                "confidence": 0.8,
+                            }
+                        ),
+                        finish_reason="stop",
+                    )
+                ),
+                ok(
+                    LlmResponse(
+                        content=json.dumps(
+                            {
+                                "reasoning": "All tool evidence is available",
+                                "action": {
+                                    "kind": "custom",
+                                    "description": "Write final answer",
+                                    "input": {"report": "done"},
+                                },
+                                "alternatives": [],
+                                "confidence": 0.9,
+                            }
+                        ),
+                        finish_reason="stop",
+                    )
+                ),
+            ]
+        )
+        tool_calls = []
+
+        async def call_tool(name, input_value, **options):
+            tool_calls.append((name, input_value, options))
+            return ok(Observation(f"{name}-{len(tool_calls)}", name, {"result": input_value}, NOW))
+
+        result = await create_llm_step_function(provider)(make_context(), make_runtime(call_tool=call_tool))
+
+        assert result.ok
+        assert [(name, input_value) for name, input_value, _options in tool_calls] == [
+            ("search", {"query": "loom"}),
+            ("search", {"query": "loom traces"}),
+        ]
+        assert len(provider.messages) == 3
+        assert result.value.context.state.decisions[-1].action.kind == "custom"
+        assert len(result.value.context.state.observations) == 4
+
+    asyncio.run(scenario())
+
+
+def test_llm_step_requests_required_tool_choice_until_required_tools_complete():
+    async def scenario():
+        provider = FakeProvider(
+            [
+                ok(
+                    LlmResponse(
+                        content=None,
+                        tool_calls=(LlmToolCall("call_1", "search", '{"query":"loom"}'),),
+                        finish_reason="tool_calls",
+                    )
+                ),
+                ok(
+                    LlmResponse(
+                        content=json.dumps(
+                            {
+                                "reasoning": "Required tool is complete",
+                                "action": {"kind": "custom", "description": "Write final answer"},
+                                "alternatives": [],
+                                "confidence": 0.9,
+                            }
+                        ),
+                        finish_reason="stop",
+                    )
+                ),
+            ]
+        )
+
+        result = await create_llm_step_function(provider, required_tools=("search",))(make_context(), make_runtime())
+
+        assert result.ok
+        assert provider.messages[0][2] == "required"
+        assert provider.messages[1][2] is None
+
+    asyncio.run(scenario())
+
+
+def test_llm_step_retries_without_required_tool_choice_when_provider_rejects_it():
+    async def scenario():
+        calls = []
+
+        async def http_client(url, request):
+            calls.append((url, request))
+            if len(calls) == 1:
+                return {
+                    "status": 400,
+                    "ok": False,
+                    "json": {
+                        "error": {
+                            "code": "InvalidParameter",
+                            "message": "The tool_choice parameter does not support being set to required or object in thinking mode",
+                        }
+                    },
+                }
+            if len(calls) == 2:
+                return {
+                    "status": 200,
+                    "ok": True,
+                    "json": {
+                        "choices": [
+                            {
+                                "finish_reason": "tool_calls",
+                                "message": {
+                                    "content": None,
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_1",
+                                            "type": "function",
+                                            "function": {"name": "search", "arguments": '{"query":"loom"}'},
+                                        }
+                                    ],
+                                },
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                    },
+                }
+            return {
+                "status": 200,
+                "ok": True,
+                "json": {
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "reasoning": "Required tool is complete",
+                                        "action": {"kind": "custom", "description": "Write final answer"},
+                                        "alternatives": [],
+                                        "confidence": 0.9,
+                                    }
+                                )
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                },
+            }
+
+        provider = create_openai_provider(api_key="key", model="qwen-test", http_client=http_client)
+        result = await create_llm_step_function(provider, required_tools=("search",))(make_context(), make_runtime())
+
+        assert result.ok
+        assert calls[0][1]["body"]["tool_choice"] == "required"
+        assert "tool_choice" not in calls[1][1]["body"]
+        assert "tool_choice" not in calls[2][1]["body"]
+
+    asyncio.run(scenario())
+
+
+def test_llm_step_executes_json_tool_action_with_multiple_targets():
+    async def scenario():
+        provider = FakeProvider(
+            [
+                ok(
+                    LlmResponse(
+                        content=json.dumps(
+                            {
+                                "reasoning": "Need both tools before final answer",
+                                "action": {
+                                    "kind": "tool",
+                                    "target": "search, write",
+                                    "description": "Collect both pieces of evidence",
+                                    "input": {"query": "loom"},
+                                },
+                                "alternatives": [],
+                                "confidence": 0.8,
+                            }
+                        ),
+                        finish_reason="stop",
+                    )
+                ),
+                ok(
+                    LlmResponse(
+                        content=json.dumps(
+                            {
+                                "reasoning": "All evidence is available",
+                                "action": {
+                                    "kind": "custom",
+                                    "description": "Write final answer",
+                                    "input": {"report": "done"},
+                                },
+                                "alternatives": [],
+                                "confidence": 0.9,
+                            }
+                        ),
+                        finish_reason="stop",
+                    )
+                ),
+            ]
+        )
+        tool_calls = []
+
+        async def call_tool(name, input_value, **options):
+            tool_calls.append((name, input_value, options))
+            return ok(Observation(f"{name}-{len(tool_calls)}", name, {"result": input_value}, NOW))
+
+        context = make_context(
+            tools=(
+                ToolRef("search", "Search indexed notes", input_schema={"type": "object"}),
+                ToolRef("write", "Write notes", input_schema={"type": "object"}),
+            )
+        )
+
+        result = await create_llm_step_function(provider)(context, make_runtime(call_tool=call_tool))
+
+        assert result.ok
+        assert [(name, input_value) for name, input_value, _options in tool_calls] == [
+            ("search", {"query": "loom"}),
+            ("write", {"query": "loom"}),
+        ]
+        assert len(provider.messages) == 2
+        assert result.value.context.state.decisions[-1].action.kind == "custom"
+
+    asyncio.run(scenario())
+
+
+def test_llm_step_can_run_unbounded_tool_calls_when_limit_is_none():
+    async def scenario():
+        provider = FakeProvider(
+            [
+                ok(
+                    LlmResponse(
+                        content=None,
+                        tool_calls=tuple(LlmToolCall(f"call_{index}", "search", json.dumps({"query": f"q{index}"})) for index in range(8)),
+                        finish_reason="tool_calls",
+                    )
+                ),
+                ok(
+                    LlmResponse(
+                        content=json.dumps(
+                            {
+                                "reasoning": "All requested tool results are available",
+                                "action": {"kind": "custom", "description": "Finish"},
+                                "alternatives": [],
+                                "confidence": 0.9,
+                            }
+                        )
+                    )
+                ),
+            ]
+        )
+        tool_calls = []
+
+        async def call_tool(name, input_value, **options):
+            tool_calls.append((name, input_value, options))
+            return ok(Observation(f"{name}-{len(tool_calls)}", name, {"result": input_value}, NOW))
+
+        result = await create_llm_step_function(provider, max_tool_calls_per_step=None)(make_context(), make_runtime(call_tool=call_tool))
+
+        assert result.ok
+        assert len(tool_calls) == 8
+
+    asyncio.run(scenario())
+
+
+def test_llm_step_adds_all_tool_calls_and_results_to_assistant_context_message():
+    async def scenario():
+        provider = FakeProvider(
+            [
+                ok(
+                    LlmResponse(
+                        content=None,
+                        tool_calls=(
+                            LlmToolCall("call_1", "search", '{"query":"loom"}'),
+                            LlmToolCall("call_2", "write", '{"content":"summary"}'),
+                        ),
+                        finish_reason="tool_calls",
+                    )
+                ),
+                ok(
+                    LlmResponse(
+                        content=json.dumps(
+                            {
+                                "reasoning": "Both tool results are available",
+                                "action": {"kind": "custom", "description": "Finish"},
+                                "alternatives": [],
+                                "confidence": 0.9,
+                            }
+                        )
+                    )
+                ),
+            ]
+        )
+
+        async def call_tool(name, input_value, **_options):
+            return ok(Observation(f"{name}-obs", name, {"tool": name, "input": input_value}, NOW))
+
+        context = make_context(
+            tools=(
+                ToolRef("search", "Search indexed notes", input_schema={"type": "object"}),
+                ToolRef("write", "Write notes", input_schema={"type": "object"}),
+            )
+        )
+
+        result = await create_llm_step_function(provider)(context, make_runtime(call_tool=call_tool))
+
+        assert result.ok
+        second_request_messages = provider.messages[1][0]
+        assert [message.role for message in second_request_messages] == ["system", "user", "assistant", "tool", "tool", "assistant"]
+        transcript = second_request_messages[-1].content
+        assert "Tool execution transcript" in transcript
+        assert "call_1" in transcript
+        assert "call_2" in transcript
+        assert "search" in transcript
+        assert "write" in transcript
+
+    asyncio.run(scenario())
+
+
 def test_openai_provider_request_parsing_and_error_mapping():
     async def scenario():
         calls = []
@@ -267,12 +604,18 @@ def test_openai_provider_request_parsing_and_error_mapping():
             base_url="https://proxy.example/v1/",
             http_client=http_client,
         )
-        result = await provider.chat([{"role": "user", "content": "hello"}])
+        result = await provider.chat(
+            [{"role": "user", "content": "hello"}],
+            tools=(to_llm_tool(ToolRef("search", "Search notes")),),
+            tool_choice="required",
+        )
 
         assert result.ok
         assert calls[0][0] == "https://proxy.example/v1/chat/completions"
         assert calls[0][1]["headers"]["Authorization"] == "Bearer test-key"
         assert calls[0][1]["body"]["model"] == "gpt-test"
+        assert calls[0][1]["body"]["tools"][0]["function"]["name"] == "search"
+        assert calls[0][1]["body"]["tool_choice"] == "required"
         assert result.value.tool_calls[0].name == "search"
         assert result.value.usage.total_tokens == 18
 
@@ -505,8 +848,7 @@ def test_llm_step_emits_full_provider_io_events():
                             {
                                 "reasoning": "Tool result is enough",
                                 "action": {
-                                    "kind": "tool",
-                                    "target": "search",
+                                    "kind": "custom",
                                     "description": "Use the search result",
                                     "input": {"query": "loom"},
                                 },
@@ -545,7 +887,8 @@ def test_llm_step_emits_full_provider_io_events():
         assert first_request["tools"][0]["function"]["name"] == "search"
         assert first_response["response"].tool_calls[0].name == "search"
         assert first_request["llm_call_id"] == first_response["llm_call_id"]
-        assert [message.role for message in second_request["messages"]] == ["system", "user", "assistant", "tool"]
+        assert [message.role for message in second_request["messages"]] == ["system", "user", "assistant", "tool", "assistant"]
+        assert "Tool execution transcript" in second_request["messages"][-1].content
         assert events[3]["response"].usage.total_tokens == 22
         assert "api_key" not in json.dumps(str(events))
 
@@ -559,8 +902,7 @@ def test_llm_step_streaming_provider_emits_delta_events_and_executes_tool_calls(
             {
                 "reasoning": "Tool result is enough",
                 "action": {
-                    "kind": "tool",
-                    "target": "search",
+                    "kind": "custom",
                     "description": "Use the search result",
                     "input": {"query": "loom"},
                 },
@@ -638,8 +980,8 @@ class FakeProvider:
         self.results = list(results)
         self.messages = []
 
-    async def chat(self, messages, tools=None, cancellation=None):
-        self.messages.append((tuple(messages), tools))
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        self.messages.append((tuple(messages), tools, tool_choice))
         if self.results:
             return self.results.pop(0)
         return ok(LlmResponse(content='{"reasoning":"default","action":{"kind":"none","description":"Stop"},"alternatives":[],"confidence":0.1}'))
@@ -650,13 +992,13 @@ class FakeStreamingProvider(FakeProvider):
         super().__init__([])
         self.streams = list(streams)
 
-    async def stream_chat(self, messages, tools=None, cancellation=None):
-        self.messages.append((tuple(messages), tools))
+    async def stream_chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        self.messages.append((tuple(messages), tools, tool_choice))
         for event in self.streams.pop(0):
             yield event
 
 
-def make_context(max_tokens=None):
+def make_context(max_tokens=None, tools=None):
     observation = Observation("obs-1", "sensor", {"status": "ready"}, NOW)
     action = Action("action-1", "tool", "Search the index", target="search", input={"query": "loom"})
     decision = Decision("decision-1", action, "Need external context", (), 0.75, NOW)
@@ -684,7 +1026,7 @@ def make_context(max_tokens=None):
             ),
             state=StateLayer(observations=(observation,), decisions=(decision,)),
             knowledge=empty_knowledge(facts=(fact,), heuristics=(heuristic,)),
-            affordances=empty_affordances(tools=(ToolRef("search", "Search indexed notes", input_schema={"type": "object"}),)),
+            affordances=empty_affordances(tools=tools or (ToolRef("search", "Search indexed notes", input_schema={"type": "object"}),)),
         )
     )
 

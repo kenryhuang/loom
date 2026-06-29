@@ -24,7 +24,8 @@ async def run_with_tui(
     This function:
     1. Creates a TUI plugin
     2. Runs the loop with the plugin's trace sink
-    3. Returns the run result when complete
+    3. Keeps the TUI in the foreground after run completion until the user presses q
+    4. Returns the run result after the TUI exits
 
     Args:
         loop: The LoopHandle to execute.
@@ -35,7 +36,7 @@ async def run_with_tui(
         metadata: Optional metadata to attach to the run.
 
     Returns:
-        Result containing the RunResult or error.
+        Result containing the RunResult or error after the user exits the TUI.
     """
     run_metadata = dict(metadata or {})
     run_metadata.setdefault("role", loop.definition.identity.role)

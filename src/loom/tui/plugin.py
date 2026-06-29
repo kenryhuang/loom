@@ -19,6 +19,7 @@ class TuiPlugin:
         auto_exit_timeout_seconds: float = 30.0,
     ) -> None:
         self._app_factory = app_factory
+        # Retained for constructor compatibility; TUI now exits only by user action.
         self._auto_exit_timeout_seconds = auto_exit_timeout_seconds
         self.collector: TuiEventCollector | None = None
         self.app: Any | None = None
@@ -41,12 +42,7 @@ class TuiPlugin:
         if self.collector is not None:
             await self.collector.put_sentinel()
         if self._app_task is not None:
-            try:
-                await asyncio.wait_for(self._app_task, timeout=self._auto_exit_timeout_seconds)
-            except TimeoutError:
-                if self.app is not None:
-                    self.app.exit()
-                await self._app_task
+            await self._app_task
         return ok(None)
 
     def _make_app(self, collector: TuiEventCollector) -> Any:

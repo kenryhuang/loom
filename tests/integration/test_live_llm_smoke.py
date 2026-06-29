@@ -23,8 +23,10 @@ from loom.core import (
     ok,
 )
 from loom.llm import (
+    LlmMessage,
     create_env_openai_provider,
     create_llm_step_function,
+    to_llm_tool,
 )
 from loom.observability import InMemoryTraceStore
 from loom.runtime import (
@@ -34,13 +36,81 @@ from loom.runtime import (
 )
 
 
-def test_live_llm_loop_runs_full_runtime_tool_trace_chain():
-    if os.environ.get("LOOM_RUN_LIVE_LLM") != "1":
-        pytest.skip("set LOOM_RUN_LIVE_LLM=1 to run the live LLM full-chain smoke test")
+def _live_env_path() -> Path:
+    return Path(os.environ.get("LOOM_LIVE_ENV_FILE", ".env"))
 
-    env_path = Path(os.environ.get("LOOM_LIVE_ENV_FILE", ".env"))
+
+def _skip_unless_live_llm_enabled(env_path: Path) -> None:
+    if os.environ.get("LOOM_RUN_LIVE_LLM") != "1":
+        pytest.skip("set LOOM_RUN_LIVE_LLM=1 to run live LLM tests against the configured provider")
     if not env_path.exists():
         pytest.skip(f"LLM env file does not exist: {env_path}")
+
+
+def test_live_env_provider_api_basic_chat_completion():
+    env_path = _live_env_path()
+    _skip_unless_live_llm_enabled(env_path)
+
+    async def scenario():
+        provider_result = create_env_openai_provider(
+            env_path=env_path,
+            max_tokens=int(os.environ.get("LOOM_LIVE_MAX_TOKENS", "128")),
+            temperature=float(os.environ.get("LOOM_LIVE_TEMPERATURE", "0")),
+        )
+        assert provider_result.ok, provider_result.error.message
+        provider = provider_result.value
+
+        response = await provider.chat((LlmMessage("user", "Return exactly this text and nothing else: loom-live-provider-ok"),))
+
+        assert response.ok, response.error.message
+        assert response.value.content or response.value.tool_calls
+
+    asyncio.run(scenario())
+
+
+def test_live_env_provider_api_required_tool_choice_contract():
+    env_path = _live_env_path()
+    _skip_unless_live_llm_enabled(env_path)
+
+    async def scenario():
+        provider_result = create_env_openai_provider(
+            env_path=env_path,
+            max_tokens=int(os.environ.get("LOOM_LIVE_MAX_TOKENS", "128")),
+            temperature=float(os.environ.get("LOOM_LIVE_TEMPERATURE", "0")),
+        )
+        assert provider_result.ok, provider_result.error.message
+        provider = provider_result.value
+        tool = to_llm_tool(
+            ToolRef(
+                "diagnose-provider",
+                "Return provider diagnostic data.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"probe": {"type": "string"}},
+                    "required": ["probe"],
+                    "additionalProperties": False,
+                },
+            )
+        )
+
+        response = await provider.chat(
+            (LlmMessage("user", 'Call diagnose-provider with {"probe":"env"}; do not answer in text.'),),
+            tools=(tool,),
+            tool_choice="required",
+        )
+        if not response.ok:
+            message = response.error.message if response.error else "unknown provider error"
+            if "tool_choice" in message or "tool_choice" in str(getattr(response.error, "cause", "")):
+                pytest.xfail(f"configured provider rejects tool_choice=required: {message}")
+            assert response.ok, message
+        assert response.value.tool_calls, f"provider returned no native tool calls; finish_reason={response.value.finish_reason!r}"
+
+    asyncio.run(scenario())
+
+
+def test_live_llm_loop_runs_full_runtime_tool_trace_chain():
+    env_path = _live_env_path()
+    _skip_unless_live_llm_enabled(env_path)
 
     async def scenario():
         provider_result = create_env_openai_provider(

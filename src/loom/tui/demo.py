@@ -67,12 +67,7 @@ async def demo_counter_loop() -> None:
 
     await loop_task
     await asyncio.sleep(0.2)
-
-    try:
-        await asyncio.wait_for(app_task, timeout=60.0)
-    except TimeoutError:
-        app.exit()
-        await app_task
+    await app_task
 
     if result_holder and result_holder[0].ok:
         print(f"\nRun completed: {result_holder[0].value.metrics.steps} steps")
@@ -148,12 +143,7 @@ async def demo_llm_loop() -> None:
 
     await loop_task
     await asyncio.sleep(0.2)
-
-    try:
-        await asyncio.wait_for(app_task, timeout=120.0)
-    except TimeoutError:
-        app.exit()
-        await app_task
+    await app_task
 
     if result_holder and result_holder[0].ok:
         print(f"\nRun completed: {result_holder[0].value.metrics.steps} steps")

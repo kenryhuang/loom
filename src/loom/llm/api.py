@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
@@ -142,6 +143,23 @@ def create_token_tracker() -> TokenTracker:
     return TokenTracker()
 
 
+def _accepts_keyword(callable_value: Any, keyword: str) -> bool:
+    try:
+        signature = inspect.signature(callable_value)
+    except (TypeError, ValueError):
+        return False
+    return keyword in signature.parameters or any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values())
+
+
+def _tool_choice_retryable(error: Any) -> bool:
+    if error is None:
+        return False
+    message = getattr(error, "message", "")
+    cause = getattr(error, "cause", None)
+    text = f"{message} {cause}".lower()
+    return "tool_choice" in text and ("invalidparameter" in text or "not support" in text or "unsupported" in text)
+
+
 def build_system_prompt(context: Context) -> str:
     lines = [
         f"You are the loop brain for this Loom context. Your role is: {context.identity.role}.",
@@ -250,7 +268,8 @@ def create_llm_step_function(
     *,
     prompt_options: dict[str, Any] | None = None,
     enable_tool_calling: bool = True,
-    max_tool_calls_per_step: int = 5,
+    max_tool_calls_per_step: int | None = 5,
+    required_tools: tuple[str, ...] = (),
     tool_selection: ToolSelectionConfig | None = None,
     tool_resolver: Any = None,
     stream: bool = False,
@@ -289,6 +308,8 @@ def create_llm_step_function(
             effective_tools = tuple(t for t in all_tools if t.id in selected_ids)
 
         tools = to_llm_tools(effective_tools) if enable_tool_calling and effective_tools else None
+        effective_tool_ids = frozenset(tool.id for tool in effective_tools)
+        pending_required_tools = {tool_id for tool_id in required_tools if tool_id in effective_tool_ids}
         messages = list(build_messages(prompt_context, **(prompt_options or {})))
         final_response: LlmResponse | None = None
         llm_call_count = 0
@@ -298,6 +319,7 @@ def create_llm_step_function(
         while True:
             llm_call_count += 1
             llm_call_id = f"{trace_id}-llm-{llm_call_count}"
+            tool_choice = "required" if tools and pending_required_tools else None
             requested = await _emit_runtime_event(
                 runtime,
                 {
@@ -310,6 +332,7 @@ def create_llm_step_function(
                     "model": provider.model,
                     "messages": tuple(messages),
                     "tools": tools,
+                    "tool_choice": tool_choice,
                     "at": runtime.now(),
                 },
             )
@@ -324,6 +347,7 @@ def create_llm_step_function(
                 context=context,
                 trace_id=trace_id,
                 llm_call_id=llm_call_id,
+                tool_choice=tool_choice,
                 stream=stream,
             )
             if not response.ok:
@@ -364,45 +388,81 @@ def create_llm_step_function(
             tracker.add(final_response.usage)
             if not tracker.is_within_budget(context.goal.budget.max_tokens):
                 return _token_budget_exceeded(tracker.total, context.goal.budget.max_tokens)
-            if not enable_tool_calling or not final_response.tool_calls:
-                break
-            if tool_call_count >= max_tool_calls_per_step:
-                return _max_tool_calls_exceeded(max_tool_calls_per_step)
 
-            messages.append(
-                LlmMessage(
-                    "assistant",
-                    "" if final_response.content is None else final_response.content,
-                    tool_calls=final_response.tool_calls,
-                )
-            )
-            for tool_call in final_response.tool_calls:
-                if tool_call_count >= max_tool_calls_per_step:
+            if enable_tool_calling and final_response.tool_calls:
+                if max_tool_calls_per_step is not None and tool_call_count >= max_tool_calls_per_step:
                     return _max_tool_calls_exceeded(max_tool_calls_per_step)
-                parsed_input = _parse_tool_arguments(tool_call)
-                if not parsed_input.ok:
-                    return parsed_input
+
+                messages.append(
+                    LlmMessage(
+                        "assistant",
+                        "" if final_response.content is None else final_response.content,
+                        tool_calls=final_response.tool_calls,
+                    )
+                )
+                native_tool_results = []
+                for tool_call in final_response.tool_calls:
+                    if max_tool_calls_per_step is not None and tool_call_count >= max_tool_calls_per_step:
+                        return _max_tool_calls_exceeded(max_tool_calls_per_step)
+                    parsed_input = _parse_tool_arguments(tool_call)
+                    if not parsed_input.ok:
+                        return parsed_input
+                    observation = await runtime.call_tool(
+                        tool_call.name,
+                        parsed_input.value,
+                        metadata={
+                            "tool_call_id": tool_call.id,
+                            "tool_name": tool_call.name,
+                            "model": provider.model,
+                        },
+                    )
+                    if not observation.ok:
+                        return observation
+                    tool_call_count += 1
+                    pending_required_tools.discard(tool_call.name)
+                    tool_observations.append(observation.value)
+                    native_tool_results.append((tool_call, observation.value))
+                    messages.append(
+                        LlmMessage(
+                            "tool",
+                            json.dumps(thaw_json(observation.value.value), separators=(",", ":")),
+                            name=tool_call.name,
+                            tool_call_id=tool_call.id,
+                        )
+                    )
+                messages.append(_native_tool_execution_transcript(native_tool_results))
+                continue
+
+            json_tool_actions = ()
+            if enable_tool_calling:
+                json_tool_actions = _json_tool_actions(_parse_decision(final_response.content, trace_id), effective_tool_ids)
+            if not json_tool_actions:
+                break
+            json_tool_results = []
+            for json_tool_action in json_tool_actions:
+                if max_tool_calls_per_step is not None and tool_call_count >= max_tool_calls_per_step:
+                    return _max_tool_calls_exceeded(max_tool_calls_per_step)
+
+                tool_call_id = f"{llm_call_id}-json-tool-{tool_call_count + 1}"
+                tool_input = {} if json_tool_action.input is None else thaw_json(json_tool_action.input)
                 observation = await runtime.call_tool(
-                    tool_call.name,
-                    parsed_input.value,
+                    json_tool_action.target,
+                    tool_input,
                     metadata={
-                        "tool_call_id": tool_call.id,
-                        "tool_name": tool_call.name,
+                        "tool_call_id": tool_call_id,
+                        "tool_name": json_tool_action.target,
+                        "tool_call_source": "json_action",
                         "model": provider.model,
                     },
                 )
                 if not observation.ok:
                     return observation
                 tool_call_count += 1
+                pending_required_tools.discard(json_tool_action.target or "")
                 tool_observations.append(observation.value)
-                messages.append(
-                    LlmMessage(
-                        "tool",
-                        json.dumps(thaw_json(observation.value.value), separators=(",", ":")),
-                        name=tool_call.name,
-                        tool_call_id=tool_call.id,
-                    )
-                )
+                json_tool_results.append((json_tool_action, observation.value))
+            messages.append(LlmMessage("assistant", "" if final_response.content is None else final_response.content))
+            messages.append(LlmMessage("assistant", _json_tool_result_feedback(tuple(json_tool_results))))
 
         if final_response is None:
             return err(make_loom_error("LLM_FAILED", "LLM provider returned no response", retryable=False))
@@ -508,10 +568,28 @@ async def _chat_or_stream(
     context: Context,
     trace_id: str,
     llm_call_id: str,
+    tool_choice: Any,
     stream: bool,
 ) -> Result:
     if not stream or not hasattr(provider, "stream_chat"):
+        if tool_choice is not None and _accepts_keyword(provider.chat, "tool_choice"):
+            response = await provider.chat(messages, tools=tools, cancellation=cancellation, tool_choice=tool_choice)
+            if response.ok or not _tool_choice_retryable(response.error):
+                return response
         return await provider.chat(messages, tools, cancellation)
+    response = await _consume_streaming_chat(
+        provider,
+        messages,
+        tools,
+        cancellation,
+        runtime,
+        context,
+        trace_id,
+        llm_call_id,
+        tool_choice,
+    )
+    if response.ok or tool_choice is None or not _tool_choice_retryable(response.error):
+        return response
     return await _consume_streaming_chat(
         provider,
         messages,
@@ -521,6 +599,7 @@ async def _chat_or_stream(
         context,
         trace_id,
         llm_call_id,
+        None,
     )
 
 
@@ -533,6 +612,7 @@ async def _consume_streaming_chat(
     context: Context,
     trace_id: str,
     llm_call_id: str,
+    tool_choice: Any,
 ) -> Result:
     step_number = as_step_number(len(context.state.observations))
     started = await _emit_runtime_event(
@@ -553,7 +633,10 @@ async def _consume_streaming_chat(
 
     final_response: LlmResponse | None = None
     try:
-        async for event in provider.stream_chat(messages, tools=tools, cancellation=cancellation):
+        stream_kwargs = {"tools": tools, "cancellation": cancellation}
+        if tool_choice is not None and _accepts_keyword(provider.stream_chat, "tool_choice"):
+            stream_kwargs["tool_choice"] = tool_choice
+        async for event in provider.stream_chat(messages, **stream_kwargs):
             if event.kind == "completed":
                 final_response = event.response
                 continue
@@ -638,7 +721,7 @@ class OpenAIProvider:
     base_url: str = "https://api.openai.com/v1"
     http_client: Any = None
 
-    async def chat(self, messages, tools=None, cancellation=None) -> Result:
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None) -> Result:
         base_url = self.base_url.rstrip("/")
         body = {
             "model": self.model,
@@ -650,6 +733,8 @@ class OpenAIProvider:
             body["max_tokens"] = self.max_tokens
         if tools:
             body["tools"] = tools
+        if tools and tool_choice is not None:
+            body["tool_choice"] = tool_choice
 
         request = {
             "method": "POST",
@@ -687,7 +772,7 @@ class OpenAIProvider:
 
         return _parse_openai_chat_response(response.get("json"))
 
-    async def stream_chat(self, messages, tools=None, cancellation=None):
+    async def stream_chat(self, messages, tools=None, cancellation=None, tool_choice=None):
         base_url = self.base_url.rstrip("/")
         body = {
             "model": self.model,
@@ -700,6 +785,8 @@ class OpenAIProvider:
             body["max_tokens"] = self.max_tokens
         if tools:
             body["tools"] = tools
+        if tools and tool_choice is not None:
+            body["tool_choice"] = tool_choice
 
         request = {
             "method": "POST",
@@ -1173,6 +1260,70 @@ def _parse_tool_arguments(tool_call: LlmToolCall) -> Result:
                 cause={"toolCallId": tool_call.id, "cause": str(exc)},
             )
         )
+
+
+def _native_tool_execution_transcript(results: list[tuple[LlmToolCall, Observation]]) -> LlmMessage:
+    payload = [
+        {
+            "tool_call_id": tool_call.id,
+            "tool": tool_call.name,
+            "arguments": _json_or_text(tool_call.arguments),
+            "result": thaw_json(observation.value),
+        }
+        for tool_call, observation in results
+    ]
+    return LlmMessage("assistant", "Tool execution transcript:\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+
+def _json_or_text(value: str) -> Any:
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _json_tool_actions(parsed: Mapping[str, Any], available_tool_ids: frozenset[str]) -> tuple[Action, ...]:
+    action = parsed.get("action")
+    if not isinstance(action, Action):
+        return ()
+    if action.kind != "tool" or not action.target:
+        return ()
+    targets = _resolve_json_tool_targets(action.target, available_tool_ids)
+    if not targets:
+        return ()
+    if targets == (action.target,):
+        return (action,)
+    return tuple(replace(action, id=f"{action.id}-{index + 1}", target=target) for index, target in enumerate(targets))
+
+
+def _resolve_json_tool_targets(target: str, available_tool_ids: frozenset[str]) -> tuple[str, ...]:
+    if target in available_tool_ids:
+        return (target,)
+
+    matches: list[tuple[int, str]] = []
+    for tool_id in available_tool_ids:
+        pattern = rf"(?<![A-Za-z0-9_-]){re.escape(tool_id)}(?![A-Za-z0-9_-])"
+        matches.extend((match.start(), tool_id) for match in re.finditer(pattern, target))
+
+    ordered = []
+    seen = set()
+    for _position, tool_id in sorted(matches, key=lambda item: item[0]):
+        if tool_id not in seen:
+            ordered.append(tool_id)
+            seen.add(tool_id)
+    return tuple(ordered)
+
+
+def _json_tool_result_feedback(results: tuple[tuple[Action, Observation], ...]) -> str:
+    payload = [
+        {
+            "tool": action.target,
+            "input": None if action.input is None else thaw_json(action.input),
+            "result": thaw_json(observation.value),
+        }
+        for action, observation in results
+    ]
+    return "Tool execution transcript:\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def _parse_decision(content: str | None, trace_id: str) -> dict[str, Any]:
