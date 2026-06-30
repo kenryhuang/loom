@@ -48,7 +48,7 @@ async def test_tui_app_uses_single_event_feed_with_inline_details():
         assert feed.get_selected_index() == 0
 
 
-def test_event_line_uses_timeline_gutter_and_flat_columns():
+def test_event_line_uses_conversation_timeline_text_without_marker():
     line = str(
         _format_event_line(
             TuiEvent(
@@ -66,14 +66,12 @@ def test_event_line_uses_timeline_gutter_and_flat_columns():
         )
     )
 
-    assert line.startswith("● ")
-    assert "LLM#2" in line
-    assert "response" in line
-    assert "step 3" in line
-    assert "done" in line
+    assert not line.startswith("●")
+    assert "Response" in line
+    assert "42 tokens" in line
 
 
-def test_event_line_carries_fixed_metadata_that_detail_omits():
+def test_event_detail_omits_trace_metadata():
     event = TuiEvent(
         timestamp=0,
         event_type="tool.completed",
@@ -90,15 +88,8 @@ def test_event_line_carries_fixed_metadata_that_detail_omits():
         duration_ms=123,
     )
 
-    line = str(_format_event_line(event))
     detail = _format_event_detail_plain(event)
 
-    assert "tool.completed" in line
-    assert "run-1" in line
-    assert "loop-1" in line
-    assert "trace-1" in line
-    assert "step 7" in line
-    assert "123ms" in line
     assert "type:" not in detail
     assert "run_id:" not in detail
     assert "loop_id:" not in detail
@@ -135,6 +126,29 @@ async def test_event_feed_collapses_previous_event_and_uses_fixed_detail_height(
         assert first_item.is_expanded is False
         assert second_item.is_expanded is True
         assert second_item.detail_height == 12
+
+
+@pytest.mark.asyncio
+async def test_event_item_uses_timeline_gutter_and_body_aligned_detail():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test() as pilot:
+        app._handle_event(
+            TuiEvent(
+                timestamp=0,
+                event_type="tool.completed",
+                data={"type": "tool.completed", "tool_id": "search", "input": {"query": "loom"}, "output": {"value": "ok"}},
+            )
+        )
+        await pilot.pause()
+
+        item = app.query_one("#event_feed", EventFeedWidget).get_item(0)
+
+        assert len(list(item.query(".event-gutter"))) == 1
+        assert len(list(item.query(".event-body"))) == 1
+        assert len(list(item.query(".event-summary"))) == 1
+        assert len(list(item.query(".event-detail"))) == 1
 
 
 @pytest.mark.asyncio
@@ -380,6 +394,7 @@ async def test_tui_app_displays_llm_round_as_request_sse_tool_and_response_rows(
         assert response_event.event_type == "llm.completed"
         assert response_event.data["llm_round"] == 1
         assert response_event.data["response"]["content"] == "final answer"
+        assert feed.get_item(1).is_expanded is False
         assert response_item.is_expanded is True
 
 
@@ -424,11 +439,11 @@ def test_event_detail_box_includes_tool_result(monkeypatch):
     assert "●" not in writes[0]
     assert "┌─" not in writes[0]
     assert "└─" not in writes[0]
-    assert "fn call" in writes[0]
+    assert "IN" in writes[0]
+    assert "OUT" in writes[0]
     assert "search-notes" in writes[0]
     assert "[dim]input:[/]" not in writes[0]
     assert '"query": "loom"' in writes[0]
-    assert "result" in writes[0]
     assert "Live Loom smoke test" in writes[0]
     assert "real tool result" in writes[0]
 
@@ -457,8 +472,8 @@ async def test_tui_app_copies_selected_detail_as_plain_text(monkeypatch):
         app.action_copy_detail()
 
     assert len(copied) == 1
-    assert "fn call" in copied[0]
-    assert "result" in copied[0]
+    assert "IN" in copied[0]
+    assert "OUT" in copied[0]
     assert '"query": "loom"' in copied[0]
     assert "input:" not in copied[0]
     assert "[dim]" not in copied[0]
@@ -491,9 +506,8 @@ async def test_tui_app_copies_full_transcript_as_plain_text(monkeypatch):
         app.action_copy_transcript()
 
     assert len(copied) == 1
-    assert "LOOP" in copied[0]
-    assert "started" in copied[0]
-    assert "completed" in copied[0]
+    assert "Run tester" in copied[0]
+    assert "Run completed pass" in copied[0]
     assert "Run Complete" in copied[0]
     assert "[dim]" not in copied[0]
 
@@ -674,7 +688,40 @@ async def test_tui_app_aggregates_llm_stream_tokens_into_one_sse_row():
         assert stream_event.event_type == "llm.stream.completed"
         assert stream_event.duration_ms == 42
         assert stream_event.data["content"] == "hello world"
+        assert stream_item.is_expanded is False
+
+
+@pytest.mark.asyncio
+async def test_tui_app_stream_detail_can_be_opened_after_default_collapse():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test():
+        for event in (
+            TuiEvent(
+                timestamp=0,
+                event_type="llm.stream.started",
+                data={"type": "llm.stream.started", "llm_call_id": "call-1", "model": "test-model"},
+                llm_call_id="call-1",
+            ),
+            TuiEvent(
+                timestamp=1,
+                event_type="llm.reasoning.delta",
+                data={"type": "llm.reasoning.delta", "llm_call_id": "call-1", "delta": "thinking live"},
+                llm_call_id="call-1",
+            ),
+        ):
+            app._handle_event(event)
+
+        feed = app.query_one("#event_feed", EventFeedWidget)
+        stream_item = feed.get_item(0)
+
+        assert stream_item.is_expanded is False
+
+        feed.toggle_selected_detail()
+
         assert stream_item.is_expanded is True
+        assert "thinking live" in _format_event_detail_plain(stream_item.event)
 
 
 def test_detail_panel_renders_llm_completed_report_with_real_newlines(monkeypatch):

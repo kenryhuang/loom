@@ -133,6 +133,9 @@ class _LlmStreamState:
             event_type = "llm.requested"
         data = dict(self.metadata)
         status = "failed" if self.failed else "completed" if self.completed else "streaming" if self.stream_started else "requested"
+        elapsed_ms = self.duration_ms
+        if elapsed_ms is None:
+            elapsed_ms = max(0, int((time.time() - self.first_event.timestamp) * 1000)) if self.first_event.timestamp else None
         data.update(
             {
                 "type": event_type,
@@ -141,8 +144,11 @@ class _LlmStreamState:
                 "reasoning": "".join(self.reasoning_parts),
                 "reasoning_context": "".join(self.reasoning_context_parts),
                 "delta_count": self.delta_count,
+                "token_count": self.delta_count,
             }
         )
+        if elapsed_ms is not None:
+            data["elapsed_ms"] = elapsed_ms
         if self.response is not None:
             data["response"] = self.response
         if self.error is not None:
@@ -256,37 +262,106 @@ def _event_tool_execution_key(event: TuiEvent) -> str:
 
 
 def _format_event_line(event: TuiEvent) -> Text:
-    """Format one flat timeline row with fixed event metadata columns."""
-    scope, scope_color = _event_scope(event)
-    description = _event_description(event)
-    step = "-" if event.step_number is None else f"step {event.step_number}"
-    duration = "-" if event.duration_ms is None else f"{event.duration_ms}ms"
-    status = _event_status(event)
-
-    parts: list[tuple[str, str]] = [
-        ("● ", scope_color),
-        (f"{scope:<8}", scope_color),
-        (_row_cell(event.event_type, 22), COLORS["text_bright"]),
-        (_row_cell(description, 36), COLORS["text"]),
-        (_row_cell(event.run_id, 14), COLORS["text_dim"]),
-        (_row_cell(event.loop_id, 14), COLORS["text_dim"]),
-        (_row_cell(event.trace_id, 14), COLORS["text_dim"]),
-        (_row_cell(step, 8), COLORS["text_dim"]),
-        (_row_cell(duration, 8), COLORS["text_dim"]),
-        (status, _status_color(status)),
-    ]
+    """Format the event text that sits to the right of the timeline gutter."""
+    title, description, color = _event_conversation_parts(event)
     text = Text()
-    for content, style_color in parts:
-        text.append(content, style=style_color)
+    text.append(title, style=f"bold {color}" if title else color)
+    if description:
+        text.append(" ")
+        text.append(_truncate_inline(description, 96), style=COLORS["text_dim"])
     return text
 
 
-def _row_cell(value: Any, width: int) -> str:
-    text = "-" if value is None or value == "" else str(value)
-    text = " ".join(text.split())
-    if len(text) > width:
-        text = text[: max(0, width - 2)] + ".."
-    return f"{text:<{width}}"
+def _event_conversation_parts(event: TuiEvent) -> tuple[str, str, str]:
+    data = event.data
+    if event.event_type in {"llm.stream.started", "llm.stream.completed", "llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
+        elapsed = _format_seconds(data.get("elapsed_ms") or event.duration_ms)
+        token_count = int(data.get("token_count") or data.get("delta_count") or 0)
+        suffix = "tokens" if token_count != 1 else "token"
+        return f"Thought for {elapsed}", f"{token_count} {suffix} >", COLORS["text_dim"]
+
+    if event.event_type == "llm.completed":
+        response = data.get("response", {})
+        usage = response.get("usage", {}) if isinstance(response, dict) else {}
+        total = usage.get("total_tokens", 0) if isinstance(usage, dict) else 0
+        return "Response", f"{total} tokens" if total else "", COLORS["text"]
+
+    if event.event_type == "llm.requested":
+        model = data.get("model") or "model"
+        messages = data.get("messages", [])
+        tools = data.get("tools", [])
+        message_count = len(messages) if isinstance(messages, list | tuple) else 0
+        tool_count = len(tools) if isinstance(tools, list | tuple) else 0
+        return "Request", f"{model} · {message_count} messages · {tool_count} tools", COLORS["text_dim"]
+
+    if event.event_type == "llm.failed":
+        return "LLM failed", str(event.error or data.get("error") or ""), COLORS["red"]
+
+    if event.event_type.startswith("tool."):
+        return _tool_event_title(data), _tool_event_preview(data), _event_marker_color(event)
+
+    if event.event_type == "run.started":
+        meta = data.get("metadata", {})
+        if isinstance(meta, dict):
+            return "Run", str(meta.get("role") or meta.get("objective") or data.get("context_id") or "started"), COLORS["text"]
+        return "Run", str(data.get("context_id") or "started"), COLORS["text"]
+
+    if event.event_type == "run.completed":
+        return "Run completed", f"{data.get('outcome', 'done')} · {data.get('steps', 0)} steps", COLORS["green"]
+
+    if event.event_type == "step.started":
+        return "Step", f"{event.step_number} started" if event.step_number is not None else "started", COLORS["cyan"]
+
+    if event.event_type == "step.completed":
+        trace = data.get("trace", {})
+        outcome = trace.get("outcome") if isinstance(trace, dict) else data.get("outcome")
+        return "Step completed", str(outcome or ""), COLORS["cyan"]
+
+    if event.event_type.startswith("tool_selection."):
+        return "Tool selection", _event_description(event), COLORS["teal"]
+
+    return event.event_type, _event_description(event), COLORS["text"]
+
+
+def _format_seconds(value: Any) -> str:
+    if not isinstance(value, int | float) or value <= 0:
+        return "0s"
+    seconds = max(0, int(round(value / 1000)))
+    return f"{seconds}s"
+
+
+def _truncate_inline(value: str, max_chars: int) -> str:
+    text = " ".join(_normalize_display_text(str(value)).split())
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3] + "..."
+
+
+def _tool_event_title(data: dict[str, Any]) -> str:
+    name = str(data.get("tool_name") or data.get("tool_id") or data.get("tool_call_id") or "Tool")
+    display = {
+        "read_file": "Read",
+        "write_file": "Write",
+        "shell_execute": "Bash",
+        "finish": "Finish",
+    }.get(name)
+    return display or name.replace("_", " ").title()
+
+
+def _tool_event_preview(data: dict[str, Any]) -> str:
+    arguments = _tool_arguments(data)
+    if arguments is None:
+        return ""
+    parsed = _jsonish_value(arguments)
+    value = arguments if parsed is None else parsed
+    if isinstance(value, dict):
+        for key in ("path", "file", "command", "cmd", "query", "description"):
+            if key in value:
+                item = value[key]
+                if isinstance(item, list | tuple):
+                    return _truncate_inline(" ".join(str(part) for part in item), 96)
+                return _truncate_inline(str(item), 96)
+    return _truncate_inline(_compact_inline(value, max_chars=120), 96)
 
 
 def _format_event_line_plain(event: TuiEvent) -> str:
@@ -439,6 +514,30 @@ def _status_color(status: str) -> str:
     return COLORS["text_dim"]
 
 
+def _event_marker_color(event: TuiEvent) -> str:
+    if event.event_type.endswith(".failed"):
+        return COLORS["red"]
+    if event.event_type.startswith("tool.") and event.event_type != "tool.started":
+        return COLORS["green"]
+    if event.event_type == "tool.started":
+        return COLORS["orange"]
+    if event.event_type.startswith("llm.stream") or event.event_type in {"llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
+        return COLORS["text_dim"]
+    if event.event_type.startswith("llm."):
+        return COLORS["text_dim"]
+    if event.event_type.startswith("run.") or event.event_type.startswith("step."):
+        return COLORS["text_dim"]
+    return COLORS["text_dim"]
+
+
+def _format_event_gutter(event: TuiEvent, *, expanded: bool) -> str:
+    color = _event_marker_color(event)
+    line_count = EventDetailBox.DETAIL_HEIGHT + 1 if expanded else 1
+    lines = [f"[{color}]●[/]"]
+    lines.extend(f"[{COLORS['border']}]│[/]" for _ in range(line_count))
+    return "\n".join(lines)
+
+
 def _format_event_detail(event: TuiEvent) -> str:
     """Format full event detail for the detail panel."""
     lines: list[str] = []
@@ -487,23 +586,22 @@ def _format_event_detail(event: TuiEvent) -> str:
         lines.append("")
 
     elif event.event_type == "tool.started":
-        _append_tool_call_line(lines, data)
+        _append_tool_detail_input(lines, data)
         lines.append("")
 
     elif event.event_type == "tool.completed":
-        _append_tool_call_line(lines, data)
-        lines.append(f"[bold {COLORS['green']}]result[/]")
+        _append_tool_detail_input(lines, data)
+        lines.append(f"[bold {COLORS['green']}]OUT[/]")
         out = data.get("output")
         if out is not None:
-            lines.append("[dim]output:[/]")
             value = out.value if hasattr(out, "value") else out
             if not _append_jsonish(lines, value, indent="  "):
                 lines.append(f"  {value}")
         lines.append("")
 
     elif event.event_type == "tool.failed":
-        _append_tool_call_line(lines, data)
-        lines.append(f"[bold {COLORS['red']}]result[/]")
+        _append_tool_detail_input(lines, data)
+        lines.append(f"[bold {COLORS['red']}]OUT[/]")
         err_data = data.get("error") or event.error
         if err_data:
             lines.append(f"[{COLORS['red']}]error:[/] {err_data}")
@@ -600,13 +698,18 @@ def _format_event_detail(event: TuiEvent) -> str:
     return "\n".join(lines)
 
 
-def _append_tool_call_line(lines: list[str], data: dict[str, Any]) -> None:
+def _append_tool_detail_input(lines: list[str], data: dict[str, Any]) -> None:
+    lines.append(f"[bold {COLORS['orange']}]IN[/]")
     name = data.get("tool_name") or data.get("tool_id") or data.get("tool_call_id") or "?"
-    arguments = data.get("arguments") if "arguments" in data else data.get("input")
+    arguments = _tool_arguments(data)
     if arguments is None:
-        lines.append(f"[bold {COLORS['orange']}]fn call:[/] {name}")
+        lines.append(f"  {name}")
         return
-    lines.append(f"[bold {COLORS['orange']}]fn call:[/] {name} {_compact_inline(arguments)}")
+    lines.append(f"  {name} {_compact_inline(arguments)}")
+
+
+def _tool_arguments(data: dict[str, Any]) -> Any | None:
+    return data.get("arguments") if "arguments" in data else data.get("input")
 
 
 def _compact_inline(value: Any, *, max_chars: int = 800) -> str:
@@ -849,14 +952,27 @@ class EventItem(Container):
         width: 100%;
         height: auto;
         min-height: 1;
+        layout: horizontal;
     }}
     EventItem.-selected {{
         background: {COLORS["bg_dark"]};
     }}
+    .event-gutter {{
+        width: 3;
+        min-width: 3;
+        height: auto;
+        padding: 0;
+        content-align: center top;
+    }}
+    .event-body {{
+        width: 1fr;
+        height: auto;
+        padding: 0;
+    }}
     .event-summary {{
         height: 1;
         color: {COLORS["text"]};
-        padding: 0 1;
+        padding: 0;
     }}
     .event-summary:hover {{
         background: {COLORS["border"]};
@@ -870,12 +986,15 @@ class EventItem(Container):
         self.is_selected = selected
         self.is_pinned_expanded = pinned_expanded
         self.detail_height = EventDetailBox.DETAIL_HEIGHT
+        self._gutter = Label(_format_event_gutter(self.event, expanded=self.is_expanded), classes="event-gutter")
         self._summary = Label(_format_event_line(self.event), classes="event-summary")
         self._detail = EventDetailBox(classes="event-detail")
 
     def compose(self) -> ComposeResult:
-        yield self._summary
-        yield self._detail
+        yield self._gutter
+        with Container(classes="event-body"):
+            yield self._summary
+            yield self._detail
 
     def on_mount(self) -> None:
         self._apply_event()
@@ -898,7 +1017,12 @@ class EventItem(Container):
             self.is_pinned_expanded = False
         self.set_expanded(not self.is_expanded)
 
+    def on_click(self, event: Any) -> None:
+        event.stop()
+        self.toggle_expanded()
+
     def _apply_event(self) -> None:
+        self._gutter.update(_format_event_gutter(self.event, expanded=self.is_expanded))
         self._summary.update(_format_event_line(self.event))
         self._detail.set_event(self.event)
 
@@ -908,6 +1032,7 @@ class EventItem(Container):
         else:
             self.remove_class("-selected")
         self._detail.display = self.is_expanded
+        self._gutter.update(_format_event_gutter(self.event, expanded=self.is_expanded))
 
 
 class EventFeedWidget(VerticalScroll):
@@ -937,17 +1062,18 @@ class EventFeedWidget(VerticalScroll):
         )
         yield Static("", classes="event-feed-separator")
 
-    def add_event(self, event: TuiEvent, *, pinned_expanded: bool = False) -> None:
+    def add_event(self, event: TuiEvent, *, pinned_expanded: bool = False, expanded: bool = True, selected: bool = True) -> None:
         """Append an event item and expand it as the active event."""
         for item in self._event_items:
             item.set_selected(False)
             if not item.is_pinned_expanded:
                 item.set_expanded(False)
 
-        item = EventItem(event, expanded=True, selected=True, pinned_expanded=pinned_expanded)
+        item = EventItem(event, expanded=expanded, selected=selected, pinned_expanded=pinned_expanded)
         self.mount(item)
         self._event_items.append(item)
-        self._selected_index = len(self._event_items) - 1
+        if selected:
+            self._selected_index = len(self._event_items) - 1
         self.scroll_end(animate=False)
 
     def update_event(self, index: int, event: TuiEvent) -> None:
@@ -973,7 +1099,7 @@ class EventFeedWidget(VerticalScroll):
     def event_count(self) -> int:
         return len(self._event_items)
 
-    def select_event(self, index: int) -> TuiEvent | None:
+    def select_event(self, index: int, *, expand: bool = True) -> TuiEvent | None:
         if not 0 <= index < len(self._event_items):
             return None
 
@@ -986,7 +1112,8 @@ class EventFeedWidget(VerticalScroll):
         self._selected_index = index
         item = self._event_items[index]
         item.set_selected(True)
-        item.set_expanded(True)
+        if expand:
+            item.set_expanded(True)
         return item.event
 
     def toggle_selected_detail(self) -> None:
@@ -1202,13 +1329,13 @@ class LoomTuiApp(App[None]):
         if stream is None:
             stream = _LlmStreamState.from_event(event)
             self._llm_streams[llm_call_id] = stream
-            feed.add_event(stream.current_event or event, pinned_expanded=True)
+            feed.add_event(stream.current_event or event, expanded=False)
             self._llm_stream_indices[llm_call_id] = feed.event_count - 1
         else:
             aggregate = stream.absorb(event)
             feed.update_event(self._llm_stream_indices[llm_call_id], aggregate)
+            feed.scroll_end(animate=False)
 
-        feed.select_event(self._llm_stream_indices[llm_call_id])
         return True
 
     def _with_llm_round(self, event: TuiEvent, llm_call_id: str) -> TuiEvent:
