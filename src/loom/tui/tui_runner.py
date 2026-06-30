@@ -1,13 +1,16 @@
-"""Runner that executes a Loom loop and streams events to the TUI."""
+"""Runners that stream Loom events to the TUI."""
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from loom.core.models import Context, Result
 from loom.runtime.engine import CancellationToken, LoopHandle
 from loom.runtime.plugins import run_with_plugins
 from loom.tui.plugin import TuiPlugin
+from loom.tui.tui_collector import TuiEventCollector
 
 
 async def run_with_tui(
@@ -50,3 +53,38 @@ async def run_with_tui(
         max_steps=max_steps,
         metadata=run_metadata,
     )
+
+
+async def run_job_with_tui(
+    job: Callable[[TuiEventCollector], Awaitable[Result]],
+    *,
+    role: str,
+    goal: str,
+    app_factory: Callable[[TuiEventCollector], Any] | None = None,
+) -> Result:
+    """Run an arbitrary async job while showing the shared Loom TUI.
+
+    This is for event-producing jobs that are not runtime ``LoopHandle`` runs,
+    such as trace evolution analysis. The job receives the same collector used
+    by ``TuiPlugin``, so it can emit the same event protocol as normal loops.
+    """
+    collector = TuiEventCollector()
+    app = _make_app(collector, app_factory)
+    app.set_loop_info(role=role, goal=goal)
+    app_task = asyncio.create_task(app.run_async())
+    try:
+        return await job(collector)
+    finally:
+        await collector.put_sentinel()
+        await app_task
+
+
+def _make_app(collector: TuiEventCollector, app_factory: Callable[[TuiEventCollector], Any] | None) -> Any:
+    if app_factory is not None:
+        return app_factory(collector)
+    from loom.tui.tui_app import LoomTuiApp
+
+    return LoomTuiApp(collector)
+
+
+__all__ = ["run_job_with_tui", "run_with_tui"]

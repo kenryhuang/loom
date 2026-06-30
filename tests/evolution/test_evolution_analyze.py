@@ -1,8 +1,10 @@
 import asyncio
 import json
+import subprocess
+import sys
 
 from loom.core import err, make_loom_error, ok
-from loom.evolution.analyze import AnalyzeConfig, analyze_trace, parse_args
+from loom.evolution.analyze import AnalyzeConfig, analyze_trace, parse_args, parse_run_options, run_analyze_trace_with_tui
 from loom.evolution.scoring import SCORE_DIMENSIONS
 from loom.llm import LlmResponse, TokenUsage
 
@@ -48,6 +50,37 @@ class RecordingScoreProvider(FakeScoreProvider):
     async def chat(self, messages, tools=None, cancellation=None):
         self.calls += 1
         return await super().chat(messages, tools=tools, cancellation=cancellation)
+
+
+class RecordingEventSink:
+    def __init__(self) -> None:
+        self.events = []
+
+    async def emit(self, event):
+        self.events.append(event)
+        return ok(None)
+
+
+class FakeTuiApp:
+    instances = []
+
+    def __init__(self, collector) -> None:
+        self.collector = collector
+        self.role = ""
+        self.goal = ""
+        self.events = []
+        FakeTuiApp.instances.append(self)
+
+    def set_loop_info(self, *, role, goal):
+        self.role = role
+        self.goal = goal
+
+    async def run_async(self):
+        while True:
+            event = await self.collector.queue.get()
+            self.events.append(event)
+            if event.event_type == "_tui_done":
+                return
 
 
 def _write_trace(path):
@@ -183,12 +216,43 @@ def test_parse_args_accepts_trace_and_output_paths(tmp_path):
     assert options.max_proposals == 3
 
 
+def test_parse_run_options_accepts_tui_flag(tmp_path):
+    options = parse_run_options(
+        (
+            "--trace-path",
+            str(tmp_path / "trace.jsonl"),
+            "--out-dir",
+            str(tmp_path / "evolution"),
+            "--tui",
+        )
+    )
+
+    assert options.config.trace_path == tmp_path / "trace.jsonl"
+    assert options.config.out_dir == tmp_path / "evolution"
+    assert options.tui is True
+
+
 def test_package_exports_analyzer_cli_contracts():
     from loom.evolution import main as package_main
     from loom.evolution import parse_args as package_parse_args
+    from loom.evolution import parse_run_options as package_parse_run_options
 
     assert package_parse_args is not None
+    assert package_parse_run_options is not None
     assert package_main is not None
+
+
+def test_analyze_module_cli_help_does_not_warn_about_preimported_module():
+    result = subprocess.run(
+        [sys.executable, "-m", "loom.evolution.analyze", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "RuntimeWarning" not in result.stderr
+    assert "Analyze Loom trace JSONL" in result.stdout
 
 
 def test_analyze_trace_scores_and_writes_artifacts(tmp_path):
@@ -213,6 +277,64 @@ def test_analyze_trace_scores_and_writes_artifacts(tmp_path):
         assert len(result.value.proposals) == 1
         assert result.value.artifacts.report_path.exists()
         assert result.value.report == result.value.artifacts.report_path.read_text(encoding="utf-8")
+
+    asyncio.run(scenario())
+
+
+def test_analyze_trace_emits_tui_style_events(tmp_path):
+    async def scenario():
+        trace_path = tmp_path / "trace.jsonl"
+        _write_trace(trace_path)
+        sink = RecordingEventSink()
+
+        result = await analyze_trace(
+            AnalyzeConfig(trace_path=trace_path, out_dir=tmp_path / "evolution", min_signal_frequency=1),
+            provider=FakeScoreProvider(),
+            event_sink=sink,
+        )
+
+        assert result.ok
+        event_types = [event["type"] for event in sink.events]
+        assert event_types == [
+            "run.started",
+            "step.started",
+            "llm.requested",
+            "llm.completed",
+            "step.completed",
+            "evolution.signals.generated",
+            "evolution.proposals.generated",
+            "evolution.artifacts.written",
+            "run.completed",
+        ]
+        request = sink.events[2]
+        assert request["model"] == "fake-score-model"
+        assert len(request["messages"]) == 2
+        assert request["tools"] is None
+        assert sink.events[4]["trace"]["outcome"] == "scored"
+        assert sink.events[-1]["outcome"] == "pass"
+        assert sink.events[-1]["proposal_count"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_run_analyze_trace_with_tui_uses_shared_tui_runner(tmp_path):
+    async def scenario():
+        trace_path = tmp_path / "trace.jsonl"
+        _write_trace(trace_path)
+        FakeTuiApp.instances = []
+
+        result = await run_analyze_trace_with_tui(
+            AnalyzeConfig(trace_path=trace_path, out_dir=tmp_path / "evolution", min_signal_frequency=1),
+            provider=FakeScoreProvider(),
+            app_factory=FakeTuiApp,
+        )
+
+        assert result.ok
+        app = FakeTuiApp.instances[0]
+        assert app.role == "trace evolution analyzer"
+        assert app.goal == f"Analyze trace {trace_path}"
+        assert [event.event_type for event in app.events][-1] == "_tui_done"
+        assert "llm.requested" in [event.event_type for event in app.events]
 
     asyncio.run(scenario())
 

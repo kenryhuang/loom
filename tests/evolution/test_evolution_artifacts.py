@@ -76,6 +76,28 @@ def test_render_evolution_report_summarizes_counts_and_proposals():
     assert "Improve system prompt" in report
 
 
+def test_render_evolution_report_explains_empty_signals_after_successful_scoring():
+    good_score = StepScore(
+        run_id="run-1",
+        trace_id="trace-1",
+        step_number=0,
+        overall=1.0,
+        dimensions={"prompt_following": 1.0},
+        attribution={},
+        proposed_fixes=(),
+        evidence_event_hashes=("hash-1",),
+        confidence=1.0,
+        evaluator_model="fake-score-model",
+        token_usage=TokenUsage(1, 2, 3),
+    )
+
+    report = render_evolution_report((good_score,), (), ())
+
+    assert "average_overall: 1.00" in report
+    assert "No signals generated after scoring 1 step(s)." in report
+    assert "no repeated low-quality or improvement attribution met the gate" in report
+
+
 def test_render_evolution_report_includes_operator_context():
     report = render_evolution_report((_score(),), (_signal(),), (_proposal(),))
 

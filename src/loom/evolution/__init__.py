@@ -1,6 +1,6 @@
 """Evolution public API for Loom."""
 
-from loom.evolution.analyze import AnalyzeConfig, AnalyzeResult, analyze_trace, main, parse_args
+from loom.evolution._exports import lazy_analyze_export
 from loom.evolution.episodes import StepEpisode, TraceRecord, build_step_episodes, load_trace_records
 from loom.evolution.mutations import (
     CompositionEdge,
@@ -30,9 +30,12 @@ from loom.evolution.mutations import (
 from loom.evolution.proposals import EvolutionProposal, EvolutionSignal, ProposalGateConfig
 from loom.evolution.scoring import LlmStepScorer, StepScore
 
+__getattr__ = lazy_analyze_export(globals())
+
 __all__ = [
     "AnalyzeConfig",
     "AnalyzeResult",
+    "AnalyzeRunOptions",
     "CompositionEdge",
     "CompositionGraph",
     "CompositionNode",
@@ -65,6 +68,8 @@ __all__ = [
     "load_trace_records",
     "main",
     "parse_args",
+    "parse_run_options",
+    "run_analyze_trace_with_tui",
     "run_shadow_evaluation",
     "validate_composition_graph",
     "validate_mutation_bundle_shape",

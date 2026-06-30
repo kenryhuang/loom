@@ -69,6 +69,7 @@ def test_build_step_scoring_messages_contains_episode_evidence():
 
     assert messages[0].role == "system"
     assert "step evolution judge" in messages[0].content.lower()
+    assert "only include attribution for problems" in messages[0].content.lower()
     assert "trace-1" in messages[1].content
     assert "inspect-project" in messages[1].content
     assert "tokenUsage" in messages[1].content
@@ -116,6 +117,37 @@ def test_parse_step_score_returns_structured_score():
     assert score.token_usage.total_tokens == 3
 
 
+def test_parse_step_score_normalizes_common_evaluator_schema_variants():
+    payload = {
+        "overall": 5,
+        "dimensions": {
+            "tool_usage": 4,
+            "instruction_following": 3,
+            "reasoning": 2,
+            "efficiency": 1,
+        },
+        "attribution": "Tool usage was strong, but the prompt contract could be clearer.",
+        "proposed_fixes": [],
+        "confidence": "80%",
+    }
+
+    score = parse_step_score(
+        json.dumps(payload),
+        _episode(),
+        evaluator_model="fake-score-model",
+        token_usage=TokenUsage(),
+    ).unwrap()
+
+    assert score.overall == 1.0
+    assert score.dimensions["tool_choice_quality"] == 0.8
+    assert score.dimensions["tool_argument_quality"] == 0.8
+    assert score.dimensions["prompt_following"] == 0.6
+    assert score.dimensions["task_progress"] == 0.4
+    assert score.dimensions["cost_efficiency"] == 0.2
+    assert score.attribution["general"] == ("Tool usage was strong, but the prompt contract could be clearer.",)
+    assert score.confidence == 0.8
+
+
 def test_parse_step_score_rejects_invalid_json():
     result = parse_step_score("not-json", _episode(), evaluator_model="fake-score-model", token_usage=TokenUsage())
 
@@ -158,7 +190,6 @@ def test_parse_step_score_rejects_out_of_range_or_non_numeric_scores():
 
 def test_parse_step_score_rejects_malformed_attribution_and_fixes():
     cases = [
-        {"attribution": ["system_prompt"]},
         {"attribution": {"system_prompt": "bad"}},
         {"attribution": {"system_prompt": [7]}},
         {"proposed_fixes": "Clarify JSON."},

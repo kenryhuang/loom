@@ -320,6 +320,9 @@ def _event_conversation_parts(event: TuiEvent) -> tuple[str, str, str]:
     if event.event_type.startswith("tool_selection."):
         return "Tool selection", _event_description(event), COLORS["teal"]
 
+    if event.event_type.startswith("evolution."):
+        return "Evolution", _event_description(event), COLORS["teal"]
+
     return event.event_type, _event_description(event), COLORS["text"]
 
 
@@ -486,6 +489,15 @@ def _event_description(event: TuiEvent) -> str:
         return f"{len(available)} available tools" if isinstance(available, list) else "select tools"
     if event.event_type == "tool_selection.failed":
         return str(event.error or "tool selection failed")
+    if event.event_type == "evolution.signals.generated":
+        return f"{data.get('signal_count', 0)} signals"
+    if event.event_type == "evolution.proposals.generated":
+        return f"{data.get('proposal_count', 0)} proposals"
+    if event.event_type == "evolution.artifacts.written":
+        artifacts = data.get("artifacts", {})
+        if isinstance(artifacts, dict):
+            return str(artifacts.get("report_path") or "artifacts written")
+        return "artifacts written"
     return event.event_type
 
 
@@ -499,6 +511,8 @@ def _event_status(event: TuiEvent) -> str:
         return "done"
     if event.event_type in {"llm.stream.started", "llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
         return "streaming"
+    if event.event_type.startswith("evolution."):
+        return "done"
     if event.event_type.endswith(".started") or event.event_type.endswith(".requested"):
         return "running"
     return "event"
@@ -527,6 +541,8 @@ def _event_marker_color(event: TuiEvent) -> str:
         return COLORS["text_dim"]
     if event.event_type.startswith("run.") or event.event_type.startswith("step."):
         return COLORS["text_dim"]
+    if event.event_type.startswith("evolution."):
+        return COLORS["teal"]
     return COLORS["text_dim"]
 
 
@@ -637,6 +653,18 @@ def _format_event_detail(event: TuiEvent) -> str:
         lines.append(f"[dim]outcome:[/]   {data.get('outcome', '?')}")
         lines.append(f"[dim]steps:[/]     {data.get('steps', 0)}")
         lines.append(f"[dim]traces:[/]    {data.get('trace_count', 0)}")
+        if "signal_count" in data:
+            lines.append(f"[dim]signals:[/]   {data.get('signal_count', 0)}")
+        if "proposal_count" in data:
+            lines.append(f"[dim]proposals:[/] {data.get('proposal_count', 0)}")
+        err_data = data.get("error") or event.error
+        if err_data:
+            lines.append(f"[{COLORS['red']}]error:[/] {err_data}")
+        artifacts = data.get("artifacts")
+        if artifacts:
+            lines.append(f"[bold {COLORS['teal']}]artifacts:[/]")
+            if not _append_jsonish(lines, artifacts, indent="  "):
+                lines.append(f"  {artifacts}")
         lines.append("")
 
     elif event.event_type == "run.started":

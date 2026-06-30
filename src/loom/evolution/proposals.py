@@ -12,6 +12,7 @@ from loom.core import err, make_loom_error, ok
 from loom.evolution.scoring import StepScore
 
 _RISK_RANKS = {"low": 0, "medium": 1, "high": 2}
+_MIN_SIGNAL_SEVERITY = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +55,8 @@ def aggregate_step_scores(scores: Iterable[StepScore], min_frequency: int = 2) -
     grouped: dict[str, list[tuple[StepScore, tuple[str, ...]]]] = defaultdict(list)
     seen: set[tuple[str, str, int, str]] = set()
     for score in scores:
+        if not _has_improvement_signal(score):
+            continue
         for surface, explanations in score.attribution.items():
             normalized = _normalize_explanations(explanations)
             if not normalized:
@@ -75,7 +78,7 @@ def aggregate_step_scores(scores: Iterable[StepScore], min_frequency: int = 2) -
         trace_ids = tuple(score.trace_id for score, _ in items)
         evidence_event_hashes = tuple(hash_ for score, _ in items for hash_ in score.evidence_event_hashes)
         confidence = sum(score.confidence for score, _ in items) / len(items)
-        severity = sum(1.0 - score.overall for score, _ in items) / len(items)
+        severity = sum(_score_severity(score) for score, _ in items) / len(items)
         explanation = _summarize_explanations(explanations for _, explanations in items)
         signals.append(
             EvolutionSignal(
@@ -229,6 +232,17 @@ def _summarize_explanations(explanation_groups: Iterable[tuple[str, ...]]) -> st
 
 def _normalize_explanations(explanations: Iterable[str]) -> tuple[str, ...]:
     return tuple(explanation.strip() for explanation in explanations if explanation.strip())
+
+
+def _has_improvement_signal(score: StepScore) -> bool:
+    return bool(score.proposed_fixes) or _score_severity(score) >= _MIN_SIGNAL_SEVERITY
+
+
+def _score_severity(score: StepScore) -> float:
+    severity = 1.0 - score.overall
+    if score.dimensions:
+        severity = max(severity, *(1.0 - value for value in score.dimensions.values()))
+    return max(0.0, severity)
 
 
 def _proposal_id(signal: EvolutionSignal) -> str:

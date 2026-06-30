@@ -61,6 +61,7 @@ def render_evolution_report(
     score_items = tuple(scores)
     signal_items = tuple(signals)
     proposal_items = tuple(proposals)
+    score_stats = _score_stats(score_items)
 
     lines = [
         "# Trace Driven Evolution Report",
@@ -70,11 +71,13 @@ def render_evolution_report(
         f"- scores: {len(score_items)}",
         f"- signals: {len(signal_items)}",
         f"- proposals: {len(proposal_items)}",
+        f"- average_overall: {score_stats['average_overall']}",
+        f"- lowest_overall: {score_stats['lowest_overall']}",
         "",
         "## Signals",
     ]
     if not signal_items:
-        lines.extend(["", "No signals generated."])
+        lines.extend(["", _empty_signal_explanation(score_items)])
     for signal in signal_items:
         lines.extend(
             [
@@ -130,6 +133,24 @@ def _write_jsonl(path: Path, records: Iterable[Any]) -> None:
         for record in records:
             handle.write(json.dumps(_to_plain(record), separators=(",", ":"), sort_keys=True))
             handle.write("\n")
+
+
+def _score_stats(scores: tuple[StepScore, ...]) -> Mapping[str, str]:
+    if not scores:
+        return {"average_overall": "n/a", "lowest_overall": "n/a"}
+    average = sum(score.overall for score in scores) / len(scores)
+    lowest = min(score.overall for score in scores)
+    return {"average_overall": f"{average:.2f}", "lowest_overall": f"{lowest:.2f}"}
+
+
+def _empty_signal_explanation(scores: tuple[StepScore, ...]) -> str:
+    if not scores:
+        return "No signals generated because no step scores were available."
+    return (
+        f"No signals generated after scoring {len(scores)} step(s). "
+        "This means no repeated low-quality or improvement attribution met the gate. "
+        "Inspect step-scores.jsonl for raw evaluator scores and attribution."
+    )
 
 
 def _format_sequence(values: Iterable[Any]) -> str:

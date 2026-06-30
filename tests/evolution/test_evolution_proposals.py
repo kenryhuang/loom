@@ -5,15 +5,23 @@ from loom.evolution.scoring import StepScore
 from loom.llm import TokenUsage
 
 
-def _score(trace_id, surface="system_prompt", confidence=0.8, overall=0.4, explanation="Output contract is unclear.", step_number=0):
+def _score(
+    trace_id,
+    surface="system_prompt",
+    confidence=0.8,
+    overall=0.4,
+    explanation="Output contract is unclear.",
+    step_number=0,
+    proposed_fixes=("Clarify JSON output contract.",),
+):
     return StepScore(
         run_id="run-1",
         trace_id=trace_id,
         step_number=step_number,
         overall=overall,
-        dimensions={"prompt_following": 0.3},
+        dimensions={"prompt_following": overall},
         attribution={surface: (explanation,)},
-        proposed_fixes=("Clarify JSON output contract.",),
+        proposed_fixes=proposed_fixes,
         evidence_event_hashes=(f"hash-{trace_id}",),
         confidence=confidence,
         evaluator_model="fake-score-model",
@@ -62,6 +70,23 @@ def test_aggregate_step_scores_ignores_whitespace_only_attribution():
             _score("trace-2", explanation="\n\t"),
         ),
         min_frequency=2,
+    )
+
+    assert signals == ()
+
+
+def test_aggregate_step_scores_ignores_positive_attribution_without_improvement_signal():
+    signals = aggregate_step_scores(
+        (
+            _score(
+                "trace-1",
+                surface="context_relevance",
+                overall=1.0,
+                explanation="The generated report is highly relevant to the audit objective.",
+                proposed_fixes=(),
+            ),
+        ),
+        min_frequency=1,
     )
 
     assert signals == ()
