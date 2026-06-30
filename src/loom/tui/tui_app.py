@@ -530,9 +530,9 @@ def _event_marker_color(event: TuiEvent) -> str:
     return COLORS["text_dim"]
 
 
-def _format_event_gutter(event: TuiEvent, *, expanded: bool) -> str:
+def _format_event_gutter(event: TuiEvent, *, expanded: bool, detail_height: int) -> str:
     color = _event_marker_color(event)
-    line_count = EventDetailBox.DETAIL_HEIGHT + 1 if expanded else 1
+    line_count = detail_height + 1 if expanded else 1
     lines = [f"[{color}]●[/]"]
     lines.extend(f"[{COLORS['border']}]│[/]" for _ in range(line_count))
     return "\n".join(lines)
@@ -564,6 +564,12 @@ def _format_event_detail(event: TuiEvent) -> str:
                 if not _append_llm_content(lines, content, indent="  "):
                     _append_wrapped(lines, str(content), indent="  ")
                 lines.append("")
+            else:
+                tool_call_count = _response_tool_call_count(resp)
+                if tool_call_count:
+                    lines.append(f"[dim]tool-call response:[/] {tool_call_count} call(s), no text content")
+                else:
+                    lines.append("[dim]empty response:[/] no text content")
             usage = resp.get("usage", {})
             if isinstance(usage, dict):
                 pt = usage.get("prompt_tokens", 0)
@@ -696,6 +702,13 @@ def _format_event_detail(event: TuiEvent) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _response_tool_call_count(response: dict[str, Any]) -> int:
+    tool_calls = response.get("tool_calls", ())
+    if isinstance(tool_calls, list | tuple):
+        return len(tool_calls)
+    return 0
 
 
 def _append_tool_detail_input(lines: list[str], data: dict[str, Any]) -> None:
@@ -920,16 +933,17 @@ def _normalize_display_text(text: str) -> str:
 
 
 class EventDetailBox(RichLog):
-    """Fixed-height scrollable detail area embedded inside an event item."""
+    """Adaptive-height scrollable detail area embedded inside an event item."""
 
-    DETAIL_HEIGHT = 12
+    DETAIL_MAX_HEIGHT = 10
+    BORDER_CHROME_LINES = 2
 
     DEFAULT_CSS = f"""
     EventDetailBox {{
-        height: {DETAIL_HEIGHT};
-        max-height: {DETAIL_HEIGHT};
+        height: auto;
+        max-height: {DETAIL_MAX_HEIGHT};
         background: {COLORS["bg_dark"]};
-        border: tall {COLORS["border"]};
+        border: round {COLORS["border"]};
         padding: 0 1;
         margin: 0 0 1 0;
     }}
@@ -939,9 +953,23 @@ class EventDetailBox(RichLog):
         super().__init__(markup=True, highlight=True, wrap=True, **kwargs)
 
     def set_event(self, event: TuiEvent) -> None:
+        detail = _format_event_detail(event)
+        height = self.detail_height_for_text(detail)
+        self.styles.height = height
+        self.styles.max_height = self.DETAIL_MAX_HEIGHT
         self.clear()
-        self.write(_format_event_detail(event))
+        self.write(detail)
         self.scroll_end(animate=False)
+
+    @classmethod
+    def detail_height_for_event(cls, event: TuiEvent) -> int:
+        return cls.detail_height_for_text(_format_event_detail(event))
+
+    @classmethod
+    def detail_height_for_text(cls, detail: str) -> int:
+        plain = _strip_rich_markup(detail).rstrip()
+        line_count = len(plain.splitlines()) if plain else 1
+        return max(1 + cls.BORDER_CHROME_LINES, min(cls.DETAIL_MAX_HEIGHT, line_count + cls.BORDER_CHROME_LINES))
 
 
 class EventItem(Container):
@@ -985,8 +1013,8 @@ class EventItem(Container):
         self.is_expanded = expanded
         self.is_selected = selected
         self.is_pinned_expanded = pinned_expanded
-        self.detail_height = EventDetailBox.DETAIL_HEIGHT
-        self._gutter = Label(_format_event_gutter(self.event, expanded=self.is_expanded), classes="event-gutter")
+        self.detail_height = EventDetailBox.detail_height_for_event(self.event)
+        self._gutter = Label(_format_event_gutter(self.event, expanded=self.is_expanded, detail_height=self.detail_height), classes="event-gutter")
         self._summary = Label(_format_event_line(self.event), classes="event-summary")
         self._detail = EventDetailBox(classes="event-detail")
 
@@ -1022,9 +1050,12 @@ class EventItem(Container):
         self.toggle_expanded()
 
     def _apply_event(self) -> None:
-        self._gutter.update(_format_event_gutter(self.event, expanded=self.is_expanded))
         self._summary.update(_format_event_line(self.event))
         self._detail.set_event(self.event)
+        self.detail_height = (
+            int(self._detail.styles.height.value) if self._detail.styles.height is not None else EventDetailBox.detail_height_for_event(self.event)
+        )
+        self._gutter.update(_format_event_gutter(self.event, expanded=self.is_expanded, detail_height=self.detail_height))
 
     def _apply_state(self) -> None:
         if self.is_selected:
@@ -1032,7 +1063,7 @@ class EventItem(Container):
         else:
             self.remove_class("-selected")
         self._detail.display = self.is_expanded
-        self._gutter.update(_format_event_gutter(self.event, expanded=self.is_expanded))
+        self._gutter.update(_format_event_gutter(self.event, expanded=self.is_expanded, detail_height=self.detail_height))
 
 
 class EventFeedWidget(VerticalScroll):

@@ -99,7 +99,7 @@ def test_event_detail_omits_trace_metadata():
 
 
 @pytest.mark.asyncio
-async def test_event_feed_collapses_previous_event_and_uses_fixed_detail_height():
+async def test_event_feed_collapses_previous_event_and_uses_adaptive_detail_height():
     collector = TuiEventCollector()
     app = LoomTuiApp(collector)
 
@@ -115,7 +115,7 @@ async def test_event_feed_collapses_previous_event_and_uses_fixed_detail_height(
             TuiEvent(
                 timestamp=1,
                 event_type="tool.completed",
-                data={"type": "tool.completed", "tool_id": "search", "output": {"value": {"summary": "done"}}},
+                data={"type": "tool.completed", "tool_id": "search", "output": {"value": "done"}},
             )
         )
 
@@ -125,7 +125,7 @@ async def test_event_feed_collapses_previous_event_and_uses_fixed_detail_height(
 
         assert first_item.is_expanded is False
         assert second_item.is_expanded is True
-        assert second_item.detail_height == 12
+        assert second_item.detail_height < EventDetailBox.DETAIL_MAX_HEIGHT
 
 
 @pytest.mark.asyncio
@@ -149,6 +149,67 @@ async def test_event_item_uses_timeline_gutter_and_body_aligned_detail():
         assert len(list(item.query(".event-body"))) == 1
         assert len(list(item.query(".event-summary"))) == 1
         assert len(list(item.query(".event-detail"))) == 1
+
+
+def test_event_detail_box_height_adapts_to_content_with_ten_line_cap(monkeypatch):
+    panel = EventDetailBox()
+    writes = []
+    monkeypatch.setattr(panel, "write", writes.append)
+
+    panel.set_event(
+        TuiEvent(
+            timestamp=0,
+            event_type="tool.completed",
+            data={"type": "tool.completed", "tool_id": "short", "input": {"query": "loom"}, "output": {"value": "ok"}},
+        )
+    )
+
+    short_height = panel.styles.height.value
+    assert short_height < EventDetailBox.DETAIL_MAX_HEIGHT
+
+    panel.set_event(
+        TuiEvent(
+            timestamp=1,
+            event_type="tool.completed",
+            data={
+                "type": "tool.completed",
+                "tool_id": "long",
+                "input": {"query": "loom"},
+                "output": {"value": {"lines": [f"line-{index}" for index in range(20)]}},
+            },
+        )
+    )
+
+    assert panel.styles.height.value == EventDetailBox.DETAIL_MAX_HEIGHT
+
+
+def test_response_detail_box_keeps_room_for_short_content_and_border(monkeypatch):
+    panel = EventDetailBox()
+    writes = []
+    monkeypatch.setattr(panel, "write", writes.append)
+
+    panel.set_event(
+        TuiEvent(
+            timestamp=0,
+            event_type="llm.completed",
+            data={
+                "type": "llm.completed",
+                "response": {
+                    "content": "",
+                    "tool_calls": [{"id": "tool-1", "name": "read_file", "arguments": '{"path":"README.md"}'}],
+                    "finish_reason": "tool_calls",
+                },
+            },
+        )
+    )
+
+    assert panel.styles.height.value >= EventDetailBox.BORDER_CHROME_LINES + 2
+    assert "tool-call response" in writes[0]
+    assert "finish_reason" in writes[0]
+
+
+def test_event_detail_box_uses_round_border():
+    assert "border: round" in EventDetailBox.DEFAULT_CSS
 
 
 @pytest.mark.asyncio
