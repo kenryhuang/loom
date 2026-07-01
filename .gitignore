@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+config.yaml
+config.yml
 .venv/
 venv/
 env/

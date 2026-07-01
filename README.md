@@ -70,3 +70,40 @@ LOOM_LIVE_ENV_FILE=.env
 LOOM_LIVE_MAX_TOKENS=512
 LOOM_LIVE_TEMPERATURE=0
 ```
+
+## Generic Task Runner
+
+Run an arbitrary task through the Loom LLM loop with workspace tools:
+
+```bash
+uv run python -m loom.tasks.run "Audit this project and suggest improvements" \
+  --workspace /path/to/project \
+  --profile project_audit \
+  --config config.yaml \
+  --model main \
+  --tui
+```
+
+By default, the generic task CLI persists full run trace records under
+`runs/loom-task-*.jsonl`. Pass `--trace-path` to override that location.
+
+The task model config supports multiple named OpenAI-compatible models:
+
+```yaml
+default_model: main
+
+models:
+  main:
+    provider: openai
+    model: qwen3.7-max
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: LOOM_LLM_API_KEY
+    temperature: 0
+    max_tokens: 8192
+
+  fast:
+    provider: openai
+    model: qwen-plus
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: LOOM_LLM_API_KEY
+```
