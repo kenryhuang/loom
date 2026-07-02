@@ -846,7 +846,7 @@ git commit -m "feat: add deterministic evaluation metrics"
 - Create: `src/loom/evaluation/analyze.py`
 - Modify: `src/loom/evaluation/__init__.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add `tests/evaluation/test_analyze.py`:
 
@@ -936,7 +936,7 @@ def test_evaluation_analyze_cli_help():
     assert "Analyze Loom trace JSONL" in result.stdout
 ```
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
 
 Run:
 
@@ -946,7 +946,7 @@ uv run pytest tests/evaluation/test_analyze.py -q
 
 Expected: fail with `ModuleNotFoundError: No module named 'loom.evaluation.analyze'`.
 
-- [ ] **Step 3: Implement artifacts and CLI**
+- [x] **Step 3: Implement artifacts and CLI**
 
 Create `src/loom/evaluation/artifacts.py`:
 
@@ -1114,7 +1114,7 @@ __all__ = ["EvaluationConfig", "EvaluationResult", "analyze_trace", "main", "par
 
 Modify `src/loom/evaluation/__init__.py` to export `EvaluationConfig`, `EvaluationResult`, and `analyze_trace`.
 
-- [ ] **Step 4: Run tests to verify pass**
+- [x] **Step 4: Run tests to verify pass**
 
 Run:
 
@@ -1124,7 +1124,7 @@ uv run pytest tests/evaluation/test_analyze.py -q
 
 Expected: 3 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/loom/evaluation/__init__.py src/loom/evaluation/artifacts.py src/loom/evaluation/analyze.py tests/evaluation/test_analyze.py
