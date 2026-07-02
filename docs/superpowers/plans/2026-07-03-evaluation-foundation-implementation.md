@@ -308,7 +308,7 @@ git commit -m "feat: add evaluation trace normalization"
 - Create: `src/loom/evaluation/episodes.py`
 - Modify: `src/loom/evaluation/__init__.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add `tests/evaluation/test_episodes.py`:
 
@@ -378,7 +378,7 @@ def test_build_episode_graph_marks_partial_tool_call():
     assert graph.tool_calls[0].status == "partial"
 ```
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
 
 Run:
 
@@ -388,7 +388,7 @@ uv run pytest tests/evaluation/test_episodes.py -q
 
 Expected: fail with `ModuleNotFoundError: No module named 'loom.evaluation.episodes'`.
 
-- [ ] **Step 3: Implement episode graph builder**
+- [x] **Step 3: Implement episode graph builder**
 
 Create `src/loom/evaluation/episodes.py`:
 
@@ -622,7 +622,7 @@ __all__ = ["EpisodeGraph", "LlmRoundEpisode", "RunEpisode", "StepGraphEpisode", 
 
 Modify `src/loom/evaluation/__init__.py` to export episode graph types.
 
-- [ ] **Step 4: Run tests to verify pass**
+- [x] **Step 4: Run tests to verify pass**
 
 Run:
 
@@ -632,7 +632,7 @@ uv run pytest tests/evaluation/test_episodes.py -q
 
 Expected: 2 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/loom/evaluation/__init__.py src/loom/evaluation/episodes.py tests/evaluation/test_episodes.py
