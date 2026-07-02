@@ -32,7 +32,7 @@
 - Create: `src/loom/evaluation/records.py`
 - Create: `src/loom/evaluation/__init__.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add `tests/evaluation/test_records.py`:
 
@@ -119,7 +119,7 @@ def test_load_normalized_events_returns_validation_error_for_malformed_json(tmp_
     assert result.error.metadata["path"] == str(path)
 ```
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
 
 Run:
 
@@ -129,7 +129,7 @@ uv run pytest tests/evaluation/test_records.py -q
 
 Expected: fail with `ModuleNotFoundError: No module named 'loom.evaluation'`.
 
-- [ ] **Step 3: Implement normalized records**
+- [x] **Step 3: Implement normalized records**
 
 Create `src/loom/evaluation/records.py`:
 
@@ -284,7 +284,7 @@ __all__ = [
 ]
 ```
 
-- [ ] **Step 4: Run tests to verify pass**
+- [x] **Step 4: Run tests to verify pass**
 
 Run:
 
@@ -294,7 +294,7 @@ uv run pytest tests/evaluation/test_records.py -q
 
 Expected: 2 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/loom/evaluation/__init__.py src/loom/evaluation/records.py tests/evaluation/test_records.py
