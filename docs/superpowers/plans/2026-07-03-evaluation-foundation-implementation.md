@@ -646,7 +646,7 @@ git commit -m "feat: build evaluation episode graph"
 - Create: `src/loom/evaluation/metrics.py`
 - Modify: `src/loom/evaluation/__init__.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add `tests/evaluation/test_metrics.py`:
 
@@ -702,7 +702,7 @@ def test_calculate_metrics_reports_trace_and_tool_quality():
     assert by_name["episode.orphaned_count"].value == 0
 ```
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
 
 Run:
 
@@ -712,7 +712,7 @@ uv run pytest tests/evaluation/test_metrics.py -q
 
 Expected: fail with `ModuleNotFoundError: No module named 'loom.evaluation.metrics'`.
 
-- [ ] **Step 3: Implement metrics**
+- [x] **Step 3: Implement metrics**
 
 Create `src/loom/evaluation/metrics.py`:
 
@@ -821,7 +821,7 @@ def _severity_for_count(value: int) -> str:
 __all__ = ["MetricResult", "calculate_metrics"]
 ```
 
-- [ ] **Step 4: Run tests to verify pass**
+- [x] **Step 4: Run tests to verify pass**
 
 Run:
 
@@ -831,7 +831,7 @@ uv run pytest tests/evaluation/test_metrics.py -q
 
 Expected: 1 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/loom/evaluation/__init__.py src/loom/evaluation/episodes.py src/loom/evaluation/metrics.py tests/evaluation/test_metrics.py
