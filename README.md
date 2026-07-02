@@ -107,3 +107,18 @@ models:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: LOOM_LLM_API_KEY
 ```
+
+## Trace Evaluation
+
+Generic task runs write JSONL traces under `runs/` by default. Analyze a trace
+with deterministic evaluation metrics:
+
+```bash
+uv run python -m loom.evaluation.analyze \
+  --trace-path runs/loom-task-xxx.jsonl \
+  --out-dir .loom/evaluation
+```
+
+The first evaluation phase builds normalized events, episode summaries, metrics,
+and a markdown report. Later evolution phases consume these artifacts for
+proposal generation and low-risk auto-apply.

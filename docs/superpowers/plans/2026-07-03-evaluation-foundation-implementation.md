@@ -1137,7 +1137,7 @@ git commit -m "feat: add deterministic evaluation analyzer"
 - Modify: `tests/test_package_structure.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: Update package structure test**
+- [x] **Step 1: Update package structure test**
 
 Modify `tests/test_package_structure.py` so the allowed top-level submodules include `"evaluation"`:
 
@@ -1145,7 +1145,7 @@ Modify `tests/test_package_structure.py` so the allowed top-level submodules inc
 submodule_names = {"composition", "core", "evaluation", "evolution", "examples", "llm", "observability", "runtime", "tasks", "tools", "tui"}
 ```
 
-- [ ] **Step 2: Update README**
+- [x] **Step 2: Update README**
 
 Add this section after the generic task runner section:
 
@@ -1167,7 +1167,7 @@ proposal generation and low-risk auto-apply.
 ```
 ```
 
-- [ ] **Step 3: Run focused tests**
+- [x] **Step 3: Run focused tests**
 
 Run:
 
@@ -1177,7 +1177,7 @@ uv run pytest tests/evaluation tests/test_package_structure.py -q
 
 Expected: all selected tests pass.
 
-- [ ] **Step 4: Run lint**
+- [x] **Step 4: Run lint**
 
 Run:
 
@@ -1187,7 +1187,7 @@ uv run ruff check src tests
 
 Expected: `All checks passed!`
 
-- [ ] **Step 5: Run full tests**
+- [x] **Step 5: Run full tests**
 
 Run:
 
@@ -1197,7 +1197,7 @@ uv run pytest
 
 Expected: all tests pass, with existing live LLM skips still skipped.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add README.md tests/test_package_structure.py
