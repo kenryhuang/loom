@@ -27,6 +27,7 @@ from loom.core.models import (
 class EventRecordingPolicy:
     enabled: bool = True
     event_types: tuple[str, ...] | None = None
+    excluded_event_types: tuple[str, ...] = ()
     include_llm_io: bool = True
     include_tool_io: bool = True
     include_context_snapshots: bool = False
@@ -34,10 +35,13 @@ class EventRecordingPolicy:
     def __post_init__(self) -> None:
         if self.event_types is not None:
             object.__setattr__(self, "event_types", tuple(self.event_types))
+        object.__setattr__(self, "excluded_event_types", tuple(self.excluded_event_types))
 
     def allows(self, event: Mapping[str, Any]) -> bool:
         event_type = str(event.get("type", ""))
         if not self.enabled:
+            return False
+        if event_type in self.excluded_event_types:
             return False
         if self.event_types is not None and event_type not in self.event_types:
             return False

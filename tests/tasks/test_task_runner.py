@@ -1,9 +1,9 @@
 import asyncio
 import json
 
-from loom.llm import LlmResponse, LlmToolCall, TokenUsage
+from loom.llm import LlmResponse, LlmStreamEvent, LlmToolCall, TokenUsage
 from loom.tasks.profiles import select_task_profile
-from loom.tasks.request import TaskRequest
+from loom.tasks.request import TaskRequest, TaskRunOptions
 from loom.tasks.runner import make_task_context, run_generic_task
 
 
@@ -86,6 +86,29 @@ class FakeTaskProvider:
         )
 
 
+class StreamingTaskProvider:
+    model = "fake-streaming-task-model"
+
+    async def stream_chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        content = json.dumps(
+            {
+                "reasoning": "The project was audited briefly.",
+                "action": {
+                    "kind": "none",
+                    "description": "task complete",
+                    "target": None,
+                    "input": {},
+                },
+                "alternatives": [],
+                "confidence": 0.82,
+            }
+        )
+        split_at = content.index('"action"')
+        yield LlmStreamEvent(kind="content.delta", content_delta=content[:split_at])
+        yield LlmStreamEvent(kind="content.delta", content_delta=content[split_at:])
+        yield LlmStreamEvent(kind="completed", response=LlmResponse(content=content, usage=TokenUsage(4, 5, 9)))
+
+
 def _response(*, content, tool_calls=(), finish_reason="stop"):
     from loom.core import ok
 
@@ -102,3 +125,23 @@ def test_run_generic_task_executes_llm_tool_loop_and_returns_finish_report(tmp_p
     assert "Demo audit" in result.value.output
     assert provider.calls >= 2
     assert any(message.role == "tool" for message in provider.messages_seen[-1])
+
+
+def test_run_generic_task_trace_omits_stream_token_deltas(tmp_path):
+    trace_path = tmp_path / "runs" / "sample-task.jsonl"
+
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest("Audit this project briefly", workspace=tmp_path, profile="project_audit"),
+            provider=StreamingTaskProvider(),
+            options=TaskRunOptions(stream=True, trace_path=trace_path),
+        )
+    )
+
+    assert result.ok
+    records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    event_types = [record["eventType"] for record in records if record["type"] == "event"]
+    assert "llm.requested" in event_types
+    assert "llm.completed" in event_types
+    assert "llm.stream.completed" in event_types
+    assert "llm.content.delta" not in event_types

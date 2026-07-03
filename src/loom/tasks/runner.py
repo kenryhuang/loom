@@ -33,12 +33,20 @@ from loom.core import (
     thaw_json,
 )
 from loom.llm import create_env_openai_provider, create_llm_step_function
-from loom.observability import JsonlTraceStore
+from loom.observability import EventRecordingPolicy, JsonlTraceStore
 from loom.runtime import create, create_runtime_registry, run, run_with_plugins
 from loom.tasks.config import TaskRunnerConfig, create_provider_from_task_config
 from loom.tasks.profiles import TaskProfile, get_task_profile, select_task_profile
 from loom.tasks.request import TaskRequest, TaskRunOptions, TaskRunResult
 from loom.tasks.tools import make_task_tools
+
+
+STREAM_DELTA_TRACE_EVENTS = (
+    "llm.content.delta",
+    "llm.reasoning.delta",
+    "llm.reasoning_context.delta",
+    "llm.tool_call.arguments.delta",
+)
 
 
 def make_task_context(request: TaskRequest) -> Result:
@@ -129,6 +137,7 @@ async def run_generic_task(
         make_task_loop(request, provider, stream=run_options.stream),
         registry=create_runtime_registry(tools=make_task_tools(request)),
         trace_store=JsonlTraceStore(run_options.trace_path) if run_options.trace_path is not None else None,
+        event_policy=_task_trace_event_policy() if run_options.trace_path is not None else None,
     )
     if not handle.ok:
         return handle
@@ -255,6 +264,10 @@ def _create_provider(config: TaskRunnerConfig | None, *, model_name: str | None)
     if config is not None:
         return create_provider_from_task_config(config, model_name=model_name)
     return create_env_openai_provider(model=model_name)
+
+
+def _task_trace_event_policy() -> EventRecordingPolicy:
+    return EventRecordingPolicy(excluded_event_types=STREAM_DELTA_TRACE_EVENTS)
 
 
 def _request_metadata(request: TaskRequest, workspace: Path | None) -> Mapping[str, Any]:
