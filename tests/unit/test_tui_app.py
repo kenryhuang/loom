@@ -7,7 +7,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from loom.tui.tui_app import EventDetailBox, EventFeedWidget, LoomTuiApp, LoopHeader, _format_event_detail_plain, _format_event_line
+from loom.tui.tui_app import EventDetailBox, EventFeedWidget, LoomTuiApp, LoopHeader, _format_event_detail, _format_event_detail_plain, _format_event_line
 from loom.tui.tui_collector import TuiEvent, TuiEventCollector
 
 
@@ -507,6 +507,64 @@ def test_event_detail_box_includes_tool_result(monkeypatch):
     assert '"query": "loom"' in writes[0]
     assert "Live Loom smoke test" in writes[0]
     assert "real tool result" in writes[0]
+
+
+def test_event_detail_box_treats_tool_arguments_as_plain_text():
+    panel = EventDetailBox()
+    event = TuiEvent(
+        timestamp=1,
+        event_type="tool.completed",
+        data={
+            "type": "tool.completed",
+            "tool_id": "shell_execute",
+            "input": {
+                "command": '[/Users/huanggui/workspace/yakDB/.venv/bin/python,", "smoke_test.py]',
+            },
+            "output": {"exit_code": 0, "stdout": "ok"},
+        },
+    )
+
+    panel._make_renderable(_format_event_detail(event))
+    panel.set_event(event)
+
+
+def test_event_detail_box_treats_tool_output_as_plain_text():
+    panel = EventDetailBox()
+    event = TuiEvent(
+        timestamp=1,
+        event_type="tool.completed",
+        data={
+            "type": "tool.completed",
+            "tool_id": "shell_execute",
+            "input": {"command": "python smoke_test.py"},
+            "output": {"stdout": '[/Users/huanggui/workspace/yakDB/.venv/bin/python,", "smoke_test.py]'},
+        },
+    )
+
+    panel._make_renderable(_format_event_detail(event))
+    panel.set_event(event)
+
+
+def test_event_detail_box_treats_llm_request_messages_as_plain_text():
+    panel = EventDetailBox()
+    event = TuiEvent(
+        timestamp=1,
+        event_type="llm.requested",
+        data={
+            "type": "llm.requested",
+            "model": "qwen3.7-max",
+            "messages": [
+                {"role": "system", "content": "inspect the trace"},
+                {
+                    "role": "assistant",
+                    "content": '[/Users/huanggui/workspace/yakDB/.venv/bin/python,"\n  "smoke_test.py]',
+                },
+            ],
+        },
+    )
+
+    panel._make_renderable(_format_event_detail(event))
+    panel.set_event(event)
 
 
 @pytest.mark.asyncio

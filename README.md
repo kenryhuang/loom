@@ -76,21 +76,36 @@ LOOM_LIVE_TEMPERATURE=0
 Run an arbitrary task through the Loom LLM loop with workspace tools:
 
 ```bash
-uv run python -m loom.tasks.run "Audit this project and suggest improvements" \
-  --workspace /path/to/project \
-  --profile project_audit \
-  --config config.yaml \
+uv run python -m loom.tasks.run \
   --model main \
   --tui
 ```
 
-By default, the generic task CLI persists full run trace records under
-`runs/loom-task-*.jsonl`. Pass `--trace-path` to override that location.
+The CLI automatically loads `./config.yaml` or `./config.yml` when present.
+CLI flags override config values. By default, the generic task CLI persists run
+trace records under `runs/loom-task-*.jsonl`. Set `run.trace_path_template` for
+dynamic trace names, or pass `--config` / `--trace-path` to override those
+locations.
 
-The task model config supports multiple named OpenAI-compatible models:
+The task config supports task defaults, run defaults, and multiple named
+OpenAI-compatible models:
 
 ```yaml
 default_model: main
+
+task:
+  objective: Audit this project briefly
+  workspace: .
+  profile: project_audit
+  expected_outputs:
+    - Brief markdown audit report with project purpose, smoke result, and improvement directions.
+
+run:
+  tui: false
+  stream: true
+  trace_path_template: runs/{task_slug}-{model}-{timestamp}.jsonl
+  max_steps:
+  timeout_ms:
 
 models:
   main:

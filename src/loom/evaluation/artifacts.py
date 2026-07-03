@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from loom.evaluation.assessments import Finding, StepAssessment
 from loom.evaluation.episodes import EpisodeGraph
 from loom.evaluation.metrics import MetricResult
 
@@ -18,26 +19,44 @@ class EvaluationArtifacts:
     out_dir: Path
     episodes_path: Path
     metrics_path: Path
+    assessments_path: Path
+    findings_path: Path
     report_path: Path
 
 
-def write_evaluation_artifacts(out_dir: str | os.PathLike[str], graph: EpisodeGraph, metrics: Iterable[MetricResult]) -> EvaluationArtifacts:
+def write_evaluation_artifacts(
+    out_dir: str | os.PathLike[str],
+    graph: EpisodeGraph,
+    metrics: Iterable[MetricResult],
+    assessments: Iterable[StepAssessment] = (),
+) -> EvaluationArtifacts:
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     metric_items = tuple(metrics)
+    assessment_items = tuple(assessments)
+    finding_items = tuple(finding for assessment in assessment_items for finding in assessment.findings)
     artifacts = EvaluationArtifacts(
         out_dir=out_path,
         episodes_path=out_path / "episodes.jsonl",
         metrics_path=out_path / "metrics.jsonl",
+        assessments_path=out_path / "step-assessments.jsonl",
+        findings_path=out_path / "findings.jsonl",
         report_path=out_path / "report.md",
     )
     _write_jsonl(artifacts.episodes_path, (*graph.runs, *graph.steps, *graph.llm_rounds, *graph.tool_calls))
     _write_jsonl(artifacts.metrics_path, metric_items)
-    artifacts.report_path.write_text(render_evaluation_report(graph, metric_items), encoding="utf-8")
+    _write_jsonl(artifacts.assessments_path, assessment_items)
+    _write_jsonl(artifacts.findings_path, finding_items)
+    artifacts.report_path.write_text(render_evaluation_report(graph, metric_items, assessment_items, finding_items), encoding="utf-8")
     return artifacts
 
 
-def render_evaluation_report(graph: EpisodeGraph, metrics: tuple[MetricResult, ...]) -> str:
+def render_evaluation_report(
+    graph: EpisodeGraph,
+    metrics: tuple[MetricResult, ...],
+    assessments: tuple[StepAssessment, ...] = (),
+    findings: tuple[Finding, ...] = (),
+) -> str:
     lines = [
         "# Trace Evaluation Report",
         "",
@@ -49,11 +68,36 @@ def render_evaluation_report(graph: EpisodeGraph, metrics: tuple[MetricResult, .
         f"- tool_calls: {len(graph.tool_calls)}",
         f"- orphaned_events: {len(graph.orphaned_events)}",
         f"- metrics: {len(metrics)}",
+        f"- step_assessments: {len(assessments)}",
+        f"- findings: {len(findings)}",
         "",
         "## Metrics",
     ]
     for metric in metrics:
         lines.append(f"- {metric.name}: {metric.value} {metric.unit or ''}".rstrip())
+    lines.extend(["", "## Step Assessments"])
+    if not assessments:
+        lines.append("")
+        lines.append("No step assessments generated.")
+    for assessment in assessments:
+        lines.extend(
+            [
+                "",
+                f"### Step {assessment.step_number} `{assessment.trace_id}`",
+                "",
+                f"- status: {assessment.status}",
+                f"- aggregate_score: {assessment.aggregate_score:.3f}",
+                "- dimensions:",
+            ]
+        )
+        for name, dimension in assessment.dimensions.items():
+            lines.append(f"  - {name}: {dimension.score:.3f} ({dimension.status})")
+        if assessment.findings:
+            lines.append("- findings:")
+            for finding in assessment.findings:
+                lines.append(f"  - {finding.severity} {finding.category}: {finding.message}")
+        else:
+            lines.append("- findings: none")
     return "\n".join(lines) + "\n"
 
 

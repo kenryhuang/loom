@@ -65,8 +65,11 @@ def test_analyze_trace_writes_evaluation_artifacts(tmp_path):
         assert result.ok
         assert result.value.artifacts.metrics_path.exists()
         assert result.value.artifacts.episodes_path.exists()
+        assert result.value.artifacts.assessments_path.exists()
+        assert result.value.artifacts.findings_path.exists()
         assert result.value.artifacts.report_path.exists()
         assert "Trace Evaluation Report" in result.value.report
+        assert "## Step Assessments" in result.value.report
 
     asyncio.run(scenario())
 
@@ -81,3 +84,4 @@ def test_evaluation_analyze_cli_help():
 
     assert result.returncode == 0
     assert "Analyze Loom trace JSONL" in result.stdout
+    assert "RuntimeWarning" not in result.stderr

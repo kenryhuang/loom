@@ -61,6 +61,46 @@ models:
     assert loaded.models["main"].max_tokens == 8192
 
 
+def test_load_task_config_reads_task_and_run_defaults_from_yaml(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+default_model: main
+task:
+  objective: Audit this project briefly
+  workspace: .
+  profile: project_audit
+  expected_outputs:
+    - Brief markdown audit report.
+run:
+  tui: false
+  stream: true
+  trace_path_template: runs/{task_slug}-{timestamp}.jsonl
+  max_steps: 3
+  timeout_ms: 5000
+models:
+  main:
+    provider: openai
+    model: qwen-main
+    base_url: https://example.test/v1
+    api_key_env: MAIN_KEY
+""",
+        encoding="utf-8",
+    )
+
+    loaded = load_task_config(path).unwrap()
+
+    assert loaded.task.objective == "Audit this project briefly"
+    assert loaded.task.workspace == "."
+    assert loaded.task.profile == "project_audit"
+    assert loaded.task.expected_outputs == ("Brief markdown audit report.",)
+    assert loaded.run.tui is False
+    assert loaded.run.stream is True
+    assert loaded.run.trace_path_template == "runs/{task_slug}-{timestamp}.jsonl"
+    assert loaded.run.max_steps == 3
+    assert loaded.run.timeout_ms == 5000
+
+
 def test_create_provider_from_task_config_selects_named_model():
     config = TaskRunnerConfig(
         default_model="main",

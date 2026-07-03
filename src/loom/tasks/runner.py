@@ -40,7 +40,6 @@ from loom.tasks.profiles import TaskProfile, get_task_profile, select_task_profi
 from loom.tasks.request import TaskRequest, TaskRunOptions, TaskRunResult
 from loom.tasks.tools import make_task_tools
 
-
 STREAM_DELTA_TRACE_EVENTS = (
     "llm.content.delta",
     "llm.reasoning.delta",

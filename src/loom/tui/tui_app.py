@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from rich.errors import MarkupError
 from rich.text import Text
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.containers import Container, VerticalScroll
@@ -387,7 +388,10 @@ def _format_event_transcript(events: list[TuiEvent]) -> str:
 
 
 def _strip_rich_markup(value: str) -> str:
-    return _RICH_TAG_RE.sub("", value)
+    try:
+        return Text.from_markup(value).plain
+    except MarkupError:
+        return _RICH_TAG_RE.sub("", value).replace("\\[", "[")
 
 
 def _event_scope(event: TuiEvent) -> tuple[str, str]:
@@ -594,7 +598,7 @@ def _format_event_detail(event: TuiEvent) -> str:
                 lines.append(f"[dim]tokens:[/] prompt={pt} completion={ct} total={tt}")
             finish = resp.get("finish_reason")
             if finish:
-                lines.append(f"[dim]finish_reason:[/] {finish}")
+                lines.append(f"[dim]finish_reason:[/] {_safe_markup(finish)}")
         lines.append("")
 
     elif event.event_type in {"llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
@@ -618,7 +622,7 @@ def _format_event_detail(event: TuiEvent) -> str:
         if out is not None:
             value = out.value if hasattr(out, "value") else out
             if not _append_jsonish(lines, value, indent="  "):
-                lines.append(f"  {value}")
+                lines.append(f"  {_safe_markup(value)}")
         lines.append("")
 
     elif event.event_type == "tool.failed":
@@ -626,7 +630,7 @@ def _format_event_detail(event: TuiEvent) -> str:
         lines.append(f"[bold {COLORS['red']}]OUT[/]")
         err_data = data.get("error") or event.error
         if err_data:
-            lines.append(f"[{COLORS['red']}]error:[/] {err_data}")
+            lines.append(f"[{COLORS['red']}]error:[/] {_safe_markup(err_data)}")
         lines.append("")
 
     elif event.event_type == "step.completed":
@@ -641,7 +645,9 @@ def _format_event_detail(event: TuiEvent) -> str:
                     if isinstance(d, dict):
                         action = d.get("action", {})
                         if isinstance(action, dict):
-                            lines.append(f"  action: [{COLORS['blue']}]{action.get('kind', '?')}[/] - {action.get('description', '')}")
+                            lines.append(
+                                f"  action: [{COLORS['blue']}]{_safe_markup(action.get('kind', '?'))}[/] - {_safe_markup(action.get('description', ''))}"
+                            )
                         reasoning = d.get("reasoning", "")
                         if reasoning:
                             _append_wrapped(lines, f"reasoning: {reasoning}", indent="  ")
@@ -659,35 +665,35 @@ def _format_event_detail(event: TuiEvent) -> str:
             lines.append(f"[dim]proposals:[/] {data.get('proposal_count', 0)}")
         err_data = data.get("error") or event.error
         if err_data:
-            lines.append(f"[{COLORS['red']}]error:[/] {err_data}")
+            lines.append(f"[{COLORS['red']}]error:[/] {_safe_markup(err_data)}")
         artifacts = data.get("artifacts")
         if artifacts:
             lines.append(f"[bold {COLORS['teal']}]artifacts:[/]")
             if not _append_jsonish(lines, artifacts, indent="  "):
-                lines.append(f"  {artifacts}")
+                lines.append(f"  {_safe_markup(artifacts)}")
         lines.append("")
 
     elif event.event_type == "run.started":
         lines.append(f"[bold {COLORS['green']}]─── Run Started ───[/]")
         ctx_id = data.get("context_id", "")
         if ctx_id:
-            lines.append(f"[dim]context:[/] {ctx_id}")
+            lines.append(f"[dim]context:[/] {_safe_markup(ctx_id)}")
         meta = data.get("metadata", {})
         if isinstance(meta, dict) and meta:
-            lines.append(f"[dim]metadata:[/] {json.dumps(meta, ensure_ascii=False)}")
+            lines.append(f"[dim]metadata:[/] {_safe_markup(json.dumps(meta, ensure_ascii=False, default=str))}")
         lines.append("")
 
     elif event.event_type == "tool_selection.requested":
         lines.append(f"[bold {COLORS['teal']}]─── Tool Selection ───[/]")
-        lines.append(f"[dim]model:[/] {data.get('model', 'unknown')}")
+        lines.append(f"[dim]model:[/] {_safe_markup(data.get('model', 'unknown'))}")
         available = data.get("available_tools", [])
         if isinstance(available, list):
-            lines.append(f"[dim]available:[/] {', '.join(available)}")
+            lines.append(f"[dim]available:[/] {_safe_markup(', '.join(str(item) for item in available))}")
         lines.append("")
 
     elif event.event_type == "tool_selection.decided":
         lines.append(f"[bold {COLORS['teal']}]─── Tool Selection Decided ───[/]")
-        lines.append(f"[dim]model:[/] {data.get('model', 'unknown')}")
+        lines.append(f"[dim]model:[/] {_safe_markup(data.get('model', 'unknown'))}")
         usage = data.get("token_usage", {})
         if isinstance(usage, dict):
             lines.append(
@@ -704,20 +710,20 @@ def _format_event_detail(event: TuiEvent) -> str:
         if isinstance(selected, list):
             lines.append(f"[bold {COLORS['teal']}]selected:[/]")
             for tid in selected:
-                lines.append(f"  [{COLORS['green']}]✓ {tid}[/]")
+                lines.append(f"  [{COLORS['green']}]✓ {_safe_markup(tid)}[/]")
         if isinstance(excluded, list) and excluded:
             lines.append(f"[bold {COLORS['text_dim']}]excluded:[/]")
             for tid in excluded:
-                lines.append(f"  [{COLORS['text_dim']}]✗ {tid}[/]")
+                lines.append(f"  [{COLORS['text_dim']}]✗ {_safe_markup(tid)}[/]")
         conf = data.get("confidence", 0)
         lines.append(f"[dim]confidence:[/] {conf}")
         lines.append("")
 
     elif event.event_type == "tool_selection.failed":
         lines.append(f"[bold {COLORS['red']}]─── Tool Selection Failed ───[/]")
-        lines.append(f"[dim]model:[/] {data.get('model', 'unknown')}")
+        lines.append(f"[dim]model:[/] {_safe_markup(data.get('model', 'unknown'))}")
         if event.error:
-            lines.append(f"[{COLORS['red']}]error:[/] {event.error}")
+            lines.append(f"[{COLORS['red']}]error:[/] {_safe_markup(event.error)}")
         lines.append("")
 
     else:
@@ -726,7 +732,7 @@ def _format_event_detail(event: TuiEvent) -> str:
         if interesting:
             lines.append("[dim]data:[/]")
             if not _append_jsonish(lines, interesting, indent="  ", max_chars=2000):
-                lines.append(f"  {interesting}")
+                lines.append(f"  {_safe_markup(interesting)}")
         lines.append("")
 
     return "\n".join(lines)
@@ -744,9 +750,9 @@ def _append_tool_detail_input(lines: list[str], data: dict[str, Any]) -> None:
     name = data.get("tool_name") or data.get("tool_id") or data.get("tool_call_id") or "?"
     arguments = _tool_arguments(data)
     if arguments is None:
-        lines.append(f"  {name}")
+        lines.append(f"  {_safe_markup(name)}")
         return
-    lines.append(f"  {name} {_compact_inline(arguments)}")
+    lines.append(f"  {_safe_markup(name)} {_safe_markup(_compact_inline(arguments))}")
 
 
 def _tool_arguments(data: dict[str, Any]) -> Any | None:
@@ -767,7 +773,7 @@ def _compact_inline(value: Any, *, max_chars: int = 800) -> str:
 
 
 def _append_llm_input_details(lines: list[str], data: dict[str, Any]) -> None:
-    lines.append(f"[dim]model:[/] {data.get('model', 'unknown')}")
+    lines.append(f"[dim]model:[/] {_safe_markup(data.get('model', 'unknown'))}")
     lines.append("")
     messages = data.get("messages", [])
     if isinstance(messages, (list, tuple)):
@@ -776,7 +782,7 @@ def _append_llm_input_details(lines: list[str], data: dict[str, Any]) -> None:
                 role = msg.get("role", "?")
                 content = msg.get("content", "")
                 role_color = COLORS["blue"] if role == "system" else COLORS["green"] if role == "user" else COLORS["magenta"]
-                lines.append(f"[bold {role_color}]{role}:[/]")
+                lines.append(f"[bold {role_color}]{_safe_markup(role)}:[/]")
                 if isinstance(content, str):
                     _append_wrapped(lines, content, indent="  ")
                 elif isinstance(content, list):
@@ -791,7 +797,7 @@ def _append_llm_input_details(lines: list[str], data: dict[str, Any]) -> None:
             if isinstance(tool, dict):
                 fn = tool.get("function", {})
                 if isinstance(fn, dict):
-                    lines.append(f"  [{COLORS['orange']}]{fn.get('name', '?')}[/] - {fn.get('description', '')}")
+                    lines.append(f"  [{COLORS['orange']}]{_safe_markup(fn.get('name', '?'))}[/] - {_safe_markup(fn.get('description', ''))}")
         lines.append("")
 
 
@@ -852,7 +858,7 @@ def _append_jsonish_rendered(lines: list[str], value: Any, *, indent: str = "", 
     comma = "," if trailing_comma else ""
 
     if isinstance(value, dict):
-        lines.append(f"{indent}{prefix}{{")
+        lines.append(f"{indent}{_safe_markup(prefix)}{{")
         items = list(value.items())
         for index, (key, item) in enumerate(items):
             item_prefix = f"{json.dumps(str(key), ensure_ascii=False)}: "
@@ -867,7 +873,7 @@ def _append_jsonish_rendered(lines: list[str], value: Any, *, indent: str = "", 
         return
 
     if isinstance(value, list | tuple):
-        lines.append(f"{indent}{prefix}[")
+        lines.append(f"{indent}{_safe_markup(prefix)}[")
         for index, item in enumerate(value):
             _append_jsonish_rendered(
                 lines,
@@ -881,13 +887,13 @@ def _append_jsonish_rendered(lines: list[str], value: Any, *, indent: str = "", 
     if isinstance(value, str):
         normalized = _normalize_display_text(value)
         if "\n" in normalized:
-            lines.append(f"{indent}{prefix}".rstrip())
+            lines.append(f"{indent}{_safe_markup(prefix)}".rstrip())
             _append_wrapped(lines, normalized, indent=f"{indent}  ")
             return
-        lines.append(f"{indent}{prefix}{json.dumps(normalized, ensure_ascii=False)}{comma}")
+        lines.append(f"{indent}{_safe_markup(prefix)}{_safe_markup(json.dumps(normalized, ensure_ascii=False))}{comma}")
         return
 
-    lines.append(f"{indent}{prefix}{json.dumps(value, ensure_ascii=False, default=str)}{comma}")
+    lines.append(f"{indent}{_safe_markup(prefix)}{_safe_markup(json.dumps(value, ensure_ascii=False, default=str))}{comma}")
 
 
 def _extract_report_text(value: Any) -> str | None:
@@ -947,14 +953,18 @@ def _append_wrapped(lines: list[str], text: str, indent: str = "", max_width: in
                 current = f"{current} {word}" if current else word
             else:
                 if current:
-                    lines.append(f"{indent}{current}")
+                    lines.append(f"{indent}{_safe_markup(current)}")
                 current = word
         if current:
-            lines.append(f"{indent}{current}")
+            lines.append(f"{indent}{_safe_markup(current)}")
 
 
 def _normalize_display_text(text: str) -> str:
     return text.replace("\\n", "\n").replace("\\t", "\t")
+
+
+def _safe_markup(value: Any) -> str:
+    return _normalize_display_text(str(value)).replace("[", r"\[")
 
 
 # ─── Widgets ───────────────────────────────────────────────────────────

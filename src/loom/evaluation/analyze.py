@@ -10,6 +10,7 @@ from pathlib import Path
 
 from loom.core import Result, err, make_loom_error, ok
 from loom.evaluation.artifacts import EvaluationArtifacts, write_evaluation_artifacts
+from loom.evaluation.assessments import StepAssessment, assess_steps
 from loom.evaluation.episodes import EpisodeGraph, build_episode_graph
 from loom.evaluation.metrics import MetricResult, calculate_metrics
 from loom.evaluation.records import load_normalized_events
@@ -29,6 +30,7 @@ class EvaluationConfig:
 class EvaluationResult:
     graph: EpisodeGraph
     metrics: tuple[MetricResult, ...]
+    assessments: tuple[StepAssessment, ...]
     artifacts: EvaluationArtifacts
     report: str
 
@@ -41,8 +43,9 @@ async def analyze_trace(config: EvaluationConfig) -> Result:
         return loaded
     graph = build_episode_graph(loaded.value.events)
     metrics = calculate_metrics(graph)
+    assessments = assess_steps(graph)
     try:
-        artifacts = write_evaluation_artifacts(config.out_dir, graph, metrics)
+        artifacts = write_evaluation_artifacts(config.out_dir, graph, metrics, assessments)
     except OSError as exc:
         return err(
             make_loom_error(
@@ -54,7 +57,7 @@ async def analyze_trace(config: EvaluationConfig) -> Result:
             )
         )
     report = artifacts.report_path.read_text(encoding="utf-8")
-    return ok(EvaluationResult(graph=graph, metrics=metrics, artifacts=artifacts, report=report))
+    return ok(EvaluationResult(graph=graph, metrics=metrics, assessments=assessments, artifacts=artifacts, report=report))
 
 
 def _build_parser() -> argparse.ArgumentParser:
