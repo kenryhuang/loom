@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
 
 from loom.core import JsonValue
 from loom.evaluation.episodes import EpisodeGraph, StepGraphEpisode, ToolCallEpisode
 from loom.evaluation.records import NormalizedEvent
+from loom.evaluation.token_usage import total_tokens_for_events
 
 DIMENSIONS = (
     "step_completion",
@@ -245,29 +245,7 @@ def _last_index(events: tuple[NormalizedEvent, ...], predicate) -> int | None:
 
 
 def _step_token_total(events: tuple[NormalizedEvent, ...]) -> int:
-    total = 0
-    for event in events:
-        total += _tokens_from_value(event.payload)
-    return total
-
-
-def _tokens_from_value(value: Any) -> int:
-    if not isinstance(value, Mapping):
-        return 0
-    token_usage = value.get("tokenUsage") or value.get("token_usage") or value.get("usage")
-    if isinstance(token_usage, Mapping):
-        parsed = token_usage.get("totalTokens") or token_usage.get("total_tokens") or 0
-        try:
-            return int(parsed)
-        except (TypeError, ValueError):
-            return 0
-    response = value.get("response")
-    if isinstance(response, Mapping):
-        return _tokens_from_value(response)
-    metadata = value.get("metadata")
-    if isinstance(metadata, Mapping):
-        return _tokens_from_value(metadata)
-    return 0
+    return total_tokens_for_events(events)
 
 
 def _dimension(name: str, score: float, status: str, rationale: str, hashes: tuple[str, ...]) -> DimensionScore:

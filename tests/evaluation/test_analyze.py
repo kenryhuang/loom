@@ -4,7 +4,53 @@ import subprocess
 import sys
 from pathlib import Path
 
+from loom.core import ok
 from loom.evaluation.analyze import EvaluationConfig, analyze_trace, parse_args
+from loom.llm import LlmResponse, TokenUsage
+
+
+class FakeJudgeProvider:
+    model = "fake-judge-model"
+
+    def __init__(self):
+        self.messages = []
+
+    async def chat(self, messages, tools=None, cancellation=None):
+        self.messages.append(messages)
+        return ok(
+            LlmResponse(
+                content=json.dumps(
+                    {
+                        "overall": 0.71,
+                        "dimensions": {
+                            "task_progress": 0.8,
+                            "instruction_following": 0.7,
+                            "tool_selection": 0.7,
+                            "tool_arguments": 0.7,
+                            "tool_result_handling": 0.6,
+                            "evidence_grounding": 0.7,
+                            "context_quality": 0.8,
+                            "efficiency": 0.6,
+                            "recovery": 1.0,
+                        },
+                        "findings": [
+                            {
+                                "severity": "warning",
+                                "category": "needs_more_evidence",
+                                "dimension": "evidence_grounding",
+                                "affected_surface": "system_prompt",
+                                "message": "The step could cite evidence more explicitly.",
+                                "recommendation": "Ask for evidence hashes in audit summaries.",
+                                "confidence": 0.8,
+                                "evidence_event_hashes": ["trace-complete"],
+                            }
+                        ],
+                        "confidence": 0.83,
+                    }
+                ),
+                usage=TokenUsage(2, 3, 5),
+            )
+        )
 
 
 def _write_trace(path):
@@ -55,6 +101,24 @@ def test_parse_args_accepts_trace_and_out_dir(tmp_path):
     assert config.out_dir == tmp_path / "eval"
 
 
+def test_parse_args_accepts_optional_judge_config_and_model(tmp_path):
+    config = parse_args(
+        (
+            "--trace-path",
+            str(tmp_path / "trace.jsonl"),
+            "--judge",
+            "--config",
+            str(tmp_path / "config.yaml"),
+            "--model",
+            "glm",
+        )
+    )
+
+    assert config.judge is True
+    assert config.config_path == tmp_path / "config.yaml"
+    assert config.model_name == "glm"
+
+
 def test_analyze_trace_writes_evaluation_artifacts(tmp_path):
     async def scenario():
         trace_path = tmp_path / "trace.jsonl"
@@ -71,6 +135,28 @@ def test_analyze_trace_writes_evaluation_artifacts(tmp_path):
         assert result.value.artifacts.report_path.exists()
         assert "Trace Evaluation Report" in result.value.report
         assert "## Step Assessments" in result.value.report
+
+    asyncio.run(scenario())
+
+
+def test_analyze_trace_with_judge_writes_step_judge_artifacts(tmp_path):
+    async def scenario():
+        trace_path = tmp_path / "trace.jsonl"
+        out_dir = tmp_path / "evaluation"
+        _write_trace(trace_path)
+        provider = FakeJudgeProvider()
+
+        result = await analyze_trace(EvaluationConfig(trace_path=trace_path, out_dir=out_dir, judge=True), judge_provider=provider)
+
+        assert result.ok
+        assert len(result.value.judge_assessments) == 1
+        assert result.value.artifacts.judge_assessments_path.exists()
+        assert "## LLM Judge Assessments" in result.value.report
+        assert "needs_more_evidence" in result.value.report
+        assert provider.messages
+
+        judge_rows = [json.loads(line) for line in result.value.artifacts.judge_assessments_path.read_text(encoding="utf-8").splitlines()]
+        assert judge_rows[0]["overall"] == 0.71
 
     asyncio.run(scenario())
 

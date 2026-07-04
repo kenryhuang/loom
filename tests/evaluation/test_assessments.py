@@ -78,3 +78,20 @@ def test_assess_steps_marks_complete_clean_step_as_pass():
     assert assessment.aggregate_score == 1.0
     assert not assessment.findings
     assert all(dimension.score == 1.0 for dimension in assessment.dimensions.values())
+
+
+def test_assess_steps_does_not_double_count_trace_aggregate_token_usage():
+    graph = build_episode_graph(
+        (
+            _event("step.started", hash="step-start"),
+            _event("llm.requested", llm_call_id="llm-1", hash="llm-request"),
+            _event("llm.completed", llm_call_id="llm-1", payload={"response": {"usage": {"total_tokens": 20000}}}, hash="llm-complete"),
+            _event("step.completed", hash="step-complete"),
+            _event("trace.completed", payload={"metadata": {"tokenUsage": {"totalTokens": 20000}}, "outcome": "pass"}, hash="trace-complete"),
+        )
+    )
+
+    assessment = assess_steps(graph)[0]
+
+    assert "high_token_usage" not in {finding.category for finding in assessment.findings}
+    assert assessment.dimensions["efficiency"].score == 1.0

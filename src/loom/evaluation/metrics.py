@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
 
 from loom.core import JsonValue
 from loom.evaluation.episodes import EpisodeGraph
+from loom.evaluation.token_usage import total_tokens_for_events
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,23 +78,7 @@ def _tool_success_rate(graph: EpisodeGraph) -> float:
 
 
 def _total_tokens(graph: EpisodeGraph) -> int:
-    total = 0
-    for event in graph.events:
-        total += _tokens_from_value(event.payload.get("metadata", {}))
-    return total
-
-
-def _tokens_from_value(value: Any) -> int:
-    if not isinstance(value, Mapping):
-        return 0
-    token_usage = value.get("tokenUsage") or value.get("token_usage")
-    if isinstance(token_usage, Mapping):
-        value = token_usage.get("totalTokens") or token_usage.get("total_tokens") or 0
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return 0
-    return 0
+    return total_tokens_for_events(graph.events)
 
 
 def _severity_for_count(value: int) -> str:
