@@ -188,6 +188,20 @@ def test_parse_step_judge_assessment_returns_structured_assessment():
     assert parsed.token_usage.total_tokens == 3
 
 
+def test_parse_step_judge_assessment_accepts_fenced_json_response():
+    graph = _graph()
+    pack = build_step_evidence_pack(graph, graph.steps[0], assess_steps(graph)[0])
+
+    parsed = parse_step_judge_assessment(
+        "```json\n" + _judge_json() + "\n```",
+        pack,
+        evaluator_model="fake-judge-model",
+        token_usage=TokenUsage(),
+    ).unwrap()
+
+    assert parsed.overall == 0.72
+
+
 def test_parse_step_judge_assessment_rejects_invalid_json_and_scores():
     graph = _graph()
     pack = build_step_evidence_pack(graph, graph.steps[0], assess_steps(graph)[0])

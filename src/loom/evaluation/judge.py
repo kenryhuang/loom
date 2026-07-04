@@ -204,10 +204,11 @@ def parse_step_judge_assessment(
     evaluator_model: str,
     token_usage: TokenUsage,
 ) -> Result:
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError as exc:
-        return err(_parse_error("Could not parse step judge JSON", pack, cause={"message": str(exc)}))
+    parsed_payload = _parse_json_object(content)
+    if not parsed_payload.ok:
+        cause = parsed_payload.error.cause if parsed_payload.error is not None else None
+        return err(_parse_error("Could not parse step judge JSON", pack, cause=cause))
+    payload = parsed_payload.value
     if not isinstance(payload, Mapping):
         return err(_parse_error("Step judge response must be a JSON object", pack))
 
@@ -242,6 +243,22 @@ def parse_step_judge_assessment(
             evidence_event_hashes=pack.evidence_event_hashes,
         )
     )
+
+
+def _parse_json_object(content: str) -> Result:
+    try:
+        return ok(json.loads(content))
+    except json.JSONDecodeError as first_exc:
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(content):
+            if char != "{":
+                continue
+            try:
+                value, _ = decoder.raw_decode(content[index:])
+                return ok(value)
+            except json.JSONDecodeError:
+                continue
+        return err(make_loom_error("LLM_PARSE_ERROR", "Could not parse JSON object", retryable=True, cause={"message": str(first_exc)}))
 
 
 def _llm_round_summary(round_item: LlmRoundEpisode) -> LlmRoundSummary:
