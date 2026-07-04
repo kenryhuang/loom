@@ -2,6 +2,7 @@ import asyncio
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 from loom.evaluation.analyze import EvaluationConfig, analyze_trace, parse_args
 
@@ -72,6 +73,14 @@ def test_analyze_trace_writes_evaluation_artifacts(tmp_path):
         assert "## Step Assessments" in result.value.report
 
     asyncio.run(scenario())
+
+
+def test_analyze_imports_trace_analysis_kernel_directly():
+    source = (Path(__file__).resolve().parents[2] / "src" / "loom" / "evaluation" / "analyze.py").read_text(encoding="utf-8")
+
+    assert "from loom.trace_analysis import EpisodeGraph, build_episode_graph, load_normalized_events" in source
+    assert "from loom.evaluation.episodes import" not in source
+    assert "from loom.evaluation.records import" not in source
 
 
 def test_evaluation_analyze_cli_help():

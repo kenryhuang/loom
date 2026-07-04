@@ -11,9 +11,8 @@ from pathlib import Path
 from loom.core import Result, err, make_loom_error, ok
 from loom.evaluation.artifacts import EvaluationArtifacts, write_evaluation_artifacts
 from loom.evaluation.assessments import StepAssessment, assess_steps
-from loom.evaluation.episodes import EpisodeGraph, build_episode_graph
 from loom.evaluation.metrics import MetricResult, calculate_metrics
-from loom.evaluation.records import load_normalized_events
+from loom.trace_analysis import EpisodeGraph, build_episode_graph, load_normalized_events
 
 
 @dataclass(frozen=True, slots=True)
