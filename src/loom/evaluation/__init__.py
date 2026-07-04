@@ -4,7 +4,19 @@ from loom.evaluation._exports import lazy_analyze_export
 from loom.evaluation.artifacts import EvaluationArtifacts, render_evaluation_report, write_evaluation_artifacts
 from loom.evaluation.assessments import DimensionScore, Finding, StepAssessment, assess_steps
 from loom.evaluation.episodes import EpisodeGraph, LlmRoundEpisode, RunEpisode, StepGraphEpisode, ToolCallEpisode, build_episode_graph
-from loom.evaluation.judge import JUDGE_DIMENSIONS, JudgeFinding, LlmStepJudge, StepEvidencePack, StepJudgeAssessment, build_step_evidence_pack
+from loom.evaluation.judge import (
+    JUDGE_DIMENSIONS,
+    ROUND_JUDGE_DIMENSIONS,
+    JudgeFinding,
+    LlmRoundJudge,
+    LlmStepJudge,
+    RoundEvidencePack,
+    RoundJudgeAssessment,
+    StepEvidencePack,
+    StepJudgeAssessment,
+    build_round_evidence_packs,
+    build_step_evidence_pack,
+)
 from loom.evaluation.metrics import MetricResult, calculate_metrics
 from loom.evaluation.records import NormalizedEvent, TraceIngestResult, load_normalized_events, normalize_record
 from loom.trace_analysis import EvidenceRef
@@ -23,9 +35,13 @@ __all__ = [
     "JUDGE_DIMENSIONS",
     "JudgeFinding",
     "LlmRoundEpisode",
+    "LlmRoundJudge",
     "LlmStepJudge",
     "MetricResult",
     "NormalizedEvent",
+    "ROUND_JUDGE_DIMENSIONS",
+    "RoundEvidencePack",
+    "RoundJudgeAssessment",
     "RunEpisode",
     "StepGraphEpisode",
     "StepAssessment",
@@ -36,6 +52,7 @@ __all__ = [
     "analyze_trace",
     "assess_steps",
     "build_episode_graph",
+    "build_round_evidence_packs",
     "build_step_evidence_pack",
     "calculate_metrics",
     "load_normalized_events",

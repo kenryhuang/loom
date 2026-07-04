@@ -6,10 +6,16 @@ from loom.evaluation.assessments import assess_steps
 from loom.evaluation.episodes import build_episode_graph
 from loom.evaluation.judge import (
     JUDGE_DIMENSIONS,
+    ROUND_JUDGE_DIMENSIONS,
+    LlmRoundJudge,
     LlmStepJudge,
+    RoundJudgeAssessment,
     StepJudgeAssessment,
+    build_round_evidence_packs,
+    build_round_judge_messages,
     build_step_evidence_pack,
     build_step_judge_messages,
+    parse_round_judge_assessment,
     parse_step_judge_assessment,
 )
 from loom.evaluation.records import NormalizedEvent
@@ -64,7 +70,19 @@ def _graph():
     return build_episode_graph(
         (
             _event("step.started", hash="step-start"),
-            _event("llm.requested", llm_call_id="llm-1", payload={"messages": [{"role": "user", "content": "Audit the project briefly."}]}, hash="llm-request"),
+            _event(
+                "llm.requested",
+                llm_call_id="llm-1",
+                payload={
+                    "messages": [
+                        {"role": "system", "content": "old context " + ("x" * 1000)},
+                        {"role": "assistant", "content": "previous response"},
+                        {"role": "tool", "content": "previous tool result"},
+                        {"role": "user", "content": "Audit the project briefly."},
+                    ]
+                },
+                hash="llm-request",
+            ),
             _event(
                 "llm.completed",
                 llm_call_id="llm-1",
@@ -138,27 +156,92 @@ def _judge_json():
     )
 
 
-def test_build_step_evidence_pack_compacts_step_for_judge():
+def _round_judge_json():
+    return json.dumps(
+        {
+            "overall": 0.64,
+            "dimensions": {
+                "round_progress": {"score": 0.7, "rationale": "The round made useful progress."},
+                "instruction_following": {"score": 0.7, "rationale": "The round followed the task."},
+                "tool_selection": {"score": 0.8, "rationale": "The selected tool was appropriate."},
+                "tool_arguments": {"score": 0.9, "rationale": "Arguments were valid."},
+                "tool_result_handling": {"score": 0.4, "rationale": "No result was handled in this round yet."},
+                "evidence_grounding": {"score": 0.6, "rationale": "Evidence was partial."},
+                "efficiency": {"score": 0.5, "rationale": "One extra round may be avoidable."},
+                "recovery": {"score": 1.0, "rationale": "No recovery needed."},
+            },
+            "findings": [
+                {
+                    "severity": "warning",
+                    "category": "round_needs_followup",
+                    "dimension": "tool_result_handling",
+                    "affected_surface": "loop_control",
+                    "message": "The round requested a file read but did not yet consume the result.",
+                    "recommendation": "Judge the follow-up round for result use.",
+                    "confidence": 0.75,
+                    "evidence_event_hashes": ["llm-complete"],
+                }
+            ],
+            "confidence": 0.8,
+        }
+    )
+
+
+def test_build_round_evidence_packs_compact_each_round_and_link_tools():
     graph = _graph()
     step = graph.steps[0]
-    assessment = assess_steps(graph)[0]
 
-    pack = build_step_evidence_pack(graph, step, assessment)
+    packs = build_round_evidence_packs(graph, step)
 
+    assert len(packs) == 2
+    pack = packs[0]
     assert pack.trace_id == "trace-1"
-    assert pack.token_total == 173
-    assert pack.deterministic_status == "pass"
-    assert pack.llm_rounds[0].llm_call_id == "llm-1"
-    assert pack.llm_rounds[0].response_excerpt == "I will inspect files first."
+    assert pack.llm_call_id == "llm-1"
+    assert pack.response_excerpt == "I will inspect files first."
+    assert len(pack.request_messages) == 3
+    assert all("old context" not in item.content_excerpt for item in pack.request_messages)
     assert pack.tool_calls[0].tool_id == "read_file"
     assert "README.md" in pack.tool_calls[0].arguments_excerpt
     assert "searchable text" in pack.tool_calls[0].result_excerpt
-    assert "tool-complete" in {ref.event_hash for ref in pack.evidence_refs}
 
 
-def test_build_step_judge_messages_include_compact_pack_not_raw_trace_dump():
+def test_build_round_judge_messages_include_one_round_not_full_step_history():
     graph = _graph()
-    pack = build_step_evidence_pack(graph, graph.steps[0], assess_steps(graph)[0])
+    pack = build_round_evidence_packs(graph, graph.steps[0])[0]
+
+    messages = build_round_judge_messages(pack)
+
+    assert messages[0].role == "system"
+    assert "round-level evaluator" in messages[0].content.lower()
+    payload = json.loads(messages[1].content)
+    assert payload["llm_call_id"] == "llm-1"
+    assert "old context" not in messages[1].content
+    assert len(messages[1].content) < 4000
+
+
+def test_parse_round_judge_assessment_returns_structured_assessment():
+    graph = _graph()
+    pack = build_round_evidence_packs(graph, graph.steps[0])[0]
+
+    parsed = parse_round_judge_assessment(_round_judge_json(), pack, evaluator_model="fake-judge-model", token_usage=TokenUsage(1, 2, 3)).unwrap()
+
+    assert isinstance(parsed, RoundJudgeAssessment)
+    assert parsed.overall == 0.64
+    assert set(parsed.dimensions) == set(ROUND_JUDGE_DIMENSIONS)
+    assert parsed.findings[0].category == "round_needs_followup"
+    assert parsed.llm_call_id == "llm-1"
+
+
+def test_build_step_judge_messages_use_round_assessments_not_full_round_trace():
+    graph = _graph()
+    round_pack = build_round_evidence_packs(graph, graph.steps[0])[0]
+    round_assessment = parse_round_judge_assessment(
+        _round_judge_json(),
+        round_pack,
+        evaluator_model="fake-judge-model",
+        token_usage=TokenUsage(1, 2, 3),
+    ).unwrap()
+    pack = build_step_evidence_pack(graph, graph.steps[0], assess_steps(graph)[0], round_assessments=(round_assessment,))
 
     messages = build_step_judge_messages(pack)
 
@@ -167,9 +250,12 @@ def test_build_step_judge_messages_include_compact_pack_not_raw_trace_dump():
     payload = json.loads(messages[1].content)
     assert payload["trace_id"] == "trace-1"
     assert payload["token_total"] == 173
-    assert "events" not in payload
-    assert "This README excerpt is intentionally long" not in messages[1].content
-    assert "YakDB turns files into searchable text" in payload["tool_calls"][0]["result_excerpt"]
+    assert "round_assessments" in payload
+    assert "llm_rounds" not in payload
+    assert "tool_calls" not in payload
+    assert "evidence_refs" not in payload
+    assert "old context" not in messages[1].content
+    assert "round_needs_followup" in messages[1].content
 
 
 def test_parse_step_judge_assessment_returns_structured_assessment():
@@ -229,5 +315,21 @@ def test_llm_step_judge_calls_provider_with_step_pack():
         assert result.value.evaluator_model == "fake-judge-model"
         assert provider.messages is not None
         assert json.loads(provider.messages[1].content)["trace_id"] == "trace-1"
+
+    asyncio.run(scenario())
+
+
+def test_llm_round_judge_calls_provider_with_round_pack():
+    async def scenario():
+        graph = _graph()
+        pack = build_round_evidence_packs(graph, graph.steps[0])[0]
+        provider = FakeJudgeProvider(_round_judge_json())
+
+        result = await LlmRoundJudge(provider).judge(pack)
+
+        assert result.ok
+        assert result.value.evaluator_model == "fake-judge-model"
+        assert provider.messages is not None
+        assert json.loads(provider.messages[1].content)["llm_call_id"] == "llm-1"
 
     asyncio.run(scenario())

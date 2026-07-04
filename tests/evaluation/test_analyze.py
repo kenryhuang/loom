@@ -6,6 +6,7 @@ from pathlib import Path
 
 from loom.core import ok
 from loom.evaluation.analyze import EvaluationConfig, analyze_trace, parse_args, parse_run_options, run_evaluation_trace_with_tui
+from loom.evaluation.judge import ROUND_JUDGE_DIMENSIONS
 from loom.llm import LlmResponse, TokenUsage
 
 
@@ -17,37 +18,45 @@ class FakeJudgeProvider:
 
     async def chat(self, messages, tools=None, cancellation=None):
         self.messages.append(messages)
+        system_prompt = (messages[0].content or "").lower()
+        if "round-level evaluator" in system_prompt:
+            content = {
+                "overall": 0.81,
+                "dimensions": {name: 0.8 for name in ROUND_JUDGE_DIMENSIONS},
+                "findings": [],
+                "confidence": 0.84,
+            }
+        else:
+            content = {
+                "overall": 0.71,
+                "dimensions": {
+                    "task_progress": 0.8,
+                    "instruction_following": 0.7,
+                    "tool_selection": 0.7,
+                    "tool_arguments": 0.7,
+                    "tool_result_handling": 0.6,
+                    "evidence_grounding": 0.7,
+                    "context_quality": 0.8,
+                    "efficiency": 0.6,
+                    "recovery": 1.0,
+                },
+                "findings": [
+                    {
+                        "severity": "warning",
+                        "category": "needs_more_evidence",
+                        "dimension": "evidence_grounding",
+                        "affected_surface": "system_prompt",
+                        "message": "The step could cite evidence more explicitly.",
+                        "recommendation": "Ask for evidence hashes in audit summaries.",
+                        "confidence": 0.8,
+                        "evidence_event_hashes": ["trace-complete"],
+                    }
+                ],
+                "confidence": 0.83,
+            }
         return ok(
             LlmResponse(
-                content=json.dumps(
-                    {
-                        "overall": 0.71,
-                        "dimensions": {
-                            "task_progress": 0.8,
-                            "instruction_following": 0.7,
-                            "tool_selection": 0.7,
-                            "tool_arguments": 0.7,
-                            "tool_result_handling": 0.6,
-                            "evidence_grounding": 0.7,
-                            "context_quality": 0.8,
-                            "efficiency": 0.6,
-                            "recovery": 1.0,
-                        },
-                        "findings": [
-                            {
-                                "severity": "warning",
-                                "category": "needs_more_evidence",
-                                "dimension": "evidence_grounding",
-                                "affected_surface": "system_prompt",
-                                "message": "The step could cite evidence more explicitly.",
-                                "recommendation": "Ask for evidence hashes in audit summaries.",
-                                "confidence": 0.8,
-                                "evidence_event_hashes": ["trace-complete"],
-                            }
-                        ],
-                        "confidence": 0.83,
-                    }
-                ),
+                content=json.dumps(content),
                 usage=TokenUsage(2, 3, 5),
             )
         )
@@ -99,6 +108,36 @@ def _write_trace(path):
             "traceId": "trace-1",
             "payload": {"type": "step.started", "run_id": "run-1", "loop_id": "loop-1", "trace_id": "trace-1", "step_number": 0},
             "hash": "step-start",
+        },
+        {
+            "type": "event",
+            "eventType": "llm.requested",
+            "traceId": "trace-1",
+            "payload": {
+                "type": "llm.requested",
+                "run_id": "run-1",
+                "loop_id": "loop-1",
+                "trace_id": "trace-1",
+                "step_number": 0,
+                "llm_call_id": "llm-1",
+                "messages": [{"role": "user", "content": "Audit this project briefly."}],
+            },
+            "hash": "llm-request",
+        },
+        {
+            "type": "event",
+            "eventType": "llm.completed",
+            "traceId": "trace-1",
+            "payload": {
+                "type": "llm.completed",
+                "run_id": "run-1",
+                "loop_id": "loop-1",
+                "trace_id": "trace-1",
+                "step_number": 0,
+                "llm_call_id": "llm-1",
+                "response": {"content": "Brief audit complete.", "usage": {"total_tokens": 42}},
+            },
+            "hash": "llm-complete",
         },
         {
             "type": "event",
@@ -197,11 +236,18 @@ def test_analyze_trace_with_judge_writes_step_judge_artifacts(tmp_path):
 
         assert result.ok
         assert len(result.value.judge_assessments) == 1
+        assert len(result.value.round_judge_assessments) == 1
         assert result.value.artifacts.judge_assessments_path.exists()
+        assert result.value.artifacts.round_judge_assessments_path.exists()
         assert "## LLM Judge Assessments" in result.value.report
+        assert "## Round LLM Judge Assessments" in result.value.report
         assert "needs_more_evidence" in result.value.report
-        assert provider.messages
+        assert len(provider.messages) == 2
+        assert "round-level evaluator" in provider.messages[0][0].content.lower()
+        assert "step-level evaluator" in provider.messages[1][0].content.lower()
 
+        round_rows = [json.loads(line) for line in result.value.artifacts.round_judge_assessments_path.read_text(encoding="utf-8").splitlines()]
+        assert round_rows[0]["overall"] == 0.81
         judge_rows = [json.loads(line) for line in result.value.artifacts.judge_assessments_path.read_text(encoding="utf-8").splitlines()]
         assert judge_rows[0]["overall"] == 0.71
 

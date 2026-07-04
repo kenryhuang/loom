@@ -13,7 +13,14 @@ from typing import Any
 from loom.core import Result, err, make_loom_error, new_loop_id, new_run_id, now_iso, ok
 from loom.evaluation.artifacts import EvaluationArtifacts, write_evaluation_artifacts
 from loom.evaluation.assessments import StepAssessment, assess_steps
-from loom.evaluation.judge import LlmStepJudge, StepJudgeAssessment, build_step_evidence_pack
+from loom.evaluation.judge import (
+    LlmRoundJudge,
+    LlmStepJudge,
+    RoundJudgeAssessment,
+    StepJudgeAssessment,
+    build_round_evidence_packs,
+    build_step_evidence_pack,
+)
 from loom.evaluation.metrics import MetricResult, calculate_metrics
 from loom.tasks.config import create_provider_from_task_config, load_task_config
 from loom.trace_analysis import EpisodeGraph, build_episode_graph, load_normalized_events
@@ -45,9 +52,16 @@ class EvaluationResult:
     graph: EpisodeGraph
     metrics: tuple[MetricResult, ...]
     assessments: tuple[StepAssessment, ...]
+    round_judge_assessments: tuple[RoundJudgeAssessment, ...]
     judge_assessments: tuple[StepJudgeAssessment, ...]
     artifacts: EvaluationArtifacts
     report: str
+
+
+@dataclass(frozen=True, slots=True)
+class JudgeRunResult:
+    round_assessments: tuple[RoundJudgeAssessment, ...]
+    step_assessments: tuple[StepJudgeAssessment, ...]
 
 
 async def analyze_trace(config: EvaluationConfig, *, judge_provider: Any | None = None, event_sink: Any | None = None) -> Result:
@@ -88,6 +102,7 @@ async def analyze_trace(config: EvaluationConfig, *, judge_provider: Any | None 
     graph = build_episode_graph(loaded.value.events)
     metrics = calculate_metrics(graph)
     assessments = assess_steps(graph)
+    round_judge_assessments: tuple[RoundJudgeAssessment, ...] = ()
     judge_assessments: tuple[StepJudgeAssessment, ...] = ()
     step_events = await _emit_step_events(event_sink, run_id, loop_id, graph, assessments)
     if not step_events.ok:
@@ -99,9 +114,17 @@ async def analyze_trace(config: EvaluationConfig, *, judge_provider: Any | None 
         judged = await _judge_steps(graph, assessments, provider_result.value, event_sink=event_sink, run_id=run_id, loop_id=loop_id)
         if not judged.ok:
             return await _finish_analysis_error(event_sink, run_id, loop_id, started, judged.error, step_count=len(assessments))
-        judge_assessments = judged.value
+        round_judge_assessments = judged.value.round_assessments
+        judge_assessments = judged.value.step_assessments
     try:
-        artifacts = write_evaluation_artifacts(config.out_dir, graph, metrics, assessments, judge_assessments)
+        artifacts = write_evaluation_artifacts(
+            config.out_dir,
+            graph,
+            metrics,
+            assessments,
+            judge_assessments=judge_assessments,
+            round_judge_assessments=round_judge_assessments,
+        )
     except OSError as exc:
         return await _finish_analysis_error(
             event_sink,
@@ -128,6 +151,7 @@ async def analyze_trace(config: EvaluationConfig, *, judge_provider: Any | None 
                 "episodes_path": str(artifacts.episodes_path),
                 "metrics_path": str(artifacts.metrics_path),
                 "assessments_path": str(artifacts.assessments_path),
+                "round_judge_assessments_path": str(artifacts.round_judge_assessments_path),
                 "judge_assessments_path": str(artifacts.judge_assessments_path),
                 "findings_path": str(artifacts.findings_path),
                 "report_path": str(artifacts.report_path),
@@ -147,8 +171,13 @@ async def analyze_trace(config: EvaluationConfig, *, judge_provider: Any | None 
             "steps": len(graph.steps),
             "metric_count": len(metrics),
             "step_assessment_count": len(assessments),
+            "round_judge_assessment_count": len(round_judge_assessments),
             "judge_assessment_count": len(judge_assessments),
-            "finding_count": sum(len(item.findings) for item in assessments) + sum(len(item.findings) for item in judge_assessments),
+            "finding_count": (
+                sum(len(item.findings) for item in assessments)
+                + sum(len(item.findings) for item in round_judge_assessments)
+                + sum(len(item.findings) for item in judge_assessments)
+            ),
             "duration_ms": _elapsed_ms(started),
             "at": now_iso(),
         },
@@ -160,6 +189,7 @@ async def analyze_trace(config: EvaluationConfig, *, judge_provider: Any | None 
             graph=graph,
             metrics=metrics,
             assessments=assessments,
+            round_judge_assessments=round_judge_assessments,
             judge_assessments=judge_assessments,
             artifacts=artifacts,
             report=report,
@@ -176,15 +206,30 @@ async def _judge_steps(
     run_id: str | None = None,
     loop_id: str | None = None,
 ) -> Result:
-    judge = LlmStepJudge(provider)
+    round_judge = LlmRoundJudge(provider)
+    step_judge = LlmStepJudge(provider)
     assessments_by_key = {(item.run_id, item.trace_id, item.step_number): item for item in assessments}
-    judged: list[StepJudgeAssessment] = []
+    round_judged: list[RoundJudgeAssessment] = []
+    step_judged: list[StepJudgeAssessment] = []
     for step in graph.steps:
         assessment = assessments_by_key.get((step.run_id, step.trace_id, step.step_number))
         if assessment is None:
             continue
-        result = await judge.judge(
-            build_step_evidence_pack(graph, step, assessment),
+        step_round_judged: list[RoundJudgeAssessment] = []
+        for round_pack in build_round_evidence_packs(graph, step):
+            round_result = await round_judge.judge(
+                round_pack,
+                event_sink=event_sink,
+                run_id=run_id,
+                loop_id=loop_id,
+                llm_call_id=f"{round_pack.llm_call_id}-evaluation-round-judge",
+            )
+            if not round_result.ok:
+                return round_result
+            step_round_judged.append(round_result.value)
+            round_judged.append(round_result.value)
+        result = await step_judge.judge(
+            build_step_evidence_pack(graph, step, assessment, round_assessments=tuple(step_round_judged)),
             event_sink=event_sink,
             run_id=run_id,
             loop_id=loop_id,
@@ -192,8 +237,8 @@ async def _judge_steps(
         )
         if not result.ok:
             return result
-        judged.append(result.value)
-    return ok(tuple(judged))
+        step_judged.append(result.value)
+    return ok(JudgeRunResult(round_assessments=tuple(round_judged), step_assessments=tuple(step_judged)))
 
 
 async def _emit_step_events(
