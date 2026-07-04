@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
-from loom.core import Result, err, make_loom_error, ok, thaw_json
+from loom.core import Result, err, make_loom_error, now_iso, ok, thaw_json
 from loom.evaluation.assessments import Finding, StepAssessment
 from loom.evaluation.episodes import EpisodeGraph, LlmRoundEpisode, StepGraphEpisode, ToolCallEpisode
 from loom.evaluation.records import NormalizedEvent
@@ -147,15 +147,70 @@ class LlmStepJudge:
     def __init__(self, provider: Any):
         self.provider = provider
 
-    async def judge(self, pack: StepEvidencePack) -> Result:
+    async def judge(
+        self,
+        pack: StepEvidencePack,
+        *,
+        event_sink: Any | None = None,
+        run_id: str | None = None,
+        loop_id: str | None = None,
+        llm_call_id: str | None = None,
+    ) -> Result:
         messages = build_step_judge_messages(pack)
+        evaluator_model = str(getattr(self.provider, "model", "unknown"))
+        call_id = llm_call_id or f"{pack.trace_id}-evaluation-judge-llm"
+        event_base = {
+            "run_id": run_id or pack.run_id,
+            "loop_id": loop_id or pack.loop_id,
+            "trace_id": pack.trace_id,
+            "llm_call_id": call_id,
+            "step_number": pack.step_number,
+            "model": evaluator_model,
+            "source_run_id": pack.run_id,
+            "source_loop_id": pack.loop_id,
+        }
+        requested = await _emit_event(
+            event_sink,
+            {
+                "type": "llm.requested",
+                **event_base,
+                "messages": messages,
+                "tools": None,
+                "at": now_iso(),
+            },
+        )
+        if not requested.ok:
+            return requested
+
         response = await self.provider.chat(messages, tools=None)
         if not response.ok:
+            failed = await _emit_event(
+                event_sink,
+                {
+                    "type": "llm.failed",
+                    **event_base,
+                    "error": response.error,
+                    "at": now_iso(),
+                },
+            )
+            if not failed.ok:
+                return failed
             return response
+        completed = await _emit_event(
+            event_sink,
+            {
+                "type": "llm.completed",
+                **event_base,
+                "response": response.value,
+                "at": now_iso(),
+            },
+        )
+        if not completed.ok:
+            return completed
         return parse_step_judge_assessment(
             response.value.content or "",
             pack,
-            evaluator_model=str(getattr(self.provider, "model", "unknown")),
+            evaluator_model=evaluator_model,
             token_usage=response.value.usage,
         )
 
@@ -180,6 +235,15 @@ def build_step_evidence_pack(graph: EpisodeGraph, step: StepGraphEpisode, assess
         evidence_refs=tuple(evidence_ref_for_event(event, max_excerpt_chars=100) for event in events if event.hash is not None),
         evidence_event_hashes=step.event_hashes,
     )
+
+
+async def _emit_event(event_sink: Any | None, event: Mapping[str, Any]) -> Result:
+    if event_sink is None:
+        return ok(None)
+    emitted = event_sink.emit(event)
+    if hasattr(emitted, "__await__"):
+        emitted = await emitted
+    return emitted
 
 
 def build_step_judge_messages(pack: StepEvidencePack) -> tuple[LlmMessage, LlmMessage]:

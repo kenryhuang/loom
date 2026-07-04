@@ -10,9 +10,12 @@ _ANALYZE_EXPORTS = frozenset(
     {
         "EvaluationConfig",
         "EvaluationResult",
+        "EvaluationRunOptions",
         "analyze_trace",
         "main",
         "parse_args",
+        "parse_run_options",
+        "run_evaluation_trace_with_tui",
     }
 )
 

@@ -16,6 +16,7 @@ __all__ = [
     "EvaluationArtifacts",
     "EvaluationConfig",
     "EvaluationResult",
+    "EvaluationRunOptions",
     "DimensionScore",
     "EvidenceRef",
     "Finding",
@@ -39,6 +40,9 @@ __all__ = [
     "calculate_metrics",
     "load_normalized_events",
     "normalize_record",
+    "parse_args",
+    "parse_run_options",
     "render_evaluation_report",
+    "run_evaluation_trace_with_tui",
     "write_evaluation_artifacts",
 ]

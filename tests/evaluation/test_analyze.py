@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from loom.core import ok
-from loom.evaluation.analyze import EvaluationConfig, analyze_trace, parse_args
+from loom.evaluation.analyze import EvaluationConfig, analyze_trace, parse_args, parse_run_options, run_evaluation_trace_with_tui
 from loom.llm import LlmResponse, TokenUsage
 
 
@@ -51,6 +51,37 @@ class FakeJudgeProvider:
                 usage=TokenUsage(2, 3, 5),
             )
         )
+
+
+class RecordingEventSink:
+    def __init__(self) -> None:
+        self.events = []
+
+    async def emit(self, event):
+        self.events.append(event)
+        return ok(None)
+
+
+class FakeTuiApp:
+    instances = []
+
+    def __init__(self, collector) -> None:
+        self.collector = collector
+        self.role = ""
+        self.goal = ""
+        self.events = []
+        FakeTuiApp.instances.append(self)
+
+    def set_loop_info(self, *, role, goal):
+        self.role = role
+        self.goal = goal
+
+    async def run_async(self):
+        while True:
+            event = await self.collector.queue.get()
+            self.events.append(event)
+            if event.event_type == "_tui_done":
+                return
 
 
 def _write_trace(path):
@@ -119,6 +150,22 @@ def test_parse_args_accepts_optional_judge_config_and_model(tmp_path):
     assert config.model_name == "glm"
 
 
+def test_parse_run_options_accepts_tui_flag(tmp_path):
+    options = parse_run_options(
+        (
+            "--trace-path",
+            str(tmp_path / "trace.jsonl"),
+            "--out-dir",
+            str(tmp_path / "eval"),
+            "--tui",
+        )
+    )
+
+    assert options.config.trace_path == tmp_path / "trace.jsonl"
+    assert options.config.out_dir == tmp_path / "eval"
+    assert options.tui is True
+
+
 def test_analyze_trace_writes_evaluation_artifacts(tmp_path):
     async def scenario():
         trace_path = tmp_path / "trace.jsonl"
@@ -161,12 +208,93 @@ def test_analyze_trace_with_judge_writes_step_judge_artifacts(tmp_path):
     asyncio.run(scenario())
 
 
+def test_analyze_trace_emits_tui_style_events(tmp_path):
+    async def scenario():
+        trace_path = tmp_path / "trace.jsonl"
+        out_dir = tmp_path / "evaluation"
+        _write_trace(trace_path)
+        sink = RecordingEventSink()
+
+        result = await analyze_trace(EvaluationConfig(trace_path=trace_path, out_dir=out_dir), event_sink=sink)
+
+        assert result.ok
+        event_types = [event["type"] for event in sink.events]
+        assert event_types == [
+            "run.started",
+            "step.started",
+            "step.completed",
+            "evaluation.artifacts.written",
+            "run.completed",
+        ]
+        assert sink.events[0]["metadata"]["role"] == "trace evaluation analyzer"
+        assert sink.events[2]["trace"]["outcome"] == "evaluated"
+        assert sink.events[-1]["outcome"] == "pass"
+        assert sink.events[-1]["step_assessment_count"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_analyze_trace_with_judge_emits_llm_events_for_tui(tmp_path):
+    async def scenario():
+        trace_path = tmp_path / "trace.jsonl"
+        out_dir = tmp_path / "evaluation"
+        _write_trace(trace_path)
+        sink = RecordingEventSink()
+
+        result = await analyze_trace(
+            EvaluationConfig(trace_path=trace_path, out_dir=out_dir, judge=True),
+            judge_provider=FakeJudgeProvider(),
+            event_sink=sink,
+        )
+
+        assert result.ok
+        event_types = [event["type"] for event in sink.events]
+        assert "llm.requested" in event_types
+        assert "llm.completed" in event_types
+        llm_request = next(event for event in sink.events if event["type"] == "llm.requested")
+        assert llm_request["model"] == "fake-judge-model"
+        assert len(llm_request["messages"]) == 2
+        assert llm_request["tools"] is None
+
+    asyncio.run(scenario())
+
+
+def test_run_evaluation_trace_with_tui_uses_shared_tui_runner(tmp_path):
+    async def scenario():
+        trace_path = tmp_path / "trace.jsonl"
+        out_dir = tmp_path / "evaluation"
+        _write_trace(trace_path)
+        FakeTuiApp.instances = []
+
+        result = await run_evaluation_trace_with_tui(
+            EvaluationConfig(trace_path=trace_path, out_dir=out_dir),
+            app_factory=FakeTuiApp,
+        )
+
+        assert result.ok
+        app = FakeTuiApp.instances[0]
+        assert app.role == "trace evaluation analyzer"
+        assert app.goal == f"Evaluate trace {trace_path}"
+        assert [event.event_type for event in app.events][-1] == "_tui_done"
+        assert "run.started" in [event.event_type for event in app.events]
+
+    asyncio.run(scenario())
+
+
 def test_analyze_imports_trace_analysis_kernel_directly():
     source = (Path(__file__).resolve().parents[2] / "src" / "loom" / "evaluation" / "analyze.py").read_text(encoding="utf-8")
 
     assert "from loom.trace_analysis import EpisodeGraph, build_episode_graph, load_normalized_events" in source
     assert "from loom.evaluation.episodes import" not in source
     assert "from loom.evaluation.records import" not in source
+
+
+def test_package_exports_evaluation_analyzer_tui_contracts():
+    from loom.evaluation import parse_run_options as package_parse_run_options
+    from loom.evaluation import run_evaluation_trace_with_tui as package_run_with_tui
+
+    assert package_parse_run_options is not None
+    assert package_run_with_tui is not None
 
 
 def test_evaluation_analyze_cli_help():
