@@ -839,12 +839,18 @@ def _dimension_score(name: str, value: Any, pack: StepEvidencePack | RoundEviden
 
 
 def _validate_findings(value: Any, pack: StepEvidencePack | RoundEvidencePack) -> Result:
+    if value is None:
+        return ok(())
+    if isinstance(value, Mapping):
+        value = (value,)
     if not isinstance(value, list | tuple):
         return err(_parse_error("findings must be an array", pack))
     findings: list[JudgeFinding] = []
     for index, item in enumerate(value):
         if not isinstance(item, Mapping):
-            return err(_parse_error(f"findings[{index}] must be a JSON object", pack))
+            if item is None:
+                continue
+            item = {"message": str(item)}
         confidence = _validate_score(item.get("confidence", 0.5), f"findings[{index}].confidence", pack)
         if not confidence.ok:
             return confidence

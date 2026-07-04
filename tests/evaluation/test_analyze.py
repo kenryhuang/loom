@@ -62,6 +62,32 @@ class FakeJudgeProvider:
         )
 
 
+class StringFindingJudgeProvider(FakeJudgeProvider):
+    async def chat(self, messages, tools=None, cancellation=None):
+        self.messages.append(messages)
+        system_prompt = (messages[0].content or "").lower()
+        if "round-level evaluator" in system_prompt:
+            dimensions = {name: 0.8 for name in ROUND_JUDGE_DIMENSIONS}
+        else:
+            dimensions = {
+                "task_progress": 0.8,
+                "instruction_following": 0.7,
+                "tool_selection": 0.7,
+                "tool_arguments": 0.7,
+                "tool_result_handling": 0.6,
+                "evidence_grounding": 0.7,
+                "context_quality": 0.8,
+                "efficiency": 0.6,
+                "recovery": 1.0,
+            }
+        return ok(
+            LlmResponse(
+                content=json.dumps({"overall": 0.71, "dimensions": dimensions, "findings": ["Judge returned a plain string finding."], "confidence": 0.83}),
+                usage=TokenUsage(2, 3, 5),
+            )
+        )
+
+
 class RecordingEventSink:
     def __init__(self) -> None:
         self.events = []
@@ -250,6 +276,21 @@ def test_analyze_trace_with_judge_writes_step_judge_artifacts(tmp_path):
         assert round_rows[0]["overall"] == 0.81
         judge_rows = [json.loads(line) for line in result.value.artifacts.judge_assessments_path.read_text(encoding="utf-8").splitlines()]
         assert judge_rows[0]["overall"] == 0.71
+
+    asyncio.run(scenario())
+
+
+def test_analyze_trace_with_judge_accepts_string_findings(tmp_path):
+    async def scenario():
+        trace_path = tmp_path / "trace.jsonl"
+        out_dir = tmp_path / "evaluation"
+        _write_trace(trace_path)
+
+        result = await analyze_trace(EvaluationConfig(trace_path=trace_path, out_dir=out_dir, judge=True), judge_provider=StringFindingJudgeProvider())
+
+        assert result.ok
+        assert result.value.round_judge_assessments[0].findings[0].message == "Judge returned a plain string finding."
+        assert result.value.judge_assessments[0].findings[0].message == "Judge returned a plain string finding."
 
     asyncio.run(scenario())
 
