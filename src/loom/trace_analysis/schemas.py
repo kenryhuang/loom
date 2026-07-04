@@ -35,6 +35,15 @@ class TraceIngestResult:
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceRef:
+    event_hash: str | None
+    event_type: str
+    subject_id: str | None
+    field_path: str | None = None
+    excerpt: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class EpisodeRef:
     kind: str
     id: str

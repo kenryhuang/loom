@@ -6,6 +6,7 @@ from loom.evaluation.assessments import DimensionScore, Finding, StepAssessment,
 from loom.evaluation.episodes import EpisodeGraph, LlmRoundEpisode, RunEpisode, StepGraphEpisode, ToolCallEpisode, build_episode_graph
 from loom.evaluation.metrics import MetricResult, calculate_metrics
 from loom.evaluation.records import NormalizedEvent, TraceIngestResult, load_normalized_events, normalize_record
+from loom.trace_analysis import EvidenceRef
 
 __getattr__ = lazy_analyze_export(globals())
 
@@ -15,6 +16,7 @@ __all__ = [
     "EvaluationConfig",
     "EvaluationResult",
     "DimensionScore",
+    "EvidenceRef",
     "Finding",
     "LlmRoundEpisode",
     "MetricResult",
