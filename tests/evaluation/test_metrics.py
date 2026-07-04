@@ -10,6 +10,7 @@ def _event(
     loop_id="loop-1",
     trace_id="trace-1",
     step_number=0,
+    llm_call_id=None,
     tool_call_id=None,
     tool_id=None,
     payload=None,
@@ -25,7 +26,7 @@ def _event(
         loop_id=loop_id,
         trace_id=trace_id,
         step_number=step_number,
-        llm_call_id=None,
+        llm_call_id=llm_call_id,
         tool_call_id=tool_call_id,
         tool_id=tool_id,
         at=None,
@@ -58,3 +59,24 @@ def test_calculate_metrics_reports_trace_and_tool_quality():
     assert by_name["cost.total_tokens"].value == 42
     assert by_name["episode.partial_count"].value == 0
     assert by_name["episode.orphaned_count"].value == 0
+
+
+def test_calculate_metrics_counts_llm_completed_response_usage_without_trace_aggregate():
+    graph = build_episode_graph(
+        (
+            _event("run.started", trace_id=None, step_number=None, hash="run-start"),
+            _event("step.started", hash="step-start"),
+            _event("llm.requested", llm_call_id="llm-1", hash="llm-request-1"),
+            _event("llm.completed", llm_call_id="llm-1", payload={"response": {"usage": {"total_tokens": 12}}}, hash="llm-complete-1"),
+            _event("llm.requested", llm_call_id="llm-2", hash="llm-request-2"),
+            _event("llm.completed", llm_call_id="llm-2", payload={"response": {"usage": {"totalTokens": 30}}}, hash="llm-complete-2"),
+            _event("step.completed", hash="step-complete"),
+            _event("trace.completed", payload={"outcome": "pass"}, hash="trace-complete"),
+            _event("run.completed", trace_id=None, step_number=None, hash="run-complete"),
+        )
+    )
+
+    metrics = calculate_metrics(graph)
+    by_name = {metric.name: metric for metric in metrics}
+
+    assert by_name["cost.total_tokens"].value == 42
