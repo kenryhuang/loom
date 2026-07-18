@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from loom.evaluation.assessments import Finding, StepAssessment
+from loom.evaluation.bundle import build_evaluation_bundle, build_evidence_index, normalize_evaluation_findings, write_json
 from loom.evaluation.episodes import EpisodeGraph
 from loom.evaluation.judge import JudgeFinding, RoundJudgeAssessment, StepJudgeAssessment
 from loom.evaluation.metrics import MetricResult
@@ -24,6 +25,8 @@ class EvaluationArtifacts:
     round_judge_assessments_path: Path
     judge_assessments_path: Path
     findings_path: Path
+    evidence_index_path: Path
+    evaluation_bundle_path: Path
     report_path: Path
 
 
@@ -34,6 +37,7 @@ def write_evaluation_artifacts(
     assessments: Iterable[StepAssessment] = (),
     judge_assessments: Iterable[StepJudgeAssessment] = (),
     round_judge_assessments: Iterable[RoundJudgeAssessment] = (),
+    source_trace_path: str | os.PathLike[str] | None = None,
 ) -> EvaluationArtifacts:
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -41,6 +45,8 @@ def write_evaluation_artifacts(
     assessment_items = tuple(assessments)
     judge_items = tuple(judge_assessments)
     round_judge_items = tuple(round_judge_assessments)
+    normalized_findings = normalize_evaluation_findings(graph, assessment_items, round_judge_items, judge_items)
+    evidence_items = build_evidence_index(graph, source_trace_path=source_trace_path)
     finding_items = (
         *(finding for assessment in assessment_items for finding in assessment.findings),
         *(finding for assessment in round_judge_items for finding in assessment.findings),
@@ -54,6 +60,8 @@ def write_evaluation_artifacts(
         round_judge_assessments_path=out_path / "round-judge-assessments.jsonl",
         judge_assessments_path=out_path / "judge-assessments.jsonl",
         findings_path=out_path / "findings.jsonl",
+        evidence_index_path=out_path / "evidence-index.jsonl",
+        evaluation_bundle_path=out_path / "evaluation-bundle.json",
         report_path=out_path / "report.md",
     )
     _write_jsonl(artifacts.episodes_path, (*graph.runs, *graph.steps, *graph.llm_rounds, *graph.tool_calls))
@@ -61,7 +69,21 @@ def write_evaluation_artifacts(
     _write_jsonl(artifacts.assessments_path, assessment_items)
     _write_jsonl(artifacts.round_judge_assessments_path, round_judge_items)
     _write_jsonl(artifacts.judge_assessments_path, judge_items)
-    _write_jsonl(artifacts.findings_path, finding_items)
+    _write_jsonl(artifacts.findings_path, normalized_findings)
+    _write_jsonl(artifacts.evidence_index_path, evidence_items)
+    write_json(
+        artifacts.evaluation_bundle_path,
+        build_evaluation_bundle(
+            out_dir=out_path,
+            graph=graph,
+            metrics=metric_items,
+            step_assessments=assessment_items,
+            round_judge_assessments=round_judge_items,
+            step_judge_assessments=judge_items,
+            findings=normalized_findings,
+            source_trace_path=source_trace_path,
+        ),
+    )
     artifacts.report_path.write_text(
         render_evaluation_report(
             graph,

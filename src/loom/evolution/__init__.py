@@ -1,6 +1,7 @@
 """Evolution public API for Loom."""
 
 from loom.evolution._exports import lazy_analyze_export
+from loom.evolution.bundle import EvolutionBundle, EvolutionBundleArtifactRefs, EvolutionBundleSummary, signals_from_evaluation_bundle
 from loom.evolution.episodes import StepEpisode, TraceRecord, build_step_episodes, load_trace_records
 from loom.evolution.mutations import (
     CompositionEdge,
@@ -43,6 +44,9 @@ __all__ = [
     "DefaultEvolutionEvaluator",
     "EvolutionDecision",
     "EvolutionEvaluation",
+    "EvolutionBundle",
+    "EvolutionBundleArtifactRefs",
+    "EvolutionBundleSummary",
     "EvolutionProposal",
     "EvolutionSignal",
     "InMemoryImplementationRegistry",
@@ -71,6 +75,7 @@ __all__ = [
     "parse_run_options",
     "run_analyze_trace_with_tui",
     "run_shadow_evaluation",
+    "signals_from_evaluation_bundle",
     "validate_composition_graph",
     "validate_mutation_bundle_shape",
 ]

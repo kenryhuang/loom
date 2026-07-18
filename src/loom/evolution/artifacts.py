@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from loom.core import now_iso
+from loom.evolution.bundle import build_evolution_bundle, write_json
 from loom.evolution.proposals import EvolutionProposal, EvolutionSignal
 from loom.evolution.scoring import StepScore
 from loom.llm import TokenUsage
@@ -20,6 +22,7 @@ class EvolutionArtifacts:
     scores_path: Path
     signals_path: Path
     proposals_path: Path
+    evolution_bundle_path: Path
     report_path: Path
 
 
@@ -28,6 +31,7 @@ def write_evolution_artifacts(
     scores: Iterable[StepScore],
     signals: Iterable[EvolutionSignal],
     proposals: Iterable[EvolutionProposal],
+    source_evaluation_bundle: str | os.PathLike[str] | None = None,
 ) -> EvolutionArtifacts:
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -41,6 +45,7 @@ def write_evolution_artifacts(
         scores_path=out_path / "step-scores.jsonl",
         signals_path=out_path / "signals.jsonl",
         proposals_path=out_path / "proposals.jsonl",
+        evolution_bundle_path=out_path / "evolution-bundle.json",
         report_path=out_path / "report.md",
     )
     _write_jsonl(artifacts.scores_path, score_items)
@@ -49,6 +54,15 @@ def write_evolution_artifacts(
     artifacts.report_path.write_text(
         render_evolution_report(score_items, signal_items, proposal_items),
         encoding="utf-8",
+    )
+    write_json(
+        artifacts.evolution_bundle_path,
+        build_evolution_bundle(
+            created_at=now_iso(),
+            source_evaluation_bundle=source_evaluation_bundle,
+            signal_count=len(signal_items),
+            proposal_count=len(proposal_items),
+        ),
     )
     return artifacts
 

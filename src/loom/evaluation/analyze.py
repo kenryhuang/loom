@@ -124,6 +124,7 @@ async def analyze_trace(config: EvaluationConfig, *, judge_provider: Any | None 
             assessments,
             judge_assessments=judge_assessments,
             round_judge_assessments=round_judge_assessments,
+            source_trace_path=config.trace_path,
         )
     except OSError as exc:
         return await _finish_analysis_error(
@@ -154,6 +155,8 @@ async def analyze_trace(config: EvaluationConfig, *, judge_provider: Any | None 
                 "round_judge_assessments_path": str(artifacts.round_judge_assessments_path),
                 "judge_assessments_path": str(artifacts.judge_assessments_path),
                 "findings_path": str(artifacts.findings_path),
+                "evidence_index_path": str(artifacts.evidence_index_path),
+                "evaluation_bundle_path": str(artifacts.evaluation_bundle_path),
                 "report_path": str(artifacts.report_path),
             },
             "at": now_iso(),

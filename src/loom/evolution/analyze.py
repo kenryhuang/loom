@@ -14,6 +14,7 @@ from typing import Any
 
 from loom.core import Result, err, make_loom_error, new_loop_id, new_run_id, now_iso, ok
 from loom.evolution.artifacts import EvolutionArtifacts, write_evolution_artifacts
+from loom.evolution.bundle import load_evaluation_bundle, signals_from_evaluation_bundle
 from loom.evolution.episodes import StepEpisode, build_step_episodes, load_trace_records
 from loom.evolution.proposals import (
     EvolutionProposal,
@@ -29,14 +30,18 @@ from loom.llm import create_env_openai_provider
 
 @dataclass(frozen=True, slots=True)
 class AnalyzeConfig:
-    trace_path: Path
+    trace_path: Path | None = None
+    evaluation_bundle_path: Path | None = None
     out_dir: Path = Path(".loom/evolution")
     min_confidence: float = 0.7
     min_signal_frequency: int = 2
     max_proposals: int = 3
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "trace_path", Path(self.trace_path))
+        if self.trace_path is not None:
+            object.__setattr__(self, "trace_path", Path(self.trace_path))
+        if self.evaluation_bundle_path is not None:
+            object.__setattr__(self, "evaluation_bundle_path", Path(self.evaluation_bundle_path))
         object.__setattr__(self, "out_dir", Path(self.out_dir))
 
 
@@ -66,11 +71,14 @@ async def analyze_trace(config: AnalyzeConfig, provider: Any = None, event_sink:
             "type": "run.started",
             "run_id": run_id,
             "loop_id": loop_id,
-            "context_id": str(config.trace_path),
+            "context_id": str(config.evaluation_bundle_path or config.trace_path),
             "metadata": {
                 "role": "trace evolution analyzer",
-                "objective": f"Analyze trace {config.trace_path}",
-                "trace_path": str(config.trace_path),
+                "objective": (
+                    f"Analyze evaluation bundle {config.evaluation_bundle_path}" if config.evaluation_bundle_path else f"Analyze trace {config.trace_path}"
+                ),
+                "trace_path": None if config.trace_path is None else str(config.trace_path),
+                "evaluation_bundle_path": None if config.evaluation_bundle_path is None else str(config.evaluation_bundle_path),
                 "out_dir": str(config.out_dir),
             },
             "at": now_iso(),
@@ -83,7 +91,20 @@ async def analyze_trace(config: AnalyzeConfig, provider: Any = None, event_sink:
     if config_error is not None:
         return await _finish_analysis_error(event_sink, run_id, loop_id, started, config_error)
 
-    if not config.trace_path.exists():
+    if config.evaluation_bundle_path is not None:
+        return await _analyze_evaluation_bundle(config, event_sink=event_sink, run_id=run_id, loop_id=loop_id, started=started)
+
+    trace_path = config.trace_path
+    if trace_path is None:
+        return await _finish_analysis_error(
+            event_sink,
+            run_id,
+            loop_id,
+            started,
+            make_loom_error("VALIDATION_FAILED", "Trace path is required when --evaluation-bundle is not provided", retryable=False),
+        )
+
+    if not trace_path.exists():
         return await _finish_analysis_error(
             event_sink,
             run_id,
@@ -93,10 +114,10 @@ async def analyze_trace(config: AnalyzeConfig, provider: Any = None, event_sink:
                 "VALIDATION_FAILED",
                 "Trace path does not exist",
                 retryable=False,
-                metadata={"trace_path": str(config.trace_path)},
+                metadata={"trace_path": str(trace_path)},
             ),
         )
-    if not config.trace_path.is_file():
+    if not trace_path.is_file():
         return await _finish_analysis_error(
             event_sink,
             run_id,
@@ -106,11 +127,11 @@ async def analyze_trace(config: AnalyzeConfig, provider: Any = None, event_sink:
                 "VALIDATION_FAILED",
                 "Trace path must be a file",
                 retryable=False,
-                metadata={"trace_path": str(config.trace_path)},
+                metadata={"trace_path": str(trace_path)},
             ),
         )
 
-    records_result = _load_records(config.trace_path)
+    records_result = _load_records(trace_path)
     if not records_result.ok:
         return await _finish_analysis_error(event_sink, run_id, loop_id, started, records_result.error)
 
@@ -118,7 +139,7 @@ async def analyze_trace(config: AnalyzeConfig, provider: Any = None, event_sink:
     episodes = tuple(build_step_episodes(records))
     incomplete_episodes = tuple(episode for episode in episodes if not episode.complete)
     if incomplete_episodes:
-        return await _finish_analysis_error(event_sink, run_id, loop_id, started, _incomplete_episodes_error(incomplete_episodes, config.trace_path))
+        return await _finish_analysis_error(event_sink, run_id, loop_id, started, _incomplete_episodes_error(incomplete_episodes, trace_path))
 
     if provider is None:
         provider_result = create_env_openai_provider()
@@ -219,6 +240,7 @@ async def analyze_trace(config: AnalyzeConfig, provider: Any = None, event_sink:
                 "score_path": str(artifacts.scores_path),
                 "signal_path": str(artifacts.signals_path),
                 "proposal_path": str(artifacts.proposals_path),
+                "evolution_bundle_path": str(artifacts.evolution_bundle_path),
                 "report_path": str(artifacts.report_path),
             },
             "at": now_iso(),
@@ -243,6 +265,7 @@ async def analyze_trace(config: AnalyzeConfig, provider: Any = None, event_sink:
                 "score_path": str(artifacts.scores_path),
                 "signal_path": str(artifacts.signals_path),
                 "proposal_path": str(artifacts.proposals_path),
+                "evolution_bundle_path": str(artifacts.evolution_bundle_path),
                 "report_path": str(artifacts.report_path),
             },
             "at": now_iso(),
@@ -263,7 +286,145 @@ async def analyze_trace(config: AnalyzeConfig, provider: Any = None, event_sink:
     )
 
 
+async def _analyze_evaluation_bundle(
+    config: AnalyzeConfig,
+    *,
+    event_sink: Any | None,
+    run_id: str,
+    loop_id: str,
+    started: float,
+) -> Result:
+    bundle_path = config.evaluation_bundle_path
+    if bundle_path is None:
+        return await _finish_analysis_error(
+            event_sink,
+            run_id,
+            loop_id,
+            started,
+            make_loom_error("VALIDATION_FAILED", "Evaluation bundle path is required", retryable=False),
+        )
+    loaded = load_evaluation_bundle(bundle_path)
+    if not loaded.ok:
+        return await _finish_analysis_error(event_sink, run_id, loop_id, started, loaded.error)
+
+    loaded_event = await _emit_event(
+        event_sink,
+        {
+            "type": "evolution.bundle.loaded",
+            "run_id": run_id,
+            "loop_id": loop_id,
+            "evaluation_bundle_path": str(bundle_path),
+            "finding_count": len(loaded.value.findings),
+            "at": now_iso(),
+        },
+    )
+    if not loaded_event.ok:
+        return loaded_event
+
+    score_items: tuple[StepScore, ...] = ()
+    episodes: tuple[StepEpisode, ...] = ()
+    signals = signals_from_evaluation_bundle(loaded.value, min_frequency=config.min_signal_frequency)
+    signal_event = await _emit_event(
+        event_sink,
+        {
+            "type": "evolution.signals.generated",
+            "run_id": run_id,
+            "loop_id": loop_id,
+            "signal_count": len(signals),
+            "signals": signals,
+            "at": now_iso(),
+        },
+    )
+    if not signal_event.ok:
+        return signal_event
+
+    proposals = tuple(
+        gate_result.value
+        for proposal in generate_evolution_proposals(signals, max_proposals=config.max_proposals)
+        if (gate_result := gate_proposal(proposal, ProposalGateConfig(min_confidence=config.min_confidence))).ok
+    )
+    proposal_event = await _emit_event(
+        event_sink,
+        {
+            "type": "evolution.proposals.generated",
+            "run_id": run_id,
+            "loop_id": loop_id,
+            "proposal_count": len(proposals),
+            "proposals": proposals,
+            "at": now_iso(),
+        },
+    )
+    if not proposal_event.ok:
+        return proposal_event
+
+    artifacts_result = _write_artifacts(config.out_dir, score_items, signals, proposals, source_evaluation_bundle=bundle_path)
+    if not artifacts_result.ok:
+        return await _finish_analysis_error(event_sink, run_id, loop_id, started, artifacts_result.error)
+
+    artifacts = artifacts_result.value
+    report = artifacts.report_path.read_text(encoding="utf-8")
+    artifact_event = await _emit_event(
+        event_sink,
+        {
+            "type": "evolution.artifacts.written",
+            "run_id": run_id,
+            "loop_id": loop_id,
+            "artifacts": {
+                "score_path": str(artifacts.scores_path),
+                "signal_path": str(artifacts.signals_path),
+                "proposal_path": str(artifacts.proposals_path),
+                "evolution_bundle_path": str(artifacts.evolution_bundle_path),
+                "report_path": str(artifacts.report_path),
+            },
+            "at": now_iso(),
+        },
+    )
+    if not artifact_event.ok:
+        return artifact_event
+
+    completed = await _emit_event(
+        event_sink,
+        {
+            "type": "run.completed",
+            "run_id": run_id,
+            "loop_id": loop_id,
+            "outcome": "pass",
+            "steps": 0,
+            "trace_count": loaded.value.manifest.summary.steps,
+            "signal_count": len(signals),
+            "proposal_count": len(proposals),
+            "duration_ms": _elapsed_ms(started),
+            "artifacts": {
+                "score_path": str(artifacts.scores_path),
+                "signal_path": str(artifacts.signals_path),
+                "proposal_path": str(artifacts.proposals_path),
+                "evolution_bundle_path": str(artifacts.evolution_bundle_path),
+                "report_path": str(artifacts.report_path),
+            },
+            "at": now_iso(),
+        },
+    )
+    if not completed.ok:
+        return completed
+    return ok(
+        AnalyzeResult(
+            episodes=episodes,
+            scores=score_items,
+            signals=signals,
+            proposals=proposals,
+            artifacts=artifacts,
+            report=report,
+        )
+    )
+
+
 def _validate_config(config: AnalyzeConfig) -> Any | None:
+    if config.trace_path is None and config.evaluation_bundle_path is None:
+        return make_loom_error(
+            "VALIDATION_FAILED",
+            "Either trace_path or evaluation_bundle_path is required",
+            retryable=False,
+        )
     if not math.isfinite(config.min_confidence) or config.min_confidence < 0.0 or config.min_confidence > 1.0:
         return make_loom_error(
             "VALIDATION_FAILED",
@@ -328,9 +489,11 @@ def _write_artifacts(
     scores: tuple[StepScore, ...],
     signals: tuple[EvolutionSignal, ...],
     proposals: tuple[EvolutionProposal, ...],
+    *,
+    source_evaluation_bundle: Path | None = None,
 ) -> Result:
     try:
-        return ok(write_evolution_artifacts(out_dir, scores, signals, proposals))
+        return ok(write_evolution_artifacts(out_dir, scores, signals, proposals, source_evaluation_bundle=source_evaluation_bundle))
     except OSError as exc:
         return err(
             make_loom_error(
@@ -535,7 +698,8 @@ async def run_analyze_trace_with_tui(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze Loom trace JSONL for evolution proposals.")
-    parser.add_argument("--trace-path", required=True, type=Path)
+    parser.add_argument("--trace-path", type=Path)
+    parser.add_argument("--evaluation-bundle", dest="evaluation_bundle_path", type=Path)
     parser.add_argument("--out-dir", default=Path(".loom/evolution"), type=Path)
     parser.add_argument("--min-confidence", default=0.7, type=float)
     parser.add_argument("--min-signal-frequency", default=2, type=int)
@@ -547,6 +711,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _config_from_options(options: argparse.Namespace) -> AnalyzeConfig:
     return AnalyzeConfig(
         trace_path=options.trace_path,
+        evaluation_bundle_path=options.evaluation_bundle_path,
         out_dir=options.out_dir,
         min_confidence=options.min_confidence,
         min_signal_frequency=options.min_signal_frequency,
