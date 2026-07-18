@@ -13,7 +13,7 @@ model = "qwen-main"
 base_url = "https://example.test/v1"
 api_key_env = "MAIN_KEY"
 temperature = 0.2
-max_tokens = 1234
+max_completion_tokens = 1234
 
 [models.fast]
 provider = "openai"
@@ -30,7 +30,7 @@ api_key = "inline-key"
     assert loaded.models["main"].model == "qwen-main"
     assert loaded.models["main"].api_key_env == "MAIN_KEY"
     assert loaded.models["main"].temperature == 0.2
-    assert loaded.models["main"].max_tokens == 1234
+    assert loaded.models["main"].max_completion_tokens == 1234
     assert loaded.models["fast"].api_key == "inline-key"
 
 
@@ -46,7 +46,7 @@ models:
     base_url: https://example.test/v1
     api_key_env: MAIN_KEY
     temperature: 0
-    max_tokens: 8192
+    max_completion_tokens: 8192
 """,
         encoding="utf-8",
     )
@@ -58,7 +58,131 @@ models:
     assert loaded.models["main"].base_url == "https://example.test/v1"
     assert loaded.models["main"].api_key_env == "MAIN_KEY"
     assert loaded.models["main"].temperature == 0
-    assert loaded.models["main"].max_tokens == 8192
+    assert loaded.models["main"].max_completion_tokens == 8192
+
+
+def test_load_task_config_reads_nested_bailian_options_from_yaml(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+default_model: main
+models:
+  main:
+    provider: openai
+    model: qwen3.7-max
+    base_url: https://example.test/v1
+    api_key: key
+    max_completion_tokens: 8192
+    request_options:
+      enable_thinking: true
+      thinking_budget: 2048
+      response_format:
+        type: json_object
+      stop:
+        - END
+        - STOP
+""",
+        encoding="utf-8",
+    )
+
+    model = load_task_config(path).unwrap().models["main"]
+
+    assert model.max_completion_tokens == 8192
+    assert model.request_options["enable_thinking"] is True
+    assert model.request_options["thinking_budget"] == 2048
+    assert model.request_options["response_format"]["type"] == "json_object"
+    assert tuple(model.request_options["stop"]) == ("END", "STOP")
+
+
+def test_load_task_config_reads_request_options_from_toml(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+default_model = "glm"
+
+[models.glm]
+provider = "openai"
+model = "glm-5.2"
+base_url = "https://example.test/v1"
+api_key = "key"
+max_completion_tokens = 4096
+
+[models.glm.request_options]
+enable_thinking = true
+reasoning_effort = "max"
+
+[models.glm.request_options.search_options]
+forced_search = false
+""",
+        encoding="utf-8",
+    )
+
+    model = load_task_config(path).unwrap().models["glm"]
+
+    assert model.max_completion_tokens == 4096
+    assert model.request_options["enable_thinking"] is True
+    assert model.request_options["reasoning_effort"] == "max"
+    assert model.request_options["search_options"]["forced_search"] is False
+
+
+def test_load_task_config_rejects_legacy_max_tokens(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+models:
+  main:
+    model: qwen3.7-max
+    max_tokens: 8192
+""",
+        encoding="utf-8",
+    )
+
+    result = load_task_config(path)
+
+    assert not result.ok
+    assert result.error.code == "VALIDATION_FAILED"
+    assert "max_completion_tokens" in result.error.message
+
+
+def test_load_task_config_rejects_unknown_model_fields(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[models.main]\nmodel = "qwen"\ntemprature = 0.2\n', encoding="utf-8")
+
+    result = load_task_config(path)
+
+    assert not result.ok
+    assert result.error.code == "VALIDATION_FAILED"
+    assert result.error.metadata["fields"] == ("temprature",)
+
+
+def test_load_task_config_rejects_non_mapping_request_options(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+models:
+  main:
+    model: qwen
+    request_options: invalid
+""",
+        encoding="utf-8",
+    )
+
+    result = load_task_config(path)
+
+    assert not result.ok
+    assert result.error.code == "VALIDATION_FAILED"
+    assert "mapping" in result.error.message
+
+
+def test_load_task_config_rejects_reserved_request_option(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[models.main]\nmodel = "qwen"\n[models.main.request_options]\nstream = false\n', encoding="utf-8")
+
+    result = load_task_config(path)
+
+    assert not result.ok
+    assert result.error.code == "VALIDATION_FAILED"
+    assert "reserved" in result.error.message
 
 
 def test_load_task_config_reads_task_and_run_defaults_from_yaml(tmp_path):
@@ -106,7 +230,14 @@ def test_create_provider_from_task_config_selects_named_model():
         default_model="main",
         models={
             "main": ModelConfig(provider="openai", model="qwen-main", base_url="https://example.test/v1", api_key_env="MAIN_KEY"),
-            "fast": ModelConfig(provider="openai", model="qwen-fast", base_url="https://example.test/v1", api_key="inline-key"),
+            "fast": ModelConfig(
+                provider="openai",
+                model="qwen-fast",
+                base_url="https://example.test/v1",
+                api_key="inline-key",
+                max_completion_tokens=4096,
+                request_options={"enable_thinking": True},
+            ),
         },
     )
 
@@ -115,6 +246,8 @@ def test_create_provider_from_task_config_selects_named_model():
     assert provider.model == "qwen-fast"
     assert provider.base_url == "https://example.test/v1"
     assert provider.api_key == "inline-key"
+    assert provider.max_completion_tokens == 4096
+    assert provider.request_options["enable_thinking"] is True
 
 
 def test_create_provider_from_task_config_uses_api_key_env():

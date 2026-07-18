@@ -11,6 +11,20 @@ from typing import Any
 
 from loom.core import Result, err, make_loom_error, ok
 from loom.llm import create_openai_provider
+from loom.llm.request_options import normalize_request_options
+
+_MODEL_CONFIG_FIELDS = frozenset(
+    {
+        "provider",
+        "model",
+        "base_url",
+        "api_key",
+        "api_key_env",
+        "temperature",
+        "max_completion_tokens",
+        "request_options",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +35,11 @@ class ModelConfig:
     api_key: str | None = None
     api_key_env: str | None = None
     temperature: float | None = None
-    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
+    request_options: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "request_options", normalize_request_options(self.request_options))
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +156,8 @@ def create_provider_from_task_config(
             model=model.model,
             base_url=model.base_url,
             temperature=model.temperature,
-            max_tokens=model.max_tokens,
+            max_completion_tokens=model.max_completion_tokens,
+            request_options=model.request_options,
             http_client=http_client,
         )
     )
@@ -234,6 +253,40 @@ def _parse_run_defaults(payload: Any, path: Path) -> Result:
 
 
 def _parse_model_config(payload: Mapping[str, Any], path: Path, name: str) -> Result:
+    if "max_tokens" in payload:
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Task model config field max_tokens is not supported; use max_completion_tokens",
+                retryable=False,
+                metadata={"path": str(path), "model": name, "field": "max_tokens"},
+            )
+        )
+
+    unknown = sorted(set(payload) - _MODEL_CONFIG_FIELDS)
+    if unknown:
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Task model config contains unknown fields",
+                retryable=False,
+                metadata={"path": str(path), "model": name, "fields": unknown},
+            )
+        )
+
+    request_options = payload.get("request_options", {})
+    if request_options is None:
+        request_options = {}
+    if not isinstance(request_options, Mapping):
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Task model config request_options must be a mapping",
+                retryable=False,
+                metadata={"path": str(path), "model": name},
+            )
+        )
+
     try:
         return ok(
             ModelConfig(
@@ -243,14 +296,18 @@ def _parse_model_config(payload: Mapping[str, Any], path: Path, name: str) -> Re
                 api_key=_optional_str(payload.get("api_key")),
                 api_key_env=_optional_str(payload.get("api_key_env")),
                 temperature=_optional_float(payload.get("temperature")),
-                max_tokens=_optional_int(payload.get("max_tokens")),
+                max_completion_tokens=_optional_int(payload.get("max_completion_tokens")),
+                request_options=request_options,
             )
         )
     except (TypeError, ValueError) as exc:
+        message = "Task model config contains invalid values"
+        if "request_options" in str(exc):
+            message = f"Task model request_options is invalid: {exc}"
         return err(
             make_loom_error(
                 "VALIDATION_FAILED",
-                "Task model config contains invalid values",
+                message,
                 retryable=False,
                 cause={"name": type(exc).__name__, "message": str(exc)},
                 metadata={"path": str(path), "model": name},
@@ -258,91 +315,127 @@ def _parse_model_config(payload: Mapping[str, Any], path: Path, name: str) -> Re
         )
 
 
-def _parse_yaml_config(text: str, path: Path) -> Result:
-    payload: dict[str, Any] = {}
-    models: dict[str, dict[str, Any]] = {}
-    current_section: str | None = None
-    current_model: str | None = None
-    current_list: tuple[dict[str, Any], str] | None = None
+@dataclass(frozen=True, slots=True)
+class _YamlLine:
+    number: int
+    indent: int
+    text: str
 
+
+class _YamlParseError(ValueError):
+    def __init__(self, line_number: int, message: str):
+        super().__init__(message)
+        self.line_number = line_number
+        self.message = message
+
+
+def _parse_yaml_config(text: str, path: Path) -> Result:
+    tokenized = _tokenize_yaml(text, path)
+    if not tokenized.ok:
+        return tokenized
+    lines = tokenized.value
+    if not lines:
+        return ok({})
+    if lines[0].indent != 0:
+        return _yaml_error(path, lines[0].number, "root mapping must start at indentation zero")
+
+    try:
+        value, next_index = _parse_yaml_mapping(lines, 0, 0)
+    except _YamlParseError as exc:
+        return _yaml_error(path, exc.line_number, exc.message)
+    if next_index != len(lines):
+        line = lines[next_index]
+        return _yaml_error(path, line.number, "unexpected indentation")
+    return ok(value)
+
+
+def _tokenize_yaml(text: str, path: Path) -> Result:
+    lines: list[_YamlLine] = []
     for line_number, raw_line in enumerate(text.splitlines(), start=1):
         line = _strip_yaml_comment(raw_line).rstrip()
         if not line.strip():
             continue
+        leading_length = len(line) - len(line.lstrip())
+        leading = line[:leading_length]
+        if "\t" in leading:
+            return _yaml_error(path, line_number, "indentation must use spaces")
         indent = len(line) - len(line.lstrip(" "))
         if indent % 2 != 0:
             return _yaml_error(path, line_number, "indentation must use two-space levels")
+        lines.append(_YamlLine(line_number, indent, line[indent:]))
+    return ok(lines)
 
-        if indent == 4 and current_section in {"task", "run"} and current_list is not None:
-            stripped = line.strip()
-            if not stripped.startswith("-"):
-                return _yaml_error(path, line_number, "expected list item")
-            current_list[0][current_list[1]].append(_parse_yaml_scalar(stripped[1:].strip()))
+
+def _parse_yaml_mapping(lines: list[_YamlLine], index: int, indent: int) -> tuple[dict[str, Any], int]:
+    result: dict[str, Any] = {}
+    while index < len(lines):
+        line = lines[index]
+        if line.indent < indent:
+            break
+        if line.indent > indent:
+            raise _YamlParseError(line.number, "unexpected indentation")
+        if line.text == "-" or line.text.startswith("- "):
+            raise _YamlParseError(line.number, "expected key: value")
+
+        key, raw_value = _split_yaml_mapping_line(line.text, line.number)
+        if key in result:
+            raise _YamlParseError(line.number, f"duplicate mapping key: {key}")
+        index += 1
+        if raw_value is not None:
+            result[key] = _parse_yaml_scalar(raw_value)
             continue
-
-        parsed = _split_yaml_mapping_line(line.strip(), path, line_number)
-        if not parsed.ok:
-            return parsed
-        key, raw_value = parsed.value
-
-        if indent == 0:
-            current_list = None
-            if key == "models":
-                if raw_value is not None:
-                    return _yaml_error(path, line_number, "models must be a mapping")
-                current_section = "models"
-                current_model = None
-                payload["models"] = models
-                continue
-            if key in {"task", "run"} and raw_value is None:
-                current_section = key
-                current_model = None
-                payload[key] = {}
-                continue
-            payload[key] = _parse_yaml_scalar(raw_value)
-            current_section = None
-            current_model = None
+        if index < len(lines) and lines[index].indent > indent:
+            nested = lines[index]
+            if nested.indent != indent + 2:
+                raise _YamlParseError(nested.number, "nested values must use one two-space indentation level")
+            if nested.text == "-" or nested.text.startswith("- "):
+                result[key], index = _parse_yaml_sequence(lines, index, indent + 2)
+            else:
+                result[key], index = _parse_yaml_mapping(lines, index, indent + 2)
             continue
+        result[key] = None
+    return result, index
 
-        if indent == 2 and current_section == "models":
-            current_list = None
-            if raw_value is not None:
-                return _yaml_error(path, line_number, "model entries must be mappings")
-            current_model = key
-            models[current_model] = {}
+
+def _parse_yaml_sequence(lines: list[_YamlLine], index: int, indent: int) -> tuple[list[Any], int]:
+    result: list[Any] = []
+    while index < len(lines):
+        line = lines[index]
+        if line.indent < indent:
+            break
+        if line.indent > indent:
+            raise _YamlParseError(line.number, "unexpected indentation")
+        if line.text != "-" and not line.text.startswith("- "):
+            break
+
+        raw_value = line.text[1:].strip()
+        index += 1
+        if raw_value:
+            result.append(_parse_yaml_scalar(raw_value))
             continue
-
-        if indent == 4 and current_section == "models" and current_model is not None:
-            current_list = None
-            models[current_model][key] = _parse_yaml_scalar(raw_value)
+        if index < len(lines) and lines[index].indent > indent:
+            nested = lines[index]
+            if nested.indent != indent + 2:
+                raise _YamlParseError(nested.number, "nested values must use one two-space indentation level")
+            if nested.text == "-" or nested.text.startswith("- "):
+                value, index = _parse_yaml_sequence(lines, index, indent + 2)
+            else:
+                value, index = _parse_yaml_mapping(lines, index, indent + 2)
+            result.append(value)
             continue
-
-        if indent == 2 and current_section in {"task", "run"}:
-            section = payload[current_section]
-            if not isinstance(section, dict):
-                return _yaml_error(path, line_number, f"{current_section} must be a mapping")
-            if raw_value is None and key == "expected_outputs":
-                section[key] = []
-                current_list = (section, key)
-                continue
-            section[key] = _parse_yaml_scalar(raw_value)
-            current_list = None
-            continue
-
-        return _yaml_error(path, line_number, "unsupported YAML shape")
-
-    return ok(payload)
+        result.append(None)
+    return result, index
 
 
-def _split_yaml_mapping_line(line: str, path: Path, line_number: int) -> Result:
+def _split_yaml_mapping_line(line: str, line_number: int) -> tuple[str, str | None]:
     if ":" not in line:
-        return _yaml_error(path, line_number, "expected key: value")
+        raise _YamlParseError(line_number, "expected key: value")
     key, value = line.split(":", 1)
     key = key.strip()
     if not key:
-        return _yaml_error(path, line_number, "mapping key is required")
+        raise _YamlParseError(line_number, "mapping key is required")
     value = value.strip()
-    return ok((key, None if value == "" else value))
+    return key, None if value == "" else value
 
 
 def _strip_yaml_comment(line: str) -> str:
