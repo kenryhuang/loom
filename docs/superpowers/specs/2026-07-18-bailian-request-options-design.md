@@ -2,7 +2,8 @@
 
 ## Status
 
-Approved for implementation on 2026-07-18.
+Approved for implementation on 2026-07-18. Amended after implementation to
+define the operator's local model-profile options.
 
 ## Context
 
@@ -41,7 +42,8 @@ Official API reference:
 - Persist complete reasoning chains in Loom context or replay them in later
   requests.
 - Automatically enable thinking, search, code interpreter, or any other
-  provider capability.
+  provider capability in the provider implementation. Operators may enable
+  supported capabilities explicitly in a model profile.
 - Add PyYAML or another runtime dependency.
 
 ## Configuration Contract
@@ -80,9 +82,51 @@ models:
       parallel_tool_calls: false
 ```
 
-The checked-in `config.yaml` migrates its existing output limits but does not
-add request options, so this change does not silently alter model behavior.
-The README demonstrates representative Bailian thinking and tool options.
+The repository ignores `config.yaml`; it is an operator-local configuration,
+not a checked-in project artifact. The provider never supplies implicit
+request options. The README demonstrates representative Bailian thinking and
+tool options, while the operator may opt into them explicitly per model.
+
+### Local model profiles
+
+The approved local configuration enables only model-appropriate reasoning,
+tool streaming, sequential tool calls, and usage reporting:
+
+```yaml
+models:
+  main:
+    model: qwen3.7-max
+    request_options:
+      enable_thinking: true
+      tool_stream: true
+      parallel_tool_calls: false
+      stream_options:
+        include_usage: true
+
+  glm:
+    model: glm-5.2
+    request_options:
+      enable_thinking: true
+      reasoning_effort: max
+      tool_stream: true
+      parallel_tool_calls: false
+      stream_options:
+        include_usage: true
+
+  kimi:
+    model: kimi-k3
+    request_options:
+      reasoning_effort: max
+      parallel_tool_calls: false
+      stream_options:
+        include_usage: true
+```
+
+No fixed `thinking_budget` is configured. `max_completion_tokens` remains the
+complete-output ceiling, and each model retains its provider-defined reasoning
+budget behavior. Search and code interpreter remain disabled. The local file
+is validated through `load_task_config`; no paid model call is required to
+verify the configuration structure and provider construction.
 
 ### Breaking migration
 
@@ -195,7 +239,8 @@ The implementation updates:
 
 - all live provider factories and examples from `max_tokens` to
   `max_completion_tokens`;
-- the checked-in `config.yaml` model output limits;
+- the operator-local, ignored `config.yaml` model output limits and explicitly
+  selected request options;
 - the README task configuration example and parameter explanation.
 
 Historical design and implementation documents are not rewritten. References
