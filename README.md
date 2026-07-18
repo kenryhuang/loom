@@ -114,7 +114,12 @@ models:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: LOOM_LLM_API_KEY
     temperature: 0
-    max_tokens: 8192
+    max_completion_tokens: 8192
+    request_options:
+      enable_thinking: true
+      thinking_budget: 2048
+      tool_stream: true
+      parallel_tool_calls: false
 
   fast:
     provider: openai
@@ -122,6 +127,15 @@ models:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: LOOM_LLM_API_KEY
 ```
+
+`max_completion_tokens` limits the complete model output, including reasoning
+content. Provider-specific `request_options` are copied to the top level of
+both streaming and non-streaming Chat API requests. Loom rejects options that
+would override its request ownership (`model`, `messages`, `stream`, `tools`,
+`tool_choice`, `temperature`, and completion limits); the provider validates
+whether a configured option applies to the selected model. See the
+[Bailian OpenAI-compatible Chat API](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)
+for supported thinking, generation, tool, and search parameters.
 
 ## Trace Evaluation
 

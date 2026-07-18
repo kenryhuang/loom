@@ -54,7 +54,7 @@ def test_live_env_provider_api_basic_chat_completion():
     async def scenario():
         provider_result = create_env_openai_provider(
             env_path=env_path,
-            max_tokens=int(os.environ.get("LOOM_LIVE_MAX_TOKENS", "128")),
+            max_completion_tokens=int(os.environ.get("LOOM_LIVE_MAX_COMPLETION_TOKENS", "128")),
             temperature=float(os.environ.get("LOOM_LIVE_TEMPERATURE", "0")),
         )
         assert provider_result.ok, provider_result.error.message
@@ -75,7 +75,7 @@ def test_live_env_provider_api_required_tool_choice_contract():
     async def scenario():
         provider_result = create_env_openai_provider(
             env_path=env_path,
-            max_tokens=int(os.environ.get("LOOM_LIVE_MAX_TOKENS", "128")),
+            max_completion_tokens=int(os.environ.get("LOOM_LIVE_MAX_COMPLETION_TOKENS", "128")),
             temperature=float(os.environ.get("LOOM_LIVE_TEMPERATURE", "0")),
         )
         assert provider_result.ok, provider_result.error.message
@@ -115,7 +115,7 @@ def test_live_llm_loop_runs_full_runtime_tool_trace_chain():
     async def scenario():
         provider_result = create_env_openai_provider(
             env_path=env_path,
-            max_tokens=int(os.environ.get("LOOM_LIVE_MAX_TOKENS", "512")),
+            max_completion_tokens=int(os.environ.get("LOOM_LIVE_MAX_COMPLETION_TOKENS", "512")),
             temperature=float(os.environ.get("LOOM_LIVE_TEMPERATURE", "0")),
         )
         assert provider_result.ok, provider_result.error.message

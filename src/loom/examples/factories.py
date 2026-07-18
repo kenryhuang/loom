@@ -231,7 +231,8 @@ def _create_llm_provider(options: dict[str, Any]):
                 model=options.get("model", "gpt-4o-mini"),
                 base_url=options.get("base_url", "https://api.openai.com/v1"),
                 temperature=options.get("temperature"),
-                max_tokens=options.get("max_tokens"),
+                max_completion_tokens=options.get("max_completion_tokens"),
+                request_options=options.get("request_options"),
                 http_client=options.get("http_client"),
             )
         )
@@ -241,7 +242,8 @@ def _create_llm_provider(options: dict[str, Any]):
         model=options.get("model"),
         base_url=options.get("base_url"),
         temperature=options.get("temperature"),
-        max_tokens=options.get("max_tokens"),
+        max_completion_tokens=options.get("max_completion_tokens"),
+        request_options=options.get("request_options"),
         http_client=options.get("http_client"),
     )
 
