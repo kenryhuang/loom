@@ -35,7 +35,7 @@
 - Produces: `plan_text_edits(content: str, edits: tuple[TextEdit, ...], *, path: str, max_diff_bytes: int = 20_000) -> Result`.
 - Later tasks consume all four interfaces without changing their names or field meanings.
 
-- [ ] **Step 1: Write failing planner tests**
+- [x] **Step 1: Write failing planner tests**
 
 Create `tests/tasks/test_edit_file.py` with these initial tests:
 
@@ -123,7 +123,7 @@ def test_parse_text_edits_rejects_invalid_entries():
         assert result.error.code == "VALIDATION_FAILED"
 ```
 
-- [ ] **Step 2: Run the planner tests and verify RED**
+- [x] **Step 2: Run the planner tests and verify RED**
 
 Run:
 
@@ -133,7 +133,7 @@ uv run pytest tests/tasks/test_edit_file.py -q
 
 Expected: collection fails with `ModuleNotFoundError: No module named 'loom.tasks.edit_file'`.
 
-- [ ] **Step 3: Implement the minimal exact planner**
+- [x] **Step 3: Implement the minimal exact planner**
 
 Create `src/loom/tasks/edit_file.py` with these immutable contracts and helpers:
 
@@ -299,7 +299,7 @@ def _validation_error(message: str, **metadata: Any) -> Result:
     return err(make_loom_error("VALIDATION_FAILED", message, retryable=False, metadata=metadata))
 ```
 
-- [ ] **Step 4: Run the planner tests and verify GREEN**
+- [x] **Step 4: Run the planner tests and verify GREEN**
 
 Run:
 
@@ -309,7 +309,7 @@ uv run pytest tests/tasks/test_edit_file.py -q
 
 Expected: all planner tests pass.
 
-- [ ] **Step 5: Add edge-case planner tests and keep GREEN**
+- [x] **Step 5: Add edge-case planner tests and keep GREEN**
 
 Extend `tests/tasks/test_edit_file.py` with:
 
@@ -379,7 +379,7 @@ uv run pytest tests/tasks/test_edit_file.py -q
 
 Expected: all tests pass; no test permits fuzzy matching.
 
-- [ ] **Step 6: Commit Task 1**
+- [x] **Step 6: Commit Task 1**
 
 ```bash
 git add src/loom/tasks/edit_file.py tests/tasks/test_edit_file.py
