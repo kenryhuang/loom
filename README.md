@@ -151,3 +151,144 @@ uv run python -m loom.evaluation.analyze \
 The first evaluation phase builds normalized events, episode summaries, metrics,
 and a markdown report. Later evolution phases consume these artifacts for
 proposal generation and low-risk auto-apply.
+
+## Governed Meta-Harness
+
+Loom's governed Meta-Harness implementation adds two authority-separated
+packages:
+
+```text
+TraceBundle -> EvaluationBundle -> EvolutionBundle
+                                      |
+                                      v
+                              loom.campaigns
+                                      |
+                                      v
+                              loom.governance
+```
+
+`loom.campaigns` owns immutable campaign specs, content-addressed artifacts,
+SQLite/WAL event and budget transactions, task-set contamination checks,
+declarative patch compilation, paired experiments, Pareto frontiers, read-only
+history, proposer sessions, and one-time validation/holdout finalization.
+`loom.governance` alone owns risk, mandatory gates, approvals, active registry
+pointers, monitoring, expiry/rollback decisions, and their atomic audit log.
+
+Create a campaign from a resolved JSON or YAML configuration. Authority-bearing
+commands require an identity file containing only the presented actor
+assertion. Trust is configured independently by the deployment launcher through
+`LOOM_TRUST_STORE` (default `/etc/loom/trust.json`). Authority-bearing commands
+do not accept a trust-root argument, so an identity file cannot make itself
+trusted:
+
+`operator.json`:
+
+```json
+{"actor":{"subject":"operator","roles":["campaign_operator"],"issued_at":"2026-07-18T00:00:00.000000Z","expires_at":"2026-07-19T00:00:00.000000Z","signature":"signed-operator"}}
+```
+
+`trust.json`, installed by the deployment authority:
+
+```json
+{"trusted_assertions":[{"subject":"operator","roles":["campaign_operator"],"issued_at":"2026-07-18T00:00:00.000000Z","expires_at":"2026-07-19T00:00:00.000000Z","signature":"signed-operator"}],"revoked_signatures":[]}
+```
+
+```bash
+export LOOM_TRUST_STORE=/etc/loom/trust.json
+uv run loom campaign create .loom/campaigns/my-campaign \
+  --config campaign.json \
+  --identity .loom/identities/campaign-creator.json \
+  --operation-id op_<uuidv7> \
+  --json
+```
+
+The input follows the shape in
+`docs/superpowers/specs/2026-07-18-governed-meta-harness-design.md`. Task-set
+fields point to frozen JSONL manifests; creation copies them into the campaign's
+content-addressed artifact store and freezes their digests. Derivation requires
+a different sealed holdout digest:
+
+```bash
+uv run loom campaign derive .loom/campaigns/child \
+  --from-campaign-dir .loom/campaigns/parent \
+  --config child-campaign.json \
+  --identity .loom/identities/campaign-creator.json \
+  --operation-id op_<uuidv7> \
+  --json
+```
+
+Inspect or change only the campaign lifecycle projection:
+
+```bash
+uv run loom campaign status .loom/campaigns/my-campaign --campaign-id cmp_<uuidv7> --identity .loom/identities/operator.json --json
+uv run loom campaign run    .loom/campaigns/my-campaign --campaign-id cmp_<uuidv7> --identity .loom/identities/operator.json --operation-id op_<uuidv7>
+uv run loom campaign pause  .loom/campaigns/my-campaign --campaign-id cmp_<uuidv7> --identity .loom/identities/operator.json --operation-id op_<uuidv7>
+uv run loom campaign resume .loom/campaigns/my-campaign --campaign-id cmp_<uuidv7> --identity .loom/identities/operator.json --operation-id op_<uuidv7>
+uv run loom campaign import-experience .loom/campaigns/my-campaign evaluation-bundle.json \
+  --campaign-id cmp_<uuidv7> --identity .loom/identities/campaign-creator.json --json
+
+uv run loom candidate create cmp_<uuidv7> --campaign-dir .loom/campaigns/my-campaign \
+  --patch patch.json --hypothesis hypothesis.md --identity .loom/identities/operator.json --json
+uv run loom candidate validate cmp_<uuidv7> cand_<uuidv7> --campaign-dir .loom/campaigns/my-campaign \
+  --candidate-ref candidate-ref.json --validation-ref validation-ref.json \
+  --experiment-ref discovery-experiment-ref.json --identity .loom/identities/controller.json --json
+uv run loom campaign frontier .loom/campaigns/my-campaign --campaign-id cmp_<uuidv7> \
+  --identity .loom/identities/controller.json --json
+uv run loom experiment compare cmp_<uuidv7> cand_<baseline> cand_<candidate> \
+  --campaign-dir .loom/campaigns/my-campaign --identity .loom/identities/controller.json --json
+uv run loom task-set fingerprint discovery.jsonl --role discovery --json
+uv run loom task-set validate discovery.jsonl --against validation.jsonl --against holdout.jsonl --json
+```
+
+`CampaignController.run_iteration()` is the adapter boundary for bounded
+proposer search: deployments inject the proposer, history view, candidate
+workspace, validation, and experiment runner. Validation and holdout consume
+only signed, content-addressed `ExperimentBundle` references. Search sealing,
+finalist selection, and holdout finalization are digest-bound and safely
+replayable; no CLI argument can directly assert a score or pass/fail result.
+Production proposer backends return a supervisor-owned `MeteredProposalResult`;
+token, cost, and wall-time usage is never read from candidate-controlled JSON.
+Experiment usage is likewise recorded by the paired runner, and each phase
+must use the deterministic three-repetition `TrialPlan` rebuilt from its frozen
+task-set manifest.
+
+Governance has a separate SQLite authority and resolves every baseline,
+candidate, policy, risk, gate, rollback, and active reference through the
+content-addressed artifact store before changing a pointer:
+
+```bash
+uv run loom governance active --surface context_policy \
+  --governance-dir .loom/governance --artifact-root .loom/campaigns/my-campaign/artifacts \
+  --identity .loom/identities/registry-reader.json --json
+uv run loom governance approve cand_<uuidv7> \
+  --candidate-digest <sha256> --baseline-digest <sha256> --policy-digest <sha256> \
+  --risk-rules-digest <sha256> --gate-digest <sha256> --expires-at 2026-07-19T00:00:00Z \
+  --governance-dir .loom/governance --artifact-root .loom/campaigns/my-campaign/artifacts \
+  --identity .loom/identities/approver.json --json
+```
+
+Registry bootstrap plus exact policy/risk-rule digests require an independent
+`governance_admin`. Campaign finalizers cannot self-assert mandatory gate
+booleans: task isolation, contamination, evaluator independence, sandbox
+conformance, and security regression results must be bound to signed
+`campaign_controller` gate-source artifacts. Governance derives holdout metrics
+from the signed recommendation and directly checks baseline, policy, rollback,
+monitor, candidate lineage, and artifact integrity before activation.
+
+Security boundaries are fail-closed. Historical text is sanitized, labeled as
+untrusted evidence, and filtered by phase before reaching a proposer. The local
+subprocess proposer is disabled unless `trusted_local_debug=True`; that flag is
+for deterministic tests and is not a production isolation boundary. Production
+proposers and executable candidates use framed sandbox adapters.
+`PodmanRootlessRuntime` probes the runtime and constructs a fixed,
+digest-pinned command with a read-only root, explicit mounts, a fresh bounded
+scratch tmpfs, user/mount/network namespaces, dropped Linux capabilities,
+`no_new_privs`, seccomp, cgroup limits, no network or host environment
+forwarding, and fixed Loom runner entrypoints. If those controls are
+unavailable, Loom returns `SANDBOX_UNAVAILABLE`; it never falls back to running
+candidate code in the Loom process or a plain subprocess.
+
+The initial implementation covers design Phases 0–4 with local deterministic
+stores and injectable execution/isolation adapters. Phase 5 cross-campaign
+transfer and distributed scale remain intentionally deferred by the approved
+design.

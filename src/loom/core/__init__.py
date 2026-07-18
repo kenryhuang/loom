@@ -1,5 +1,8 @@
 """Core public API for Loom."""
 
+from loom.core.artifacts import ArtifactRef, TaskSetRef
+from loom.core.experiments import ExperimentPhase, ExperimentStatus
+from loom.core.identity import ActorAssertion, StaticIdentityProvider
 from loom.core.models import (
     Action,
     AffordanceLayer,
@@ -61,6 +64,8 @@ from loom.core.models import (
 
 __all__ = [
     "Action",
+    "ArtifactRef",
+    "ActorAssertion",
     "AffordanceLayer",
     "Budget",
     "Capability",
@@ -69,6 +74,8 @@ __all__ = [
     "Context",
     "ContextPatch",
     "Decision",
+    "ExperimentPhase",
+    "ExperimentStatus",
     "FrozenDict",
     "GoalLayer",
     "IdentityLayer",
@@ -89,6 +96,8 @@ __all__ = [
     "StateLayer",
     "StepResult",
     "SuccessCriterion",
+    "TaskSetRef",
+    "StaticIdentityProvider",
     "ToolRef",
     "Trace",
     "TraceSnapshot",

@@ -347,6 +347,11 @@ def _parse_yaml_config(text: str, path: Path) -> Result:
     return ok(value)
 
 
+def parse_yaml_document(text: str, path: str | os.PathLike[str]) -> Result:
+    """Parse Loom's supported deterministic YAML subset into JSON-like values."""
+    return _parse_yaml_config(text, Path(path))
+
+
 def _tokenize_yaml(text: str, path: Path) -> Result:
     lines: list[_YamlLine] = []
     for line_number, raw_line in enumerate(text.splitlines(), start=1):
@@ -645,4 +650,5 @@ __all__ = [
     "TaskRunnerConfig",
     "create_provider_from_task_config",
     "load_task_config",
+    "parse_yaml_document",
 ]
