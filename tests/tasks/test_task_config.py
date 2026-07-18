@@ -94,6 +94,33 @@ models:
     assert tuple(model.request_options["stop"]) == ("END", "STOP")
 
 
+def test_load_task_config_reads_yaml_lists_of_nested_mappings(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+models:
+  main:
+    model: qwen3.7-max
+    request_options:
+      items:
+        - name: first
+          enabled: true
+          details:
+            rank: 1
+        - name: second
+          enabled: false
+""",
+        encoding="utf-8",
+    )
+
+    items = load_task_config(path).unwrap().models["main"].request_options["items"]
+
+    assert items[0]["name"] == "first"
+    assert items[0]["enabled"] is True
+    assert items[0]["details"]["rank"] == 1
+    assert items[1] == {"name": "second", "enabled": False}
+
+
 def test_load_task_config_reads_request_options_from_toml(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text(
@@ -174,6 +201,25 @@ models:
     assert "mapping" in result.error.message
 
 
+def test_load_task_config_rejects_null_request_options(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+models:
+  main:
+    model: qwen
+    request_options: null
+""",
+        encoding="utf-8",
+    )
+
+    result = load_task_config(path)
+
+    assert not result.ok
+    assert result.error.code == "VALIDATION_FAILED"
+    assert "mapping" in result.error.message
+
+
 def test_load_task_config_rejects_reserved_request_option(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('[models.main]\nmodel = "qwen"\n[models.main.request_options]\nstream = false\n', encoding="utf-8")
@@ -183,6 +229,17 @@ def test_load_task_config_rejects_reserved_request_option(tmp_path):
     assert not result.ok
     assert result.error.code == "VALIDATION_FAILED"
     assert "reserved" in result.error.message
+
+
+def test_load_task_config_rejects_non_json_request_option_with_path(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[models.main]\nmodel = "qwen"\n[models.main.request_options]\ntop_p = nan\n', encoding="utf-8")
+
+    result = load_task_config(path)
+
+    assert not result.ok
+    assert result.error.code == "VALIDATION_FAILED"
+    assert "request_options.top_p" in result.error.message
 
 
 def test_load_task_config_reads_task_and_run_defaults_from_yaml(tmp_path):

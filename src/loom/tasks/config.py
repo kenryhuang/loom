@@ -275,8 +275,6 @@ def _parse_model_config(payload: Mapping[str, Any], path: Path, name: str) -> Re
         )
 
     request_options = payload.get("request_options", {})
-    if request_options is None:
-        request_options = {}
     if not isinstance(request_options, Mapping):
         return err(
             make_loom_error(
@@ -411,6 +409,10 @@ def _parse_yaml_sequence(lines: list[_YamlLine], index: int, indent: int) -> tup
         raw_value = line.text[1:].strip()
         index += 1
         if raw_value:
+            if _looks_like_yaml_mapping_entry(raw_value):
+                value, index = _parse_yaml_sequence_mapping(lines, index, indent, line.number, raw_value)
+                result.append(value)
+                continue
             result.append(_parse_yaml_scalar(raw_value))
             continue
         if index < len(lines) and lines[index].indent > indent:
@@ -425,6 +427,56 @@ def _parse_yaml_sequence(lines: list[_YamlLine], index: int, indent: int) -> tup
             continue
         result.append(None)
     return result, index
+
+
+def _parse_yaml_sequence_mapping(
+    lines: list[_YamlLine],
+    index: int,
+    sequence_indent: int,
+    first_line_number: int,
+    first_entry: str,
+) -> tuple[dict[str, Any], int]:
+    mapping_indent = sequence_indent + 2
+    result: dict[str, Any] = {}
+    key, raw_value = _split_yaml_mapping_line(first_entry, first_line_number)
+    result[key], index = _parse_yaml_mapping_value(lines, index, mapping_indent, raw_value)
+
+    while index < len(lines):
+        line = lines[index]
+        if line.indent < mapping_indent:
+            break
+        if line.indent > mapping_indent:
+            raise _YamlParseError(line.number, "unexpected indentation")
+        if line.text == "-" or line.text.startswith("- "):
+            break
+
+        key, raw_value = _split_yaml_mapping_line(line.text, line.number)
+        if key in result:
+            raise _YamlParseError(line.number, f"duplicate mapping key: {key}")
+        index += 1
+        result[key], index = _parse_yaml_mapping_value(lines, index, mapping_indent, raw_value)
+    return result, index
+
+
+def _parse_yaml_mapping_value(lines: list[_YamlLine], index: int, parent_indent: int, raw_value: str | None) -> tuple[Any, int]:
+    if raw_value is not None:
+        return _parse_yaml_scalar(raw_value), index
+    if index >= len(lines) or lines[index].indent <= parent_indent:
+        return None, index
+
+    nested = lines[index]
+    if nested.indent != parent_indent + 2:
+        raise _YamlParseError(nested.number, "nested values must use one two-space indentation level")
+    if nested.text == "-" or nested.text.startswith("- "):
+        return _parse_yaml_sequence(lines, index, parent_indent + 2)
+    return _parse_yaml_mapping(lines, index, parent_indent + 2)
+
+
+def _looks_like_yaml_mapping_entry(value: str) -> bool:
+    if value.startswith(("'", '"')):
+        return False
+    colon = value.find(":")
+    return colon > 0 and (colon == len(value) - 1 or value[colon + 1].isspace())
 
 
 def _split_yaml_mapping_line(line: str, line_number: int) -> tuple[str, str | None]:

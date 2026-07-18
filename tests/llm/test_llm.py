@@ -715,6 +715,21 @@ def test_openai_provider_rejects_reserved_request_options(reserved):
         create_openai_provider(api_key="key", model="test", request_options={reserved: "bad"})
 
 
+@pytest.mark.parametrize(
+    ("request_options", "error_path"),
+    [
+        ({"top_p": float("nan")}, "request_options.top_p"),
+        ({"metadata": {1: "value"}}, "request_options.metadata keys"),
+        ({"metadata": {"values": {"unsupported"}}}, "request_options.metadata.values"),
+    ],
+)
+def test_openai_provider_rejects_non_json_request_options_with_paths(request_options, error_path):
+    with pytest.raises((TypeError, ValueError)) as exc_info:
+        create_openai_provider(api_key="key", model="test", request_options=request_options)
+
+    assert error_path in str(exc_info.value)
+
+
 def test_env_config_loads_openai_compatible_provider(tmp_path):
     env_path = tmp_path / ".env"
     env_path.write_text(
