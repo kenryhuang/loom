@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import difflib
+import os
+import stat
+import tempfile
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from loom.core import Result, err, make_loom_error, ok, thaw_json
@@ -23,6 +28,16 @@ class TextEdit:
 class EditPlan:
     content: str
     replacements: int
+    first_changed_line: int
+    diff: str
+    diff_truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FileEditResult:
+    path: str
+    replacements: int
+    bytes_written: int
     first_changed_line: int
     diff: str
     diff_truncated: bool
@@ -150,6 +165,78 @@ def plan_text_edits(
     )
 
 
+def apply_file_edits(
+    path: Path,
+    edits: tuple[TextEdit, ...],
+    *,
+    display_path: str,
+    max_diff_bytes: int = DEFAULT_MAX_DIFF_BYTES,
+) -> Result:
+    if not path.exists() or not path.is_file():
+        return _tool_error("Edit target must be an existing regular file", path=display_path)
+    try:
+        raw = path.read_bytes()
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError as exc:
+        return _tool_error(f"Failed to read edit target: {exc}", path=display_path)
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return _tool_error(f"Edit target is not valid UTF-8: {exc}", path=display_path)
+
+    bom = "\ufeff" if decoded.startswith("\ufeff") else ""
+    text = decoded[len(bom) :]
+    newline = _detect_newline(text)
+    normalized = _normalize_newlines(text)
+    normalized_edits = tuple(
+        TextEdit(
+            _normalize_newlines(edit.old_text),
+            _normalize_newlines(edit.new_text),
+            edit.occurrence,
+        )
+        for edit in edits
+    )
+    planned = plan_text_edits(
+        normalized,
+        normalized_edits,
+        path=display_path,
+        max_diff_bytes=max_diff_bytes,
+    )
+    if not planned.ok:
+        return planned
+
+    final_text = bom + _restore_newlines(planned.value.content, newline)
+    encoded = final_text.encode("utf-8")
+    temporary_path: str | None = None
+    try:
+        descriptor, temporary_path = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary_path, mode)
+        os.replace(temporary_path, path)
+        temporary_path = None
+    except OSError as exc:
+        return _tool_error(f"Failed to replace edit target: {exc}", path=display_path)
+    finally:
+        if temporary_path is not None:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary_path)
+
+    plan = planned.value
+    return ok(
+        FileEditResult(
+            display_path,
+            plan.replacements,
+            len(encoded),
+            plan.first_changed_line,
+            plan.diff,
+            plan.diff_truncated,
+        )
+    )
+
+
 def _validate_text_edit(edit: TextEdit, *, path: str, edit_index: int) -> Result | None:
     if not isinstance(edit.old_text, str) or not edit.old_text:
         return _validation_error("old_text must be a non-empty string", path=path, edit_index=edit_index)
@@ -182,5 +269,22 @@ def _truncate_utf8(value: str, max_bytes: int) -> tuple[str, bool]:
     return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
 
 
+def _normalize_newlines(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _detect_newline(value: str) -> str:
+    positions = [(value.find(token), token) for token in ("\r\n", "\n", "\r") if token in value]
+    return min(positions, default=(0, "\n"), key=lambda item: item[0])[1]
+
+
+def _restore_newlines(value: str, newline: str) -> str:
+    return value if newline == "\n" else value.replace("\n", newline)
+
+
 def _validation_error(message: str, **metadata: Any) -> Result:
     return err(make_loom_error("VALIDATION_FAILED", message, retryable=False, metadata=metadata))
+
+
+def _tool_error(message: str, **metadata: Any) -> Result:
+    return err(make_loom_error("TOOL_FAILED", message, retryable=False, metadata=metadata))

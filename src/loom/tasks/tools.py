@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from loom.core import Observation, Result, err, make_loom_error, new_trace_id, now_iso, ok, thaw_json
+from loom.tasks.edit_file import apply_file_edits, parse_text_edits
 from loom.tasks.request import TaskRequest
 
 
@@ -37,6 +38,45 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
                     "content": content,
                     "bytes_read": min(len(raw), max_bytes),
                     "truncated": len(raw) > max_bytes,
+                },
+                now_iso(),
+            )
+        )
+
+    async def edit_file(input_value: Any, _options: Mapping[str, Any] | None = None) -> Result:
+        data = _tool_input(input_value)
+        unknown = set(data) - {"path", "edits"}
+        if unknown:
+            return err(
+                make_loom_error(
+                    "VALIDATION_FAILED",
+                    "edit_file input contains unknown fields",
+                    retryable=False,
+                    metadata={"fields": sorted(unknown)},
+                )
+            )
+        resolved = _resolve_workspace_path(root, data.get("path"))
+        if not resolved.ok:
+            return resolved
+        edits = parse_text_edits(data.get("edits"))
+        if not edits.ok:
+            return edits
+        display_path = _relative_to_root(root, resolved.value)
+        edited = apply_file_edits(resolved.value, edits.value, display_path=display_path)
+        if not edited.ok:
+            return edited
+        value = edited.value
+        return ok(
+            Observation(
+                new_trace_id(),
+                "edit_file",
+                {
+                    "path": value.path,
+                    "replacements": value.replacements,
+                    "bytes_written": value.bytes_written,
+                    "first_changed_line": value.first_changed_line,
+                    "diff": value.diff,
+                    "diff_truncated": value.diff_truncated,
                 },
                 now_iso(),
             )
@@ -120,6 +160,7 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
 
     return {
         "read_file": read_file,
+        "edit_file": edit_file,
         "write_file": write_file,
         "shell_execute": shell_execute,
         "finish": finish,

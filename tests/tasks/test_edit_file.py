@@ -1,4 +1,14 @@
-from loom.tasks.edit_file import TextEdit, parse_text_edits, plan_text_edits
+import asyncio
+
+import loom.tasks.edit_file as edit_file_module
+from loom.tasks.edit_file import (
+    TextEdit,
+    apply_file_edits,
+    parse_text_edits,
+    plan_text_edits,
+)
+from loom.tasks.request import TaskRequest
+from loom.tasks.tools import make_task_tools
 
 
 def test_plan_text_edits_replaces_unique_text_and_returns_diff():
@@ -144,3 +154,127 @@ def test_plan_text_edits_does_not_fuzzy_match_unicode_punctuation():
 
     assert not result.ok
     assert result.error.code == "VALIDATION_FAILED"
+
+
+def test_apply_file_edits_preserves_crlf_bom_and_permissions(tmp_path):
+    path = tmp_path / "sample.txt"
+    path.write_bytes("\ufefffirst\r\nsecond\r\n".encode())
+    path.chmod(0o640)
+
+    result = apply_file_edits(path, (TextEdit("second\n", "SECOND\n"),), display_path="sample.txt")
+
+    assert result.ok
+    assert path.read_bytes() == "\ufefffirst\r\nSECOND\r\n".encode()
+    assert path.stat().st_mode & 0o777 == 0o640
+
+
+def test_apply_file_edits_failure_leaves_file_unchanged(tmp_path):
+    path = tmp_path / "sample.txt"
+    original = b"alpha\nbeta\n"
+    path.write_bytes(original)
+
+    result = apply_file_edits(
+        path,
+        (TextEdit("alpha", "ALPHA"), TextEdit("missing", "MISSING")),
+        display_path="sample.txt",
+    )
+
+    assert not result.ok
+    assert path.read_bytes() == original
+
+
+def test_edit_file_handler_edits_workspace_file_and_returns_observation(tmp_path):
+    path = tmp_path / "sample.txt"
+    path.write_text("same\nsame\n", encoding="utf-8")
+    handler = make_task_tools(TaskRequest("Edit sample", workspace=tmp_path))["edit_file"]
+
+    result = asyncio.run(
+        handler(
+            {
+                "path": "sample.txt",
+                "edits": [
+                    {
+                        "old_text": "same",
+                        "new_text": "changed",
+                        "occurrence": 2,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.ok
+    assert result.value.source == "edit_file"
+    assert result.value.value["path"] == "sample.txt"
+    assert result.value.value["replacements"] == 1
+    assert path.read_text(encoding="utf-8") == "same\nchanged\n"
+
+
+def test_edit_file_handler_rejects_unknown_top_level_field(tmp_path):
+    path = tmp_path / "sample.txt"
+    path.write_text("hello\n", encoding="utf-8")
+    handler = make_task_tools(TaskRequest("Edit sample", workspace=tmp_path))["edit_file"]
+
+    result = asyncio.run(
+        handler(
+            {
+                "path": "sample.txt",
+                "edits": [{"old_text": "hello", "new_text": "world"}],
+                "extra": True,
+            }
+        )
+    )
+
+    assert not result.ok
+    assert result.error.code == "VALIDATION_FAILED"
+    assert path.read_text(encoding="utf-8") == "hello\n"
+
+
+def test_apply_file_edits_rejects_missing_directory_and_invalid_utf8(tmp_path):
+    missing = apply_file_edits(tmp_path / "missing.txt", (TextEdit("a", "b"),), display_path="missing.txt")
+    directory = apply_file_edits(tmp_path, (TextEdit("a", "b"),), display_path=".")
+    binary_path = tmp_path / "binary.dat"
+    binary_path.write_bytes(b"\xff\xfe")
+    binary = apply_file_edits(binary_path, (TextEdit("a", "b"),), display_path="binary.dat")
+
+    assert not missing.ok and missing.error.code == "TOOL_FAILED"
+    assert not directory.ok and directory.error.code == "TOOL_FAILED"
+    assert not binary.ok and binary.error.code == "TOOL_FAILED"
+
+
+def test_edit_file_handler_rejects_workspace_traversal(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("hello\n", encoding="utf-8")
+    handler = make_task_tools(TaskRequest("Edit sample", workspace=workspace))["edit_file"]
+
+    result = asyncio.run(
+        handler(
+            {
+                "path": "../outside.txt",
+                "edits": [{"old_text": "hello", "new_text": "world"}],
+            }
+        )
+    )
+
+    assert not result.ok
+    assert result.error.code == "VALIDATION_FAILED"
+    assert outside.read_text(encoding="utf-8") == "hello\n"
+
+
+def test_apply_file_edits_cleans_temporary_file_after_replace_failure(tmp_path, monkeypatch):
+    path = tmp_path / "sample.txt"
+    original = b"hello\n"
+    path.write_bytes(original)
+
+    def fail_replace(source, target):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(edit_file_module.os, "replace", fail_replace)
+    result = apply_file_edits(path, (TextEdit("hello", "world"),), display_path="sample.txt")
+
+    assert not result.ok
+    assert result.error.code == "TOOL_FAILED"
+    assert path.read_bytes() == original
+    assert not tuple(tmp_path.glob(".sample.txt.*.tmp"))

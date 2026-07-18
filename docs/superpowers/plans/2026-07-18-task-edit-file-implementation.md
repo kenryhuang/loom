@@ -401,7 +401,7 @@ git commit -m "feat: add exact text edit planner"
 - Produces: `apply_file_edits(path: Path, edits: tuple[TextEdit, ...], *, display_path: str, max_diff_bytes: int = 20_000) -> Result`.
 - Produces: `make_task_tools(request)["edit_file"]`, returning an `Observation` with the result fields.
 
-- [ ] **Step 1: Write failing filesystem and handler tests**
+- [x] **Step 1: Write failing filesystem and handler tests**
 
 Add tests that:
 
@@ -528,7 +528,7 @@ def test_apply_file_edits_cleans_temporary_file_after_replace_failure(tmp_path, 
     assert not tuple(tmp_path.glob(".sample.txt.*.tmp"))
 ```
 
-- [ ] **Step 2: Run filesystem/handler tests and verify RED**
+- [x] **Step 2: Run filesystem/handler tests and verify RED**
 
 Run:
 
@@ -538,7 +538,7 @@ uv run pytest tests/tasks/test_edit_file.py -q
 
 Expected: fails because `apply_file_edits` and `make_task_tools(...)["edit_file"]` do not exist.
 
-- [ ] **Step 3: Implement atomic file application**
+- [x] **Step 3: Implement atomic file application**
 
 Extend `src/loom/tasks/edit_file.py` with:
 
@@ -632,7 +632,7 @@ def _tool_error(message: str, **metadata: Any) -> Result:
     return err(make_loom_error("TOOL_FAILED", message, retryable=False, metadata=metadata))
 ```
 
-- [ ] **Step 4: Register the task handler**
+- [x] **Step 4: Register the task handler**
 
 Modify `src/loom/tasks/tools.py` to import `apply_file_edits` and
 `parse_text_edits`, validate top-level keys, resolve the workspace path, call
@@ -681,7 +681,7 @@ async def edit_file(input_value: Any, _options: Mapping[str, Any] | None = None)
 
 Add `"edit_file": edit_file` to the returned handler mapping.
 
-- [ ] **Step 5: Run Task 2 tests and verify GREEN**
+- [x] **Step 5: Run Task 2 tests and verify GREEN**
 
 Run:
 
@@ -691,7 +691,7 @@ uv run pytest tests/tasks/test_edit_file.py -q
 
 Expected: all planner, filesystem, and handler tests pass.
 
-- [ ] **Step 6: Commit Task 2**
+- [x] **Step 6: Commit Task 2**
 
 ```bash
 git add src/loom/tasks/edit_file.py src/loom/tasks/tools.py tests/tasks/test_edit_file.py
