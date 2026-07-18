@@ -12,6 +12,7 @@ from loom.examples.real_project_smoke import (
     make_real_project_smoke_context,
     make_real_project_smoke_llm_context,
     make_real_project_smoke_loop,
+    make_real_project_smoke_tools,
     parse_args,
     parse_run_options,
     run_command,
@@ -155,13 +156,45 @@ def test_real_project_smoke_llm_prompt_requires_evidence_tool_calls(tmp_path: Pa
 
     assert context.ok
     tool_ids = tuple(tool.id for tool in context.value.affordances.tools)
-    assert tool_ids == ("read_file", "write_file", "shell_execute", "finish")
+    assert tool_ids == (
+        "read_file",
+        "edit_file",
+        "write_file",
+        "shell_execute",
+        "finish",
+    )
     system_prompt = build_system_prompt(context.value)
     assert "Use read_file to inspect project files" in system_prompt
     assert "Use shell_execute to run the configured smoke command" in system_prompt
     assert "Do not enumerate the whole repository" in system_prompt
     assert "Call finish exactly once" in system_prompt
     assert "inspect-project" not in system_prompt
+
+
+def test_real_project_smoke_edit_file_tool_edits_existing_file(tmp_path: Path):
+    target = tmp_path / "sample.txt"
+    target.write_text("same\nsame\n", encoding="utf-8")
+    config = RealProjectSmokeConfig(target_path=tmp_path, cli_smoke_enabled=False)
+
+    result = asyncio.run(
+        make_real_project_smoke_tools(config)["edit_file"](
+            {
+                "path": "sample.txt",
+                "edits": [
+                    {
+                        "old_text": "same",
+                        "new_text": "changed",
+                        "occurrence": 2,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.ok
+    assert result.value.source == "edit_file"
+    assert result.value.value["replacements"] == 1
+    assert target.read_text(encoding="utf-8") == "same\nchanged\n"
 
 
 def test_real_project_smoke_llm_mode_uses_model_report(tmp_path: Path):

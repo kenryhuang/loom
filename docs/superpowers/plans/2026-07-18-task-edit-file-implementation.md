@@ -704,6 +704,7 @@ git commit -m "feat: add edit_file task handler"
 
 **Files:**
 - Modify: `src/loom/tasks/runner.py:199-259`
+- Modify: `src/loom/examples/real_project_smoke.py`
 - Modify: `tests/tasks/test_task_runner.py`
 - Modify: `tests/integration/test_real_project_smoke.py:148-225`
 - Test: `tests/tasks/test_edit_file.py`
@@ -713,7 +714,7 @@ git commit -m "feat: add edit_file task handler"
 - Produces: a ToolRef named `edit_file` with the exact schema from the design.
 - Preserves: existing `read_file`, `write_file`, `shell_execute`, and `finish` contracts.
 
-- [ ] **Step 1: Write failing ToolRef and runtime tests**
+- [x] **Step 1: Write failing ToolRef and runtime tests**
 
 Update `test_make_task_context_maps_request_to_loom_layers` to require
 `edit_file`, then add:
@@ -797,10 +798,10 @@ def test_run_generic_task_executes_edit_file_and_traces_observation(tmp_path):
     completed = [record for record in records if record.get("eventType") == "tool.completed"]
     edit_record = next(record for record in completed if record["payload"]["tool_id"] == "edit_file")
     assert edit_record["payload"]["input"]["edits"][0]["occurrence"] == 2
-    assert edit_record["payload"]["output"]["replacements"] == 1
+    assert edit_record["payload"]["output"]["value"]["replacements"] == 1
 ```
 
-- [ ] **Step 2: Run integration tests and verify RED**
+- [x] **Step 2: Run integration tests and verify RED**
 
 Run:
 
@@ -811,7 +812,7 @@ uv run pytest tests/tasks/test_task_runner.py tests/integration/test_real_projec
 Expected: failures show the ToolRef and expected built-in tool sequence do not
 yet include `edit_file`.
 
-- [ ] **Step 3: Add the ToolRef and update smoke expectations**
+- [x] **Step 3: Add the ToolRef and update smoke expectations**
 
 Insert this ToolRef between `read_file` and `write_file` in
 `src/loom/tasks/runner.py`:
@@ -853,7 +854,11 @@ Update exact built-in tool tuples in real-project smoke tests to:
 ("read_file", "edit_file", "write_file", "shell_execute", "finish")
 ```
 
-- [ ] **Step 4: Run task and smoke tests and verify GREEN**
+Register the corresponding real-project smoke handler using the shared exact
+edit parser and atomic file application so its ToolRef and runtime registry
+remain aligned.
+
+- [x] **Step 4: Run task and smoke tests and verify GREEN**
 
 Run:
 
@@ -863,14 +868,14 @@ uv run pytest tests/tasks tests/integration/test_real_project_smoke.py -q
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Run formatting, lint, and full regression tests**
+- [x] **Step 5: Run formatting, lint, and full regression tests**
 
 Run:
 
 ```bash
-uv run ruff format src/loom/tasks/edit_file.py src/loom/tasks/tools.py src/loom/tasks/runner.py tests/tasks/test_edit_file.py tests/tasks/test_task_runner.py tests/integration/test_real_project_smoke.py
+uv run ruff format src/loom/tasks/edit_file.py src/loom/tasks/tools.py src/loom/tasks/runner.py src/loom/examples/real_project_smoke.py tests/tasks/test_edit_file.py tests/tasks/test_task_runner.py tests/integration/test_real_project_smoke.py
 uv run ruff check src tests
-uv run ruff format --check src/loom/tasks/edit_file.py src/loom/tasks/tools.py src/loom/tasks/runner.py tests/tasks/test_edit_file.py tests/tasks/test_task_runner.py tests/integration/test_real_project_smoke.py
+uv run ruff format --check src/loom/tasks/edit_file.py src/loom/tasks/tools.py src/loom/tasks/runner.py src/loom/examples/real_project_smoke.py tests/tasks/test_edit_file.py tests/tasks/test_task_runner.py tests/integration/test_real_project_smoke.py
 uv run pytest -q
 ```
 
@@ -879,7 +884,7 @@ Expected: Ruff reports no errors for the changed files and the full pytest suite
 - [ ] **Step 6: Commit Task 3**
 
 ```bash
-git add src/loom/tasks/runner.py tests/tasks/test_task_runner.py tests/integration/test_real_project_smoke.py tests/tasks/test_edit_file.py
+git add src/loom/tasks/runner.py src/loom/examples/real_project_smoke.py tests/tasks/test_task_runner.py tests/integration/test_real_project_smoke.py tests/tasks/test_edit_file.py
 git commit -m "feat: expose edit_file in task runs"
 ```
 
@@ -887,8 +892,8 @@ git commit -m "feat: expose edit_file in task runs"
 
 - [ ] Confirm `git status --short` is clean.
 - [ ] Confirm `git log -4 --oneline` contains the plan plus three feature commits.
-- [ ] Run `uv run pytest -q` and record the exact pass/skip counts.
-- [ ] Run `uv run ruff check src tests`.
-- [ ] Run changed-file `uv run ruff format --check ...`.
-- [ ] Compare the final diff against every acceptance criterion in
+- [x] Run `uv run pytest -q` and record the exact pass/skip counts.
+- [x] Run `uv run ruff check src tests`.
+- [x] Run changed-file `uv run ruff format --check ...`.
+- [x] Compare the final diff against every acceptance criterion in
   `docs/superpowers/specs/2026-07-18-task-edit-file-design.md`.

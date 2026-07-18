@@ -38,6 +38,22 @@ def test_plan_text_edits_uses_one_based_occurrence_for_repeated_text():
     assert result.value.content == "same\nchanged\nsame\n"
 
 
+def test_plan_text_edits_selects_first_and_last_repeated_occurrences():
+    first = plan_text_edits(
+        "same\nsame\nsame\n",
+        (TextEdit("same", "first", occurrence=1),),
+        path="sample.txt",
+    )
+    last = plan_text_edits(
+        "same\nsame\nsame\n",
+        (TextEdit("same", "last", occurrence=3),),
+        path="sample.txt",
+    )
+
+    assert first.ok and first.value.content == "first\nsame\nsame\n"
+    assert last.ok and last.value.content == "same\nsame\nlast\n"
+
+
 def test_plan_text_edits_applies_disjoint_edits_against_original_content():
     result = plan_text_edits(
         "foo\nbar\nbaz\n",
@@ -81,6 +97,8 @@ def test_parse_text_edits_rejects_invalid_entries():
         [],
         [{"old_text": "", "new_text": "x"}],
         [{"old_text": "x", "new_text": "y", "occurrence": 0}],
+        [{"old_text": "x", "new_text": "y", "occurrence": -1}],
+        [{"old_text": "x", "new_text": "y", "occurrence": "1"}],
         [{"old_text": "x", "new_text": "y", "occurrence": True}],
         [{"old_text": "x", "new_text": "y", "extra": "no"}],
     )
@@ -116,6 +134,13 @@ def test_plan_text_edits_rejects_duplicate_target():
         (TextEdit("target", "one"), TextEdit("target", "two")),
         path="sample.txt",
     )
+
+    assert not result.ok
+    assert result.error.code == "VALIDATION_FAILED"
+
+
+def test_plan_text_edits_rejects_no_op_batch():
+    result = plan_text_edits("unchanged\n", (TextEdit("unchanged", "unchanged"),), path="sample.txt")
 
     assert not result.ok
     assert result.error.code == "VALIDATION_FAILED"
@@ -207,6 +232,10 @@ def test_edit_file_handler_edits_workspace_file_and_returns_observation(tmp_path
     assert result.value.source == "edit_file"
     assert result.value.value["path"] == "sample.txt"
     assert result.value.value["replacements"] == 1
+    assert result.value.value["bytes_written"] == len(b"same\nchanged\n")
+    assert result.value.value["first_changed_line"] == 2
+    assert "+changed" in result.value.value["diff"]
+    assert result.value.value["diff_truncated"] is False
     assert path.read_text(encoding="utf-8") == "same\nchanged\n"
 
 

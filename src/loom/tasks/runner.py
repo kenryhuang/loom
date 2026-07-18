@@ -212,6 +212,37 @@ def _task_tool_refs() -> tuple[ToolRef, ...]:
             },
         ),
         ToolRef(
+            "edit_file",
+            "Make precise exact-text replacements in an existing UTF-8 workspace file. "
+            "Use occurrence to select repeated text; omitted occurrence requires a unique match. "
+            "All edits match the original file. Use write_file for new files or intentional full replacement.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to an existing UTF-8 file.",
+                    },
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_text": {"type": "string", "minLength": 1},
+                                "new_text": {"type": "string"},
+                                "occurrence": {"type": "integer", "minimum": 1},
+                            },
+                            "required": ["old_text", "new_text"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["path", "edits"],
+                "additionalProperties": False,
+            },
+        ),
+        ToolRef(
             "write_file",
             "Write a UTF-8 text file inside the workspace. Use only when the user requested file changes.",
             input_schema={

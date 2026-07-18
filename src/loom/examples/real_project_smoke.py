@@ -43,6 +43,7 @@ from loom.llm.api import create_env_openai_provider, create_llm_step_function
 from loom.observability.traces import JsonlTraceStore
 from loom.runtime.engine import create, create_runtime_registry, run
 from loom.runtime.plugins import run_with_plugins
+from loom.tasks.edit_file import apply_file_edits, parse_text_edits
 from loom.tui.plugin import TuiPlugin
 
 DEFAULT_YAKDB_PATH = "/Users/huanggui/workspace/yakDB"
@@ -339,6 +340,45 @@ def make_real_project_smoke_tools(config: RealProjectSmokeConfig) -> dict[str, A
             )
         )
 
+    async def edit_file_tool(input_value, _options=None):
+        data = _tool_input(input_value)
+        unknown = set(data) - {"path", "edits"}
+        if unknown:
+            return err(
+                make_loom_error(
+                    "VALIDATION_FAILED",
+                    "edit_file input contains unknown fields",
+                    retryable=False,
+                    metadata={"fields": sorted(unknown)},
+                )
+            )
+        resolved = _resolve_project_path(config.target_path, data.get("path"))
+        if not resolved.ok:
+            return resolved
+        edits = parse_text_edits(data.get("edits"))
+        if not edits.ok:
+            return edits
+        display_path = _relative_to_project(config.target_path, resolved.value)
+        edited = apply_file_edits(resolved.value, edits.value, display_path=display_path)
+        if not edited.ok:
+            return edited
+        value = edited.value
+        return ok(
+            Observation(
+                new_trace_id(),
+                "edit_file",
+                {
+                    "path": value.path,
+                    "replacements": value.replacements,
+                    "bytes_written": value.bytes_written,
+                    "first_changed_line": value.first_changed_line,
+                    "diff": value.diff,
+                    "diff_truncated": value.diff_truncated,
+                },
+                now_iso(),
+            )
+        )
+
     async def write_file_tool(input_value, _options=None):
         data = _tool_input(input_value)
         resolved = _resolve_project_path(config.target_path, data.get("path"))
@@ -390,6 +430,7 @@ def make_real_project_smoke_tools(config: RealProjectSmokeConfig) -> dict[str, A
 
     return {
         "read_file": read_file_tool,
+        "edit_file": edit_file_tool,
         "write_file": write_file_tool,
         "shell_execute": shell_execute_tool,
         "finish": finish_tool,
@@ -478,6 +519,43 @@ def make_real_project_smoke_llm_context(config: RealProjectSmokeConfig):
                                     "max_bytes": {"type": "integer", "description": "Maximum bytes to return; defaults to 20000"},
                                 },
                                 "required": ["path"],
+                                "additionalProperties": False,
+                            },
+                        ),
+                        ToolRef(
+                            "edit_file",
+                            "Make precise exact-text replacements in an existing UTF-8 project file. "
+                            "Use occurrence to select repeated text; omitted occurrence requires a unique match. "
+                            "All edits match the original file.",
+                            input_schema={
+                                "type": "object",
+                                "properties": {
+                                    "path": {
+                                        "type": "string",
+                                        "description": "Project-relative path to an existing UTF-8 file.",
+                                    },
+                                    "edits": {
+                                        "type": "array",
+                                        "minItems": 1,
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "old_text": {
+                                                    "type": "string",
+                                                    "minLength": 1,
+                                                },
+                                                "new_text": {"type": "string"},
+                                                "occurrence": {
+                                                    "type": "integer",
+                                                    "minimum": 1,
+                                                },
+                                            },
+                                            "required": ["old_text", "new_text"],
+                                            "additionalProperties": False,
+                                        },
+                                    },
+                                },
+                                "required": ["path", "edits"],
                                 "additionalProperties": False,
                             },
                         ),

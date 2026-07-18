@@ -24,7 +24,26 @@ def test_make_task_context_maps_request_to_loom_layers(tmp_path):
     assert any("Do not modify source files." in item.description for item in context.identity.constraints)
     assert context.metadata["profile"] == "project_audit"
     assert context.metadata["workspace"] == str(tmp_path)
-    assert {tool.id for tool in context.affordances.tools} >= {"read_file", "write_file", "shell_execute", "finish"}
+    assert {tool.id for tool in context.affordances.tools} >= {
+        "read_file",
+        "edit_file",
+        "write_file",
+        "shell_execute",
+        "finish",
+    }
+
+
+def test_make_task_context_exposes_exact_edit_file_schema(tmp_path):
+    context = make_task_context(TaskRequest("Edit this project", workspace=tmp_path)).unwrap()
+    tool = next(item for item in context.affordances.tools if item.id == "edit_file")
+    schema = tool.input_schema
+
+    assert schema["required"] == ("path", "edits")
+    assert schema["additionalProperties"] is False
+    item_schema = schema["properties"]["edits"]["items"]
+    assert item_schema["required"] == ("old_text", "new_text")
+    assert item_schema["properties"]["occurrence"]["minimum"] == 1
+    assert item_schema["additionalProperties"] is False
 
 
 def test_auto_profile_selects_project_audit_for_workspace_audit(tmp_path):
@@ -86,6 +105,66 @@ class FakeTaskProvider:
         )
 
 
+class FakeEditTaskProvider:
+    model = "fake-edit-task-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        self.calls += 1
+        if self.calls == 1:
+            return _response(
+                content="",
+                tool_calls=(
+                    LlmToolCall(
+                        "call-edit",
+                        "edit_file",
+                        json.dumps(
+                            {
+                                "path": "sample.txt",
+                                "edits": [
+                                    {
+                                        "old_text": "same",
+                                        "new_text": "changed",
+                                        "occurrence": 2,
+                                    }
+                                ],
+                            }
+                        ),
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        if self.calls == 2:
+            return _response(
+                content="",
+                tool_calls=(
+                    LlmToolCall(
+                        "call-finish",
+                        "finish",
+                        json.dumps({"report": "Edited sample."}),
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        return _response(
+            content=json.dumps(
+                {
+                    "reasoning": "The requested occurrence was edited and reported.",
+                    "action": {
+                        "kind": "none",
+                        "description": "task complete",
+                        "target": None,
+                        "input": {},
+                    },
+                    "alternatives": [],
+                    "confidence": 0.9,
+                }
+            )
+        )
+
+
 class StreamingTaskProvider:
     model = "fake-streaming-task-model"
 
@@ -125,6 +204,28 @@ def test_run_generic_task_executes_llm_tool_loop_and_returns_finish_report(tmp_p
     assert "Demo audit" in result.value.output
     assert provider.calls >= 2
     assert any(message.role == "tool" for message in provider.messages_seen[-1])
+
+
+def test_run_generic_task_executes_edit_file_and_traces_observation(tmp_path):
+    target = tmp_path / "sample.txt"
+    target.write_text("same\nsame\n", encoding="utf-8")
+    trace_path = tmp_path / "runs" / "edit-task.jsonl"
+
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest("Edit the second repeated string", workspace=tmp_path),
+            provider=FakeEditTaskProvider(),
+            options=TaskRunOptions(trace_path=trace_path),
+        )
+    )
+
+    assert result.ok
+    assert target.read_text(encoding="utf-8") == "same\nchanged\n"
+    records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    completed = [record for record in records if record.get("eventType") == "tool.completed"]
+    edit_record = next(record for record in completed if record["payload"]["tool_id"] == "edit_file")
+    assert edit_record["payload"]["input"]["edits"][0]["occurrence"] == 2
+    assert edit_record["payload"]["output"]["value"]["replacements"] == 1
 
 
 def test_run_generic_task_trace_omits_stream_token_deltas(tmp_path):
