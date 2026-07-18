@@ -9,7 +9,7 @@ import re
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,7 @@ from loom.core.models import (
     ok,
     thaw_json,
 )
+from loom.llm.request_options import materialize_request_options, normalize_request_options
 
 
 @dataclass(frozen=True, slots=True)
@@ -717,24 +718,35 @@ class OpenAIProvider:
     api_key: str
     model: str
     temperature: float | None = None
-    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
+    request_options: Mapping[str, Any] = field(default_factory=dict)
     base_url: str = "https://api.openai.com/v1"
     http_client: Any = None
 
-    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None) -> Result:
-        base_url = self.base_url.rstrip("/")
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "request_options", normalize_request_options(self.request_options))
+
+    def _request_body(self, messages, tools, tool_choice, *, stream: bool) -> dict[str, Any]:
         body = {
             "model": self.model,
             "messages": [_to_openai_message(message) for message in messages],
         }
         if self.temperature is not None:
             body["temperature"] = self.temperature
-        if self.max_tokens is not None:
-            body["max_tokens"] = self.max_tokens
+        if self.max_completion_tokens is not None:
+            body["max_completion_tokens"] = self.max_completion_tokens
+        body.update(materialize_request_options(self.request_options))
+        if stream:
+            body["stream"] = True
         if tools:
             body["tools"] = tools
         if tools and tool_choice is not None:
             body["tool_choice"] = tool_choice
+        return body
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None) -> Result:
+        base_url = self.base_url.rstrip("/")
+        body = self._request_body(messages, tools, tool_choice, stream=False)
 
         request = {
             "method": "POST",
@@ -774,19 +786,7 @@ class OpenAIProvider:
 
     async def stream_chat(self, messages, tools=None, cancellation=None, tool_choice=None):
         base_url = self.base_url.rstrip("/")
-        body = {
-            "model": self.model,
-            "messages": [_to_openai_message(message) for message in messages],
-            "stream": True,
-        }
-        if self.temperature is not None:
-            body["temperature"] = self.temperature
-        if self.max_tokens is not None:
-            body["max_tokens"] = self.max_tokens
-        if tools:
-            body["tools"] = tools
-        if tools and tool_choice is not None:
-            body["tool_choice"] = tool_choice
+        body = self._request_body(messages, tools, tool_choice, stream=True)
 
         request = {
             "method": "POST",
@@ -887,7 +887,8 @@ def create_env_openai_provider(
     model: str | None = None,
     base_url: str | None = None,
     temperature: float | None = None,
-    max_tokens: int | None = None,
+    max_completion_tokens: int | None = None,
+    request_options: Mapping[str, Any] | None = None,
     http_client: Any = None,
 ) -> Result:
     config = load_env_openai_config(
@@ -905,7 +906,8 @@ def create_env_openai_provider(
             model=config.value.model,
             base_url=config.value.base_url,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_completion_tokens=max_completion_tokens,
+            request_options=request_options,
             http_client=http_client,
         )
     )

@@ -600,7 +600,7 @@ def test_openai_provider_request_parsing_and_error_mapping():
             api_key="test-key",
             model="gpt-test",
             temperature=0.2,
-            max_tokens=256,
+            max_completion_tokens=256,
             base_url="https://proxy.example/v1/",
             http_client=http_client,
         )
@@ -632,6 +632,87 @@ def test_openai_provider_request_parsing_and_error_mapping():
         assert failed.error.retryable is True
 
     asyncio.run(scenario())
+
+
+def test_openai_provider_sends_completion_limit_and_request_options():
+    async def scenario():
+        calls = []
+
+        async def http_client(url, request):
+            calls.append((url, request))
+            return {
+                "status": 200,
+                "ok": True,
+                "json": {"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}], "usage": {}},
+            }
+
+        options = {
+            "enable_thinking": True,
+            "reasoning_effort": "max",
+            "search_options": {"forced_search": False},
+            "stop": ["END"],
+        }
+        provider = create_openai_provider(
+            api_key="key",
+            model="glm-5.2",
+            max_completion_tokens=4096,
+            request_options=options,
+            http_client=http_client,
+        )
+        options["search_options"]["forced_search"] = True
+        options["stop"].append("MUTATED")
+
+        assert (await provider.chat([{"role": "user", "content": "hello"}])).ok
+        body = calls[0][1]["body"]
+        assert body["max_completion_tokens"] == 4096
+        assert "max_tokens" not in body
+        assert body["enable_thinking"] is True
+        assert body["reasoning_effort"] == "max"
+        assert body["search_options"] == {"forced_search": False}
+        assert body["stop"] == ["END"]
+
+    asyncio.run(scenario())
+
+
+def test_openai_provider_stream_sends_completion_limit_and_request_options():
+    async def scenario():
+        calls = []
+
+        async def http_client(url, request):
+            calls.append((url, request))
+            return {
+                "status": 200,
+                "ok": True,
+                "chunks": ['data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n', "data: [DONE]\n\n"],
+            }
+
+        provider = create_openai_provider(
+            api_key="key",
+            model="qwen3.7-max",
+            max_completion_tokens=8192,
+            request_options={"enable_thinking": True, "thinking_budget": 2048, "tool_stream": True},
+            http_client=http_client,
+        )
+
+        [event async for event in provider.stream_chat([LlmMessage("user", "hello")])]
+        body = calls[0][1]["body"]
+        assert body["stream"] is True
+        assert body["max_completion_tokens"] == 8192
+        assert body["enable_thinking"] is True
+        assert body["thinking_budget"] == 2048
+        assert body["tool_stream"] is True
+        assert "max_tokens" not in body
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "reserved",
+    ["model", "messages", "stream", "tools", "tool_choice", "temperature", "max_completion_tokens", "max_tokens"],
+)
+def test_openai_provider_rejects_reserved_request_options(reserved):
+    with pytest.raises(ValueError, match="reserved"):
+        create_openai_provider(api_key="key", model="test", request_options={reserved: "bad"})
 
 
 def test_env_config_loads_openai_compatible_provider(tmp_path):
