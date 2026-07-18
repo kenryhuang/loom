@@ -27,6 +27,31 @@ def test_plan_text_edits_replaces_unique_text_and_returns_diff():
     assert not result.value.diff_truncated
 
 
+def test_plan_text_edits_reports_first_line_that_actually_differs():
+    result = plan_text_edits(
+        "same\nold\n",
+        (TextEdit("same\nold", "same\nnew"),),
+        path="sample.txt",
+    )
+
+    assert result.ok
+    assert result.value.first_changed_line == 2
+
+
+def test_plan_text_edits_ignores_earlier_no_op_target_for_first_changed_line():
+    result = plan_text_edits(
+        "unchanged\nold\n",
+        (
+            TextEdit("unchanged", "unchanged"),
+            TextEdit("old", "new"),
+        ),
+        path="sample.txt",
+    )
+
+    assert result.ok
+    assert result.value.first_changed_line == 2
+
+
 def test_plan_text_edits_uses_one_based_occurrence_for_repeated_text():
     result = plan_text_edits(
         "same\nsame\nsame\n",
@@ -257,6 +282,42 @@ def test_edit_file_handler_rejects_unknown_top_level_field(tmp_path):
     assert not result.ok
     assert result.error.code == "VALIDATION_FAILED"
     assert path.read_text(encoding="utf-8") == "hello\n"
+
+
+def test_edit_file_handler_rejects_non_string_and_malformed_paths(tmp_path):
+    handler = make_task_tools(TaskRequest("Edit sample", workspace=tmp_path))["edit_file"]
+
+    for path in (1, "\0"):
+        result = asyncio.run(
+            handler(
+                {
+                    "path": path,
+                    "edits": [{"old_text": "hello", "new_text": "world"}],
+                }
+            )
+        )
+
+        assert not result.ok
+        assert result.error.code == "VALIDATION_FAILED"
+
+
+def test_edit_file_handler_includes_path_in_edit_validation_error(tmp_path):
+    path = tmp_path / "sample.txt"
+    path.write_text("hello\n", encoding="utf-8")
+    handler = make_task_tools(TaskRequest("Edit sample", workspace=tmp_path))["edit_file"]
+
+    result = asyncio.run(
+        handler(
+            {
+                "path": "sample.txt",
+                "edits": [{"old_text": "", "new_text": "world"}],
+            }
+        )
+    )
+
+    assert not result.ok
+    assert result.error.code == "VALIDATION_FAILED"
+    assert result.error.metadata["path"] == "sample.txt"
 
 
 def test_apply_file_edits_rejects_missing_directory_and_invalid_utf8(tmp_path):

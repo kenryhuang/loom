@@ -51,18 +51,23 @@ class _MatchedEdit:
     new_text: str
 
 
-def parse_text_edits(value: Any) -> Result:
+def parse_text_edits(value: Any, *, path: str | None = None) -> Result:
+    def invalid(message: str, **metadata: Any) -> Result:
+        if path is not None:
+            metadata = {"path": path, **metadata}
+        return _validation_error(message, **metadata)
+
     raw = thaw_json(value)
     if not isinstance(raw, (list, tuple)) or not raw:
-        return _validation_error("edits must contain at least one replacement")
+        return invalid("edits must contain at least one replacement")
 
     parsed: list[TextEdit] = []
     for index, item in enumerate(raw):
         if not isinstance(item, Mapping):
-            return _validation_error("Each edit must be an object", edit_index=index)
+            return invalid("Each edit must be an object", edit_index=index)
         unknown = set(item) - {"old_text", "new_text", "occurrence"}
         if unknown:
-            return _validation_error(
+            return invalid(
                 "Edit contains unknown fields",
                 edit_index=index,
                 fields=sorted(unknown),
@@ -71,11 +76,11 @@ def parse_text_edits(value: Any) -> Result:
         new_text = item.get("new_text")
         occurrence = item.get("occurrence")
         if not isinstance(old_text, str) or not old_text:
-            return _validation_error("old_text must be a non-empty string", edit_index=index)
+            return invalid("old_text must be a non-empty string", edit_index=index)
         if not isinstance(new_text, str):
-            return _validation_error("new_text must be a string", edit_index=index)
+            return invalid("new_text must be a string", edit_index=index)
         if occurrence is not None and (isinstance(occurrence, bool) or not isinstance(occurrence, int) or occurrence < 1):
-            return _validation_error(
+            return invalid(
                 "occurrence must be an integer greater than or equal to 1",
                 edit_index=index,
             )
@@ -143,7 +148,6 @@ def plan_text_edits(
     if updated == content:
         return _validation_error("The edit batch would not change the file", path=path)
 
-    first_offset = matched[0].start
     diff = "".join(
         difflib.unified_diff(
             content.splitlines(keepends=True),
@@ -158,7 +162,7 @@ def plan_text_edits(
         EditPlan(
             updated,
             len(matched),
-            content.count("\n", 0, first_offset) + 1,
+            _first_changed_line(content, updated),
             diff,
             truncated,
         )
@@ -260,6 +264,15 @@ def _non_overlapping_positions(content: str, needle: str) -> tuple[int, ...]:
             return tuple(positions)
         positions.append(position)
         start = position + len(needle)
+
+
+def _first_changed_line(content: str, updated: str) -> int:
+    offset = 0
+    for before, after in zip(content, updated, strict=False):
+        if before != after:
+            break
+        offset += 1
+    return content.count("\n", 0, offset) + 1
 
 
 def _truncate_utf8(value: str, max_bytes: int) -> tuple[str, bool]:

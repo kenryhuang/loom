@@ -881,17 +881,27 @@ uv run pytest -q
 
 Expected: Ruff reports no errors for the changed files and the full pytest suite passes with only the repository's expected skips.
 
-- [ ] **Step 6: Commit Task 3**
+- [x] **Step 6: Commit Task 3**
 
 ```bash
 git add src/loom/tasks/runner.py src/loom/examples/real_project_smoke.py tests/tasks/test_task_runner.py tests/integration/test_real_project_smoke.py tests/tasks/test_edit_file.py
 git commit -m "feat: expose edit_file in task runs"
 ```
 
+## Review Remediation
+
+- [x] Compute `first_changed_line` from the actual before/after common prefix,
+  including multiline replacements and earlier no-op targets.
+- [x] Reject non-string and malformed workspace paths as `VALIDATION_FAILED`
+  instead of coercing them or allowing path-library exceptions to escape.
+- [x] Include the safe workspace-relative path in edit-entry validation errors.
+- [x] Re-run task/smoke, full pytest, Ruff lint, and changed-file format checks.
+
 ## Final Verification
 
-- [ ] Confirm `git status --short` is clean.
-- [ ] Confirm `git log -4 --oneline` contains the plan plus three feature commits.
+- [x] Confirm `git status --short` is clean.
+- [x] Confirm `git log -5 --oneline` contains the plan, three feature commits,
+  and the review-fix commit.
 - [x] Run `uv run pytest -q` and record the exact pass/skip counts.
 - [x] Run `uv run ruff check src tests`.
 - [x] Run changed-file `uv run ruff format --check ...`.

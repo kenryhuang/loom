@@ -355,10 +355,10 @@ def make_real_project_smoke_tools(config: RealProjectSmokeConfig) -> dict[str, A
         resolved = _resolve_project_path(config.target_path, data.get("path"))
         if not resolved.ok:
             return resolved
-        edits = parse_text_edits(data.get("edits"))
+        display_path = _relative_to_project(config.target_path, resolved.value)
+        edits = parse_text_edits(data.get("edits"), path=display_path)
         if not edits.ok:
             return edits
-        display_path = _relative_to_project(config.target_path, resolved.value)
         edited = apply_file_edits(resolved.value, edits.value, display_path=display_path)
         if not edited.ok:
             return edited

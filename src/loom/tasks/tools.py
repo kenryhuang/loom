@@ -58,10 +58,10 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
         resolved = _resolve_workspace_path(root, data.get("path"))
         if not resolved.ok:
             return resolved
-        edits = parse_text_edits(data.get("edits"))
+        display_path = _relative_to_root(root, resolved.value)
+        edits = parse_text_edits(data.get("edits"), path=display_path)
         if not edits.ok:
             return edits
-        display_path = _relative_to_root(root, resolved.value)
         edited = apply_file_edits(resolved.value, edits.value, display_path=display_path)
         if not edited.ok:
             return edited
@@ -173,12 +173,27 @@ def _tool_input(input_value: Any) -> dict[str, Any]:
 
 
 def _resolve_workspace_path(root: Path, value: Any) -> Result:
-    if value is None or str(value).strip() == "":
-        return err(make_loom_error("VALIDATION_FAILED", "Tool path is required", retryable=False))
-    candidate = Path(str(value)).expanduser()
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve()
+    if not isinstance(value, str) or not value.strip():
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Tool path must be a non-empty string",
+                retryable=False,
+            )
+        )
+    try:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                f"Tool path is invalid: {exc}",
+                retryable=False,
+            )
+        )
     if resolved != root and root not in resolved.parents:
         return err(
             make_loom_error(
