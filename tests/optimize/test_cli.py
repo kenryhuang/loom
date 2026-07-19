@@ -96,6 +96,35 @@ def test_run_main_maps_terminal_dispositions_to_exit_codes(tmp_path: Path, monke
     assert json.loads(capsys.readouterr().out)["disposition"] == "promoted"
 
 
+def test_run_main_routes_tui_and_maps_paused_to_exit_three(tmp_path: Path, monkeypatch, capsys):
+    report = tmp_path / "paused.md"
+    report.write_text("paused", encoding="utf-8")
+    calls = []
+
+    async def fake_tui(options: OptimizeCliOptions):
+        calls.append(options.tui)
+        return ok(
+            OptimizationResult(
+                "loom.optimization.result.v1",
+                "opt_test",
+                "cmp_test",
+                "paused",
+                None,
+                None,
+                None,
+                report,
+            )
+        )
+
+    monkeypatch.setattr("loom.optimize.tui_runner.run_optimize_with_tui", fake_tui)
+
+    code = main(["--trace", "run.jsonl", "--tasks", "tasks.jsonl", "--config", "config.yaml", "--tui"])
+
+    assert code == 3
+    assert calls == [True]
+    assert "disposition: paused" in capsys.readouterr().out
+
+
 def test_top_level_cli_dispatches_optimize(monkeypatch):
     monkeypatch.setattr("loom.optimize.cli.main", lambda argv: 23)
     from loom.cli import main as loom_main

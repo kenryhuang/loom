@@ -75,8 +75,8 @@ def parse_args(argv: Sequence[str] | None = None) -> OptimizeCliOptions:
     )
 
 
-async def run_optimize(options: OptimizeCliOptions) -> Result:
-    built = build_orchestrator(options)
+async def run_optimize(options: OptimizeCliOptions, *, observer: Any | None = None, control: Any | None = None) -> Result:
+    built = build_orchestrator(options, observer=observer, control=control)
     if inspect_is_awaitable(built):
         built = await built
     if not isinstance(built, Result):
@@ -89,13 +89,31 @@ async def run_optimize(options: OptimizeCliOptions) -> Result:
             value = dry_run()
             return await value if inspect_is_awaitable(value) else value
         return ok({"disposition": "dry_run", "optimization_id": getattr(built.value, "spec", None).optimization_id})
-    return await built.value.run()
+    emit_snapshot = getattr(built.value, "emit_snapshot", None)
+    if callable(emit_snapshot):
+        snapshot = emit_snapshot()
+        snapshot = await snapshot if inspect_is_awaitable(snapshot) else snapshot
+        if isinstance(snapshot, Result) and not snapshot.ok:
+            return snapshot
+    result = await built.value.run()
+    if not result.ok and result.error is not None and result.error.code == "OPTIMIZATION_PAUSED":
+        paused_result = getattr(built.value, "paused_result", None)
+        if callable(paused_result):
+            value = paused_result(result.error)
+            result = await value if inspect_is_awaitable(value) else value
+    emit_terminal = getattr(built.value, "emit_terminal", None)
+    if callable(emit_terminal):
+        emitted = emit_terminal(result)
+        emitted = await emitted if inspect_is_awaitable(emitted) else emitted
+        if isinstance(emitted, Result) and not emitted.ok:
+            return emitted
+    return result
 
 
-def build_orchestrator(options: OptimizeCliOptions) -> Result:
+def build_orchestrator(options: OptimizeCliOptions, *, observer: Any | None = None, control: Any | None = None) -> Result:
     from loom.optimize.runtime import build_default_runtime
 
-    return build_default_runtime(options)
+    return build_default_runtime(options, observer=observer, control=control)
 
 
 async def run_status(options: OptimizeCliOptions) -> Result:
@@ -128,7 +146,12 @@ async def run_approve(options: OptimizeCliOptions) -> Result:
 def main(argv: Sequence[str] | None = None) -> int:
     options = parse_args(argv)
     if options.command == "run":
-        result = asyncio.run(run_optimize(options))
+        if options.tui:
+            from loom.optimize.tui_runner import run_optimize_with_tui
+
+            result = asyncio.run(run_optimize_with_tui(options))
+        else:
+            result = asyncio.run(run_optimize(options))
     elif options.command == "status":
         result = asyncio.run(run_status(options))
     elif options.command == "approve":
@@ -143,6 +166,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.command == "pause":
         return 3
     disposition = _field(value, "disposition")
+    if disposition == "paused":
+        return 3
     return 2 if disposition == "awaiting_approval" else 0
 
 

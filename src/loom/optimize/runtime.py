@@ -110,14 +110,115 @@ class _CandidateRuntime:
 
 
 class DefaultOptimizeRuntime:
-    def __init__(self, orchestrator: OptimizeOrchestrator, services: DefaultOptimizeCampaignServices, prepared: PreparedTaskSets):
+    def __init__(
+        self,
+        orchestrator: OptimizeOrchestrator,
+        services: DefaultOptimizeCampaignServices,
+        prepared: PreparedTaskSets,
+        event_emitter: OptimizationEventEmitter,
+    ):
         self.orchestrator = orchestrator
         self.services = services
         self.prepared = prepared
         self.spec = orchestrator.spec
+        self.event_emitter = event_emitter
 
     async def run(self) -> Result:
         return await self.orchestrator.run()
+
+    async def emit_snapshot(self) -> Result:
+        limits = {
+            "candidates": self.services.loaded.meta.budgets.max_candidates,
+            "llm_calls": self.services.loaded.meta.budgets.max_llm_calls,
+            "cost": None if self.services.loaded.meta.budgets.max_cost_usd is None else format(self.services.loaded.meta.budgets.max_cost_usd, "f"),
+            "wall_time_seconds": self.services.loaded.meta.budgets.max_wall_clock_minutes * 60,
+        }
+        loaded = await self.orchestrator.store.snapshot(
+            self.spec.optimization_id,
+            campaign_id=self.spec.campaign_id,
+            budgets=limits,
+        )
+        if loaded.ok:
+            snapshot = loaded.value
+            completed_stages = tuple(operation["target_stage"] for operation in snapshot.operations if operation.get("status") == "completed")
+            payload = {
+                "lifecycle": snapshot.lifecycle,
+                "aggregate_version": snapshot.aggregate_version,
+                "operations": snapshot.operations,
+                "completed_stages": completed_stages,
+                "budgets": snapshot.budgets,
+            }
+            stage = snapshot.stage
+            status = "replayed"
+        elif loaded.error is not None and loaded.error.code == "OPTIMIZATION_NOT_FOUND":
+            payload = {
+                "lifecycle": "running",
+                "aggregate_version": 0,
+                "operations": (),
+                "completed_stages": (),
+                "budgets": limits,
+            }
+            stage = "created"
+            status = "running"
+        else:
+            return loaded
+        return await self.event_emitter.emit(
+            "optimization.snapshot.loaded",
+            stage=stage,
+            status=status,
+            payload=payload,
+        )
+
+    async def paused_result(self, error) -> Result:
+        summary = {
+            "schema_version": "loom.optimization.result.v1",
+            "optimization_id": self.spec.optimization_id,
+            "campaign_id": self.spec.campaign_id,
+            "disposition": "paused",
+            "candidate_id": None,
+            "reason": error.metadata.get("reason") if error is not None else None,
+            "next_action": "Run the identical loom optimize command to resume from the next durable checkpoint.",
+        }
+        report_path = write_report(self.orchestrator.output_dir, summary)
+        result = OptimizationResult(
+            "loom.optimization.result.v1",
+            self.spec.optimization_id,
+            self.spec.campaign_id,
+            "paused",
+            None,
+            None,
+            None,
+            report_path,
+        )
+        write_result(self.orchestrator.output_dir, result)
+        return ok(result)
+
+    async def emit_terminal(self, result: Result) -> Result:
+        state = await self.orchestrator.store.load(self.spec.optimization_id)
+        stage = state.value.stage.value if state.ok else "created"
+        if not result.ok:
+            return await self.event_emitter.emit(
+                "optimization.failed",
+                stage=stage,
+                status="failed",
+                payload={"error_code": "INTERNAL" if result.error is None else result.error.code},
+            )
+        disposition = str(getattr(result.value, "disposition", "completed"))
+        if disposition == "awaiting_approval":
+            event_type = "optimization.governance.awaiting_approval"
+            status = disposition
+        elif disposition == "paused":
+            event_type = "optimization.paused"
+            status = disposition
+        else:
+            event_type = "optimization.completed"
+            status = "completed"
+        return await self.event_emitter.emit(
+            event_type,
+            stage=stage,
+            status=status,
+            payload={"disposition": disposition},
+        )
 
     def dry_run(self) -> Result:
         return ok(
@@ -918,7 +1019,7 @@ def _stage_for_phase(phase: ExperimentPhase) -> str:
     }[phase]
 
 
-def build_default_runtime(options) -> Result:
+def build_default_runtime(options, *, observer: Any | None = None, control=None) -> Result:
     if options.trace is None or options.config is None:
         return _runtime_error("VALIDATION_FAILED", "Optimize trace and config are required")
     trace_path = options.trace.resolve()
@@ -1018,10 +1119,10 @@ def build_default_runtime(options) -> Result:
         campaign_id,
     )
     optimization_store = SQLiteOptimizationStore(root)
-    observer = create_observer(tui=options.tui, json_output=options.json, stdout=sys.stdout, stderr=sys.stderr)
-    if not observer.ok:
-        return observer
-    event_emitter = OptimizationEventEmitter(optimization_id, campaign_id, observer.value)
+    selected_observer = create_observer(tui=options.tui, json_output=options.json, stdout=sys.stdout, stderr=sys.stderr) if observer is None else ok(observer)
+    if not selected_observer.ok:
+        return selected_observer
+    event_emitter = OptimizationEventEmitter(optimization_id, campaign_id, selected_observer.value)
     services = DefaultOptimizeCampaignServices(
         loaded=loaded.value,
         root=root,
@@ -1042,13 +1143,14 @@ def build_default_runtime(options) -> Result:
         optimization_store,
         services.contract(),
         iterations=loaded.value.meta.search.iterations,
-        observer=observer.value,
+        observer=selected_observer.value,
         event_emitter=event_emitter,
+        control=control,
         lease_seconds=max(60, loaded.value.meta.execution.trial_timeout_seconds * 2),
         governance=services.govern,
         output_dir=root,
     )
-    return ok(DefaultOptimizeRuntime(orchestrator, services, prepared.value))
+    return ok(DefaultOptimizeRuntime(orchestrator, services, prepared.value, event_emitter))
 
 
 async def approve_default_runtime(options) -> Result:
