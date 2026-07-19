@@ -10,12 +10,16 @@ from loom.optimize.contracts import (
     OptimizationStage,
     OptimizationState,
 )
+from loom.optimize.orchestrator import CampaignOutcome, OptimizeCampaignServices, OptimizeOrchestrator
 from loom.optimize.proposer import LoomNativeProposerAdapter
 from loom.optimize.trial_executor import OptimizeTrialExecutor
 
 __all__ = [
     "LoadedOptimizeConfig",
     "LoomNativeProposerAdapter",
+    "CampaignOutcome",
+    "OptimizeCampaignServices",
+    "OptimizeOrchestrator",
     "MetaHarnessConfig",
     "OptimizationLifecycle",
     "OptimizationResult",

@@ -1,0 +1,339 @@
+"""Durable stage orchestration for one-command Meta-Harness campaigns."""
+
+from __future__ import annotations
+
+import inspect
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from loom.campaigns.serialization import canonical_digest
+from loom.core import Result, err, make_loom_error, ok, thaw_json
+from loom.optimize.contracts import OptimizationSpec, OptimizationStage
+from loom.optimize.store import SQLiteOptimizationStore
+
+
+@dataclass(frozen=True, slots=True)
+class OptimizeCampaignServices:
+    preflight: Callable[..., Any]
+    seed_evaluation: Callable[..., Any]
+    seed_evolution: Callable[..., Any]
+    initialize_campaign: Callable[..., Any]
+    search_iteration: Callable[..., Any]
+    seal_search: Callable[..., Any]
+    validate: Callable[..., Any]
+    select_finalists: Callable[..., Any]
+    holdout: Callable[..., Any]
+    finalize: Callable[..., Any]
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignOutcome:
+    optimization_id: str
+    campaign_id: str | None
+    disposition: str
+    candidate_id: str | None
+    recommendation_ref: Any | None
+    finalist_ids: tuple[str, ...]
+    holdout_opened: bool
+
+
+class OptimizeOrchestrator:
+    def __init__(
+        self,
+        spec: OptimizationSpec,
+        store: SQLiteOptimizationStore,
+        services: OptimizeCampaignServices,
+        *,
+        iterations: int,
+        observer: Any | None = None,
+        lease_seconds: int = 3600,
+    ):
+        if iterations < 1 or lease_seconds < 1:
+            raise ValueError("Optimization iterations and lease duration must be positive")
+        self.spec = spec
+        self.store = store
+        self.services = services
+        self.iterations = iterations
+        self.observer = observer
+        self.lease_seconds = lease_seconds
+
+    async def run_campaign(self) -> Result:
+        created = await self.store.create(self.spec)
+        if not created.ok:
+            return created
+        reconciled = await self.store.reconcile_expired(self.spec.optimization_id)
+        if not reconciled.ok:
+            return reconciled
+
+        preflight = await self._stage(
+            OptimizationStage.PREFLIGHT_COMPLETE,
+            "preflight",
+            {"spec": self.spec.optimization_key},
+            self.services.preflight,
+        )
+        if not preflight.ok:
+            return preflight
+
+        async def seed_action():
+            evaluation = await _call(self.services.seed_evaluation)
+            if not evaluation.ok:
+                return evaluation
+            evolution = await _call(self.services.seed_evolution, evaluation.value)
+            if not evolution.ok:
+                return evolution
+            return ok({"evaluation": evaluation.value, "evolution": evolution.value})
+
+        seed = await self._stage(
+            OptimizationStage.SEED_ANALYSIS_COMPLETE,
+            "seed_analysis",
+            {"trace": str(self.spec.trace_path), "preflight": preflight.value},
+            seed_action,
+        )
+        if not seed.ok:
+            return seed
+        initialized = await self._stage(
+            OptimizationStage.CAMPAIGN_INITIALIZED,
+            "campaign",
+            {"seed": seed.value, "campaign_id": self.spec.campaign_id},
+            self.services.initialize_campaign,
+            seed.value,
+        )
+        if not initialized.ok:
+            return initialized
+
+        candidate_ids: list[str] = []
+        for iteration in range(1, self.iterations + 1):
+            search = await self._stage(
+                OptimizationStage.SEARCH_RUNNING,
+                f"search_{iteration}",
+                {"iteration": iteration, "campaign": initialized.value, "prior_candidates": tuple(candidate_ids)},
+                self.services.search_iteration,
+                iteration,
+            )
+            if not search.ok:
+                return search
+            extracted = _ids(search.value, "candidate_ids")
+            if not extracted.ok:
+                return extracted
+            for candidate_id in extracted.value:
+                if candidate_id not in candidate_ids:
+                    candidate_ids.append(candidate_id)
+
+        sealed = await self._stage(
+            OptimizationStage.SEARCH_SEALED,
+            "search_sealed",
+            {"candidate_ids": tuple(candidate_ids)},
+            self.services.seal_search,
+            tuple(candidate_ids),
+        )
+        if not sealed.ok:
+            return sealed
+        entrants = _ids(sealed.value, "entrant_ids")
+        if not entrants.ok:
+            return entrants
+        if not set(entrants.value).issubset(candidate_ids):
+            return _orchestration_error("OPTIMIZATION_ENTRANTS_INVALID", "Sealed entrants are not a subset of searched candidates")
+
+        if entrants.value:
+            validation_action = self.services.validate
+            validation_args = (entrants.value,)
+        else:
+            validation_action = _empty_validation
+            validation_args = ()
+        validation = await self._stage(
+            OptimizationStage.VALIDATION_COMPLETE,
+            "validation",
+            {"entrant_ids": entrants.value, "sealed": sealed.value},
+            validation_action,
+            *validation_args,
+        )
+        if not validation.ok:
+            return validation
+        validated = _ids(validation.value, "validated_ids")
+        if not validated.ok:
+            return validated
+        if not set(validated.value).issubset(entrants.value):
+            return _orchestration_error("OPTIMIZATION_VALIDATION_COHORT_INVALID", "Validated candidates are not sealed entrants")
+
+        if validated.value:
+            selection_action = self.services.select_finalists
+            selection_args = (validated.value,)
+        else:
+            selection_action = _empty_selection
+            selection_args = ()
+        selection = await self._stage(
+            OptimizationStage.FINALISTS_SELECTED,
+            "finalists",
+            {"validated_ids": validated.value, "validation": validation.value},
+            selection_action,
+            *selection_args,
+        )
+        if not selection.ok:
+            return selection
+        finalists = _ids(selection.value, "finalist_ids")
+        if not finalists.ok:
+            return finalists
+        if not set(finalists.value).issubset(validated.value):
+            return _orchestration_error("OPTIMIZATION_FINALISTS_INVALID", "Finalists are not validated candidates")
+
+        async def holdout_action():
+            if finalists.value:
+                evaluated = await _call(self.services.holdout, finalists.value)
+                if not evaluated.ok:
+                    return evaluated
+                evaluated_ids = _ids(evaluated.value, "evaluated_ids")
+                if not evaluated_ids.ok:
+                    return evaluated_ids
+                if evaluated_ids.value != finalists.value:
+                    return _orchestration_error(
+                        "OPTIMIZATION_HOLDOUT_COHORT_MISMATCH",
+                        "Holdout results do not exactly match the frozen finalist cohort",
+                    )
+                holdout_value = evaluated.value
+            else:
+                holdout_value = {"evaluated_ids": (), "experiment_refs": (), "skipped": "no_finalists"}
+            finalized = await _call(self.services.finalize, finalists.value, holdout_value)
+            if not finalized.ok:
+                return finalized
+            return ok({"holdout": holdout_value, "finalization": finalized.value})
+
+        holdout = await self._stage(
+            OptimizationStage.HOLDOUT_COMPLETE,
+            "holdout",
+            {"finalist_ids": finalists.value, "selection": selection.value},
+            holdout_action,
+        )
+        if not holdout.ok:
+            return holdout
+        finalization = holdout.value.get("finalization")
+        if not isinstance(finalization, Mapping):
+            return _orchestration_error("OPTIMIZATION_FINALIZATION_INVALID", "Campaign finalization output is missing")
+        disposition = finalization.get("disposition")
+        candidate_id = finalization.get("candidate_id")
+        if disposition not in {"recommend", "reject"} or (candidate_id is not None and not isinstance(candidate_id, str)):
+            return _orchestration_error("OPTIMIZATION_FINALIZATION_INVALID", "Campaign finalization disposition is invalid")
+        return ok(
+            CampaignOutcome(
+                self.spec.optimization_id,
+                _optional_text(initialized.value.get("campaign_id")) or self.spec.campaign_id,
+                str(disposition),
+                candidate_id,
+                finalization.get("recommendation_ref"),
+                finalists.value,
+                bool(finalists.value),
+            )
+        )
+
+    async def _stage(
+        self,
+        target: OptimizationStage,
+        name: str,
+        inputs: Mapping[str, Any],
+        action: Callable[..., Any],
+        *args: Any,
+    ) -> Result:
+        operation_id = _operation_id(self.spec.optimization_id, name)
+        input_digest = canonical_digest({"optimization_key": self.spec.optimization_key, "stage": target.value, "inputs": inputs})
+        begun = await self.store.begin(
+            self.spec.optimization_id,
+            operation_id,
+            input_digest,
+            target,
+            lease_seconds=self.lease_seconds,
+        )
+        if not begun.ok:
+            return begun
+        output_key = f"stage.{name}"
+        if begun.value.replayed:
+            value = begun.value.outputs.get(output_key)
+            if not isinstance(value, Mapping):
+                return _orchestration_error("OPTIMIZATION_REPLAY_INVALID", "Recorded stage output is missing", operation_id=operation_id)
+            return ok(value)
+        called = await _call(action, *args)
+        if not called.ok:
+            return called
+        if not isinstance(called.value, Mapping):
+            return _orchestration_error("OPTIMIZATION_STAGE_OUTPUT_INVALID", "Stage service must return a mapping", stage=target.value)
+        completed = await self.store.complete(begun.value.lease_id, {output_key: called.value})
+        if not completed.ok:
+            return completed
+        await self._emit(
+            {
+                "schema_version": "loom.optimization.event.v1",
+                "optimization_id": self.spec.optimization_id,
+                "operation_id": operation_id,
+                "stage": target.value,
+                "status": "completed",
+                "aggregate_version": completed.value.aggregate_version,
+                "outputs": thaw_json(called.value),
+            }
+        )
+        return ok(called.value)
+
+    async def _emit(self, event: Mapping[str, Any]) -> None:
+        if self.observer is None:
+            return
+        try:
+            emitted = self.observer.emit(event)
+            if inspect.isawaitable(emitted):
+                await emitted
+        except Exception:
+            return
+
+
+async def _call(function: Callable[..., Any], *args: Any) -> Result:
+    try:
+        value = function(*args)
+        if inspect.isawaitable(value):
+            value = await value
+    except Exception as exc:
+        return _orchestration_error(
+            "OPTIMIZATION_SERVICE_FAILED",
+            "Optimization stage service raised an exception",
+            cause=exc,
+        )
+    if not isinstance(value, Result):
+        return _orchestration_error("OPTIMIZATION_SERVICE_INVALID", "Optimization stage service must return Result")
+    return value
+
+
+def _ids(value: Mapping[str, Any], field: str) -> Result:
+    items = value.get(field)
+    if not isinstance(items, list | tuple) or not all(isinstance(item, str) and item for item in items):
+        return _orchestration_error("OPTIMIZATION_COHORT_INVALID", "Optimization cohort is invalid", field=field)
+    result = tuple(items)
+    if len(set(result)) != len(result):
+        return _orchestration_error("OPTIMIZATION_COHORT_INVALID", "Optimization cohort contains duplicates", field=field)
+    return ok(result)
+
+
+def _operation_id(optimization_id: str, name: str) -> str:
+    return f"op_optimize_{canonical_digest({'optimization_id': optimization_id, 'name': name})[:24]}"
+
+
+def _empty_validation() -> Result:
+    return ok({"validated_ids": (), "experiment_refs": (), "skipped": "no_entrants"})
+
+
+def _empty_selection() -> Result:
+    return ok({"finalist_ids": (), "finalist_digest": canonical_digest(())})
+
+
+def _optional_text(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _orchestration_error(code: str, message: str, *, cause: BaseException | None = None, **metadata: Any) -> Result:
+    return err(
+        make_loom_error(
+            code,
+            message,
+            retryable=False,
+            cause=None if cause is None else {"name": type(cause).__name__, "message": str(cause)},
+            metadata=metadata,
+        )
+    )
+
+
+__all__ = ["CampaignOutcome", "OptimizeCampaignServices", "OptimizeOrchestrator"]
