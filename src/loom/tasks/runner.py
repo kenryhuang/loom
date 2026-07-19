@@ -159,9 +159,7 @@ async def run_generic_task(
 
     handle = create(
         make_task_loop(request, provider, stream=run_options.stream, harness=task_harness),
-        registry=create_runtime_registry(
-            tools=_filter_tool_handlers(make_task_tools(request), task_harness.allowed_tools)
-        ),
+        registry=create_runtime_registry(tools=_filter_tool_handlers(make_task_tools(request), task_harness.allowed_tools)),
         trace_store=JsonlTraceStore(run_options.trace_path) if run_options.trace_path is not None else None,
         event_policy=_task_trace_event_policy() if run_options.trace_path is not None else None,
     )

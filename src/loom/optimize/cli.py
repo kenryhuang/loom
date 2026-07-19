@@ -93,11 +93,9 @@ async def run_optimize(options: OptimizeCliOptions) -> Result:
 
 
 def build_orchestrator(options: OptimizeCliOptions) -> Result:
-    del options
-    return _cli_error(
-        "OPTIMIZATION_COMPOSITION_UNAVAILABLE",
-        "Optimize runtime composition is unavailable",
-    )
+    from loom.optimize.runtime import build_default_runtime
+
+    return build_default_runtime(options)
 
 
 async def run_status(options: OptimizeCliOptions) -> Result:
@@ -122,7 +120,9 @@ async def run_approve(options: OptimizeCliOptions) -> Result:
             "APPROVAL_CONTEXT_MISSING",
             "Approval context is unavailable; resume the original optimize command after the request is recorded",
         )
-    return _cli_error("APPROVAL_SERVICE_UNAVAILABLE", "Approval service is not configured for this optimization")
+    from loom.optimize.runtime import approve_default_runtime
+
+    return await approve_default_runtime(options)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -214,6 +214,11 @@ class EvaluatorSpec:
     bootstrap_resamples: int = 10_000
     confidence_level: float = 0.95
     missing_policy: str = "fail_closed"
+    repetitions: int = 3
+
+    def __post_init__(self) -> None:
+        if self.repetitions < 1:
+            raise ValueError("Evaluator repetitions must be positive")
 
 
 @dataclass(frozen=True, slots=True)

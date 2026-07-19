@@ -13,7 +13,7 @@ from loom.campaigns.experiments import (
     aggregate_paired_metric,
     objective_gate_result,
 )
-from loom.evaluation.experiments import TrialEntry, TrialPlan
+from loom.evaluation.experiments import PairedMetricResult, TrialEntry, TrialPlan
 
 
 def _ref(kind: str, digest: str) -> ArtifactRef:
@@ -88,6 +88,23 @@ def test_objective_gate_uses_exact_maximize_and_minimize_interval_boundaries():
 
     assert objective_gate_result(maximize, success_metric).value == "passed"
     assert objective_gate_result(minimize, token_metric).value == "passed"
+
+
+def test_relative_change_gate_compares_conservative_candidate_and_baseline_intervals():
+    objective = ObjectiveSpec(
+        "tokens",
+        ObjectiveDirection.MINIMIZE,
+        aggregation="relative_change",
+        hard=True,
+        max_baseline_regression=0.25,
+        min_valid_pairs=5,
+        missing_policy="fail_closed",
+    )
+    accepted = PairedMetricResult("tokens", 100.0, 120.0, 20.0, 5, (98.0, 102.0), (115.0, 122.0), (15.0, 22.0), 1.0)
+    rejected = PairedMetricResult("tokens", 100.0, 130.0, 30.0, 5, (98.0, 102.0), (126.0, 134.0), (26.0, 34.0), 1.0)
+
+    assert objective_gate_result(objective, accepted).value == "passed"
+    assert objective_gate_result(objective, rejected).value == "failed"
 
 
 def test_runner_executes_fixed_pairs_retries_only_infrastructure_failure_and_never_adds_samples(tmp_path: Path):

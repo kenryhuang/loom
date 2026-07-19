@@ -165,4 +165,3 @@ async def test_verifier_uses_argv_without_a_shell_and_repeated_attempts_get_fres
     assert all(call[0][:2] == (sys.executable, "-c") for call in calls)
     assert all("shell" not in call[1] for call in calls)
     assert all(call[1]["stdin"] is asyncio.subprocess.DEVNULL for call in calls)
-

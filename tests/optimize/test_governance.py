@@ -202,14 +202,17 @@ def test_production_identity_loading_fails_closed_for_missing_or_combined_roles(
         ),
         encoding="utf-8",
     )
-    env = {name: str(assertion) for name in (
-        "LOOM_IDENTITY_CAMPAIGN_FINALIZER",
-        "LOOM_IDENTITY_CAMPAIGN_CONTROLLER",
-        "LOOM_IDENTITY_GOVERNANCE_AUTOMATION",
-        "LOOM_IDENTITY_REGISTRY_OPERATOR",
-        "LOOM_IDENTITY_GOVERNANCE_ADMIN",
-        "LOOM_IDENTITY_GOVERNANCE_APPROVER",
-    )}
+    env = {
+        name: str(assertion)
+        for name in (
+            "LOOM_IDENTITY_CAMPAIGN_FINALIZER",
+            "LOOM_IDENTITY_CAMPAIGN_CONTROLLER",
+            "LOOM_IDENTITY_GOVERNANCE_AUTOMATION",
+            "LOOM_IDENTITY_REGISTRY_OPERATOR",
+            "LOOM_IDENTITY_GOVERNANCE_ADMIN",
+            "LOOM_IDENTITY_GOVERNANCE_APPROVER",
+        )
+    }
     combined = load_production_governance(env)
 
     assert not missing.ok and missing.error.code == "GOVERNANCE_IDENTITY_INVALID"

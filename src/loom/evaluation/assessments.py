@@ -222,11 +222,7 @@ def _assess_tool_result_handling(
 
 
 def _step_events(graph: EpisodeGraph, step: StepGraphEpisode) -> tuple[NormalizedEvent, ...]:
-    return tuple(
-        event
-        for event in graph.events
-        if event.run_id == step.run_id and event.trace_id == step.trace_id and event.step_number == step.step_number
-    )
+    return tuple(event for event in graph.events if event.run_id == step.run_id and event.trace_id == step.trace_id and event.step_number == step.step_number)
 
 
 def _hashes(events: tuple[NormalizedEvent, ...]) -> tuple[str, ...]:

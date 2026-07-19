@@ -18,9 +18,11 @@ class FakeChatProvider:
     def __init__(self, content: str):
         self.content = content
         self.messages = ()
+        self.calls = 0
 
     async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
         del tools, cancellation, tool_choice
+        self.calls += 1
         self.messages = tuple(messages)
         return ok(LlmResponse(content=self.content, usage=TokenUsage(10, 32, 42)))
 
@@ -132,6 +134,24 @@ async def test_native_proposer_writes_bounded_single_surface_drafts(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_native_proposer_replays_durable_result_without_provider_or_history_calls(tmp_path: Path):
+    workspace = CandidateWorkspace.allocate(tmp_path, "resume").unwrap()
+    first_provider = FakeChatProvider(_response(_draft()))
+    first_history = RecordingHistory()
+    first = LoomNativeProposerAdapter(first_provider, _baseline(), evidence_refs=("trace:seed",))
+    expected = (await first.propose(_request(), first_history, workspace)).unwrap()
+
+    second_provider = FakeChatProvider("not valid JSON")
+    second_history = RecordingHistory()
+    second = LoomNativeProposerAdapter(second_provider, _baseline(), evidence_refs=("trace:seed",))
+    replayed = (await second.propose(_request(), second_history, workspace)).unwrap()
+
+    assert replayed == expected
+    assert first_provider.calls == 1 and second_provider.calls == 0
+    assert second_history.queries == []
+
+
+@pytest.mark.asyncio
 async def test_native_proposer_records_malformed_raw_response(tmp_path: Path):
     workspace = CandidateWorkspace.allocate(tmp_path, "malformed").unwrap()
     adapter = LoomNativeProposerAdapter(FakeChatProvider('{"drafts": [{"kind": "declarative_patch"'), _baseline(), evidence_refs=("trace:seed",))
@@ -165,4 +185,3 @@ async def test_native_proposer_rejects_unsafe_or_non_falsifiable_drafts(tmp_path
 
     assert not result.ok
     assert result.error.code == "PROPOSAL_FAILED"
-

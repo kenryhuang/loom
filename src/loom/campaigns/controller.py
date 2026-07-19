@@ -853,7 +853,7 @@ def _load_authoritative_experiment(store, spec, ref, *, candidate_id: str, phase
         ExperimentPhase.VALIDATION: spec.validation_set,
         ExperimentPhase.HOLDOUT: spec.holdout_set,
     }[phase]
-    expected_trial_plan = freeze_trial_plan(store, expected_task_set)
+    expected_trial_plan = freeze_trial_plan(store, expected_task_set, repetitions=spec.evaluator.repetitions)
     if not expected_trial_plan.ok:
         return expected_trial_plan
     if (

@@ -90,7 +90,7 @@ def _graph():
                     "response": {
                         "content": "I will inspect files first.",
                         "finish_reason": "tool_calls",
-                        "tool_calls": [{"id": "call-1", "name": "read_file", "arguments": "{\"path\":\"README.md\"}"}],
+                        "tool_calls": [{"id": "call-1", "name": "read_file", "arguments": '{"path":"README.md"}'}],
                         "usage": {"total_tokens": 123},
                     }
                 },

@@ -55,6 +55,16 @@ class LoomNativeProposerAdapter:
         self.max_response_bytes = max_response_bytes
 
     async def propose(self, request: ProposalRequest, history, workspace) -> Result:
+        request_digest = canonical_digest(
+            {
+                "request": request,
+                "baseline_harness": self.baseline_harness,
+                "evidence_refs": self.evidence_refs,
+            }
+        )
+        replayed = self._load_cached(workspace, request_digest)
+        if replayed is not None:
+            return replayed
         visible_history = await self._query_history(history)
         if not visible_history.ok:
             return visible_history
@@ -100,7 +110,37 @@ class LoomNativeProposerAdapter:
         elapsed = max(0, math.ceil(time.monotonic() - started_at))
         tokens = response.usage.total_tokens
         cost = self.cost_per_token * tokens
-        return ok(ProposalBatch(tuple(drafts), ProposalUsage(tokens, format(cost, "f"), elapsed)))
+        batch = ProposalBatch(tuple(drafts), ProposalUsage(tokens, format(cost, "f"), elapsed))
+        cached = workspace.write_text(
+            "native-proposal-result.json",
+            canonical_json_bytes(
+                {
+                    "schema_version": "loom.native-proposal-result.v1",
+                    "request_digest": request_digest,
+                    "drafts": batch.drafts,
+                    "usage": batch.usage,
+                }
+            ).decode("utf-8"),
+        )
+        return cached if not cached.ok else ok(batch)
+
+    @staticmethod
+    def _load_cached(workspace, request_digest: str) -> Result | None:
+        resolved = workspace.resolve("native-proposal-result.json")
+        if not resolved.ok or not resolved.value.is_file():
+            return None
+        try:
+            payload = json.loads(resolved.value.read_text(encoding="utf-8"))
+            if payload.get("schema_version") != "loom.native-proposal-result.v1" or payload.get("request_digest") != request_digest:
+                return None
+            drafts = tuple(candidate_draft_from_mapping(value) for value in payload["drafts"])
+            usage = ProposalUsage(**payload["usage"])
+            return ok(ProposalBatch(drafts, usage))
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            return _proposal_error(
+                "Cached native proposer result is malformed",
+                cause={"name": type(exc).__name__, "message": str(exc)},
+            )
 
     async def _query_history(self, history) -> Result:
         if history is None or not callable(getattr(history, "query", None)):

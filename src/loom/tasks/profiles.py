@@ -42,9 +42,7 @@ PROJECT_AUDIT_PROFILE = TaskProfile(
         "Ground purpose and improvement recommendations in observed files or command output.",
         "Call finish with a markdown audit report when the audit is complete.",
     ),
-    expected_outputs=(
-        "A markdown report covering project purpose, smoke test result, evidence, risks, and improvement directions.",
-    ),
+    expected_outputs=("A markdown report covering project purpose, smoke test result, evidence, risks, and improvement directions.",),
     blueprint="explore_execute_synthesize",
 )
 

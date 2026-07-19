@@ -148,9 +148,12 @@ class SQLiteOptimizationStore:
                 if operation[1] == "started":
                     lease = connection.execute("SELECT expires_at, status FROM leases WHERE lease_id = ?", (operation[2],)).fetchone()
                     if lease is not None and lease[1] == "active" and _parse_time(lease[0]) > datetime.now(UTC):
-                        version = self._aggregate_version(connection)
                         connection.rollback()
-                        return ok(StageLease(operation[2], operation_id, target_stage, version))
+                        return _store_error(
+                            "OPTIMIZATION_OPERATION_IN_PROGRESS",
+                            "stage operation already has an active lease",
+                            operation_id=operation_id,
+                        )
                     connection.rollback()
                     return _store_error("OPTIMIZATION_LEASE_EXPIRED", "operation lease must be reconciled before retry")
             state = self._state_from_connection(connection, optimization_id)
@@ -287,6 +290,44 @@ class SQLiteOptimizationStore:
         finally:
             connection.close()
 
+    async def cancel(self, lease_id: str, *, reason: str) -> Result:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            lease = connection.execute(
+                "SELECT l.operation_id, l.status, o.status FROM leases l JOIN operations o USING (operation_id) WHERE l.lease_id = ?",
+                (lease_id,),
+            ).fetchone()
+            if lease is None:
+                connection.rollback()
+                return _store_error("OPTIMIZATION_LEASE_INVALID", "stage lease was not found")
+            if lease[1] == "cancelled" and lease[2] == "cancelled":
+                connection.rollback()
+                return ok(lease_id)
+            if lease[1] != "active" or lease[2] != "started":
+                connection.rollback()
+                return _store_error("OPTIMIZATION_LEASE_INVALID", "only an active stage lease can be cancelled")
+            optimization_id = self._optimization_id(connection)
+            state = self._state_from_connection(connection, optimization_id).unwrap()
+            connection.execute("UPDATE leases SET status = 'cancelled' WHERE lease_id = ?", (lease_id,))
+            connection.execute("UPDATE operations SET status = 'cancelled' WHERE operation_id = ?", (lease[0],))
+            self._append_event(
+                connection,
+                optimization_id,
+                "optimization.stage_cancelled",
+                state.stage,
+                state.lifecycle,
+                lease[0],
+                {"lease_id": lease_id, "reason": reason},
+            )
+            connection.commit()
+            return ok(lease_id)
+        except (sqlite3.Error, ValueError) as exc:
+            connection.rollback()
+            return _sqlite_error(exc)
+        finally:
+            connection.close()
+
     async def pause(self, optimization_id: str, reason: str) -> Result:
         return await self._lifecycle_event(optimization_id, "optimization.paused", OptimizationLifecycle.PAUSED, {"reason": reason})
 
@@ -300,6 +341,52 @@ class SQLiteOptimizationStore:
 
     async def fail(self, optimization_id: str, failure: Mapping[str, Any]) -> Result:
         return await self._lifecycle_event(optimization_id, "optimization.failed", OptimizationLifecycle.FAILED, {"failure": failure})
+
+    async def complete_approval(self, optimization_id: str, governance_output: Mapping[str, Any]) -> Result:
+        try:
+            output = json.loads(canonical_json_bytes(governance_output))
+        except (TypeError, ValueError) as exc:
+            return _store_error("OPTIMIZATION_OUTPUT_INVALID", "approval output is not canonical JSON", cause=exc)
+        if output.get("disposition") != "promoted":
+            return _store_error("OPTIMIZATION_TRANSITION_INVALID", "explicit approval must produce a promoted governance output")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            state = self._state_from_connection(connection, optimization_id)
+            if not state.ok:
+                connection.rollback()
+                return state
+            if state.value.lifecycle is not OptimizationLifecycle.AWAITING_APPROVAL or state.value.stage is not OptimizationStage.GOVERNANCE_COMPLETE:
+                connection.rollback()
+                return _store_error("OPTIMIZATION_TRANSITION_INVALID", "optimization is not awaiting governance approval")
+            operation = connection.execute(
+                "SELECT operation_id FROM operations WHERE target_stage = ? AND status = 'completed' ORDER BY rowid DESC LIMIT 1",
+                (OptimizationStage.GOVERNANCE_COMPLETE.value,),
+            ).fetchone()
+            if operation is None:
+                connection.rollback()
+                return _store_error("OPTIMIZATION_TRANSITION_INVALID", "governance operation is unavailable")
+            outputs = {"stage.governance": output}
+            version = self._append_event(
+                connection,
+                optimization_id,
+                "optimization.approval_completed",
+                OptimizationStage.GOVERNANCE_COMPLETE,
+                OptimizationLifecycle.PROMOTED,
+                operation[0],
+                {"outputs": outputs},
+            )
+            connection.execute(
+                "UPDATE operations SET result_json = ? WHERE operation_id = ?",
+                (canonical_json_bytes({"aggregate_version": version, "outputs": outputs}).decode(), operation[0]),
+            )
+            connection.commit()
+            return ok(self._state_from_connection(connection, optimization_id).unwrap())
+        except (sqlite3.Error, ValueError) as exc:
+            connection.rollback()
+            return _sqlite_error(exc)
+        finally:
+            connection.close()
 
     async def _lifecycle_event(
         self,
@@ -390,9 +477,7 @@ class SQLiteOptimizationStore:
         manifest = connection.execute("SELECT optimization_id FROM manifest WHERE singleton = 1").fetchone()
         if manifest is None or manifest[0] != optimization_id:
             return _store_error("OPTIMIZATION_NOT_FOUND", "optimization was not found")
-        rows = connection.execute(
-            "SELECT aggregate_version, event_type, stage, lifecycle, operation_id, payload_json FROM events ORDER BY sequence"
-        ).fetchall()
+        rows = connection.execute("SELECT aggregate_version, event_type, stage, lifecycle, operation_id, payload_json FROM events ORDER BY sequence").fetchall()
         stage = OptimizationStage.CREATED
         lifecycle = OptimizationLifecycle.RUNNING
         completed: list[str] = []
@@ -406,6 +491,9 @@ class SQLiteOptimizationStore:
                 stage = OptimizationStage(row[2])
                 if row[4] is not None:
                     completed.append(row[4])
+                payload = json.loads(row[5])
+                outputs.update(payload.get("outputs", {}))
+            elif event_type == "optimization.approval_completed":
                 payload = json.loads(row[5])
                 outputs.update(payload.get("outputs", {}))
             lifecycle = OptimizationLifecycle(row[3])

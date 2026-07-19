@@ -8,11 +8,14 @@ from loom.optimize.contracts import OptimizationLifecycle, OptimizationStage, Sp
 
 
 def _config_text(*, reasoning_effort: str = "high", meta_extra: str = "", split: str = "") -> str:
-    split_block = split or """    split:
+    split_block = (
+        split
+        or """    split:
       discovery: 0.60
       validation: 0.20
       holdout: 0.20
 """
+    )
     return f"""default_model: kimi
 models:
   main:
@@ -97,6 +100,20 @@ def test_load_optimize_config_rejects_missing_model_reference(tmp_path: Path):
 
     assert result.error.code == "OPTIMIZE_CONFIG_INVALID"
     assert result.error.metadata["field"] == "meta_harness.judge_model"
+
+
+def test_load_optimize_config_rejects_fewer_than_five_valid_pairs(tmp_path: Path):
+    result = load_optimize_config(_write_config(tmp_path, _config_text(meta_extra="    minimum_pairs: 4\n")))
+
+    assert result.error.code == "OPTIMIZE_CONFIG_INVALID"
+    assert result.error.metadata["field"] == "meta_harness.tasks.minimum_pairs"
+
+
+def test_load_optimize_config_rejects_primary_metric_not_emitted_by_trials(tmp_path: Path):
+    result = load_optimize_config(_write_config(tmp_path, _config_text(meta_extra="  objectives:\n    primary: invented_metric\n")))
+
+    assert result.error.code == "OPTIMIZE_CONFIG_INVALID"
+    assert result.error.metadata["field"] == "meta_harness.objectives.primary"
 
 
 def test_load_optimize_config_rejects_executable_without_approval(tmp_path: Path):

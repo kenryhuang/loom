@@ -20,7 +20,7 @@ from loom.campaigns.reducer import reduce_campaign
 from loom.campaigns.serialization import canonical_digest, canonical_json_bytes, new_prefixed_id, utc_now
 from loom.core import ActorAssertion, Result, StaticIdentityProvider, err, make_loom_error, ok, thaw_json
 
-_STORE_SCHEMA_VERSION = 2
+_STORE_SCHEMA_VERSION = 3
 
 
 class SQLiteCampaignStore:
@@ -124,7 +124,10 @@ class SQLiteCampaignStore:
             connection.execute("BEGIN IMMEDIATE")
             replay = self._replay_operation(connection, operation)
             if replay is not None:
-                connection.rollback()
+                if replay.ok and not operation.complete and replay.value.lease_id is not None:
+                    connection.commit()
+                else:
+                    connection.rollback()
                 return replay
             result = self._commit_operation(connection, operation, expected_version)
             if not result.ok:
@@ -584,14 +587,36 @@ class SQLiteCampaignStore:
 
     def _replay_operation(self, connection: sqlite3.Connection, operation: CampaignOperation) -> Result | None:
         existing = connection.execute(
-            "SELECT input_digest, result_json FROM operations WHERE operation_id = ?",
+            "SELECT input_digest, status, result_json FROM operations WHERE operation_id = ?",
             (operation.operation_id,),
         ).fetchone()
         if existing is None:
             return None
         if existing[0] != operation.input_digest:
             return err(make_loom_error("OPERATION_CONFLICT", "Operation ID was reused with different input", retryable=False))
-        return ok(_committed_from_dict(json.loads(existing[1])))
+        committed = _committed_from_dict(json.loads(existing[2]))
+        if not operation.complete and existing[1] in {"cancelled", "reconciled"}:
+            authorized = self._authorize_operation(operation)
+            if not authorized.ok:
+                return authorized
+            reserved = self._apply_reservation(connection, operation)
+            if not reserved.ok:
+                return reserved
+            restarted = CommittedOperation(
+                committed.operation_id,
+                committed.campaign_id,
+                committed.aggregate_version,
+                committed.event_type,
+                committed.event_hash,
+                lease_id=reserved.value,
+                output_refs=committed.output_refs,
+            )
+            connection.execute(
+                "UPDATE operations SET status = 'started', result_json = ? WHERE operation_id = ?",
+                (json.dumps(_committed_to_dict(restarted), sort_keys=True), operation.operation_id),
+            )
+            return ok(restarted)
+        return ok(committed)
 
     def _read_events(self, campaign_id: str) -> Result:
         connection = self._connect()
@@ -718,7 +743,7 @@ class SQLiteCampaignStore:
                 );
                 CREATE TABLE IF NOT EXISTS leases(
                     lease_id TEXT PRIMARY KEY,
-                    operation_id TEXT NOT NULL UNIQUE,
+                    operation_id TEXT NOT NULL,
                     phase TEXT NOT NULL,
                     candidate_experiments INTEGER NOT NULL,
                     task_side_runs INTEGER NOT NULL,
@@ -740,11 +765,42 @@ class SQLiteCampaignStore:
                 connection.execute("INSERT INTO schema_info(version) VALUES (?)", (_STORE_SCHEMA_VERSION,))
             elif version[0] == 1:
                 _ensure_column(connection, "leases", "actor_json", "TEXT NOT NULL DEFAULT '{}'")
+                _migrate_lease_attempts(connection)
+                connection.execute("UPDATE schema_info SET version = ?", (_STORE_SCHEMA_VERSION,))
+            elif version[0] == 2:
+                _migrate_lease_attempts(connection)
                 connection.execute("UPDATE schema_info SET version = ?", (_STORE_SCHEMA_VERSION,))
             elif version[0] != _STORE_SCHEMA_VERSION:
                 raise RuntimeError(f"Unsupported campaign store schema: {version[0]}")
         finally:
             connection.close()
+
+
+def _migrate_lease_attempts(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        ALTER TABLE leases RENAME TO leases_single_attempt;
+        CREATE TABLE leases(
+            lease_id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            candidate_experiments INTEGER NOT NULL,
+            task_side_runs INTEGER NOT NULL,
+            infrastructure_retry_task_side_runs INTEGER NOT NULL,
+            proposer_tokens INTEGER NOT NULL,
+            solver_tokens INTEGER NOT NULL,
+            cost TEXT NOT NULL,
+            iterations INTEGER NOT NULL,
+            candidates INTEGER NOT NULL,
+            wall_time_seconds INTEGER NOT NULL,
+            expires_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            actor_json TEXT NOT NULL
+        );
+        INSERT INTO leases SELECT * FROM leases_single_attempt;
+        DROP TABLE leases_single_attempt;
+        """
+    )
 
 
 def _event_to_dict(event: CampaignEvent) -> dict[str, Any]:

@@ -372,11 +372,7 @@ def build_round_evidence_packs(graph: EpisodeGraph, step: StepGraphEpisode) -> t
     tool_by_call_id = {item.tool_call_id: item for item in tool_calls if item.tool_call_id}
     packs: list[RoundEvidencePack] = []
     for index, round_item in enumerate(llm_rounds):
-        linked_tools = tuple(
-            tool_by_call_id[call_id]
-            for call_id in _tool_call_ids_from_round(round_item)
-            if call_id in tool_by_call_id
-        )
+        linked_tools = tuple(tool_by_call_id[call_id] for call_id in _tool_call_ids_from_round(round_item) if call_id in tool_by_call_id)
         packs.append(_round_evidence_pack(round_item, index, linked_tools))
     return tuple(packs)
 
@@ -670,11 +666,7 @@ def _tool_call_ids_from_round(round_item: LlmRoundEpisode) -> tuple[str, ...]:
         return ()
     ids: list[str] = []
     for item in tool_calls:
-        call_id = (
-            item.get("id") or item.get("tool_call_id")
-            if isinstance(item, Mapping)
-            else getattr(item, "id", None) or getattr(item, "tool_call_id", None)
-        )
+        call_id = item.get("id") or item.get("tool_call_id") if isinstance(item, Mapping) else getattr(item, "id", None) or getattr(item, "tool_call_id", None)
         if call_id is not None:
             ids.append(str(call_id))
     return tuple(ids)
@@ -798,11 +790,7 @@ def _finding_summary(finding: Finding) -> Mapping[str, Any]:
 
 
 def _step_events(graph: EpisodeGraph, step: StepGraphEpisode) -> tuple[NormalizedEvent, ...]:
-    return tuple(
-        event
-        for event in graph.events
-        if event.run_id == step.run_id and event.trace_id == step.trace_id and event.step_number == step.step_number
-    )
+    return tuple(event for event in graph.events if event.run_id == step.run_id and event.trace_id == step.trace_id and event.step_number == step.step_number)
 
 
 def _validate_dimensions(value: Any, pack: StepEvidencePack | RoundEvidencePack, dimensions: tuple[str, ...]) -> Result:

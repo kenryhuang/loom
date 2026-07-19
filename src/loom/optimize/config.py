@@ -26,6 +26,7 @@ from loom.tasks.config import load_task_config, parse_yaml_document
 _REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
 _CANDIDATE_KINDS = frozenset({"declarative_patch", "executable_component"})
 _APPROVAL_KINDS = frozenset({"medium", "high", "executable"})
+_OBJECTIVE_METRICS = frozenset({"task_success_rate", "total_tokens", "wall_time_ms"})
 _META_FIELDS = frozenset({"proposer_model", "solver_model", "judge_model", "search", "tasks", "objectives", "budgets", "execution", "governance"})
 
 
@@ -115,11 +116,14 @@ def _parse_tasks(value: Mapping[str, Any]) -> TaskSetConfig:
     threshold = _finite_float(value.get("contamination_threshold", 0.80), "meta_harness.tasks.contamination_threshold")
     if threshold <= 0 or threshold > 0.80:
         raise _OptimizeConfigError("meta_harness.tasks.contamination_threshold", "contamination threshold must be within (0, 0.80]")
+    minimum_pairs = _positive_int(value.get("minimum_pairs", 5), "meta_harness.tasks.minimum_pairs")
+    if minimum_pairs < 5:
+        raise _OptimizeConfigError("meta_harness.tasks.minimum_pairs", "minimum_pairs must be at least five for confidence intervals")
     return TaskSetConfig(
         split,
         _integer(value.get("seed", 42), "meta_harness.tasks.seed"),
         _positive_int(value.get("repetitions", 3), "meta_harness.tasks.repetitions"),
-        _positive_int(value.get("minimum_pairs", 5), "meta_harness.tasks.minimum_pairs"),
+        minimum_pairs,
         threshold,
     )
 
@@ -130,8 +134,8 @@ def _parse_objectives(value: Mapping[str, Any]) -> ObjectiveConfig:
     allowed = frozenset({"max_regression_rate", "max_cost_increase_ratio", "max_latency_increase_ratio"})
     _reject_unknown(constraints, allowed, "meta_harness.objectives.constraints")
     primary = value.get("primary", "task_success_rate")
-    if not isinstance(primary, str) or not primary.strip():
-        raise _OptimizeConfigError("meta_harness.objectives.primary", "primary objective must be a string")
+    if not isinstance(primary, str) or primary not in _OBJECTIVE_METRICS:
+        raise _OptimizeConfigError("meta_harness.objectives.primary", "primary objective is not emitted by optimize trials")
     return ObjectiveConfig(
         primary,
         _non_negative_float(constraints.get("max_regression_rate", 0.05), "meta_harness.objectives.constraints.max_regression_rate"),

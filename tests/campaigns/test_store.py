@@ -142,6 +142,36 @@ def test_expired_lease_reconciliation_releases_reservation_once(tmp_path: Path):
     asyncio.run(scenario())
 
 
+def test_cancelled_incomplete_operation_can_reacquire_lease_without_duplicate_event(tmp_path: Path):
+    async def scenario():
+        store = make_campaign_store(tmp_path / "campaign")
+        spec = make_campaign_spec(store, discovery_experiments=1, discovery_runs=2)
+        await store.create(spec, operation_id=new_prefixed_id("op_"), actor=campaign_actor("campaign_creator"))
+        actor = campaign_actor("campaign_controller")
+        operation = CampaignOperation(
+            new_prefixed_id("op_"),
+            spec.campaign_id,
+            canonical_digest("retryable-lease"),
+            "experiment.started",
+            actor=actor,
+            reservation=BudgetReservation(ExperimentPhase.DISCOVERY, candidate_experiments=1, task_side_runs=2),
+            complete=False,
+        )
+        first = await store.transact(operation, 1)
+        cancelled = await store.cancel_lease(first.unwrap().lease_id, actor)
+
+        retried = await store.transact(operation, 2)
+        completed = await store.complete_lease(retried.unwrap().lease_id, actor)
+        events = (await store.events(spec.campaign_id)).unwrap()
+
+        assert cancelled.unwrap().action == "cancelled"
+        assert retried.ok and retried.value.lease_id != first.value.lease_id
+        assert completed.unwrap().action == "completed"
+        assert [event.event_type for event in events].count("experiment.started") == 1
+
+    asyncio.run(scenario())
+
+
 def test_manifest_write_failure_rolls_back_create_and_retry_repairs_manifest(tmp_path: Path, monkeypatch):
     async def scenario():
         store = make_campaign_store(tmp_path / "campaign")

@@ -100,6 +100,9 @@ class OptimizeOrchestrator:
         if not governance.ok:
             return governance
         disposition = str(governance.value["disposition"])
+        state = await self.store.load(self.spec.optimization_id)
+        if not state.ok:
+            return state
         summary = {
             "schema_version": "loom.optimization.result.v1",
             "optimization_id": self.spec.optimization_id,
@@ -111,6 +114,7 @@ class OptimizeOrchestrator:
             "task_set_digests": self.spec.task_set_digests,
             "model_digests": self.spec.model_digests,
             "finalist_ids": campaign.value.finalist_ids,
+            "stages": {key.removeprefix("stage."): thaw_json(value) for key, value in state.value.outputs.items() if key.startswith("stage.")},
             "next_action": (
                 f"loom optimize approve {self.spec.optimization_id} --candidate {governance.value.get('candidate_id')}"
                 if disposition == "awaiting_approval"
@@ -327,6 +331,12 @@ class OptimizeOrchestrator:
             return ok(value)
         called = await _call(action, *args)
         if not called.ok:
+            cancelled = await self.store.cancel(
+                begun.value.lease_id,
+                reason="OPTIMIZATION_STAGE_FAILED" if called.error is None else called.error.code,
+            )
+            if not cancelled.ok:
+                return cancelled
             return called
         if not isinstance(called.value, Mapping):
             return _orchestration_error("OPTIMIZATION_STAGE_OUTPUT_INVALID", "Stage service must return a mapping", stage=target.value)
@@ -406,6 +416,9 @@ def _normalize_governance_outcome(value: Any) -> Result:
             "candidate_id": decision.candidate_id,
             "promotion_decision_ref": asdict(value.decision_ref),
             "monitor_ref": value.monitor,
+            "risk": decision.computed_risk.value,
+            "matched_risk_rules": decision.matched_risk_rules,
+            "gates": tuple(asdict(gate) for gate in decision.gates),
         }
     else:
         return _orchestration_error("OPTIMIZATION_GOVERNANCE_INVALID", "Governance service returned an invalid outcome")

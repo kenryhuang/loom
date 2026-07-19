@@ -556,20 +556,25 @@ def aggregate_paired_metric(
 def objective_gate_result(objective: ObjectiveSpec, metric: PairedMetricResult) -> GateResult:
     if not objective.hard:
         return GateResult.PASSED
-    if metric.valid_pairs < objective.min_valid_pairs or metric.candidate_interval is None or metric.delta_interval is None:
+    if metric.valid_pairs < objective.min_valid_pairs or metric.baseline_interval is None or metric.candidate_interval is None or metric.delta_interval is None:
         return GateResult.INSUFFICIENT_EVIDENCE
+    baseline_lower, baseline_upper = metric.baseline_interval
     candidate_lower, candidate_upper = metric.candidate_interval
     delta_lower, delta_upper = metric.delta_interval
     passed = True
     if objective.direction is ObjectiveDirection.MAXIMIZE:
         if objective.absolute_limit is not None:
             passed = passed and candidate_lower >= objective.absolute_limit
-        if objective.max_baseline_regression is not None:
+        if objective.max_baseline_regression is not None and objective.aggregation == "relative_change":
+            passed = passed and candidate_lower >= baseline_upper * (1 - objective.max_baseline_regression)
+        elif objective.max_baseline_regression is not None:
             passed = passed and delta_lower >= -objective.max_baseline_regression
     else:
         if objective.absolute_limit is not None:
             passed = passed and candidate_upper <= objective.absolute_limit
-        if objective.max_baseline_regression is not None:
+        if objective.max_baseline_regression is not None and objective.aggregation == "relative_change":
+            passed = passed and candidate_upper <= baseline_lower * (1 + objective.max_baseline_regression)
+        elif objective.max_baseline_regression is not None:
             passed = passed and delta_upper <= objective.max_baseline_regression
     return GateResult.PASSED if passed else GateResult.FAILED
 

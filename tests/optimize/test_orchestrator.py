@@ -239,6 +239,10 @@ async def test_public_run_completes_governance_and_writes_stable_outputs(tmp_pat
     assert state.lifecycle is lifecycle
     assert result.disposition == governance_disposition
     assert result.report_path.is_file()
+    report = result.report_path.read_text(encoding="utf-8")
+    assert '"seed_analysis"' in report
+    assert '"holdout"' in report
+    assert '"governance"' in report
     assert (tmp_path / "result" / "result.json").is_file()
     assert governance_calls == ["cand-a"]
 

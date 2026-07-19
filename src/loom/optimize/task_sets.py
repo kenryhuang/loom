@@ -406,6 +406,7 @@ def _assign_groups(
         ExperimentPhase.HOLDOUT: holdout_target,
     }
     assigned: dict[ExperimentPhase, list[PreparedTask]] = {role: [] for role in targets}
+
     def group_order(group: tuple[PreparedTask, ...]) -> str:
         group_digest = canonical_digest(tuple(item.task.task_id for item in group))
         return hashlib.sha256(f"{config.seed}:{group_digest}".encode()).hexdigest()

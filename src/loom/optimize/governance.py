@@ -104,10 +104,7 @@ def bootstrap_local_governance(output_dir: str | Path) -> Result:
     values = LocalGovernanceActors(StaticIdentityProvider(assertions), *assertions)
     public = {
         "schema_version": "loom.local-governance-identities.v1",
-        "identities": tuple(
-            {"subject": item.subject, "roles": item.roles, "issued_at": item.issued_at, "expires_at": item.expires_at}
-            for item in assertions
-        ),
+        "identities": tuple({"subject": item.subject, "roles": item.roles, "issued_at": item.issued_at, "expires_at": item.expires_at} for item in assertions),
     }
     path = Path(output_dir) / "governance-identities.json"
     try:
