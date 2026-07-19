@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -7,7 +8,7 @@ import pytest
 
 from loom.campaigns.proposer import ProposalRequest
 from loom.campaigns.workspace import CandidateWorkspace
-from loom.core import ok
+from loom.core import err, make_loom_error, ok
 from loom.llm import LlmResponse, TokenUsage
 from loom.optimize.proposer import LoomNativeProposerAdapter
 
@@ -41,6 +42,20 @@ class SequenceChatProvider:
         self.calls += 1
         self.messages.append(tuple(messages))
         return ok(LlmResponse(content=content, usage=TokenUsage(10, 32, 42)))
+
+
+class DraftWriteFailingWorkspace:
+    def __init__(self, workspace: CandidateWorkspace):
+        self.workspace = workspace
+        self.root = workspace.root
+
+    def resolve(self, relative_path: str):
+        return self.workspace.resolve(relative_path)
+
+    def write_text(self, relative_path: str, content: str):
+        if relative_path.startswith("draft-"):
+            return err(make_loom_error("WORKSPACE_FAILED", "Could not write candidate workspace file", retryable=False))
+        return self.workspace.write_text(relative_path, content)
 
 
 class RecordingHistory:
@@ -167,7 +182,9 @@ async def test_native_proposer_retries_invalid_kind_with_validation_feedback(tmp
 
     assert provider.calls == 2
     assert batch.usage.proposer_tokens == 84
-    assert (workspace.root / "proposer-raw-response-attempt-1.txt").read_text(encoding="utf-8") == invalid
+    raw_paths = tuple(workspace.root.glob("proposer-attempts/*/response-1.txt"))
+    assert len(raw_paths) == 1
+    assert raw_paths[0].read_text(encoding="utf-8") == invalid
     retry_prompt = "\n".join(message.content or "" for message in provider.messages[1])
     assert "Native proposer draft kind is not allowed" in retry_prompt
     assert '"declarative_patch"' in retry_prompt
@@ -198,6 +215,95 @@ async def test_native_proposer_protocol_retry_exhaustion_preserves_every_raw_res
     raw_paths = tuple(Path(value) for value in result.error.metadata["raw_response_paths"])
     assert len(raw_paths) == 2
     assert tuple(path.read_text(encoding="utf-8") for path in raw_paths) == responses
+
+
+@pytest.mark.asyncio
+async def test_native_proposer_retry_feedback_includes_schema_failure_cause(tmp_path: Path):
+    invalid_draft = _draft()
+    invalid_draft["hypothesis"] = {**invalid_draft["hypothesis"]}
+    del invalid_draft["hypothesis"]["problem"]
+    provider = SequenceChatProvider((_response(invalid_draft), _response(_draft())))
+    workspace = CandidateWorkspace.allocate(tmp_path, "schema-retry").unwrap()
+    adapter = LoomNativeProposerAdapter(
+        provider,
+        _baseline(),
+        evidence_refs=("trace:seed",),
+        max_protocol_retries=1,
+    )
+
+    result = await adapter.propose(_request(), RecordingHistory(), workspace)
+
+    assert result.ok
+    retry_prompt = "\n".join(message.content or "" for message in provider.messages[1])
+    assert '"cause":{"message":"\'problem\'","name":"KeyError"}' in retry_prompt
+
+
+@pytest.mark.asyncio
+async def test_native_proposer_does_not_retry_workspace_failures(tmp_path: Path):
+    provider = FakeChatProvider(_response(_draft()))
+    allocated = CandidateWorkspace.allocate(tmp_path, "workspace-failure").unwrap()
+    workspace = DraftWriteFailingWorkspace(allocated)
+    adapter = LoomNativeProposerAdapter(provider, _baseline(), evidence_refs=("trace:seed",))
+
+    result = await adapter.propose(_request(), RecordingHistory(), workspace)
+
+    assert result.error.code == "WORKSPACE_FAILED"
+    assert provider.calls == 1
+    assert not (workspace.root / "proposer-attempts").exists()
+
+
+@pytest.mark.asyncio
+async def test_native_proposer_preserves_rejected_responses_across_resumes(tmp_path: Path):
+    workspace = CandidateWorkspace.allocate(tmp_path, "resume-evidence").unwrap()
+    responses = (_response({**_draft(), "kind": "bad-a"}), _response({**_draft(), "kind": "bad-b"}))
+
+    results = []
+    for response in responses:
+        adapter = LoomNativeProposerAdapter(
+            FakeChatProvider(response),
+            _baseline(),
+            evidence_refs=("trace:seed",),
+            max_protocol_retries=0,
+        )
+        results.append(await adapter.propose(_request(), RecordingHistory(), workspace))
+
+    raw_paths = tuple(Path(result.error.metadata["raw_response_path"]) for result in results)
+    assert raw_paths[0] != raw_paths[1]
+    assert tuple(path.read_text(encoding="utf-8") for path in raw_paths) == responses
+
+
+@pytest.mark.asyncio
+async def test_native_proposer_records_digest_and_size_for_truncated_response(tmp_path: Path):
+    raw = _response({**_draft(), "kind": "not-allowed"})
+    workspace = CandidateWorkspace.allocate(tmp_path, "bounded-evidence").unwrap()
+    adapter = LoomNativeProposerAdapter(
+        FakeChatProvider(raw),
+        _baseline(),
+        evidence_refs=("trace:seed",),
+        max_response_bytes=32,
+        max_protocol_retries=0,
+    )
+
+    result = await adapter.propose(_request(), RecordingHistory(), workspace)
+
+    evidence = result.error.metadata["raw_response_evidence"][0]
+    assert evidence["original_byte_size"] == len(raw.encode("utf-8"))
+    assert evidence["preserved_byte_size"] <= 32
+    assert evidence["sha256"] == hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    assert evidence["truncated"] is True
+    sidecar = Path(evidence["metadata_path"])
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["sha256"] == evidence["sha256"]
+
+
+@pytest.mark.parametrize("value", (-1, True, 1.5))
+def test_native_proposer_rejects_invalid_protocol_retry_configuration(value):
+    with pytest.raises(ValueError, match="max_protocol_retries"):
+        LoomNativeProposerAdapter(
+            FakeChatProvider(_response(_draft())),
+            _baseline(),
+            evidence_refs=("trace:seed",),
+            max_protocol_retries=value,
+        )
 
 
 @pytest.mark.asyncio

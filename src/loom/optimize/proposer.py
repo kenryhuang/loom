@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import time
@@ -76,6 +77,8 @@ class LoomNativeProposerAdapter:
         started_at = time.monotonic()
         total_tokens = 0
         raw_response_paths: list[str] = []
+        raw_response_evidence: list[dict[str, Any]] = []
+        protocol_run_id = new_prefixed_id("op_")
         for attempt in range(1, self.max_protocol_retries + 2):
             try:
                 response_result = await self.provider.chat(tuple(messages), tools=None)
@@ -110,12 +113,16 @@ class LoomNativeProposerAdapter:
                     ).decode("utf-8"),
                 )
                 return cached if not cached.ok else ok(batch)
+            if decoded.error.code != "PROPOSAL_FAILED":
+                return decoded
 
-            preserved = raw.encode("utf-8")[: self.max_response_bytes].decode("utf-8", errors="replace")
-            persisted = workspace.write_text(f"proposer-raw-response-attempt-{attempt}.txt", preserved)
+            persisted = self._persist_rejected_response(workspace, protocol_run_id, attempt, raw)
             if not persisted.ok:
                 return persisted
-            raw_response_paths.append(str(persisted.value))
+            evidence = dict(persisted.value)
+            preserved = evidence.pop("preserved_content")
+            raw_response_paths.append(evidence["path"])
+            raw_response_evidence.append(evidence)
             if attempt > self.max_protocol_retries:
                 return _proposal_error(
                     "Native proposer protocol retries exhausted",
@@ -125,6 +132,7 @@ class LoomNativeProposerAdapter:
                     cost=format(self.cost_per_token * total_tokens, "f"),
                     raw_response_path=raw_response_paths[-1],
                     raw_response_paths=tuple(raw_response_paths),
+                    raw_response_evidence=tuple(raw_response_evidence),
                 )
             messages.extend(
                 (
@@ -274,10 +282,39 @@ class LoomNativeProposerAdapter:
                 "schema_version": "loom.native-proposal-feedback.v1",
                 "accepted": False,
                 "error": error.message,
+                "cause": thaw_json(error.cause),
                 "metadata": thaw_json(error.metadata),
                 "instruction": 'Return a corrected raw JSON object. Every draft kind must equal "declarative_patch" exactly.',
             }
         ).decode("utf-8")
+
+    def _persist_rejected_response(self, workspace, protocol_run_id: str, attempt: int, raw: str) -> Result:
+        raw_bytes = raw.encode("utf-8")
+        preserved = raw_bytes[: self.max_response_bytes].decode("utf-8", errors="ignore")
+        directory = f"proposer-attempts/{protocol_run_id}"
+        response_path = f"{directory}/response-{attempt}.txt"
+        metadata_path = f"{directory}/response-{attempt}.json"
+        written = workspace.write_text(response_path, preserved)
+        if not written.ok:
+            return written
+        evidence = {
+            "schema_version": "loom.native-proposer-rejected-response.v1",
+            "attempt": attempt,
+            "path": str(written.value),
+            "original_byte_size": len(raw_bytes),
+            "preserved_byte_size": len(preserved.encode("utf-8")),
+            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "truncated": len(raw_bytes) > self.max_response_bytes,
+            "preserved_content": preserved,
+        }
+        metadata_written = workspace.write_text(
+            metadata_path,
+            canonical_json_bytes({key: value for key, value in evidence.items() if key != "preserved_content"}).decode("utf-8"),
+        )
+        if not metadata_written.ok:
+            return metadata_written
+        evidence["metadata_path"] = str(metadata_written.value)
+        return ok(evidence)
 
     def _decode_and_materialize(self, request: ProposalRequest, workspace, raw: str) -> Result:
         raw_bytes = raw.encode("utf-8")
