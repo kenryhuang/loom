@@ -27,6 +27,22 @@ class FakeChatProvider:
         return ok(LlmResponse(content=self.content, usage=TokenUsage(10, 32, 42)))
 
 
+class SequenceChatProvider:
+    model = "proposer-model"
+
+    def __init__(self, contents: tuple[str, ...]):
+        self.contents = contents
+        self.messages: list[tuple] = []
+        self.calls = 0
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        del tools, cancellation, tool_choice
+        content = self.contents[self.calls]
+        self.calls += 1
+        self.messages.append(tuple(messages))
+        return ok(LlmResponse(content=content, usage=TokenUsage(10, 32, 42)))
+
+
 class RecordingHistory:
     def __init__(self):
         self.queries: list[str] = []
@@ -129,8 +145,59 @@ async def test_native_proposer_writes_bounded_single_surface_drafts(tmp_path: Pa
     assert history.queries == ["campaign.frontier", "finding.search", "candidate.list"]
     prompt = "\n".join(message.content for message in provider.messages)
     assert "untrusted_historical_evidence" in prompt
+    assert '"const":"declarative_patch"' in prompt
     assert "validation" not in prompt.lower()
     assert "holdout" not in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_native_proposer_retries_invalid_kind_with_validation_feedback(tmp_path: Path):
+    invalid = _response({**_draft(), "kind": "declarative"})
+    provider = SequenceChatProvider((invalid, _response(_draft())))
+    history = RecordingHistory()
+    workspace = CandidateWorkspace.allocate(tmp_path, "protocol-retry").unwrap()
+    adapter = LoomNativeProposerAdapter(
+        provider,
+        _baseline(),
+        evidence_refs=("trace:seed",),
+        max_protocol_retries=1,
+    )
+
+    batch = (await adapter.propose(_request(), history, workspace)).unwrap()
+
+    assert provider.calls == 2
+    assert batch.usage.proposer_tokens == 84
+    assert (workspace.root / "proposer-raw-response-attempt-1.txt").read_text(encoding="utf-8") == invalid
+    retry_prompt = "\n".join(message.content or "" for message in provider.messages[1])
+    assert "Native proposer draft kind is not allowed" in retry_prompt
+    assert '"declarative_patch"' in retry_prompt
+    assert history.queries == ["campaign.frontier", "finding.search", "candidate.list"]
+
+
+@pytest.mark.asyncio
+async def test_native_proposer_protocol_retry_exhaustion_preserves_every_raw_response(tmp_path: Path):
+    responses = (
+        _response({**_draft(), "kind": "bad-a"}),
+        _response({**_draft(), "kind": "bad-b"}),
+    )
+    provider = SequenceChatProvider(responses)
+    workspace = CandidateWorkspace.allocate(tmp_path, "protocol-exhausted").unwrap()
+    adapter = LoomNativeProposerAdapter(
+        provider,
+        _baseline(),
+        evidence_refs=("trace:seed",),
+        max_protocol_retries=1,
+    )
+
+    result = await adapter.propose(_request(), RecordingHistory(), workspace)
+
+    assert result.error.code == "PROPOSAL_FAILED"
+    assert result.error.retryable is False
+    assert result.error.metadata["attempts"] == 2
+    assert result.error.metadata["last_protocol_error"] == "Native proposer draft kind is not allowed"
+    raw_paths = tuple(Path(value) for value in result.error.metadata["raw_response_paths"])
+    assert len(raw_paths) == 2
+    assert tuple(path.read_text(encoding="utf-8") for path in raw_paths) == responses
 
 
 @pytest.mark.asyncio
