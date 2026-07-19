@@ -674,6 +674,32 @@ def test_openai_provider_sends_completion_limit_and_request_options():
     asyncio.run(scenario())
 
 
+def test_openai_provider_omits_stream_options_for_non_stream_chat():
+    provider = create_openai_provider(
+        api_key="secret",
+        model="judge",
+        request_options={"reasoning_effort": "high", "stream_options": {"include_usage": True}},
+    )
+
+    body = provider._request_body((LlmMessage("user", "judge"),), None, None, stream=False)
+
+    assert body["reasoning_effort"] == "high"
+    assert "stream_options" not in body
+
+
+def test_openai_provider_keeps_stream_options_for_stream_chat():
+    provider = create_openai_provider(
+        api_key="secret",
+        model="solver",
+        request_options={"stream_options": {"include_usage": True}},
+    )
+
+    body = provider._request_body((LlmMessage("user", "solve"),), None, None, stream=True)
+
+    assert body["stream"] is True
+    assert body["stream_options"] == {"include_usage": True}
+
+
 def test_openai_provider_stream_sends_completion_limit_and_request_options():
     async def scenario():
         calls = []

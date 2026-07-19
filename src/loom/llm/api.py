@@ -735,7 +735,10 @@ class OpenAIProvider:
             body["temperature"] = self.temperature
         if self.max_completion_tokens is not None:
             body["max_completion_tokens"] = self.max_completion_tokens
-        body.update(materialize_request_options(self.request_options))
+        request_options = materialize_request_options(self.request_options)
+        if not stream:
+            request_options.pop("stream_options", None)
+        body.update(request_options)
         if stream:
             body["stream"] = True
         if tools:
