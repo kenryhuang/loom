@@ -10,9 +10,11 @@ from loom.optimize.contracts import (
     OptimizationStage,
     OptimizationState,
 )
+from loom.optimize.proposer import LoomNativeProposerAdapter
 
 __all__ = [
     "LoadedOptimizeConfig",
+    "LoomNativeProposerAdapter",
     "MetaHarnessConfig",
     "OptimizationLifecycle",
     "OptimizationResult",

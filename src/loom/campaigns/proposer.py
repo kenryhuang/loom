@@ -204,7 +204,7 @@ class SubprocessProposerAdapter:
         if not isinstance(payload, list) or not payload or len(payload) > request.max_candidates:
             return _proposal_error("Proposer returned an invalid number of drafts", count=len(payload) if isinstance(payload, list) else None)
         try:
-            drafts = tuple(_draft_from_dict(item) for item in payload)
+            drafts = tuple(candidate_draft_from_mapping(item) for item in payload)
         except (KeyError, TypeError, ValueError) as exc:
             return _proposal_error("Proposer draft schema is invalid", cause={"name": type(exc).__name__, "message": str(exc)})
         digests = tuple(canonical_digest(draft) for draft in drafts)
@@ -276,7 +276,7 @@ class SandboxProposerAdapter:
             values = envelope["drafts"]
             if not isinstance(values, list) or not values or len(values) > request.max_candidates:
                 raise ValueError("invalid draft count")
-            drafts = tuple(_draft_from_dict(item) for item in values)
+            drafts = tuple(candidate_draft_from_mapping(item) for item in values)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             return _proposal_error(
                 "Sandbox proposer output is invalid",
@@ -288,7 +288,7 @@ class SandboxProposerAdapter:
         return ok(ProposalBatch(drafts, result.value.usage))
 
 
-def _draft_from_dict(value: Any) -> CandidateDraft:
+def candidate_draft_from_mapping(value: Any) -> CandidateDraft:
     if not isinstance(value, Mapping):
         raise TypeError("draft must be an object")
     hypothesis = value["hypothesis"]
@@ -340,4 +340,5 @@ __all__ = [
     "ProposerAdapter",
     "SandboxProposerAdapter",
     "SubprocessProposerAdapter",
+    "candidate_draft_from_mapping",
 ]
