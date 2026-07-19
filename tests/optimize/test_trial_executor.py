@@ -188,17 +188,43 @@ async def test_trial_executor_emits_scoped_trial_and_nested_runtime_events(tmp_p
 @pytest.mark.asyncio
 async def test_trial_executor_rejects_tampered_trial_side_checkpoint(tmp_path: Path):
     checkpoint_root = tmp_path / "checkpoints"
-    executor, _provider, _artifacts, entry = _executor(tmp_path, checkpoint_root=checkpoint_root)
+    executor, _provider, artifacts, entry = _executor(tmp_path, checkpoint_root=checkpoint_root)
 
     result = await executor.execute("candidate", _candidate(), entry, "trial-checkpoint")
     assert result.failure_kind is None
     checkpoint = next(checkpoint_root.glob("*.json"))
-    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
-    payload["execution"]["metrics"]["task_success_rate"] = 999.0
-    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+    pointer = json.loads(checkpoint.read_text(encoding="utf-8"))
+    receipt_ref = ArtifactRef(**pointer["receipt_ref"])
+    receipt_path = artifacts.resolve(receipt_ref).unwrap()
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["execution"]["metrics"]["task_success_rate"] = 999.0
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
 
     with pytest.raises(TrialCheckpointError):
         await executor.execute("candidate", _candidate(), entry, "trial-checkpoint")
+
+
+@pytest.mark.asyncio
+async def test_trial_executor_rejects_cross_identity_receipt_substitution(tmp_path: Path):
+    checkpoint_root = tmp_path / "checkpoints"
+    executor, _provider, artifacts, entry = _executor(tmp_path, checkpoint_root=checkpoint_root)
+    for trial_id in ("trial-a", "trial-b"):
+        result = await executor.execute("candidate", _candidate(), entry, trial_id)
+        assert result.failure_kind is None
+
+    pointers_by_trial = {}
+    for checkpoint in checkpoint_root.glob("*.json"):
+        pointer = json.loads(checkpoint.read_text(encoding="utf-8"))
+        receipt_ref = ArtifactRef(**pointer["receipt_ref"])
+        receipt = json.loads(artifacts.read_bytes(receipt_ref).unwrap())
+        pointers_by_trial[receipt["identity"]["trial_id"]] = (checkpoint, pointer)
+    checkpoint_a, pointer_a = pointers_by_trial["trial-a"]
+    _checkpoint_b, pointer_b = pointers_by_trial["trial-b"]
+    pointer_a["receipt_ref"] = pointer_b["receipt_ref"]
+    checkpoint_a.write_text(json.dumps(pointer_a), encoding="utf-8")
+
+    with pytest.raises(TrialCheckpointError):
+        await executor.execute("candidate", _candidate(), entry, "trial-a")
 
 
 @pytest.mark.asyncio
@@ -208,11 +234,18 @@ async def test_durable_baseline_cache_rejects_tampered_execution(tmp_path: Path)
     assert result.failure_kind is None
     cache_root = tmp_path / "baseline-cache"
     cache_key = "a" * 64
-    DurableBaselineRunCache(cache_root, artifacts).put(cache_key, result)
+    DurableBaselineRunCache(cache_root, artifacts).put(cache_key, result, source_experiment_id="exp-test")
+    restored = DurableBaselineRunCache(cache_root, artifacts).get(cache_key)
+    assert restored is not None
+    assert restored.source_experiment_id == "exp-test"
+    assert restored.execution == result
     checkpoint = cache_root / f"{cache_key}.json"
-    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
-    payload["execution"]["metrics"]["task_success_rate"] = 999.0
-    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+    pointer = json.loads(checkpoint.read_text(encoding="utf-8"))
+    receipt_ref = ArtifactRef(**pointer["receipt_ref"])
+    receipt_path = artifacts.resolve(receipt_ref).unwrap()
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["execution"]["metrics"]["task_success_rate"] = 999.0
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
 
     with pytest.raises(TrialCheckpointError):
         DurableBaselineRunCache(cache_root, artifacts).get(cache_key)

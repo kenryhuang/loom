@@ -441,13 +441,14 @@ git commit -m "docs: document optimize operations tui"
 Recorded on 2026-07-19:
 
 - Focused optimization and lifecycle regression suite: passed.
-- Full repository suite: `662 passed, 4 skipped`.
+- Full repository suite: `664 passed, 4 skipped`.
 - `uv run ruff format --check src tests`: passed.
 - `uv run ruff check src tests`: passed.
 - Independent review: all Critical findings resolved; final review performed
   after durable control, holdout snapshot, cancellation, LLM-call accounting,
   retry-deduplication, per-trial-side resume checkpoint fixes, durable usage
-  accounting, and checkpoint execution-integrity validation.
+  accounting, checkpoint execution-integrity validation, and TUI teardown
+  timer safety.
 - Reproduction command:
 
   ```bash

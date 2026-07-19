@@ -91,6 +91,16 @@ async def test_operations_dashboard_has_stable_layout_and_renders_collector_stat
 
 
 @pytest.mark.asyncio
+async def test_dashboard_poll_timer_tolerates_widget_teardown():
+    app = OptimizeTuiApp(OptimizeTuiCollector(), OptimizeRunControl())
+
+    async with app.run_test() as pilot:
+        await app.query_one("#optimize-header", Static).remove()
+        await pilot.pause(0.1)
+        assert app.is_running
+
+
+@pytest.mark.asyncio
 async def test_pause_and_confirmed_cancel_use_control_without_auto_exiting():
     collector = OptimizeTuiCollector()
     control = OptimizeRunControl()

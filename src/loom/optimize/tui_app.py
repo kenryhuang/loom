@@ -11,7 +11,9 @@ from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
+from textual.timer import Timer
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from loom.core import Result
@@ -154,6 +156,7 @@ class OptimizeTuiApp(App[None]):
         self._started = asyncio.Event()
         self._started_at = time.monotonic()
         self._rendered_sequence = -1
+        self._poll_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("LOOM OPTIMIZE", id="optimize-header")
@@ -176,23 +179,35 @@ class OptimizeTuiApp(App[None]):
         self.query_one("#event-feed", DataTable).add_columns("#", "Event", "Status", "Scope")
         self._refresh_dashboard(force=True)
         self._started.set()
-        self.set_interval(0.05, self._poll_updates)
+        self._poll_timer = self.set_interval(0.05, self._poll_updates)
+
+    def on_unmount(self) -> None:
+        if self._poll_timer is not None:
+            self._poll_timer.stop()
+            self._poll_timer = None
 
     async def wait_started(self) -> None:
         await self._started.wait()
 
     def _poll_updates(self) -> None:
-        changed = False
         try:
-            while True:
-                self.collector.updates.get_nowait()
-                changed = True
-        except asyncio.QueueEmpty:
-            pass
-        if changed or self.collector.state.sequence != self._rendered_sequence:
-            self._refresh_dashboard()
-        else:
-            self.query_one("#optimize-header", Static).update(_header_text(self.collector.state, time.monotonic() - self._started_at))
+            changed = False
+            try:
+                while True:
+                    self.collector.updates.get_nowait()
+                    changed = True
+            except asyncio.QueueEmpty:
+                pass
+            if changed or self.collector.state.sequence != self._rendered_sequence:
+                self._refresh_dashboard()
+            else:
+                self.query_one("#optimize-header", Static).update(_header_text(self.collector.state, time.monotonic() - self._started_at))
+        except NoMatches:
+            # A timer tick may already be queued while Textual tears down the
+            # screen. Stop polling once the dashboard DOM no longer exists.
+            if self._poll_timer is not None:
+                self._poll_timer.stop()
+                self._poll_timer = None
 
     def _refresh_dashboard(self, *, force: bool = False) -> None:
         state = self.collector.state

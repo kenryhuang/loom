@@ -197,8 +197,8 @@ def test_runner_reuses_baseline_only_for_exact_frozen_conditions():
     task_set = TaskSetRef("tasks", ExperimentPhase.DISCOVERY, _ref("taskset", "6" * 64), "7" * 64)
     plan = TrialPlan((TrialEntry("task-a", 1, 0),))
 
-    asyncio.run(runner.evaluate(_candidate(), task_set, plan, experiment_id="exp-first")).unwrap()
-    asyncio.run(
+    first = asyncio.run(runner.evaluate(_candidate(), task_set, plan, experiment_id="exp-first")).unwrap()
+    second = asyncio.run(
         runner.evaluate(
             replace(_candidate(), candidate_id="other", artifact=_ref("candidate", "0" * 64)),
             task_set,
@@ -207,6 +207,9 @@ def test_runner_reuses_baseline_only_for_exact_frozen_conditions():
         )
     ).unwrap()
     changed = replace(_candidate(), solver_digest="0" * 64)
-    asyncio.run(runner.evaluate(changed, task_set, plan, experiment_id="exp-changed")).unwrap()
+    changed_bundle = asyncio.run(runner.evaluate(changed, task_set, plan, experiment_id="exp-changed")).unwrap()
 
     assert baseline_calls == 2
+    assert first.usage.task_side_runs == 2
+    assert second.usage.task_side_runs == 1
+    assert changed_bundle.usage.task_side_runs == 2

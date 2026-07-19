@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from loom.campaigns.contracts import ArtifactRef
-from loom.campaigns.experiments import TrialExecution, ValidatedCandidate
+from loom.campaigns.experiments import BaselineRunCacheEntry, TrialExecution, ValidatedCandidate
 from loom.campaigns.serialization import canonical_digest, canonical_json_bytes
 from loom.core import Result, err, make_loom_error, ok
 from loom.evaluation import EvaluationConfig, analyze_trace
@@ -26,6 +26,11 @@ from loom.optimize.events import OptimizationEventEmitter, ScopedOptimizationTra
 from loom.optimize.task_sets import PreparedTaskSets, VerifierSpec
 from loom.runtime import CancellationToken
 from loom.tasks import TaskHarness, TaskRequest, TaskRunOptions, run_generic_task
+
+_TRIAL_CHECKPOINT_SCHEMA = "loom.optimization.trial-side-checkpoint.v3"
+_TRIAL_RECEIPT_SCHEMA = "loom.optimization.trial-side-receipt.v1"
+_BASELINE_CHECKPOINT_SCHEMA = "loom.optimization.baseline-run-checkpoint.v3"
+_BASELINE_RECEIPT_SCHEMA = "loom.optimization.baseline-run-receipt.v1"
 
 
 class OptimizeTrialExecutor:
@@ -123,16 +128,24 @@ class OptimizeTrialExecutor:
             return ok(None)
         identity = self._trial_checkpoint_identity(candidate, entry, trial_id, side, prepared)
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if (
-                payload.get("schema_version") != "loom.optimization.trial-side-checkpoint.v2"
-                or payload.get("identity") != identity
-                or payload.get("identity_digest") != canonical_digest(identity)
-            ):
+            pointer = json.loads(path.read_text(encoding="utf-8"))
+            if pointer.get("schema_version") != _TRIAL_CHECKPOINT_SCHEMA:
+                raise ValueError("trial-side checkpoint schema does not match")
+            receipt_ref = ArtifactRef(**pointer["receipt_ref"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            return _trial_checkpoint_error("TRIAL_CHECKPOINT_INVALID", "Trial-side checkpoint is malformed", exc, path=path)
+        verified_receipt = self.artifact_store.read_bytes(receipt_ref, expected_schema=_TRIAL_RECEIPT_SCHEMA)
+        if not verified_receipt.ok:
+            return _trial_checkpoint_error(
+                "TRIAL_CHECKPOINT_EVIDENCE_INVALID",
+                "Trial-side checkpoint receipt is unavailable",
+                path=path,
+            )
+        try:
+            receipt = json.loads(verified_receipt.value)
+            if receipt.get("schema_version") != _TRIAL_RECEIPT_SCHEMA or receipt.get("identity") != identity:
                 raise ValueError("trial-side checkpoint identity does not match")
-            execution = payload["execution"]
-            if payload.get("execution_digest") != canonical_digest(execution):
-                raise ValueError("trial-side checkpoint execution does not match")
+            execution = receipt["execution"]
             evaluation_ref = ArtifactRef(**execution["evaluation_ref"])
             trace_ref = ArtifactRef(**execution["trace_ref"])
             result = TrialExecution.success(
@@ -147,8 +160,8 @@ class OptimizeTrialExecutor:
             )
             if result.trial_id != trial_id or result.side != side:
                 raise ValueError("trial-side checkpoint execution does not match")
-        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-            return _trial_checkpoint_error("TRIAL_CHECKPOINT_INVALID", "Trial-side checkpoint is malformed", exc, path=path)
+        except (UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            return _trial_checkpoint_error("TRIAL_CHECKPOINT_INVALID", "Trial-side checkpoint receipt is malformed", exc, path=path)
         for ref, schema in (
             (evaluation_ref, "loom.evaluation.bundle.v1"),
             (trace_ref, "loom.task-trace.v1"),
@@ -179,15 +192,30 @@ class OptimizeTrialExecutor:
             "cost": result.cost,
             "wall_time_seconds": result.wall_time_seconds,
         }
-        payload = {
-            "schema_version": "loom.optimization.trial-side-checkpoint.v2",
-            "identity_digest": canonical_digest(identity),
+        receipt = {
+            "schema_version": _TRIAL_RECEIPT_SCHEMA,
             "identity": identity,
-            "execution_digest": canonical_digest(execution),
             "execution": execution,
         }
+        published = self.artifact_store.publish_bytes(
+            canonical_json_bytes(receipt),
+            kind="trial_side_receipt",
+            schema_version=_TRIAL_RECEIPT_SCHEMA,
+            suffix=".json",
+        )
+        if not published.ok:
+            return _trial_checkpoint_error(
+                "TRIAL_CHECKPOINT_WRITE_FAILED",
+                "Could not publish completed trial-side receipt",
+                path=path,
+                artifact_error=published.error.code,
+            )
+        pointer = {
+            "schema_version": _TRIAL_CHECKPOINT_SCHEMA,
+            "receipt_ref": asdict(published.value),
+        }
         try:
-            _atomic_write_json(path, payload)
+            _atomic_write_json(path, pointer)
         except OSError as exc:
             return _trial_checkpoint_error("TRIAL_CHECKPOINT_WRITE_FAILED", "Could not persist completed trial side", exc, path=path)
         return ok(None)
@@ -479,9 +507,9 @@ class DurableBaselineRunCache:
     def __init__(self, root: str | Path, artifact_store):
         self.root = Path(root).resolve()
         self.artifact_store = artifact_store
-        self._items: dict[str, TrialExecution] = {}
+        self._items: dict[str, BaselineRunCacheEntry] = {}
 
-    def get(self, key: str) -> TrialExecution | None:
+    def get(self, key: str) -> BaselineRunCacheEntry | None:
         cached = self._items.get(key)
         if cached is not None:
             return cached
@@ -489,12 +517,31 @@ class DurableBaselineRunCache:
         if not path.is_file():
             return None
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if payload.get("schema_version") != "loom.optimization.baseline-run-checkpoint.v2" or payload.get("cache_key") != key:
+            pointer = json.loads(path.read_text(encoding="utf-8"))
+            if pointer.get("schema_version") != _BASELINE_CHECKPOINT_SCHEMA:
+                raise ValueError("baseline checkpoint schema does not match")
+            receipt_ref = ArtifactRef(**pointer["receipt_ref"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise TrialCheckpointError(
+                _trial_checkpoint_error("BASELINE_CHECKPOINT_INVALID", "Durable baseline checkpoint is malformed", exc, path=path).error
+            ) from exc
+        verified_receipt = self.artifact_store.read_bytes(receipt_ref, expected_schema=_BASELINE_RECEIPT_SCHEMA)
+        if not verified_receipt.ok:
+            raise TrialCheckpointError(
+                _trial_checkpoint_error(
+                    "BASELINE_CHECKPOINT_EVIDENCE_INVALID",
+                    "Durable baseline checkpoint receipt is unavailable",
+                    path=path,
+                ).error
+            )
+        try:
+            receipt = json.loads(verified_receipt.value)
+            if receipt.get("schema_version") != _BASELINE_RECEIPT_SCHEMA or receipt.get("cache_key") != key:
                 raise ValueError("baseline checkpoint identity does not match")
-            execution = payload["execution"]
-            if payload.get("execution_digest") != canonical_digest(execution):
-                raise ValueError("baseline checkpoint execution does not match")
+            source_experiment_id = receipt["source_experiment_id"]
+            if not isinstance(source_experiment_id, str) or not source_experiment_id:
+                raise ValueError("baseline checkpoint source experiment is invalid")
+            execution = receipt["execution"]
             evaluation_ref = ArtifactRef(**execution["evaluation_ref"])
             trace_ref = ArtifactRef(**execution["trace_ref"])
             result = TrialExecution.success(
@@ -507,9 +554,9 @@ class DurableBaselineRunCache:
                 cost=execution["cost"],
                 wall_time_seconds=execution["wall_time_seconds"],
             )
-        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        except (UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise TrialCheckpointError(
-                _trial_checkpoint_error("BASELINE_CHECKPOINT_INVALID", "Durable baseline checkpoint is malformed", exc, path=path).error
+                _trial_checkpoint_error("BASELINE_CHECKPOINT_INVALID", "Durable baseline checkpoint receipt is malformed", exc, path=path).error
             ) from exc
         for ref, schema in (
             (evaluation_ref, "loom.evaluation.bundle.v1"),
@@ -523,12 +570,15 @@ class DurableBaselineRunCache:
                         path=path,
                     ).error
                 )
-        self._items[key] = result
-        return result
+        cached = BaselineRunCacheEntry(result, source_experiment_id)
+        self._items[key] = cached
+        return cached
 
-    def put(self, key: str, value: TrialExecution) -> None:
+    def put(self, key: str, value: TrialExecution, *, source_experiment_id: str) -> None:
         if value.failure_kind is not None:
             return
+        if not source_experiment_id:
+            raise TrialCheckpointError(_trial_checkpoint_error("BASELINE_CHECKPOINT_INVALID", "Baseline source experiment ID is required").error)
         if value.evaluation_ref is None or value.trace_ref is None:
             raise TrialCheckpointError(_trial_checkpoint_error("BASELINE_CHECKPOINT_INVALID", "Successful baseline evidence is missing").error)
         path = self.root / f"{key}.json"
@@ -541,21 +591,40 @@ class DurableBaselineRunCache:
             "cost": value.cost,
             "wall_time_seconds": value.wall_time_seconds,
         }
+        receipt = {
+            "schema_version": _BASELINE_RECEIPT_SCHEMA,
+            "cache_key": key,
+            "source_experiment_id": source_experiment_id,
+            "execution": execution,
+        }
+        published = self.artifact_store.publish_bytes(
+            canonical_json_bytes(receipt),
+            kind="baseline_run_receipt",
+            schema_version=_BASELINE_RECEIPT_SCHEMA,
+            suffix=".json",
+        )
+        if not published.ok:
+            raise TrialCheckpointError(
+                _trial_checkpoint_error(
+                    "BASELINE_CHECKPOINT_WRITE_FAILED",
+                    "Could not publish durable baseline receipt",
+                    path=path,
+                    artifact_error=published.error.code,
+                ).error
+            )
         try:
             _atomic_write_json(
                 path,
                 {
-                    "schema_version": "loom.optimization.baseline-run-checkpoint.v2",
-                    "cache_key": key,
-                    "execution_digest": canonical_digest(execution),
-                    "execution": execution,
+                    "schema_version": _BASELINE_CHECKPOINT_SCHEMA,
+                    "receipt_ref": asdict(published.value),
                 },
             )
         except OSError as exc:
             raise TrialCheckpointError(
                 _trial_checkpoint_error("BASELINE_CHECKPOINT_WRITE_FAILED", "Could not persist baseline run", exc, path=path).error
             ) from exc
-        self._items[key] = value
+        self._items[key] = BaselineRunCacheEntry(value, source_experiment_id)
 
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:

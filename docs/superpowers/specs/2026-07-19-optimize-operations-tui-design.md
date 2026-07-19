@@ -357,6 +357,15 @@ orchestrator still validates its stored operation input digest and output before
 emitting `optimization.stage.replayed`. The TUI therefore cannot cause or mask
 an invalid replay.
 
+Each successful trial side is sealed as an identity-bound receipt in the
+verified content-addressed campaign artifact store. The resumable checkpoint
+contains only that receipt's `ArtifactRef`; restore verifies the receipt schema,
+exact trial identity, execution contract, and referenced trace/evaluation
+artifacts before reuse. Durable baseline receipts also record the source
+experiment ID: a same-experiment resume restores the usage incurred before its
+bundle was published, while a later cross-experiment cache hit consumes no new
+task-side run.
+
 ## Pause and Cancellation Checkpoints
 
 Pause state currently exists in the optimization store but the orchestrator

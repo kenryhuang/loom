@@ -123,6 +123,16 @@ class TrialExecution:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class BaselineRunCacheEntry:
+    execution: TrialExecution
+    source_experiment_id: str
+
+    def __post_init__(self) -> None:
+        if not self.source_experiment_id:
+            raise ValueError("Baseline cache source experiment ID is required")
+
+
 class BaselineRunCache:
     """In-memory adapter for exact-condition baseline reuse.
 
@@ -131,14 +141,14 @@ class BaselineRunCache:
     """
 
     def __init__(self) -> None:
-        self._items: dict[str, TrialExecution] = {}
+        self._items: dict[str, BaselineRunCacheEntry] = {}
 
-    def get(self, key: str) -> TrialExecution | None:
+    def get(self, key: str) -> BaselineRunCacheEntry | None:
         return self._items.get(key)
 
-    def put(self, key: str, value: TrialExecution) -> None:
+    def put(self, key: str, value: TrialExecution, *, source_experiment_id: str) -> None:
         if value.failure_kind is None:
-            self._items[key] = value
+            self._items[key] = BaselineRunCacheEntry(value, source_experiment_id)
 
 
 class PairedExperimentRunner:
@@ -183,19 +193,22 @@ class PairedExperimentRunner:
             results: dict[str, TrialExecution] = {}
             for side in order:
                 cache_key = _baseline_cache_key(candidate, task_set, entry)
-                result = None if side != "baseline" or self.baseline_cache is None else self.baseline_cache.get(cache_key)
+                cached = None if side != "baseline" or self.baseline_cache is None else self.baseline_cache.get(cache_key)
+                result = None if cached is None else cached.execution
+                charge_usage = cached is None or cached.source_experiment_id == experiment_id
                 if result is None:
                     result = await self._execute_with_retry(side, candidate, entry, trial_id)
                     if side == "baseline" and self.baseline_cache is not None:
-                        self.baseline_cache.put(cache_key, result)
-                # The bundle accounts for every run whose evidence it uses.
-                # A durable cache avoids repeating provider calls on resume,
-                # but does not make the already-incurred run free.
-                usage_task_side_runs += result.task_side_runs
-                usage_retry_task_side_runs += result.infrastructure_retry_task_side_runs
-                usage_solver_tokens += result.solver_tokens
-                usage_cost += Decimal(result.cost)
-                usage_wall_time_seconds += result.wall_time_seconds
+                        self.baseline_cache.put(cache_key, result, source_experiment_id=experiment_id)
+                if charge_usage:
+                    # A same-experiment resume restores costs that were incurred
+                    # before its bundle was published. Cross-experiment hits are
+                    # already accounted by their source experiment.
+                    usage_task_side_runs += result.task_side_runs
+                    usage_retry_task_side_runs += result.infrastructure_retry_task_side_runs
+                    usage_solver_tokens += result.solver_tokens
+                    usage_cost += Decimal(result.cost)
+                    usage_wall_time_seconds += result.wall_time_seconds
                 results[side] = result
                 if result.failure_kind is not None:
                     failures.append(ExperimentFailure(trial_id, side, result.failure_kind, result.failure_code or "UNKNOWN", False, result.failure_code or ""))
@@ -620,6 +633,7 @@ def _percentile_interval(values: list[float], confidence_level: float) -> tuple[
 __all__ = [
     "PairedExperimentRunner",
     "BaselineRunCache",
+    "BaselineRunCacheEntry",
     "TrialExecution",
     "ValidatedCandidate",
     "aggregate_paired_metric",
