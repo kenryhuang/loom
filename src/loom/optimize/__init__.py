@@ -11,6 +11,7 @@ from loom.optimize.contracts import (
     OptimizationState,
 )
 from loom.optimize.proposer import LoomNativeProposerAdapter
+from loom.optimize.trial_executor import OptimizeTrialExecutor
 
 __all__ = [
     "LoadedOptimizeConfig",
@@ -21,5 +22,6 @@ __all__ = [
     "OptimizationSpec",
     "OptimizationStage",
     "OptimizationState",
+    "OptimizeTrialExecutor",
     "load_optimize_config",
 ]
