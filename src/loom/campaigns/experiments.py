@@ -184,17 +184,18 @@ class PairedExperimentRunner:
             for side in order:
                 cache_key = _baseline_cache_key(candidate, task_set, entry)
                 result = None if side != "baseline" or self.baseline_cache is None else self.baseline_cache.get(cache_key)
-                cache_hit = result is not None
                 if result is None:
                     result = await self._execute_with_retry(side, candidate, entry, trial_id)
                     if side == "baseline" and self.baseline_cache is not None:
                         self.baseline_cache.put(cache_key, result)
-                if not cache_hit:
-                    usage_task_side_runs += result.task_side_runs
-                    usage_retry_task_side_runs += result.infrastructure_retry_task_side_runs
-                    usage_solver_tokens += result.solver_tokens
-                    usage_cost += Decimal(result.cost)
-                    usage_wall_time_seconds += result.wall_time_seconds
+                # The bundle accounts for every run whose evidence it uses.
+                # A durable cache avoids repeating provider calls on resume,
+                # but does not make the already-incurred run free.
+                usage_task_side_runs += result.task_side_runs
+                usage_retry_task_side_runs += result.infrastructure_retry_task_side_runs
+                usage_solver_tokens += result.solver_tokens
+                usage_cost += Decimal(result.cost)
+                usage_wall_time_seconds += result.wall_time_seconds
                 results[side] = result
                 if result.failure_kind is not None:
                     failures.append(ExperimentFailure(trial_id, side, result.failure_kind, result.failure_code or "UNKNOWN", False, result.failure_code or ""))

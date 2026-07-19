@@ -20,7 +20,7 @@ from loom.llm import LlmResponse, TokenUsage
 from loom.optimize.control import OptimizeControlInterrupt, OptimizeRunControl
 from loom.optimize.events import OptimizationEventEmitter
 from loom.optimize.task_sets import OptimizeTask, PreparedTask, VerifierSpec, WorkspaceSnapshot
-from loom.optimize.trial_executor import OptimizeTrialExecutor
+from loom.optimize.trial_executor import DurableBaselineRunCache, OptimizeTrialExecutor, TrialCheckpointError
 from loom.tasks import TaskHarness
 
 
@@ -100,6 +100,7 @@ def _executor(
     event_emitter=None,
     control=None,
     verifier_code: str | None = None,
+    checkpoint_root: Path | None = None,
 ):
     tasks, entry = _prepared_task(tmp_path, verifier_exit=verifier_exit, verifier_code=verifier_code)
     solver = provider or RecordingSolverProvider()
@@ -121,6 +122,7 @@ def _executor(
         event_emitter=event_emitter,
         event_scope={"phase": "discovery", "experiment_id": "exp_test"},
         control=control,
+        checkpoint_root=checkpoint_root,
     )
     return executor, solver, artifacts, entry
 
@@ -181,6 +183,39 @@ async def test_trial_executor_emits_scoped_trial_and_nested_runtime_events(tmp_p
     }
     assert any(event["type"] == "optimization.runtime.event" for event in observer.events)
     assert any(event["type"] == "optimization.trial.completed" for event in observer.events)
+
+
+@pytest.mark.asyncio
+async def test_trial_executor_rejects_tampered_trial_side_checkpoint(tmp_path: Path):
+    checkpoint_root = tmp_path / "checkpoints"
+    executor, _provider, _artifacts, entry = _executor(tmp_path, checkpoint_root=checkpoint_root)
+
+    result = await executor.execute("candidate", _candidate(), entry, "trial-checkpoint")
+    assert result.failure_kind is None
+    checkpoint = next(checkpoint_root.glob("*.json"))
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    payload["execution"]["metrics"]["task_success_rate"] = 999.0
+    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(TrialCheckpointError):
+        await executor.execute("candidate", _candidate(), entry, "trial-checkpoint")
+
+
+@pytest.mark.asyncio
+async def test_durable_baseline_cache_rejects_tampered_execution(tmp_path: Path):
+    executor, _provider, artifacts, entry = _executor(tmp_path)
+    result = await executor.execute("baseline", _candidate(), entry, "trial-baseline")
+    assert result.failure_kind is None
+    cache_root = tmp_path / "baseline-cache"
+    cache_key = "a" * 64
+    DurableBaselineRunCache(cache_root, artifacts).put(cache_key, result)
+    checkpoint = cache_root / f"{cache_key}.json"
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    payload["execution"]["metrics"]["task_success_rate"] = 999.0
+    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(TrialCheckpointError):
+        DurableBaselineRunCache(cache_root, artifacts).get(cache_key)
 
 
 @pytest.mark.asyncio

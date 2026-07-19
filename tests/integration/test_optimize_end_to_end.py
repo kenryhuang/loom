@@ -473,6 +473,13 @@ async def test_pause_after_completed_pair_resumes_without_repeating_paid_trial_s
     assert len(providers["proposer"].messages) == 1
     trial_checkpoints = list(output.glob("opt_*/evidence/trial-sides/**/*.json"))
     assert len(trial_checkpoints) == 54
+    discovery_checkpoint = next(output.glob("opt_*/evidence/experiments/discovery/*.json"))
+    experiment_pointer = json.loads(discovery_checkpoint.read_text(encoding="utf-8"))
+    experiment_ref = experiment_pointer["experiment_ref"]
+    experiment_artifact = discovery_checkpoint.parents[3] / "campaign" / "artifacts" / experiment_ref["relative_path"]
+    experiment = json.loads(experiment_artifact.read_text(encoding="utf-8"))["bundle"]
+    assert experiment["usage"]["task_side_runs"] == 30
+    assert experiment["usage"]["solver_tokens"] == 150
 
 
 @pytest.mark.asyncio

@@ -124,9 +124,15 @@ class OptimizeTrialExecutor:
         identity = self._trial_checkpoint_identity(candidate, entry, trial_id, side, prepared)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            if payload.get("schema_version") != "loom.optimization.trial-side-checkpoint.v1" or payload.get("identity_digest") != canonical_digest(identity):
+            if (
+                payload.get("schema_version") != "loom.optimization.trial-side-checkpoint.v2"
+                or payload.get("identity") != identity
+                or payload.get("identity_digest") != canonical_digest(identity)
+            ):
                 raise ValueError("trial-side checkpoint identity does not match")
             execution = payload["execution"]
+            if payload.get("execution_digest") != canonical_digest(execution):
+                raise ValueError("trial-side checkpoint execution does not match")
             evaluation_ref = ArtifactRef(**execution["evaluation_ref"])
             trace_ref = ArtifactRef(**execution["trace_ref"])
             result = TrialExecution.success(
@@ -163,20 +169,22 @@ class OptimizeTrialExecutor:
             return _trial_checkpoint_error("TRIAL_CHECKPOINT_INVALID", "Successful trial-side evidence is missing")
         identity = self._trial_checkpoint_identity(candidate, entry, result.trial_id, result.side, prepared)
         path = self._trial_checkpoint_path(result.trial_id, result.side)
+        execution = {
+            "trial_id": result.trial_id,
+            "side": result.side,
+            "metrics": dict(result.metrics),
+            "evaluation_ref": asdict(result.evaluation_ref),
+            "trace_ref": asdict(result.trace_ref),
+            "solver_tokens": result.solver_tokens,
+            "cost": result.cost,
+            "wall_time_seconds": result.wall_time_seconds,
+        }
         payload = {
-            "schema_version": "loom.optimization.trial-side-checkpoint.v1",
+            "schema_version": "loom.optimization.trial-side-checkpoint.v2",
             "identity_digest": canonical_digest(identity),
             "identity": identity,
-            "execution": {
-                "trial_id": result.trial_id,
-                "side": result.side,
-                "metrics": dict(result.metrics),
-                "evaluation_ref": asdict(result.evaluation_ref),
-                "trace_ref": asdict(result.trace_ref),
-                "solver_tokens": result.solver_tokens,
-                "cost": result.cost,
-                "wall_time_seconds": result.wall_time_seconds,
-            },
+            "execution_digest": canonical_digest(execution),
+            "execution": execution,
         }
         try:
             _atomic_write_json(path, payload)
@@ -482,9 +490,11 @@ class DurableBaselineRunCache:
             return None
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            if payload.get("schema_version") != "loom.optimization.baseline-run-checkpoint.v1" or payload.get("cache_key") != key:
+            if payload.get("schema_version") != "loom.optimization.baseline-run-checkpoint.v2" or payload.get("cache_key") != key:
                 raise ValueError("baseline checkpoint identity does not match")
             execution = payload["execution"]
+            if payload.get("execution_digest") != canonical_digest(execution):
+                raise ValueError("baseline checkpoint execution does not match")
             evaluation_ref = ArtifactRef(**execution["evaluation_ref"])
             trace_ref = ArtifactRef(**execution["trace_ref"])
             result = TrialExecution.success(
@@ -522,21 +532,23 @@ class DurableBaselineRunCache:
         if value.evaluation_ref is None or value.trace_ref is None:
             raise TrialCheckpointError(_trial_checkpoint_error("BASELINE_CHECKPOINT_INVALID", "Successful baseline evidence is missing").error)
         path = self.root / f"{key}.json"
+        execution = {
+            "trial_id": value.trial_id,
+            "metrics": dict(value.metrics),
+            "evaluation_ref": asdict(value.evaluation_ref),
+            "trace_ref": asdict(value.trace_ref),
+            "solver_tokens": value.solver_tokens,
+            "cost": value.cost,
+            "wall_time_seconds": value.wall_time_seconds,
+        }
         try:
             _atomic_write_json(
                 path,
                 {
-                    "schema_version": "loom.optimization.baseline-run-checkpoint.v1",
+                    "schema_version": "loom.optimization.baseline-run-checkpoint.v2",
                     "cache_key": key,
-                    "execution": {
-                        "trial_id": value.trial_id,
-                        "metrics": dict(value.metrics),
-                        "evaluation_ref": asdict(value.evaluation_ref),
-                        "trace_ref": asdict(value.trace_ref),
-                        "solver_tokens": value.solver_tokens,
-                        "cost": value.cost,
-                        "wall_time_seconds": value.wall_time_seconds,
-                    },
+                    "execution_digest": canonical_digest(execution),
+                    "execution": execution,
                 },
             )
         except OSError as exc:
