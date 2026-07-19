@@ -173,6 +173,31 @@ models, snapshots workspaces, checks provenance and contamination, freezes the
 three task sets, estimates the campaign, and prints the stable optimization ID
 without calling a proposer, solver, or judge:
 
+`--tui` opens the full-screen Operations Dashboard before any model call. It
+keeps the pipeline, candidate/paired-trial progress, live nested task events,
+budget consumption, sealed holdout status, and governance state visible at the
+same time. The dashboard is a projection of the durable SQLite and artifact
+state; it does not replace campaign evidence or alter model streaming.
+
+TUI controls:
+
+- `q` detaches the dashboard while the optimization keeps running and falls
+  back to concise text progress.
+- `p` requests a durable pause at the next safe stage checkpoint.
+- `c` requests cancellation after an explicit confirmation; the resulting
+  paused optimization remains resumable.
+- `a` submits the stored governance approval when the local campaign is in
+  `awaiting_approval`.
+- Arrow keys or `j`/`k` move through candidates; `y` and `Y` copy event detail
+  or the bounded event window.
+
+The dashboard remains open on completion so the result can be inspected; press
+`q` to return to the shell. Exit code `0` means a normal terminal result, `2`
+means governance is awaiting approval, `3` means the run was durably paused,
+and `1` is a failure. Re-run the identical command after a pause to load a
+snapshot, replay completed stages, and continue at the next unfinished durable
+operation.
+
 ```bash
 uv run loom optimize \
   --trace runs/seed.jsonl \

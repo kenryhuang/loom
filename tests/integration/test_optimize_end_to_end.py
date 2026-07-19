@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import io
 import json
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pytest
+
 from loom.core import err, make_loom_error, ok
 from loom.evaluation.judge import ROUND_JUDGE_DIMENSIONS
 from loom.llm import LlmResponse, TokenUsage
+from loom.optimize.cli import OptimizeCliOptions, run_optimize
 from loom.optimize.cli import main as optimize_main
+from loom.optimize.tui_state import OptimizeTuiCollector
+from loom.optimize.ui import JsonObserver, OptimizeTuiObserver
 
 
 @dataclass
@@ -394,6 +400,8 @@ def test_optimize_command_resumes_without_repeating_completed_model_calls(tmp_pa
     assert optimize_main(command) == 0
     captured = capsys.readouterr()
     assert '"disposition":"promoted"' in captured.out
+    assert '"type":"optimization.snapshot.loaded"' in captured.out
+    assert '"type":"optimization.stage.replayed"' in captured.out
     all_judge_calls = [tuple(message.content for message in call) for call in providers["judge"].messages]
     assert all(all_judge_calls.count(call) == 1 for call in completed_seed_calls)
     proposer_context = "\n".join(message.content or "" for call in providers["proposer"].messages for message in call)
@@ -405,6 +413,57 @@ def test_optimize_command_resumes_without_repeating_completed_model_calls(tmp_pa
     assert optimize_main(command) == 0
     capsys.readouterr()
     assert {role: len(provider.messages) for role, provider in providers.items()} == ledger
+
+
+@pytest.mark.asyncio
+async def test_tui_and_json_modes_receive_equivalent_safe_end_to_end_event_streams(tmp_path: Path, monkeypatch):
+    async def execute(root: Path, observer, *, tui: bool, json_output: bool):
+        root.mkdir()
+        trace, tasks, config = _build_fixture(root)
+        providers = {role: FakeProvider(role) for role in ("proposer", "solver", "judge")}
+
+        def fake_provider_factory(task_config, *, model_name=None, **kwargs):
+            del task_config, kwargs
+            return ok(providers[model_name])
+
+        monkeypatch.setattr("loom.optimize.runtime.create_provider_from_task_config", fake_provider_factory)
+        result = await run_optimize(
+            OptimizeCliOptions(
+                "run",
+                trace=trace,
+                tasks=tasks,
+                config=config,
+                tui=tui,
+                json=json_output,
+                output_dir=root / "runs",
+            ),
+            observer=observer,
+        )
+        return result
+
+    collector = OptimizeTuiCollector()
+    tui_result = await execute(tmp_path / "tui", OptimizeTuiObserver(collector), tui=True, json_output=False)
+    json_stream = io.StringIO()
+    json_result = await execute(tmp_path / "json", JsonObserver(json_stream), tui=False, json_output=True)
+    json_events = [json.loads(line) for line in json_stream.getvalue().splitlines()]
+
+    assert tui_result.ok and json_result.ok
+    assert tui_result.value.disposition == json_result.value.disposition
+    assert [event["type"] for event in collector.state.recent_events] == [event["type"] for event in json_events]
+    assert any(event["type"] == "optimization.candidate.admitted" for event in json_events)
+    assert any(event["type"] == "optimization.trial.started" for event in json_events)
+    forbidden = {"task", "workspace", "expected_output", "verifier", "score", "judge_rationale", "rationale"}
+    for event in json_events:
+        if event.get("scope", {}).get("phase") == "holdout" or event["type"].startswith("optimization.holdout"):
+            assert not forbidden.intersection(_nested_keys(event["payload"]))
+
+
+def _nested_keys(value):
+    if isinstance(value, dict):
+        return set(value).union(*(_nested_keys(item) for item in value.values()))
+    if isinstance(value, list):
+        return set().union(*(_nested_keys(item) for item in value)) if value else set()
+    return set()
 
 
 def test_optimize_resume_reuses_completed_seed_evaluation(tmp_path: Path, monkeypatch, capsys):

@@ -1,6 +1,6 @@
 # Optimize Operations TUI Design
 
-**Status:** Design approved; written specification pending review  
+**Status:** Implemented and verified
 **Date:** 2026-07-19  
 **Extends:** `2026-07-19-meta-harness-optimize-command-design.md`
 
@@ -17,6 +17,11 @@ machine. SQLite stores, campaign artifacts, task traces, and governance
 evidence remain authoritative. Selecting `--tui` must not change provider
 streaming, candidate policy, evaluation, holdout isolation, or promotion
 semantics.
+
+Implementation verification on 2026-07-19 covered the full repository: 644
+tests passed, 4 optional tests were skipped, and Ruff format/static checks were
+clean. The implementation lives in `loom.optimize.events`, `control`,
+`tui_state`, `tui_app`, and `tui_runner`, with runtime/orchestrator integration.
 
 ## Problem
 

@@ -180,7 +180,7 @@ def _run_parser() -> argparse.ArgumentParser:
     parser.add_argument("--holdout-tasks", type=Path)
     parser.add_argument("--config", required=True, type=Path, help="Loom config containing meta_harness.")
     output = parser.add_mutually_exclusive_group()
-    output.add_argument("--tui", action="store_true", help="Observe committed stages in a TUI.")
+    output.add_argument("--tui", action="store_true", help="Open the live Optimize Operations Dashboard.")
     output.add_argument("--json", action="store_true", help="Emit JSON events and final result.")
     parser.add_argument("--dry-run", action="store_true", help="Validate all inputs without model or campaign calls.")
     parser.add_argument("--new-run", action="store_true", help="Create a new optimization identity instead of resuming identical inputs.")
