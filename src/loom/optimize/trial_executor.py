@@ -16,6 +16,7 @@ from loom.campaigns.experiments import TrialExecution, ValidatedCandidate
 from loom.core import Result, make_loom_error
 from loom.evaluation import EvaluationConfig, analyze_trace
 from loom.evaluation.experiments import TrialEntry
+from loom.optimize.events import OptimizationEventEmitter, ScopedOptimizationTraceSink
 from loom.optimize.task_sets import PreparedTaskSets, VerifierSpec
 from loom.tasks import TaskHarness, TaskRequest, TaskRunOptions, run_generic_task
 
@@ -32,6 +33,8 @@ class OptimizeTrialExecutor:
         judge_provider: Any | None = None,
         trial_timeout_seconds: int = 900,
         verifier_timeout_seconds: int = 120,
+        event_emitter: OptimizationEventEmitter | None = None,
+        event_scope: Mapping[str, Any] | None = None,
     ):
         if trial_timeout_seconds < 1 or verifier_timeout_seconds < 1:
             raise ValueError("Trial and verifier timeouts must be positive")
@@ -43,6 +46,8 @@ class OptimizeTrialExecutor:
         self.candidate_harnesses = dict(candidate_harnesses)
         self.trial_timeout_seconds = trial_timeout_seconds
         self.verifier_timeout_seconds = verifier_timeout_seconds
+        self.event_emitter = event_emitter
+        self.event_scope = dict(event_scope or {})
         self._attempts: dict[tuple[str, str], int] = {}
         self._workspaces: dict[tuple[str, str], Path] = {}
 
@@ -55,6 +60,43 @@ class OptimizeTrialExecutor:
         candidate: ValidatedCandidate,
         entry: TrialEntry,
         trial_id: str,
+    ) -> TrialExecution:
+        prepared = self.prepared_tasks.task_by_fingerprint.get(entry.task_fingerprint)
+        scope = {
+            **self.event_scope,
+            "candidate_id": candidate.candidate_id,
+            "trial_id": trial_id,
+            "side": side,
+            "task_id": entry.task_fingerprint if prepared is None else prepared.task.task_id,
+            "repetition": entry.repetition,
+        }
+        await self._emit("optimization.trial.started", "running", scope, {})
+        result = await self._execute_once(side, candidate, entry, trial_id, scope)
+        status = "failed" if result.failure_kind is not None else "completed"
+        await self._emit(
+            f"optimization.trial.{status}",
+            status,
+            scope,
+            {
+                "failure_kind": result.failure_kind,
+                "failure_code": result.failure_code,
+                "solver_tokens": result.solver_tokens,
+                "cost": result.cost,
+                "wall_time_seconds": result.wall_time_seconds,
+                # Holdout task-level metrics stay sealed.  The dashboard only
+                # receives aggregate experiment status for that phase.
+                "metrics": {} if scope.get("phase") == "holdout" else result.metrics,
+            },
+        )
+        return result
+
+    async def _execute_once(
+        self,
+        side: str,
+        candidate: ValidatedCandidate,
+        entry: TrialEntry,
+        trial_id: str,
+        event_scope: Mapping[str, Any],
     ) -> TrialExecution:
         started = time.monotonic()
         if side not in {"baseline", "candidate"}:
@@ -82,6 +124,15 @@ class OptimizeTrialExecutor:
             risk_level=task.risk_level,
             metadata=task.metadata,
         )
+        trace_sink = (
+            None
+            if self.event_emitter is None
+            else ScopedOptimizationTraceSink(
+                self.event_emitter,
+                stage=_stage_for_phase(str(event_scope.get("phase", "discovery"))),
+                scope=event_scope,
+            )
+        )
         try:
             run_result = await asyncio.wait_for(
                 run_generic_task(
@@ -92,6 +143,7 @@ class OptimizeTrialExecutor:
                         timeout_ms=self.trial_timeout_seconds * 1000,
                     ),
                     harness=harness,
+                    trace_sink=trace_sink,
                 ),
                 timeout=self.trial_timeout_seconds,
             )
@@ -117,6 +169,7 @@ class OptimizeTrialExecutor:
                     judge=self.judge_provider is not None,
                 ),
                 judge_provider=self.judge_provider,
+                event_sink=trace_sink,
             )
         except Exception:
             return self._infrastructure(trial_id, side, "EVALUATION_FAILED", started)
@@ -158,6 +211,17 @@ class OptimizeTrialExecutor:
             trace_ref.value,
             solver_tokens=total_tokens,
             wall_time_seconds=max(0, math.ceil(elapsed_ms / 1000)),
+        )
+
+    async def _emit(self, event_type: str, status: str, scope: Mapping[str, Any], payload: Mapping[str, Any]) -> None:
+        if self.event_emitter is None:
+            return
+        await self.event_emitter.emit(
+            event_type,
+            stage=_stage_for_phase(str(scope.get("phase", "discovery"))),
+            status=status,
+            scope=scope,
+            payload=payload,
         )
 
     def _materialize_workspace(self, trial_id: str, side: str, snapshot: Path) -> Path | str:
@@ -226,6 +290,14 @@ def _total_tokens(metrics) -> int:
         if metric.name == "cost.total_tokens" and isinstance(metric.value, int | float) and not isinstance(metric.value, bool):
             return max(0, int(metric.value))
     return 0
+
+
+def _stage_for_phase(phase: str) -> str:
+    return {
+        "discovery": "search_running",
+        "validation": "validation_complete",
+        "holdout": "holdout_complete",
+    }.get(phase, "search_running")
 
 
 __all__ = ["OptimizeTrialExecutor"]

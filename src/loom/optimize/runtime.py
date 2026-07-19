@@ -65,6 +65,7 @@ from loom.evolution import AnalyzeConfig
 from loom.evolution import analyze_trace as analyze_evolution_trace
 from loom.optimize.config import load_optimize_config
 from loom.optimize.contracts import LoadedOptimizeConfig, OptimizationResult, OptimizationSpec
+from loom.optimize.events import OptimizationEventEmitter
 from loom.optimize.governance import (
     GovernanceInputs,
     OptimizeGovernanceComposer,
@@ -154,6 +155,7 @@ class DefaultOptimizeCampaignServices:
         proposer_provider: Any,
         solver_provider: Any,
         judge_provider: Any,
+        event_emitter: OptimizationEventEmitter | None = None,
     ):
         self.loaded = loaded
         self.root = root
@@ -167,6 +169,7 @@ class DefaultOptimizeCampaignServices:
         self.proposer_provider = proposer_provider
         self.solver_provider = solver_provider
         self.judge_provider = judge_provider
+        self.event_emitter = event_emitter
         self.baseline_harness = _baseline_harness(loaded)
         self.compiler = DeclarativePatchCompiler(_surface_definitions(self.baseline_harness))
         self.controller = CampaignController(
@@ -183,6 +186,7 @@ class DefaultOptimizeCampaignServices:
         self.holdout_results_ref: ArtifactRef | None = None
         self.holdout_experiment_refs: tuple[ArtifactRef, ...] = ()
         self._baseline_cache = BaselineRunCache()
+        self._budget_usage = {"candidates": 0, "llm_calls": 0, "tokens": 0, "cost": Decimal("0"), "wall_time_seconds": 0}
 
     def contract(self) -> OptimizeCampaignServices:
         return OptimizeCampaignServices(
@@ -343,9 +347,26 @@ class DefaultOptimizeCampaignServices:
         async def evaluate(draft, candidate_id):
             return await self._evaluate_draft(draft, candidate_id, workspace, ExperimentPhase.DISCOVERY)
 
+        await self._emit_event(
+            "optimization.proposal.started",
+            stage="search_running",
+            status="running",
+            scope={"phase": "discovery", "iteration": iteration},
+            payload={"max_candidates": self.loaded.meta.search.candidates_per_iteration},
+        )
         result = await self.controller.run_iteration(iteration, self.proposer, self.history, workspace, evaluate)
         if not result.ok:
             return result
+        for candidate_id in result.value:
+            await self._emit_event(
+                "optimization.candidate.admitted",
+                stage="search_running",
+                status="completed",
+                scope={"phase": "discovery", "iteration": iteration, "candidate_id": candidate_id},
+                payload={},
+            )
+        self._budget_usage["candidates"] = len(self.candidates)
+        await self._emit_budget("search_running", {"phase": "discovery", "iteration": iteration})
         return ok({"candidate_ids": result.value})
 
     async def seal_search(self, candidate_ids: tuple[str, ...]) -> Result:
@@ -356,6 +377,12 @@ class DefaultOptimizeCampaignServices:
         )
         if not sealed.ok:
             return sealed
+        await self._emit_event(
+            "optimization.frontier.updated",
+            stage="search_sealed",
+            status="completed",
+            payload={"candidate_ids": sealed.value.validation_entrants, "frontier_digest": sealed.value.frontier_digest},
+        )
         return ok(
             {
                 "entrant_ids": sealed.value.validation_entrants,
@@ -416,6 +443,13 @@ class DefaultOptimizeCampaignServices:
         )
 
     async def holdout(self, finalist_ids: tuple[str, ...]) -> Result:
+        await self._emit_event(
+            "optimization.holdout.status",
+            stage="holdout_complete",
+            status="running",
+            scope={"phase": "holdout"},
+            payload={"state": "opened", "finalist_ids": finalist_ids, "finalist_count": len(finalist_ids)},
+        )
         refs = []
         for candidate_id in finalist_ids:
             experiment = await self._run_experiment(candidate_id, ExperimentPhase.HOLDOUT)
@@ -436,6 +470,13 @@ class DefaultOptimizeCampaignServices:
             return summary
         self.holdout_results_ref = phase.value
         self.holdout_experiment_refs = tuple(refs)
+        await self._emit_event(
+            "optimization.holdout.status",
+            stage="holdout_complete",
+            status="completed",
+            scope={"phase": "holdout"},
+            payload={"state": "completed", "evaluated_ids": finalist_ids, "evidence_ref_count": len(refs) + 1},
+        )
         return ok(
             {
                 "evaluated_ids": finalist_ids,
@@ -633,6 +674,17 @@ class DefaultOptimizeCampaignServices:
             return restored
         if restored.value is not None:
             return ok(restored.value)
+        experiment_id = prefixed_id_from_digest(
+            "exp_",
+            canonical_digest(
+                {
+                    "campaign_id": self.spec.campaign_id,
+                    "candidate_id": candidate_id,
+                    "phase": phase.value,
+                    "task_set": task_set.fingerprint_digest,
+                }
+            ),
+        )
         plan = freeze_trial_plan(self.store, task_set, repetitions=self.loaded.meta.tasks.repetitions)
         if not plan.ok:
             return plan
@@ -645,6 +697,8 @@ class DefaultOptimizeCampaignServices:
             judge_provider=self.judge_provider,
             trial_timeout_seconds=self.loaded.meta.execution.trial_timeout_seconds,
             verifier_timeout_seconds=self.loaded.meta.execution.verifier_timeout_seconds,
+            event_emitter=self.event_emitter,
+            event_scope={"phase": phase.value, "experiment_id": experiment_id},
         )
         candidate = ValidatedCandidate(
             self.spec.campaign_id,
@@ -657,16 +711,12 @@ class DefaultOptimizeCampaignServices:
             self.spec.permissions_digest,
             self.spec.evaluator.digest,
         )
-        experiment_id = prefixed_id_from_digest(
-            "exp_",
-            canonical_digest(
-                {
-                    "campaign_id": self.spec.campaign_id,
-                    "candidate_id": candidate_id,
-                    "phase": phase.value,
-                    "task_set": task_set.fingerprint_digest,
-                }
-            ),
+        await self._emit_event(
+            "optimization.experiment.started",
+            stage=_stage_for_phase(phase),
+            status="running",
+            scope={"phase": phase.value, "candidate_id": candidate_id, "experiment_id": experiment_id},
+            payload={"trial_count": len(plan.value.entries)},
         )
         runner = PairedExperimentRunner(
             executor.execute,
@@ -677,6 +727,25 @@ class DefaultOptimizeCampaignServices:
         evaluated = await runner.evaluate(candidate, task_set, plan.value, experiment_id=experiment_id)
         if not evaluated.ok:
             return evaluated
+        usage = evaluated.value.usage
+        self._budget_usage["llm_calls"] += usage.task_side_runs
+        self._budget_usage["tokens"] += usage.solver_tokens
+        self._budget_usage["cost"] += Decimal(usage.cost)
+        self._budget_usage["wall_time_seconds"] += usage.wall_time_seconds
+        await self._emit_event(
+            "optimization.experiment.completed",
+            stage=_stage_for_phase(phase),
+            status="completed",
+            scope={"phase": phase.value, "candidate_id": candidate_id, "experiment_id": experiment_id},
+            payload={
+                "status": evaluated.value.status.value,
+                "task_side_runs": usage.task_side_runs,
+                "solver_tokens": usage.solver_tokens,
+                "cost": usage.cost,
+                "wall_time_seconds": usage.wall_time_seconds,
+            },
+        )
+        await self._emit_budget(_stage_for_phase(phase), {"phase": phase.value, "candidate_id": candidate_id})
         published = publish_experiment_bundle(self.store, evaluated.value, actor=self.actors.controller)
         if not published.ok:
             return published
@@ -693,6 +762,36 @@ class DefaultOptimizeCampaignServices:
             },
         )
         return published
+
+    async def _emit_event(
+        self,
+        event_type: str,
+        *,
+        stage: str,
+        status: str,
+        scope: Mapping[str, Any] | None = None,
+        payload: Mapping[str, Any] | None = None,
+    ) -> None:
+        if self.event_emitter is None:
+            return
+        await self.event_emitter.emit(event_type, stage=stage, status=status, scope=scope, payload=payload)
+
+    async def _emit_budget(self, stage: str, scope: Mapping[str, Any]) -> None:
+        await self._emit_event(
+            "optimization.budget.updated",
+            stage=stage,
+            status="event",
+            scope=scope,
+            payload={
+                "used": {**self._budget_usage, "cost": format(self._budget_usage["cost"], "f")},
+                "limits": {
+                    "candidates": self.loaded.meta.budgets.max_candidates,
+                    "llm_calls": self.loaded.meta.budgets.max_llm_calls,
+                    "cost": None if self.loaded.meta.budgets.max_cost_usd is None else format(self.loaded.meta.budgets.max_cost_usd, "f"),
+                    "wall_time_seconds": self.loaded.meta.budgets.max_wall_clock_minutes * 60,
+                },
+            },
+        )
 
     def _restore_experiment(self, checkpoint: Path, runtime: _CandidateRuntime, phase: ExperimentPhase, task_set) -> Result:
         if not checkpoint.is_file():
@@ -811,6 +910,14 @@ class DefaultOptimizeCampaignServices:
         return ok(thaw_json(value))
 
 
+def _stage_for_phase(phase: ExperimentPhase) -> str:
+    return {
+        ExperimentPhase.DISCOVERY: "search_running",
+        ExperimentPhase.VALIDATION: "validation_complete",
+        ExperimentPhase.HOLDOUT: "holdout_complete",
+    }[phase]
+
+
 def build_default_runtime(options) -> Result:
     if options.trace is None or options.config is None:
         return _runtime_error("VALIDATION_FAILED", "Optimize trace and config are required")
@@ -911,6 +1018,10 @@ def build_default_runtime(options) -> Result:
         campaign_id,
     )
     optimization_store = SQLiteOptimizationStore(root)
+    observer = create_observer(tui=options.tui, json_output=options.json, stdout=sys.stdout, stderr=sys.stderr)
+    if not observer.ok:
+        return observer
+    event_emitter = OptimizationEventEmitter(optimization_id, campaign_id, observer.value)
     services = DefaultOptimizeCampaignServices(
         loaded=loaded.value,
         root=root,
@@ -924,16 +1035,15 @@ def build_default_runtime(options) -> Result:
         proposer_provider=providers["proposer"],
         solver_provider=providers["solver"],
         judge_provider=providers["judge"],
+        event_emitter=event_emitter,
     )
-    observer = create_observer(tui=options.tui, json_output=options.json, stdout=sys.stdout, stderr=sys.stderr)
-    if not observer.ok:
-        return observer
     orchestrator = OptimizeOrchestrator(
         spec,
         optimization_store,
         services.contract(),
         iterations=loaded.value.meta.search.iterations,
         observer=observer.value,
+        event_emitter=event_emitter,
         lease_seconds=max(60, loaded.value.meta.execution.trial_timeout_seconds * 2),
         governance=services.govern,
         output_dir=root,

@@ -3,10 +3,20 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from loom.core import ok
 from loom.llm import LlmResponse, LlmStreamEvent, LlmToolCall, TokenUsage
 from loom.tasks.profiles import select_task_profile
 from loom.tasks.request import TaskHarness, TaskRequest, TaskRunOptions
 from loom.tasks.runner import make_task_context, run_generic_task
+
+
+class RecordingTraceSink:
+    def __init__(self):
+        self.events = []
+
+    async def emit(self, event):
+        self.events.append(event)
+        return ok(None)
 
 
 def test_make_task_context_maps_request_to_loom_layers(tmp_path):
@@ -260,6 +270,29 @@ def test_run_generic_task_executes_llm_tool_loop_and_returns_finish_report(tmp_p
     assert "Demo audit" in result.value.output
     assert provider.calls >= 2
     assert any(message.role == "tool" for message in provider.messages_seen[-1])
+
+
+def test_run_generic_task_forwards_runtime_events_to_additional_trace_sink(tmp_path):
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    trace_path = tmp_path / "runs" / "observed.jsonl"
+    sink = RecordingTraceSink()
+
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest("Audit this project", workspace=tmp_path, profile="project_audit"),
+            provider=FakeTaskProvider(),
+            options=TaskRunOptions(trace_path=trace_path),
+            trace_sink=sink,
+        )
+    )
+
+    assert result.ok
+    assert trace_path.is_file()
+    event_types = [event["type"] for event in sink.events]
+    assert "run.started" in event_types
+    assert "llm.requested" in event_types
+    assert "llm.completed" in event_types
+    assert "run.completed" in event_types
 
 
 def test_run_generic_task_executes_edit_file_and_traces_observation(tmp_path):

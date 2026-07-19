@@ -17,6 +17,7 @@ from loom.campaigns.task_sets import TaskManifestRow
 from loom.core import err, make_loom_error, ok
 from loom.evaluation.experiments import TrialEntry
 from loom.llm import LlmResponse, TokenUsage
+from loom.optimize.events import OptimizationEventEmitter
 from loom.optimize.task_sets import OptimizeTask, PreparedTask, VerifierSpec, WorkspaceSnapshot
 from loom.optimize.trial_executor import OptimizeTrialExecutor
 from loom.tasks import TaskHarness
@@ -73,7 +74,7 @@ def _candidate() -> ValidatedCandidate:
     return ValidatedCandidate("cmp_test", "cand_test", artifact, baseline, "env", "solver", "tools", "permissions", "evaluator")
 
 
-def _executor(tmp_path: Path, *, verifier_exit: int = 0, provider: RecordingSolverProvider | None = None):
+def _executor(tmp_path: Path, *, verifier_exit: int = 0, provider: RecordingSolverProvider | None = None, event_emitter=None):
     tasks, entry = _prepared_task(tmp_path, verifier_exit=verifier_exit)
     solver = provider or RecordingSolverProvider()
     artifacts = ArtifactStore(tmp_path / "artifacts")
@@ -91,8 +92,18 @@ def _executor(tmp_path: Path, *, verifier_exit: int = 0, provider: RecordingSolv
         },
         trial_timeout_seconds=10,
         verifier_timeout_seconds=5,
+        event_emitter=event_emitter,
+        event_scope={"phase": "discovery", "experiment_id": "exp_test"},
     )
     return executor, solver, artifacts, entry
+
+
+class RecordingObserver:
+    def __init__(self):
+        self.events = []
+
+    def emit(self, event):
+        self.events.append(event)
 
 
 @pytest.mark.asyncio
@@ -120,6 +131,29 @@ async def test_trial_executor_materializes_fresh_paired_workspaces_and_applies_o
     assert evaluation["schema_version"] == "loom.evaluation.bundle.v1"
     assert baseline.metrics["total_tokens"] == 12.0
     assert baseline.metrics["wall_time_ms"] >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_trial_executor_emits_scoped_trial_and_nested_runtime_events(tmp_path: Path):
+    observer = RecordingObserver()
+    emitter = OptimizationEventEmitter("opt_test", "cmp_test", observer)
+    executor, _provider, _artifacts, entry = _executor(tmp_path, event_emitter=emitter)
+
+    result = await executor.execute("candidate", _candidate(), entry, "trial-1")
+
+    assert result.failure_kind is None
+    started = next(event for event in observer.events if event["type"] == "optimization.trial.started")
+    assert dict(started["scope"]) == {
+        "phase": "discovery",
+        "experiment_id": "exp_test",
+        "candidate_id": "cand_test",
+        "trial_id": "trial-1",
+        "side": "candidate",
+        "task_id": "task-1",
+        "repetition": 0,
+    }
+    assert any(event["type"] == "optimization.runtime.event" for event in observer.events)
+    assert any(event["type"] == "optimization.trial.completed" for event in observer.events)
 
 
 @pytest.mark.asyncio
