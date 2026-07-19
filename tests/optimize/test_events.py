@@ -76,7 +76,78 @@ async def test_holdout_forbidden_payload_is_rejected_before_observer_call():
 
     assert not result.ok
     assert result.error.code == "HOLDOUT_EVENT_FORBIDDEN"
-    assert observer.events == []
+    assert [event["type"] for event in observer.events] == ["optimization.observer.warning"]
+    assert observer.events[0]["payload"] == {"code": "HOLDOUT_EVENT_FORBIDDEN"}
+
+
+@pytest.mark.asyncio
+async def test_holdout_trial_scope_is_rejected_before_observer_call():
+    observer = RecordingObserver()
+    emitter = OptimizationEventEmitter("opt_test", "cmp_test", observer)
+
+    result = await emitter.emit(
+        "optimization.trial.started",
+        stage="holdout_complete",
+        status="running",
+        scope={
+            "phase": "holdout",
+            "candidate_id": "cand_test",
+            "trial_id": "hidden-trial",
+            "task_id": "hidden-task",
+            "side": "candidate",
+            "repetition": 0,
+        },
+    )
+
+    assert not result.ok
+    assert result.error.code == "HOLDOUT_EVENT_FORBIDDEN"
+    assert [event["type"] for event in observer.events] == ["optimization.observer.warning"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "stage", "scope", "payload"),
+    [
+        (
+            "optimization.runtime.event",
+            "holdout_complete",
+            {"phase": "holdout", "candidate_id": "cand_test", "experiment_id": "exp_test"},
+            {"runtime_event": {"type": "tool.completed", "stdout": "hidden workspace output"}},
+        ),
+        (
+            "optimization.stage.failed",
+            "holdout_complete",
+            {},
+            {"operation_id": "op_test", "error_code": "FAILED", "error_message": "hidden task details"},
+        ),
+    ],
+)
+async def test_holdout_rejects_runtime_values_and_stage_failure_text(event_type, stage, scope, payload):
+    observer = RecordingObserver()
+    emitter = OptimizationEventEmitter("opt_test", "cmp_test", observer)
+
+    result = await emitter.emit(event_type, stage=stage, status="failed", scope=scope, payload=payload)
+
+    assert not result.ok
+    assert result.error.code == "HOLDOUT_EVENT_FORBIDDEN"
+    assert [event["type"] for event in observer.events] == ["optimization.observer.warning"]
+
+
+@pytest.mark.asyncio
+async def test_holdout_allows_only_aggregate_experiment_progress():
+    observer = RecordingObserver()
+    emitter = OptimizationEventEmitter("opt_test", "cmp_test", observer)
+
+    result = await emitter.emit(
+        "optimization.experiment.completed",
+        stage="holdout_complete",
+        status="completed",
+        scope={"phase": "holdout", "candidate_id": "cand_test", "experiment_id": "exp_test"},
+        payload={"status": "completed", "task_side_runs": 6, "solver_tokens": 20, "cost": "0", "wall_time_seconds": 3},
+    )
+
+    assert result.ok
+    assert len(observer.events) == 1
 
 
 @pytest.mark.asyncio

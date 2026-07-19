@@ -65,6 +65,7 @@ from loom.evolution import AnalyzeConfig
 from loom.evolution import analyze_trace as analyze_evolution_trace
 from loom.optimize.config import load_optimize_config
 from loom.optimize.contracts import LoadedOptimizeConfig, OptimizationResult, OptimizationSpec
+from loom.optimize.control import OptimizeRunControl
 from loom.optimize.events import OptimizationEventEmitter
 from loom.optimize.governance import (
     GovernanceInputs,
@@ -162,6 +163,10 @@ class DefaultOptimizeRuntime:
             status = "running"
         else:
             return loaded
+        campaign = await self.services.snapshot_projection()
+        if not campaign.ok:
+            return campaign
+        payload.update(campaign.value)
         return await self.event_emitter.emit(
             "optimization.snapshot.loaded",
             stage=stage,
@@ -213,11 +218,22 @@ class DefaultOptimizeRuntime:
         else:
             event_type = "optimization.completed"
             status = "completed"
+        next_action = (
+            f"loom optimize approve {self.spec.optimization_id}"
+            if disposition == "awaiting_approval"
+            else "Run the identical optimize command to resume."
+            if disposition == "paused"
+            else "No manual action required."
+        )
         return await self.event_emitter.emit(
             event_type,
             stage=stage,
             status=status,
-            payload={"disposition": disposition},
+            payload={
+                "disposition": disposition,
+                "report_path": str(getattr(result.value, "report_path", "")) or None,
+                "next_action": next_action,
+            },
         )
 
     def dry_run(self) -> Result:
@@ -257,6 +273,7 @@ class DefaultOptimizeCampaignServices:
         solver_provider: Any,
         judge_provider: Any,
         event_emitter: OptimizationEventEmitter | None = None,
+        control: OptimizeRunControl | None = None,
     ):
         self.loaded = loaded
         self.root = root
@@ -271,6 +288,7 @@ class DefaultOptimizeCampaignServices:
         self.solver_provider = solver_provider
         self.judge_provider = judge_provider
         self.event_emitter = event_emitter
+        self.control = control
         self.baseline_harness = _baseline_harness(loaded)
         self.compiler = DeclarativePatchCompiler(_surface_definitions(self.baseline_harness))
         self.controller = CampaignController(
@@ -287,7 +305,7 @@ class DefaultOptimizeCampaignServices:
         self.holdout_results_ref: ArtifactRef | None = None
         self.holdout_experiment_refs: tuple[ArtifactRef, ...] = ()
         self._baseline_cache = BaselineRunCache()
-        self._budget_usage = {"candidates": 0, "llm_calls": 0, "tokens": 0, "cost": Decimal("0"), "wall_time_seconds": 0}
+        self._budget_usage = {"candidates": 0, "tokens": 0, "cost": Decimal("0"), "wall_time_seconds": 0}
 
     def contract(self) -> OptimizeCampaignServices:
         return OptimizeCampaignServices(
@@ -301,6 +319,104 @@ class DefaultOptimizeCampaignServices:
             select_finalists=self.select_finalists,
             holdout=self.holdout,
             finalize=self.finalize,
+        )
+
+    async def snapshot_projection(self) -> Result:
+        projection = await self.store.load(self.spec.campaign_id)
+        if not projection.ok:
+            if projection.error is not None and projection.error.code == "CAMPAIGN_NOT_FOUND":
+                return ok({"candidates": (), "frontier_ids": (), "budget_used": {}, "governance": {}})
+            return projection
+        events = await self.store.events(self.spec.campaign_id)
+        if not events.ok:
+            return events
+        candidates: dict[str, dict[str, Any]] = {
+            candidate_id: {
+                "candidate_id": candidate_id,
+                "status": state.lifecycle.value,
+                "completed_experiments": len(state.experiment_refs),
+            }
+            for candidate_id, state in projection.value.candidates.items()
+        }
+        frontier_ids: tuple[str, ...] = ()
+        for event in events.value:
+            candidate_id = event.payload.get("candidate_id")
+            if event.event_type == "candidate.created" and isinstance(candidate_id, str):
+                candidate_ref = event.payload.get("candidate_ref")
+                if isinstance(candidate_ref, Mapping):
+                    read = self.store.artifacts.read_bytes(_artifact_ref(candidate_ref), expected_schema="loom.candidate-bundle.v1")
+                    if not read.ok:
+                        return read
+                    bundle = json.loads(read.value)
+                    surfaces = bundle.get("changed_surfaces", ())
+                    if isinstance(surfaces, list) and surfaces:
+                        candidates[candidate_id]["surface"] = str(surfaces[0])
+            elif event.event_type == "experiment.completed" and isinstance(candidate_id, str):
+                score = event.payload.get("score")
+                if isinstance(score, Mapping):
+                    candidates[candidate_id]["score"] = score.get("primary_lcb")
+                    candidates[candidate_id]["regression"] = score.get("critical_regressions")
+            elif event.event_type == "frontier.updated":
+                artifact_ref = event.payload.get("artifact_ref")
+                if isinstance(artifact_ref, Mapping):
+                    read = self.store.artifacts.read_bytes(_artifact_ref(artifact_ref), expected_schema="loom.frontier.snapshot.v1")
+                    if not read.ok:
+                        return read
+                    frontier = json.loads(read.value)
+                    values = frontier.get("candidate_ids", ())
+                    if isinstance(values, list):
+                        frontier_ids = tuple(str(value) for value in values)
+        usage = await self.store.budget_usage(self.spec.campaign_id)
+        if not usage.ok:
+            return usage
+        consumed = usage.value
+        checkpoint_tokens = 0
+        checkpoint_cost = Decimal("0")
+        checkpoint_wall_time = 0
+        seen_experiments: set[str] = set()
+        for checkpoint in sorted((self.root / "evidence" / "experiments").glob("*/*.json")):
+            try:
+                checkpoint_payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+                experiment_ref = _artifact_ref(checkpoint_payload["experiment_ref"])
+            except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                return _runtime_error("EXPERIMENT_CHECKPOINT_INVALID", "Experiment checkpoint is malformed", cause=exc)
+            if experiment_ref.sha256 in seen_experiments:
+                continue
+            loaded_experiment = load_experiment_bundle(self.store, experiment_ref)
+            if not loaded_experiment.ok:
+                return loaded_experiment
+            seen_experiments.add(experiment_ref.sha256)
+            checkpoint_tokens += loaded_experiment.value.usage.solver_tokens
+            checkpoint_cost += Decimal(loaded_experiment.value.usage.cost)
+            checkpoint_wall_time += loaded_experiment.value.usage.wall_time_seconds
+        budget_used = {
+            "candidates": consumed.candidates,
+            "tokens": consumed.proposer_tokens + max(consumed.solver_tokens, checkpoint_tokens),
+            "cost": format(max(Decimal(consumed.cost), checkpoint_cost), "f"),
+            "wall_time_seconds": max(consumed.wall_time_seconds, checkpoint_wall_time),
+        }
+        governance = {}
+        request_path = self.root / "approval-request.json"
+        if request_path.is_file():
+            try:
+                request = json.loads(request_path.read_text(encoding="utf-8"))
+                decision = request.get("decision", {})
+                if isinstance(decision, Mapping):
+                    governance = {
+                        "status": "awaiting_approval",
+                        "candidate_id": request.get("candidate_id"),
+                        "risk": decision.get("computed_risk"),
+                        "gates": decision.get("gates", ()),
+                    }
+            except (OSError, json.JSONDecodeError):
+                return _runtime_error("APPROVAL_CONTEXT_INVALID", "Approval snapshot is malformed")
+        return ok(
+            {
+                "candidates": tuple(candidates.values()),
+                "frontier_ids": frontier_ids,
+                "budget_used": budget_used,
+                "governance": governance,
+            }
         )
 
     def preflight(self) -> Result:
@@ -318,6 +434,7 @@ class DefaultOptimizeCampaignServices:
         )
 
     async def seed_evaluation(self) -> Result:
+        self._check_control()
         path = self.root / "seed" / "evaluation" / "evaluation-bundle.json"
         cached = load_evaluation_bundle(path) if path.is_file() else None
         if cached is not None and cached.ok:
@@ -336,6 +453,7 @@ class DefaultOptimizeCampaignServices:
         return self._publish_seed_bundle(path, kind="evaluation_bundle", schema_version="loom.evaluation.bundle.v1")
 
     async def seed_evolution(self, evaluation: Mapping[str, Any]) -> Result:
+        self._check_control()
         bundle_path = Path(str(evaluation["bundle_path"]))
         path = self.root / "seed" / "evolution" / "evolution-bundle.json"
         if _valid_evolution_bundle(path, bundle_path):
@@ -364,6 +482,7 @@ class DefaultOptimizeCampaignServices:
         return ok({output_key: asdict(published.value), "bundle_path": str(path)})
 
     async def initialize_campaign(self, seed: Mapping[str, Any]) -> Result:
+        self._check_control()
         created = await self.store.create(
             self.spec,
             operation_id=_operation_id("campaign.created", self.spec.campaign_id),
@@ -428,6 +547,7 @@ class DefaultOptimizeCampaignServices:
         return ok({"campaign_id": self.spec.campaign_id, "evidence_refs": evidence_refs})
 
     async def search_iteration(self, iteration: int) -> Result:
+        self._check_control()
         if self.proposer is None:
             seed = await self._optimization_stage_output("seed_analysis")
             if not seed.ok:
@@ -459,12 +579,13 @@ class DefaultOptimizeCampaignServices:
         if not result.ok:
             return result
         for candidate_id in result.value:
+            candidate = self.candidates.get(candidate_id)
             await self._emit_event(
                 "optimization.candidate.admitted",
                 stage="search_running",
                 status="completed",
                 scope={"phase": "discovery", "iteration": iteration, "candidate_id": candidate_id},
-                payload={},
+                payload={"surface": None if candidate is None else candidate.surface_id},
             )
         self._budget_usage["candidates"] = len(self.candidates)
         await self._emit_budget("search_running", {"phase": "discovery", "iteration": iteration})
@@ -493,6 +614,7 @@ class DefaultOptimizeCampaignServices:
         )
 
     async def validate(self, entrant_ids: tuple[str, ...]) -> Result:
+        self._check_control()
         refs = []
         for candidate_id in entrant_ids:
             experiment = await self._run_experiment(candidate_id, ExperimentPhase.VALIDATION)
@@ -525,6 +647,7 @@ class DefaultOptimizeCampaignServices:
         )
 
     async def select_finalists(self, validated_ids: tuple[str, ...]) -> Result:
+        self._check_control()
         del validated_ids
         validation_ref = self.validation_results_ref
         if validation_ref is None:
@@ -536,6 +659,14 @@ class DefaultOptimizeCampaignServices:
         if not selected.ok:
             return selected
         self.finalist_digest = selected.value.finalist_digest
+        for candidate_id in selected.value.candidate_ids:
+            await self._emit_event(
+                "optimization.candidate.finalist",
+                stage="validation_complete",
+                status="completed",
+                scope={"phase": "validation", "candidate_id": candidate_id},
+                payload={},
+            )
         return ok(
             {
                 "finalist_ids": selected.value.candidate_ids,
@@ -544,6 +675,7 @@ class DefaultOptimizeCampaignServices:
         )
 
     async def holdout(self, finalist_ids: tuple[str, ...]) -> Result:
+        self._check_control()
         await self._emit_event(
             "optimization.holdout.status",
             stage="holdout_complete",
@@ -614,7 +746,20 @@ class DefaultOptimizeCampaignServices:
         )
 
     async def govern(self, outcome: CampaignOutcome) -> Result:
+        self._check_control()
+        await self._emit_event(
+            "optimization.governance.started",
+            stage="governance_complete",
+            status="running",
+            payload={"candidate_id": outcome.candidate_id},
+        )
         if outcome.candidate_id is None or outcome.recommendation_ref is None:
+            await self._emit_event(
+                "optimization.governance.completed",
+                stage="governance_complete",
+                status="completed",
+                payload={"candidate_id": None, "disposition": "rejected", "risk": None, "gates": ()},
+            )
             return ok(
                 {
                     "disposition": "rejected",
@@ -654,7 +799,21 @@ class DefaultOptimizeCampaignServices:
         governed = await composer.promote(inputs)
         if not governed.ok:
             return governed
-        if governed.value.decision.decision.value == "awaiting_approval":
+        decision = governed.value.decision
+        disposition = decision.decision.value
+        governance_payload = {
+            "candidate_id": decision.candidate_id,
+            "disposition": disposition,
+            "risk": decision.computed_risk.value,
+            "gates": tuple({"gate_id": gate.gate_id, "mandatory": gate.mandatory, "result": gate.result.value} for gate in decision.gates),
+        }
+        await self._emit_event(
+            "optimization.governance.awaiting_approval" if disposition == "awaiting_approval" else "optimization.governance.completed",
+            stage="governance_complete",
+            status="awaiting_approval" if disposition == "awaiting_approval" else "completed",
+            payload=governance_payload,
+        )
+        if disposition == "awaiting_approval":
             _write_json(
                 self.root / "approval-request.json",
                 {
@@ -800,6 +959,7 @@ class DefaultOptimizeCampaignServices:
             verifier_timeout_seconds=self.loaded.meta.execution.verifier_timeout_seconds,
             event_emitter=self.event_emitter,
             event_scope={"phase": phase.value, "experiment_id": experiment_id},
+            control=self.control,
         )
         candidate = ValidatedCandidate(
             self.spec.campaign_id,
@@ -829,10 +989,22 @@ class DefaultOptimizeCampaignServices:
         if not evaluated.ok:
             return evaluated
         usage = evaluated.value.usage
-        self._budget_usage["llm_calls"] += usage.task_side_runs
         self._budget_usage["tokens"] += usage.solver_tokens
         self._budget_usage["cost"] += Decimal(usage.cost)
         self._budget_usage["wall_time_seconds"] += usage.wall_time_seconds
+        primary_metric = next(
+            (metric for metric in evaluated.value.metrics if metric.objective_id == self.loaded.meta.objectives.primary),
+            None,
+        )
+        metric_summary = (
+            {}
+            if phase is ExperimentPhase.HOLDOUT or primary_metric is None
+            else {
+                "score": primary_metric.candidate_value,
+                "regression": primary_metric.paired_delta,
+                "valid_pairs": primary_metric.valid_pairs,
+            }
+        )
         await self._emit_event(
             "optimization.experiment.completed",
             stage=_stage_for_phase(phase),
@@ -844,6 +1016,7 @@ class DefaultOptimizeCampaignServices:
                 "solver_tokens": usage.solver_tokens,
                 "cost": usage.cost,
                 "wall_time_seconds": usage.wall_time_seconds,
+                **metric_summary,
             },
         )
         await self._emit_budget(_stage_for_phase(phase), {"phase": phase.value, "candidate_id": candidate_id})
@@ -893,6 +1066,10 @@ class DefaultOptimizeCampaignServices:
                 },
             },
         )
+
+    def _check_control(self) -> None:
+        if self.control is not None:
+            self.control.interrupt()
 
     def _restore_experiment(self, checkpoint: Path, runtime: _CandidateRuntime, phase: ExperimentPhase, task_set) -> Result:
         if not checkpoint.is_file():
@@ -1137,6 +1314,7 @@ def build_default_runtime(options, *, observer: Any | None = None, control=None)
         solver_provider=providers["solver"],
         judge_provider=providers["judge"],
         event_emitter=event_emitter,
+        control=control,
     )
     orchestrator = OptimizeOrchestrator(
         spec,

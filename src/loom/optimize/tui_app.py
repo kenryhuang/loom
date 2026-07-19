@@ -9,12 +9,12 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Footer, RichLog, Static
+from textual.widgets import Button, DataTable, Footer, Input, Static
 
+from loom.core import Result
 from loom.optimize.control import OptimizeRunControl
 from loom.optimize.tui_state import PIPELINE_STAGES, OptimizeDashboardState, OptimizeTuiCollector
 
@@ -69,6 +69,43 @@ class CancelConfirmationScreen(ModalScreen[bool]):
         self.dismiss(event.button.id == "confirm-cancel")
 
 
+class ApprovalInputScreen(ModalScreen[tuple[str, str] | None]):
+    """Collect the actor assertion and rationale required by governance."""
+
+    BINDINGS = [("escape", "decline", "Cancel")]
+
+    CSS = """
+    ApprovalInputScreen { align: center middle; background: $background 70%; }
+    #approval-dialog { width: 72; height: 16; padding: 1 2; border: round $warning; background: $panel; }
+    #approval-dialog Input { margin-bottom: 1; }
+    #approval-actions { height: 3; align-horizontal: center; }
+    #approval-actions Button { margin: 0 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="approval-dialog"):
+            yield Static("Approve the stored candidate using an authorized identity")
+            yield Input(placeholder="Approver identity", id="approval-identity")
+            yield Input(placeholder="Reason (optional)", id="approval-reason")
+            with Horizontal(id="approval-actions"):
+                yield Button("Submit approval", id="submit-approval", variant="warning")
+                yield Button("Cancel", id="cancel-approval")
+
+    def action_decline(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "submit-approval":
+            self.dismiss(None)
+            return
+        identity = self.query_one("#approval-identity", Input).value.strip()
+        if not identity:
+            self.query_one("#approval-identity", Input).focus()
+            return
+        reason = self.query_one("#approval-reason", Input).value.strip()
+        self.dismiss((identity, reason))
+
+
 class OptimizeTuiApp(App[None]):
     """Read-only projection of optimization state plus cooperative controls."""
 
@@ -81,7 +118,8 @@ class OptimizeTuiApp(App[None]):
     #dashboard-side { width: 1fr; min-width: 26; height: 1fr; }
     #candidate-table { height: 2fr; border: round #3b3d57; }
     #active-trial { height: 7; padding: 0 1; border: round #7aa2f7; }
-    #event-feed { height: 3fr; border: round #3b3d57; padding: 0 1; }
+    #event-feed { height: 2fr; border: round #3b3d57; }
+    #event-detail { height: 1fr; min-height: 5; border: round #565f89; padding: 0 1; overflow-y: auto; }
     #budget-panel { height: 1fr; min-height: 10; padding: 1; border: round #9ece6a; }
     #holdout-governance { height: 1fr; min-height: 10; padding: 1; border: round #e0af68; }
     #optimize-status { height: 1; padding: 0 1; background: #1e1f2e; }
@@ -107,7 +145,7 @@ class OptimizeTuiApp(App[None]):
         collector: OptimizeTuiCollector,
         control: OptimizeRunControl,
         *,
-        approval_handler: Callable[[], Any] | None = None,
+        approval_handler: Callable[[str, str | None], Any] | None = None,
     ) -> None:
         super().__init__()
         self.collector = collector
@@ -124,7 +162,8 @@ class OptimizeTuiApp(App[None]):
             with Vertical(id="dashboard-main"):
                 yield DataTable(id="candidate-table", cursor_type="row", zebra_stripes=True)
                 yield Static("No active trial", id="active-trial")
-                yield RichLog(id="event-feed", wrap=True, highlight=False, markup=False)
+                yield DataTable(id="event-feed", cursor_type="row", zebra_stripes=True)
+                yield Static("Select an event and press Enter for sanitized detail", id="event-detail", markup=False)
             with Vertical(id="dashboard-side"):
                 yield Static("Budget data pending", id="budget-panel")
                 yield Static("Holdout sealed\nGovernance pending", id="holdout-governance")
@@ -133,7 +172,8 @@ class OptimizeTuiApp(App[None]):
 
     def on_mount(self) -> None:
         table = self.query_one("#candidate-table", DataTable)
-        table.add_columns("Candidate", "Surface", "Pairs", "State", "Frontier")
+        table.add_columns("Candidate", "Surface", "Pairs", "Score", "Delta", "State", "Frontier")
+        self.query_one("#event-feed", DataTable).add_columns("#", "Event", "Status", "Scope")
         self._refresh_dashboard(force=True)
         self._started.set()
         self.set_interval(0.05, self._poll_updates)
@@ -164,10 +204,18 @@ class OptimizeTuiApp(App[None]):
         self.query_one("#budget-panel", Static).update(_budget_text(state))
         self.query_one("#holdout-governance", Static).update(_governance_text(state))
         self.query_one("#optimize-status", Static).update(_status_text(state))
-        feed = self.query_one("#event-feed", RichLog)
+        feed = self.query_one("#event-feed", DataTable)
         feed.clear()
         for event in state.recent_events:
-            feed.write(Text(_event_line(event)))
+            scope = event.get("scope") if isinstance(event.get("scope"), dict) else {}
+            labels = [scope.get(name) for name in ("candidate_id", "trial_id", "side") if scope.get(name)]
+            feed.add_row(
+                str(event.get("sequence", "?")),
+                str(event.get("type", "unknown")),
+                str(event.get("status", "event")),
+                " / ".join(map(str, labels)) or "—",
+                key=str(event.get("sequence", len(state.recent_events))),
+            )
 
     def _refresh_candidates(self, state: OptimizeDashboardState) -> None:
         table = self.query_one("#candidate-table", DataTable)
@@ -180,7 +228,9 @@ class OptimizeTuiApp(App[None]):
                 candidate.candidate_id,
                 candidate.surface or "—",
                 pairs,
-                candidate.status,
+                "—" if candidate.score is None else f"{candidate.score:.3f}",
+                "—" if candidate.regression is None else f"{candidate.regression:+.3f}",
+                "finalist" if candidate.finalist else candidate.status,
                 "yes" if candidate.frontier else "—",
                 key=candidate.candidate_id,
             )
@@ -200,27 +250,44 @@ class OptimizeTuiApp(App[None]):
             self.control.request_cancel()
             self.query_one("#optimize-status", Static).update("cancel requested — waiting for durable checkpoint")
 
-    async def action_approve(self) -> None:
+    def action_approve(self) -> None:
         if self.collector.state.lifecycle != "awaiting_approval" or self.approval_handler is None:
             self.query_one("#optimize-status", Static).update("approval is not currently available")
             return
-        result = self.approval_handler()
+        self.push_screen(ApprovalInputScreen(), self._on_approval_input)
+
+    def _on_approval_input(self, request: tuple[str, str] | None) -> None:
+        if request is not None:
+            self.run_worker(self._submit_approval(*request), exclusive=False)
+
+    async def _submit_approval(self, identity: str, reason: str) -> None:
+        if self.approval_handler is None:
+            return
+        result = self.approval_handler(identity, reason or None)
         if inspect.isawaitable(result):
-            await result
+            result = await result
+        if isinstance(result, Result) and not result.ok:
+            code = "INTERNAL" if result.error is None else result.error.code
+            self.query_one("#optimize-status", Static).update(f"approval failed: {code}")
+            return
         self.query_one("#optimize-status", Static).update("approval submitted")
 
     def action_cursor_down(self) -> None:
-        self.query_one("#candidate-table", DataTable).action_cursor_down()
+        self._focused_table().action_cursor_down()
 
     def action_cursor_up(self) -> None:
-        self.query_one("#candidate-table", DataTable).action_cursor_up()
+        self._focused_table().action_cursor_up()
 
     def action_show_detail(self) -> None:
-        self.query_one("#optimize-status", Static).update("event detail is visible in the live feed")
+        event = self._selected_event()
+        if event is None:
+            self.query_one("#optimize-status", Static).update("no event selected")
+            return
+        self.query_one("#event-detail", Static).update(json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True))
 
     def action_copy_detail(self) -> None:
-        events = self.collector.state.recent_events
-        self._copy(json.dumps(events[-1], ensure_ascii=False, sort_keys=True) if events else "")
+        event = self._selected_event()
+        self._copy(json.dumps(event, ensure_ascii=False, sort_keys=True) if event is not None else "")
 
     def action_copy_all(self) -> None:
         self._copy(json.dumps(self.collector.state.recent_events, ensure_ascii=False, sort_keys=True))
@@ -232,6 +299,17 @@ class OptimizeTuiApp(App[None]):
         except Exception:
             status = "clipboard unavailable"
         self.query_one("#optimize-status", Static).update(status)
+
+    def _focused_table(self) -> DataTable:
+        return self.focused if isinstance(self.focused, DataTable) else self.query_one("#event-feed", DataTable)
+
+    def _selected_event(self) -> dict[str, Any] | None:
+        events = self.collector.state.recent_events
+        if not events:
+            return None
+        feed = self.query_one("#event-feed", DataTable)
+        index = min(max(0, feed.cursor_row), len(events) - 1)
+        return events[index]
 
 
 def _header_text(state: OptimizeDashboardState, elapsed: float) -> str:
@@ -260,27 +338,38 @@ def _budget_text(state: OptimizeDashboardState) -> str:
     names = ("candidates", "llm_calls", "tokens", "cost", "wall_time_seconds")
     lines = ["Budget"]
     for name in names:
-        used = state.budget.used.get(name, "—")
-        limit = state.budget.limits.get(name, "—")
-        lines.append(f"{name}: {used} / {limit}")
+        used = state.budget.used.get(name)
+        limit = state.budget.limits.get(name)
+        if used is None or limit is None:
+            lines.append(f"{name}: unavailable")
+            continue
+        ratio = _ratio(used, limit)
+        marker = "✗ " if ratio is not None and ratio >= 1 else "⚠ " if ratio is not None and ratio >= 0.8 else ""
+        lines.append(f"{marker}{name}: {used} / {limit}")
     return "\n".join(lines)
 
 
 def _governance_text(state: OptimizeDashboardState) -> str:
-    return f"Holdout\n{state.holdout_status}\n\nGovernance\n{state.governance_status}"
+    gates = ", ".join(f"{gate.get('gate_id', 'gate')}={gate.get('result', 'unknown')}" for gate in state.governance_gates)
+    return (
+        f"Holdout\n{state.holdout_status}\n\nGovernance\n{state.governance_status}"
+        f"\nrisk: {state.governance_risk or 'unavailable'}\ngates: {gates or 'unavailable'}"
+    )
 
 
 def _status_text(state: OptimizeDashboardState) -> str:
     if state.terminal_status:
-        return f"{state.terminal_status} — press q to detach"
+        details = " • ".join(value for value in (state.report_path, state.next_action) if value)
+        return f"{state.terminal_status} — {details or 'press q to detach'}"
     return "running — p pause • c cancel • q detach"
 
 
-def _event_line(event: dict[str, Any]) -> str:
-    scope = event.get("scope") if isinstance(event.get("scope"), dict) else {}
-    labels = [scope.get(name) for name in ("candidate_id", "trial_id", "side") if scope.get(name)]
-    suffix = f"  [{' / '.join(map(str, labels))}]" if labels else ""
-    return f"{event.get('sequence', '?'):>4}  {event.get('type', 'unknown')}  {event.get('status', 'event')}{suffix}"
+def _ratio(used: Any, limit: Any) -> float | None:
+    try:
+        denominator = float(limit)
+        return None if denominator <= 0 else float(used) / denominator
+    except (TypeError, ValueError):
+        return None
 
 
-__all__ = ["CancelConfirmationScreen", "OptimizeTuiApp"]
+__all__ = ["ApprovalInputScreen", "CancelConfirmationScreen", "OptimizeTuiApp"]

@@ -106,6 +106,36 @@ async def test_startup_failure_prevents_optimization_job(monkeypatch, tmp_path: 
     assert not called
 
 
+class HangingStartupApp(AutoDetachApp):
+    async def wait_started(self):
+        await asyncio.Event().wait()
+
+    async def run_async(self):
+        await asyncio.Event().wait()
+
+
+@pytest.mark.asyncio
+async def test_startup_timeout_cancels_app_and_prevents_job(monkeypatch, tmp_path: Path):
+    called = False
+
+    async def fake_job(options, *, observer=None, control=None):
+        nonlocal called
+        called = True
+        return ok(None)
+
+    monkeypatch.setattr("loom.optimize.tui_runner.run_optimize", fake_job)
+
+    result = await run_optimize_with_tui(
+        _options(tmp_path),
+        app_factory=HangingStartupApp,
+        startup_timeout_seconds=0.01,
+    )
+
+    assert not result.ok
+    assert result.error.code == "TUI_UNAVAILABLE"
+    assert not called
+
+
 class ImmediateDetachApp(AutoDetachApp):
     async def run_async(self):
         self.started.set()

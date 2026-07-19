@@ -70,7 +70,11 @@ class OptimizeDashboardState:
     budget: BudgetState = field(default_factory=BudgetState)
     holdout_status: str = "sealed"
     governance_status: str = "pending"
+    governance_risk: str | None = None
+    governance_gates: tuple[dict[str, Any], ...] = ()
     terminal_status: str | None = None
+    report_path: str | None = None
+    next_action: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -116,6 +120,35 @@ class OptimizeTuiCollector:
             for completed in payload.get("completed_stages", ()):
                 if isinstance(completed, str):
                     state.pipeline[completed] = "completed"
+            frontier_ids = {str(value) for value in payload.get("frontier_ids", ())}
+            for value in payload.get("candidates", ()):
+                if not isinstance(value, dict) or not isinstance(value.get("candidate_id"), str):
+                    continue
+                candidate_id = value["candidate_id"]
+                candidate = state.candidates.setdefault(candidate_id, CandidateRow(candidate_id))
+                candidate.status = str(value.get("status", candidate.status))
+                candidate.finalist = candidate.status in {
+                    "validation_passed",
+                    "holdout_passed",
+                    "awaiting_approval",
+                    "promoted",
+                }
+                candidate.surface = _optional_text(value.get("surface"))
+                candidate.score = _optional_number(value.get("score"))
+                candidate.regression = _optional_number(value.get("regression"))
+                candidate.frontier = candidate_id in frontier_ids
+            if isinstance(payload.get("budget_used"), dict):
+                state.budget.used.update(payload["budget_used"])
+            if isinstance(payload.get("budgets"), dict):
+                state.budget.limits.update(payload["budgets"])
+            governance = payload.get("governance")
+            if isinstance(governance, dict) and governance.get("status"):
+                state.governance_status = str(governance["status"])
+                state.lifecycle = str(governance["status"])
+                state.governance_risk = _optional_text(governance.get("risk"))
+                gates = governance.get("gates", ())
+                if isinstance(gates, list | tuple):
+                    state.governance_gates = tuple(dict(gate) for gate in gates if isinstance(gate, dict))
         elif event_type.startswith("optimization.stage.") and isinstance(stage, str):
             state.pipeline[stage] = status
             if status in {"failed", "paused"}:
@@ -135,12 +168,19 @@ class OptimizeTuiCollector:
             elif event_type in {"optimization.candidate.rejected", "optimization.proposal.rejected"}:
                 candidate.status = "rejected"
                 candidate.rejection = str(payload.get("code") or payload.get("reason") or "rejected")
-            elif event_type == "optimization.trial.completed":
+            elif event_type == "optimization.candidate.finalist":
+                candidate.finalist = True
+            elif event_type in {"optimization.trial.completed", "optimization.trial.failed"} and scope.get("side") == "candidate":
                 candidate.completed_pairs += 1
             elif event_type == "optimization.experiment.started":
                 trial_count = payload.get("trial_count")
                 if isinstance(trial_count, int):
                     candidate.total_pairs = trial_count
+            elif event_type == "optimization.experiment.completed":
+                score = _optional_number(payload.get("score"))
+                regression = _optional_number(payload.get("regression"))
+                candidate.score = candidate.score if score is None else score
+                candidate.regression = candidate.regression if regression is None else regression
 
         if event_type == "optimization.frontier.updated":
             members = payload.get("candidate_ids", payload.get("frontier", ()))
@@ -167,26 +207,42 @@ class OptimizeTuiCollector:
             runtime = payload.get("runtime_event")
             if isinstance(runtime, dict):
                 state.active_trial.runtime_event = _optional_text(runtime.get("type"))
+                if runtime.get("type") == "llm.requested":
+                    state.budget.used["llm_calls"] = _integer(state.budget.used.get("llm_calls")) + 1
 
         if event_type == "optimization.budget.updated":
             if isinstance(payload.get("used"), dict):
-                state.budget.used = dict(payload["used"])
+                state.budget.used.update(payload["used"])
             if isinstance(payload.get("limits"), dict):
-                state.budget.limits = dict(payload["limits"])
+                state.budget.limits.update(payload["limits"])
 
         if event_type == "optimization.holdout.status":
-            state.holdout_status = "sealed" if payload.get("sealed", True) else status
+            holdout_state = payload.get("state")
+            if isinstance(holdout_state, str) and holdout_state:
+                state.holdout_status = holdout_state
+            else:
+                state.holdout_status = "sealed" if payload.get("sealed", True) else status
         if event_type.startswith("optimization.governance."):
             state.governance_status = status
+            state.governance_risk = _optional_text(payload.get("risk")) or state.governance_risk
+            gates = payload.get("gates")
+            if isinstance(gates, list | tuple):
+                state.governance_gates = tuple(dict(gate) for gate in gates if isinstance(gate, dict))
             if status == "awaiting_approval":
                 state.lifecycle = status
         if event_type in {"optimization.completed", "optimization.paused", "optimization.failed"}:
             state.terminal_status = status
             state.lifecycle = status
+            state.report_path = _optional_text(payload.get("report_path"))
+            state.next_action = _optional_text(payload.get("next_action"))
 
     def _retain(self, event: dict[str, Any]) -> None:
         key = _coalesce_key(event)
         if key is not None and self.state.recent_events and _coalesce_key(self.state.recent_events[-1]) == key:
+            previous_runtime = self.state.recent_events[-1]["payload"]["runtime_event"]
+            runtime = event["payload"]["runtime_event"]
+            if isinstance(previous_runtime.get("delta"), str) and isinstance(runtime.get("delta"), str):
+                runtime["delta"] = (previous_runtime["delta"] + runtime["delta"])[-8192:]
             self.state.recent_events[-1] = event
             return
         self.state.recent_events.append(event)
@@ -200,14 +256,20 @@ def _coalesce_key(event: dict[str, Any]) -> tuple[str, str, str] | None:
         return None
     payload = event.get("payload")
     runtime = payload.get("runtime_event") if isinstance(payload, dict) else None
-    if not isinstance(runtime, dict) or runtime.get("type") not in {"llm.delta", "llm.stream.delta"}:
+    delta_types = {
+        "llm.content.delta",
+        "llm.reasoning.delta",
+        "llm.reasoning_context.delta",
+        "llm.tool_call.arguments.delta",
+    }
+    if not isinstance(runtime, dict) or runtime.get("type") not in delta_types:
         return None
-    call_id = runtime.get("llm_call_id") or runtime.get("call_id")
+    call_id = runtime.get("tool_call_id") or runtime.get("llm_call_id") or runtime.get("call_id")
     scope = event.get("scope")
     trial_id = scope.get("trial_id") if isinstance(scope, dict) else None
     if not call_id:
         return None
-    return ("llm.delta", str(trial_id or ""), str(call_id))
+    return (str(runtime["type"]), str(trial_id or ""), str(call_id))
 
 
 def _optional_text(value: Any) -> str | None:
@@ -216,6 +278,10 @@ def _optional_text(value: Any) -> str | None:
 
 def _integer(value: Any) -> int:
     return int(value) if isinstance(value, int | float) and not isinstance(value, bool) else 0
+
+
+def _optional_number(value: Any) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
 
 
 __all__ = [

@@ -140,6 +140,7 @@ async def run_generic_task(
     model_name: str | None = None,
     harness: TaskHarness | None = None,
     trace_sink: Any | None = None,
+    cancellation: Any | None = None,
 ) -> Result:
     run_options = options or TaskRunOptions()
     task_harness = harness or TaskHarness()
@@ -177,6 +178,7 @@ async def run_generic_task(
             timeout_ms=run_options.timeout_ms,
             plugins=(TuiPlugin(),),
             trace_sink=trace_sink,
+            cancellation=cancellation,
         )
     else:
         run_result = await run(
@@ -185,6 +187,7 @@ async def run_generic_task(
             max_steps=run_options.max_steps,
             timeout_ms=run_options.timeout_ms,
             trace_sink=trace_sink,
+            cancellation=cancellation,
         )
     if not run_result.ok:
         return run_result

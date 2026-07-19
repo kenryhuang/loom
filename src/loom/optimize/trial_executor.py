@@ -16,8 +16,10 @@ from loom.campaigns.experiments import TrialExecution, ValidatedCandidate
 from loom.core import Result, make_loom_error
 from loom.evaluation import EvaluationConfig, analyze_trace
 from loom.evaluation.experiments import TrialEntry
+from loom.optimize.control import OptimizeControlInterrupt, OptimizeRunControl
 from loom.optimize.events import OptimizationEventEmitter, ScopedOptimizationTraceSink
 from loom.optimize.task_sets import PreparedTaskSets, VerifierSpec
+from loom.runtime import CancellationToken
 from loom.tasks import TaskHarness, TaskRequest, TaskRunOptions, run_generic_task
 
 
@@ -35,6 +37,7 @@ class OptimizeTrialExecutor:
         verifier_timeout_seconds: int = 120,
         event_emitter: OptimizationEventEmitter | None = None,
         event_scope: Mapping[str, Any] | None = None,
+        control: OptimizeRunControl | None = None,
     ):
         if trial_timeout_seconds < 1 or verifier_timeout_seconds < 1:
             raise ValueError("Trial and verifier timeouts must be positive")
@@ -48,8 +51,10 @@ class OptimizeTrialExecutor:
         self.verifier_timeout_seconds = verifier_timeout_seconds
         self.event_emitter = event_emitter
         self.event_scope = dict(event_scope or {})
+        self.control = control
         self._attempts: dict[tuple[str, str], int] = {}
         self._workspaces: dict[tuple[str, str], Path] = {}
+        self._started_trial_ids: set[str] = set()
 
     def workspace_for(self, trial_id: str, side: str) -> Path:
         return self._workspaces[(trial_id, side)]
@@ -61,6 +66,10 @@ class OptimizeTrialExecutor:
         entry: TrialEntry,
         trial_id: str,
     ) -> TrialExecution:
+        if trial_id not in self._started_trial_ids:
+            if self.control is not None:
+                self.control.interrupt()
+            self._started_trial_ids.add(trial_id)
         prepared = self.prepared_tasks.task_by_fingerprint.get(entry.task_fingerprint)
         scope = {
             **self.event_scope,
@@ -133,8 +142,17 @@ class OptimizeTrialExecutor:
                 scope=event_scope,
             )
         )
+        cancellation = CancellationToken()
+
+        async def watch_cancel(task: asyncio.Task) -> None:
+            while not task.done():
+                if self.control is not None and self.control.cancel_requested:
+                    cancellation.cancel()
+                    return
+                await asyncio.sleep(0.01)
+
         try:
-            run_result = await asyncio.wait_for(
+            run_task = asyncio.create_task(
                 run_generic_task(
                     request,
                     provider=self.solver_provider,
@@ -144,13 +162,21 @@ class OptimizeTrialExecutor:
                     ),
                     harness=harness,
                     trace_sink=trace_sink,
+                    cancellation=cancellation,
                 ),
-                timeout=self.trial_timeout_seconds,
             )
+            cancel_watcher = asyncio.create_task(watch_cancel(run_task))
+            try:
+                run_result = await asyncio.wait_for(run_task, timeout=self.trial_timeout_seconds)
+            finally:
+                cancel_watcher.cancel()
+                await asyncio.gather(cancel_watcher, return_exceptions=True)
         except TimeoutError:
             return self._infrastructure(trial_id, side, "TIMEOUT", started)
         except Exception:
             return self._infrastructure(trial_id, side, "TASK_RUNNER_FAILED", started)
+        if self.control is not None and self.control.cancel_requested:
+            raise OptimizeControlInterrupt("user cancelled active trial")
         task_ok = run_result.ok
         if not task_ok and run_result.error.retryable:
             return self._infrastructure(trial_id, side, run_result.error.code, started)

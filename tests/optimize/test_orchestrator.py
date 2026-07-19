@@ -220,6 +220,31 @@ async def test_pause_request_stops_before_next_stage_and_persists_paused_lifecyc
 
 
 @pytest.mark.asyncio
+async def test_cancel_request_cancels_active_stage_lease_without_stage_failure(tmp_path: Path):
+    control = OptimizeRunControl()
+
+    class CancelActiveStage(RecordingObserver):
+        def emit(self, event):
+            super().emit(event)
+            if event["type"] == "optimization.stage.started":
+                control.request_cancel("stop active work")
+
+    observer = CancelActiveStage()
+    orchestrator, store, services, _observer = _fixture(tmp_path, control=control, observer=observer)
+
+    result = await orchestrator.run_campaign()
+
+    assert result.error.code == "OPTIMIZATION_PAUSED"
+    assert (await store.load("opt_test")).unwrap().lifecycle is OptimizationLifecycle.PAUSED
+    stored_events = (await store.events("opt_test")).unwrap()
+    assert any(event["event_type"] == "optimization.stage_cancelled" for event in stored_events)
+    assert not any(event["type"] == "optimization.stage.failed" for event in observer.events)
+    assert any(event["type"] == "optimization.cancel.requested" for event in observer.events)
+    assert any(event["type"] == "optimization.paused" for event in observer.events)
+    assert services.calls["seed_evaluation"] == 0
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_resume_does_not_repeat_completed_seed_calls(tmp_path: Path):
     orchestrator, store, services, _observer = _fixture(tmp_path)
     services.fail_once_at("search")

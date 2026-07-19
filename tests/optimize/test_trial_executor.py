@@ -17,6 +17,7 @@ from loom.campaigns.task_sets import TaskManifestRow
 from loom.core import err, make_loom_error, ok
 from loom.evaluation.experiments import TrialEntry
 from loom.llm import LlmResponse, TokenUsage
+from loom.optimize.control import OptimizeControlInterrupt, OptimizeRunControl
 from loom.optimize.events import OptimizationEventEmitter
 from loom.optimize.task_sets import OptimizeTask, PreparedTask, VerifierSpec, WorkspaceSnapshot
 from loom.optimize.trial_executor import OptimizeTrialExecutor
@@ -56,6 +57,20 @@ class RecordingSolverProvider:
         )
 
 
+@dataclass(frozen=True)
+class CancellableSolverProvider(RecordingSolverProvider):
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    cancelled: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        del messages, tools, tool_choice
+        self.started.set()
+        while cancellation is None or not cancellation.cancelled:
+            await asyncio.sleep(0.005)
+        self.cancelled.set()
+        return err(make_loom_error("ABORTED", "provider cancelled", retryable=False))
+
+
 def _prepared_task(tmp_path: Path, *, verifier_exit: int = 0) -> tuple[SimpleNamespace, TrialEntry]:
     snapshot = tmp_path / f"snapshot-{verifier_exit}"
     snapshot.mkdir()
@@ -74,7 +89,14 @@ def _candidate() -> ValidatedCandidate:
     return ValidatedCandidate("cmp_test", "cand_test", artifact, baseline, "env", "solver", "tools", "permissions", "evaluator")
 
 
-def _executor(tmp_path: Path, *, verifier_exit: int = 0, provider: RecordingSolverProvider | None = None, event_emitter=None):
+def _executor(
+    tmp_path: Path,
+    *,
+    verifier_exit: int = 0,
+    provider: RecordingSolverProvider | None = None,
+    event_emitter=None,
+    control=None,
+):
     tasks, entry = _prepared_task(tmp_path, verifier_exit=verifier_exit)
     solver = provider or RecordingSolverProvider()
     artifacts = ArtifactStore(tmp_path / "artifacts")
@@ -94,6 +116,7 @@ def _executor(tmp_path: Path, *, verifier_exit: int = 0, provider: RecordingSolv
         verifier_timeout_seconds=5,
         event_emitter=event_emitter,
         event_scope={"phase": "discovery", "experiment_id": "exp_test"},
+        control=control,
     )
     return executor, solver, artifacts, entry
 
@@ -154,6 +177,33 @@ async def test_trial_executor_emits_scoped_trial_and_nested_runtime_events(tmp_p
     }
     assert any(event["type"] == "optimization.runtime.event" for event in observer.events)
     assert any(event["type"] == "optimization.trial.completed" for event in observer.events)
+
+
+@pytest.mark.asyncio
+async def test_trial_executor_stops_before_scheduling_a_new_pair_when_pause_requested(tmp_path: Path):
+    control = OptimizeRunControl()
+    control.request_pause("operator pause")
+    executor, _provider, _artifacts, entry = _executor(tmp_path, control=control)
+
+    with pytest.raises(OptimizeControlInterrupt):
+        await executor.execute("baseline", _candidate(), entry, "trial-1")
+
+    assert not (tmp_path / "trials").exists()
+
+
+@pytest.mark.asyncio
+async def test_trial_executor_cancels_in_flight_provider_without_trial_failure_evidence(tmp_path: Path):
+    control = OptimizeRunControl()
+    provider = CancellableSolverProvider()
+    executor, _provider, _artifacts, entry = _executor(tmp_path, provider=provider, control=control)
+
+    running = asyncio.create_task(executor.execute("candidate", _candidate(), entry, "trial-1"))
+    await asyncio.wait_for(provider.started.wait(), timeout=1)
+    control.request_cancel("operator cancel")
+
+    with pytest.raises(OptimizeControlInterrupt):
+        await asyncio.wait_for(running, timeout=1)
+    assert provider.cancelled.is_set()
 
 
 @pytest.mark.asyncio

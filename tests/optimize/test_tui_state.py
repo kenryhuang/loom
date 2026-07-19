@@ -130,16 +130,16 @@ async def test_collector_coalesces_repeated_runtime_deltas_and_never_blocks_upda
                 scope={"trial_id": "trial_1"},
                 payload={
                     "runtime_event": {
-                        "type": "llm.delta",
+                        "type": "llm.content.delta",
                         "llm_call_id": "llm_1",
-                        "content": text,
+                        "delta": text[-1],
                     }
                 },
             )
         )
 
     assert len(collector.state.recent_events) == 1
-    assert collector.state.recent_events[0]["payload"]["runtime_event"]["content"] == "abc"
+    assert collector.state.recent_events[0]["payload"]["runtime_event"]["delta"] == "abc"
     assert collector.updates.qsize() == 1
 
 
@@ -151,3 +151,42 @@ async def test_collector_ignores_duplicate_or_out_of_order_session_events():
 
     assert collector.state.sequence == 2
     assert collector.state.pipeline["search_running"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_collector_counts_completed_pairs_once_and_shows_opened_holdout():
+    collector = OptimizeTuiCollector()
+    await collector.emit(
+        _event(
+            1,
+            "optimization.candidate.admitted",
+            scope={"candidate_id": "cand_1", "phase": "discovery"},
+        )
+    )
+    for sequence, side in ((2, "baseline"), (3, "candidate")):
+        await collector.emit(
+            _event(
+                sequence,
+                "optimization.trial.completed",
+                status="completed",
+                scope={
+                    "candidate_id": "cand_1",
+                    "phase": "discovery",
+                    "trial_id": "trial_1",
+                    "side": side,
+                },
+            )
+        )
+    await collector.emit(
+        _event(
+            4,
+            "optimization.holdout.status",
+            stage="holdout_complete",
+            status="running",
+            scope={"phase": "holdout"},
+            payload={"state": "opened", "finalist_count": 1},
+        )
+    )
+
+    assert collector.state.candidates["cand_1"].completed_pairs == 1
+    assert collector.state.holdout_status == "opened"

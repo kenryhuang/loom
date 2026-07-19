@@ -38,6 +38,7 @@ async def run_optimize_with_tui(
     *,
     app_factory: Callable[..., Any] | None = None,
     fallback_stream: TextIO = sys.stderr,
+    startup_timeout_seconds: float = 10.0,
 ) -> Result:
     """Start Textual first, then run optimization without tying job life to UI life."""
 
@@ -46,7 +47,7 @@ async def run_optimize_with_tui(
     observer = _SwitchingObserver(OptimizeTuiObserver(collector), TextObserver(fallback_stream))
     result_holder: dict[str, Result] = {}
 
-    async def approve() -> Result:
+    async def approve(identity: str, reason: str | None) -> Result:
         current = result_holder.get("result")
         value = None if current is None or not current.ok else current.value
         optimization_id = _field(value, "optimization_id")
@@ -58,8 +59,8 @@ async def run_optimize_with_tui(
             output_dir=options.output_dir,
             optimization_id=str(optimization_id),
             candidate_id=str(candidate_id),
-            identity="approver",
-            reason="approved from optimize TUI",
+            identity=identity,
+            reason=reason,
         )
         approved = await run_approve(approval_options)
         if approved.ok:
@@ -79,7 +80,16 @@ async def run_optimize_with_tui(
     except Exception as exc:
         return _tui_error("TUI_UNAVAILABLE", "Optimize TUI could not be constructed", cause=exc)
 
-    done, _pending = await asyncio.wait({app_task, started_task}, return_when=asyncio.FIRST_COMPLETED)
+    done, _pending = await asyncio.wait(
+        {app_task, started_task},
+        timeout=max(0.001, startup_timeout_seconds),
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if not done:
+        app_task.cancel()
+        started_task.cancel()
+        await asyncio.gather(app_task, started_task, return_exceptions=True)
+        return _tui_error("TUI_UNAVAILABLE", "Optimize TUI did not complete startup before the timeout")
     if started_task not in done and not started_task.done():
         app_error = _task_exception(app_task)
         started_task.cancel()

@@ -186,8 +186,9 @@ TUI controls:
 - `p` requests a durable pause at the next safe stage checkpoint.
 - `c` requests cancellation after an explicit confirmation; the resulting
   paused optimization remains resumable.
-- `a` submits the stored governance approval when the local campaign is in
-  `awaiting_approval`.
+- `a` opens identity/reason input and submits the stored governance approval
+  when the campaign is in `awaiting_approval`; Loom still enforces the existing
+  authorization, evidence, risk, and staleness checks.
 - Arrow keys or `j`/`k` move through candidates; `y` and `Y` copy event detail
   or the bounded event window.
 

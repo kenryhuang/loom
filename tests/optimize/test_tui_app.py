@@ -4,10 +4,10 @@ import pytest
 
 pytest.importorskip("textual")
 
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Input, Static
 
 from loom.optimize.control import OptimizeRunControl
-from loom.optimize.tui_app import CancelConfirmationScreen, OptimizeTuiApp
+from loom.optimize.tui_app import ApprovalInputScreen, CancelConfirmationScreen, OptimizeTuiApp
 from loom.optimize.tui_state import OptimizeTuiCollector
 
 
@@ -79,6 +79,12 @@ async def test_operations_dashboard_has_stable_layout_and_renders_collector_stat
         await pilot.pause(0.15)
 
         assert app.query_one("#candidate-table", DataTable).row_count == 1
+        feed = app.query_one("#event-feed", DataTable)
+        assert feed.row_count == 4
+        feed.focus()
+        feed.move_cursor(row=1)
+        app.action_show_detail()
+        assert "optimization.candidate.admitted" in str(app.query_one("#event-detail", Static).render())
         assert "task_1" in str(app.query_one("#active-trial", Static).render())
         assert "50 / 100" in str(app.query_one("#budget-panel", Static).render())
         assert "Search" in str(app.query_one("#stage-pipeline", Static).render())
@@ -142,8 +148,8 @@ async def test_terminal_event_updates_status_and_does_not_auto_exit():
 async def test_approval_binding_is_enabled_only_when_awaiting_approval():
     approvals = []
 
-    async def approve():
-        approvals.append("approved")
+    async def approve(identity, reason):
+        approvals.append((identity, reason))
 
     collector = OptimizeTuiCollector()
     app = OptimizeTuiApp(collector, OptimizeRunControl(), approval_handler=approve)
@@ -161,4 +167,10 @@ async def test_approval_binding_is_enabled_only_when_awaiting_approval():
         )
         await pilot.pause(0.15)
         await pilot.press("a")
-        assert approvals == ["approved"]
+        await pilot.pause()
+        assert isinstance(app.screen, ApprovalInputScreen)
+        app.screen.query_one("#approval-identity", Input).value = "reviewer@example.com"
+        app.screen.query_one("#approval-reason", Input).value = "Evidence reviewed"
+        await pilot.click("#submit-approval")
+        await pilot.pause(0.1)
+        assert approvals == [("reviewer@example.com", "Evidence reviewed")]

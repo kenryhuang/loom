@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from loom.core import Result, err, make_loom_error, ok
 
 
+class OptimizeControlInterrupt(Exception):
+    """Internal cooperative signal; never convert it into trial failure evidence."""
+
+
 @dataclass(slots=True)
 class OptimizeRunControl:
     _pause_reason: str | None = None
@@ -26,6 +30,22 @@ class OptimizeRunControl:
     def cancel_requested(self) -> bool:
         return self._cancel_reason is not None
 
+    @property
+    def requested(self) -> bool:
+        return self.pause_requested or self.cancel_requested
+
+    @property
+    def request_type(self) -> str | None:
+        if self.cancel_requested:
+            return "cancel"
+        if self.pause_requested:
+            return "pause"
+        return None
+
+    def interrupt(self) -> None:
+        if self.requested:
+            raise OptimizeControlInterrupt(self._cancel_reason or self._pause_reason or "optimization control requested")
+
     async def checkpoint(self, store, optimization_id: str) -> Result:
         reason = self._cancel_reason or self._pause_reason
         if reason is None:
@@ -43,4 +63,4 @@ class OptimizeRunControl:
         )
 
 
-__all__ = ["OptimizeRunControl"]
+__all__ = ["OptimizeControlInterrupt", "OptimizeRunControl"]

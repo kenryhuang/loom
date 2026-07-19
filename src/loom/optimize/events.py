@@ -29,8 +29,27 @@ _FORBIDDEN_HOLDOUT_KEYS = frozenset(
         "scores",
         "judge_rationale",
         "rationale",
+        "error_message",
+        "message",
+        "cause",
+        "stdout",
+        "stderr",
     }
 )
+_HOLDOUT_ALLOWED_SCOPE_KEYS = frozenset({"phase", "candidate_id", "experiment_id"})
+_HOLDOUT_ALLOWED_PAYLOAD_KEYS = {
+    "optimization.holdout.status": frozenset({"state", "finalist_ids", "finalist_count", "evaluated_ids", "evidence_ref_count"}),
+    "optimization.experiment.started": frozenset({"trial_count"}),
+    "optimization.experiment.completed": frozenset({"status", "task_side_runs", "solver_tokens", "cost", "wall_time_seconds"}),
+    "optimization.budget.updated": frozenset({"used", "limits"}),
+    "optimization.stage.started": frozenset({"operation_id", "lease_id", "aggregate_version"}),
+    "optimization.stage.replayed": frozenset({"operation_id", "lease_id", "aggregate_version", "output_keys"}),
+    "optimization.stage.completed": frozenset({"operation_id", "lease_id", "aggregate_version", "output_keys"}),
+    "optimization.stage.failed": frozenset({"operation_id", "lease_id", "error_code"}),
+    "optimization.pause.requested": frozenset({"operation_id", "lease_id"}),
+    "optimization.cancel.requested": frozenset({"operation_id", "lease_id"}),
+    "optimization.paused": frozenset({"operation_id", "lease_id"}),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +73,7 @@ class OptimizationEventEmitter:
     campaign_id: str | None
     observer: Any | None = None
     _sequence: int = 0
+    _holdout_warning_emitted: bool = False
 
     async def emit(
         self,
@@ -78,18 +98,35 @@ class OptimizationEventEmitter:
             payload=payload,
         )
         if not built.ok:
+            if built.error is not None and built.error.code == "HOLDOUT_EVENT_FORBIDDEN" and not self._holdout_warning_emitted:
+                warning = build_optimization_event(
+                    "optimization.observer.warning",
+                    sequence=next_sequence,
+                    optimization_id=self.optimization_id,
+                    campaign_id=self.campaign_id,
+                    stage=None,
+                    status="warning",
+                    scope={},
+                    payload={"code": "HOLDOUT_EVENT_FORBIDDEN"},
+                )
+                if warning.ok:
+                    self._sequence = next_sequence
+                    self._holdout_warning_emitted = True
+                    await self._notify(warning.value)
             return built
         self._sequence = next_sequence
-        if self.observer is not None:
-            try:
-                emitted = self.observer.emit(built.value)
-                if inspect.isawaitable(emitted):
-                    emitted = await emitted
-                if isinstance(emitted, Result) and not emitted.ok:
-                    return ok(built.value)
-            except Exception:
-                return ok(built.value)
+        await self._notify(built.value)
         return ok(built.value)
+
+    async def _notify(self, event: Mapping[str, Any]) -> None:
+        if self.observer is None:
+            return
+        try:
+            emitted = self.observer.emit(event)
+            if inspect.isawaitable(emitted):
+                await emitted
+        except Exception:
+            return
 
 
 class ScopedOptimizationTraceSink:
@@ -137,7 +174,20 @@ def build_optimization_event(
     scope_value = {} if scope is None else dict(scope)
     payload_value = {} if payload is None else dict(payload)
     phase = str(scope_value.get("phase", ""))
-    if phase == "holdout" or event_type.startswith("optimization.holdout"):
+    protected_holdout = phase == "holdout" or event_type.startswith("optimization.holdout") or stage == "holdout_complete"
+    if protected_holdout:
+        forbidden_scope = set(map(str, scope_value)) - _HOLDOUT_ALLOWED_SCOPE_KEYS
+        allowed_payload = _HOLDOUT_ALLOWED_PAYLOAD_KEYS.get(event_type)
+        forbidden_payload = set(map(str, payload_value)) - (allowed_payload or frozenset())
+        if event_type not in _HOLDOUT_ALLOWED_PAYLOAD_KEYS:
+            return _event_error(
+                "HOLDOUT_EVENT_FORBIDDEN",
+                "Holdout observer event type is not aggregate-safe",
+                field=event_type,
+            )
+        if forbidden_scope or forbidden_payload:
+            field = sorted(forbidden_scope or forbidden_payload)[0]
+            return _event_error("HOLDOUT_EVENT_FORBIDDEN", "Holdout observer event contains a forbidden field", field=field)
         forbidden = _find_forbidden_key(payload_value)
         if forbidden is not None:
             return _event_error(

@@ -411,7 +411,11 @@ def test_optimize_command_resumes_without_repeating_completed_model_calls(tmp_pa
 
     ledger = {role: len(provider.messages) for role, provider in providers.items()}
     assert optimize_main(command) == 0
-    capsys.readouterr()
+    replayed = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    snapshot = next(event for event in replayed if event.get("type") == "optimization.snapshot.loaded")
+    assert snapshot["payload"]["candidates"]
+    assert snapshot["payload"]["frontier_ids"]
+    assert snapshot["payload"]["budget_used"]["tokens"] > 0
     assert {role: len(provider.messages) for role, provider in providers.items()} == ledger
 
 
@@ -452,10 +456,23 @@ async def test_tui_and_json_modes_receive_equivalent_safe_end_to_end_event_strea
     assert [event["type"] for event in collector.state.recent_events] == [event["type"] for event in json_events]
     assert any(event["type"] == "optimization.candidate.admitted" for event in json_events)
     assert any(event["type"] == "optimization.trial.started" for event in json_events)
-    forbidden = {"task", "workspace", "expected_output", "verifier", "score", "judge_rationale", "rationale"}
+    forbidden = {
+        "task",
+        "task_id",
+        "trial_id",
+        "workspace",
+        "expected_output",
+        "verifier",
+        "score",
+        "judge_rationale",
+        "rationale",
+        "stdout",
+        "stderr",
+    }
     for event in json_events:
         if event.get("scope", {}).get("phase") == "holdout" or event["type"].startswith("optimization.holdout"):
             assert not forbidden.intersection(_nested_keys(event["payload"]))
+            assert not forbidden.intersection(event.get("scope", {}))
 
 
 def _nested_keys(value):

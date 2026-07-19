@@ -322,11 +322,9 @@ class OptimizeOrchestrator:
         *args: Any,
         terminal_lifecycle: Callable[[Mapping[str, Any]], OptimizationLifecycle] | None = None,
     ) -> Result:
-        if self.control is not None:
-            checkpoint = await self.control.checkpoint(self.store, self.spec.optimization_id)
-            if not checkpoint.ok:
-                return checkpoint
         operation_id = _operation_id(self.spec.optimization_id, name)
+        if self.control is not None and self.control.requested:
+            return await self._handle_control(target, operation_id)
         input_digest = canonical_digest({"optimization_key": self.spec.optimization_key, "stage": target.value, "inputs": inputs})
         begun = await self.store.begin(
             self.spec.optimization_id,
@@ -364,7 +362,11 @@ class OptimizeOrchestrator:
                 "aggregate_version": begun.value.aggregate_version,
             },
         )
+        if self.control is not None and self.control.requested:
+            return await self._handle_control(target, operation_id, lease_id=begun.value.lease_id)
         called = await _call(action, *args)
+        if self.control is not None and self.control.requested:
+            return await self._handle_control(target, operation_id, lease_id=begun.value.lease_id)
         if not called.ok:
             cancelled = await self.store.cancel(
                 begun.value.lease_id,
@@ -380,7 +382,6 @@ class OptimizeOrchestrator:
                     "operation_id": operation_id,
                     "lease_id": begun.value.lease_id,
                     "error_code": "INTERNAL" if called.error is None else called.error.code,
-                    "error_message": "Stage failed" if called.error is None else called.error.message,
                 },
             )
             return called
@@ -402,6 +403,28 @@ class OptimizeOrchestrator:
             },
         )
         return ok(called.value)
+
+    async def _handle_control(
+        self,
+        stage: OptimizationStage,
+        operation_id: str,
+        *,
+        lease_id: str | None = None,
+    ) -> Result:
+        assert self.control is not None
+        request_type = self.control.request_type or "pause"
+        payload = {"operation_id": operation_id}
+        if lease_id is not None:
+            payload["lease_id"] = lease_id
+        await self._emit(f"optimization.{request_type}.requested", stage, "requested", payload)
+        if lease_id is not None:
+            cancelled = await self.store.cancel(lease_id, reason=f"USER_{request_type.upper()}_REQUESTED")
+            if not cancelled.ok:
+                return cancelled
+        checkpoint = await self.control.checkpoint(self.store, self.spec.optimization_id)
+        if not checkpoint.ok and checkpoint.error is not None and checkpoint.error.code == "OPTIMIZATION_PAUSED":
+            await self._emit("optimization.paused", stage, "paused", payload)
+        return checkpoint
 
     async def _emit(self, event_type: str, stage: OptimizationStage, status: str, payload: Mapping[str, Any]) -> None:
         await self.event_emitter.emit(event_type, stage=stage.value, status=status, payload=payload)
