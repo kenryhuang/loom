@@ -39,6 +39,7 @@ def test_top_level_package_api_is_intentionally_thin():
     submodule_names = {
         "composition",
         "campaigns",
+        "cli",
         "core",
         "evaluation",
         "evolution",
@@ -46,6 +47,7 @@ def test_top_level_package_api_is_intentionally_thin():
         "llm",
         "governance",
         "observability",
+        "optimize",
         "runtime",
         "tasks",
         "tools",

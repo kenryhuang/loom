@@ -8,7 +8,7 @@ from collections.abc import Sequence
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="loom")
-    parser.add_argument("command", choices=("campaign", "candidate", "experiment", "task-set", "governance"))
+    parser.add_argument("command", choices=("campaign", "candidate", "experiment", "task-set", "governance", "optimize"))
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.command == "campaign":
@@ -19,8 +19,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from loom.campaigns.experiment_cli import main as command_main
     elif args.command == "task-set":
         from loom.campaigns.task_set_cli import main as command_main
-    else:
+    elif args.command == "governance":
         from loom.governance.cli import main as command_main
+    else:
+        from loom.optimize.cli import main as command_main
     return command_main(args.arguments)
 
 
