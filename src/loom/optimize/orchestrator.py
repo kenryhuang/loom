@@ -11,6 +11,8 @@ from typing import Any
 from loom.campaigns.serialization import canonical_digest
 from loom.core import Result, err, make_loom_error, ok, thaw_json
 from loom.optimize.contracts import OptimizationLifecycle, OptimizationResult, OptimizationSpec, OptimizationStage
+from loom.optimize.control import OptimizeRunControl
+from loom.optimize.events import OptimizationEventEmitter
 from loom.optimize.reporting import write_report, write_result
 from loom.optimize.store import SQLiteOptimizationStore
 
@@ -49,6 +51,8 @@ class OptimizeOrchestrator:
         *,
         iterations: int,
         observer: Any | None = None,
+        event_emitter: OptimizationEventEmitter | None = None,
+        control: OptimizeRunControl | None = None,
         lease_seconds: int = 3600,
         governance: Callable[..., Any] | None = None,
         output_dir: str | Path | None = None,
@@ -60,6 +64,8 @@ class OptimizeOrchestrator:
         self.services = services
         self.iterations = iterations
         self.observer = observer
+        self.event_emitter = event_emitter or OptimizationEventEmitter(spec.optimization_id, spec.campaign_id, observer)
+        self.control = control
         self.lease_seconds = lease_seconds
         self.governance = governance
         self.output_dir = Path(output_dir) if output_dir is not None else store.root
@@ -140,6 +146,10 @@ class OptimizeOrchestrator:
         created = await self.store.create(self.spec)
         if not created.ok:
             return created
+        if created.value.lifecycle is OptimizationLifecycle.PAUSED:
+            resumed = await self.store.resume(self.spec.optimization_id)
+            if not resumed.ok:
+                return resumed
         reconciled = await self.store.reconcile_expired(self.spec.optimization_id)
         if not reconciled.ok:
             return reconciled
@@ -312,6 +322,10 @@ class OptimizeOrchestrator:
         *args: Any,
         terminal_lifecycle: Callable[[Mapping[str, Any]], OptimizationLifecycle] | None = None,
     ) -> Result:
+        if self.control is not None:
+            checkpoint = await self.control.checkpoint(self.store, self.spec.optimization_id)
+            if not checkpoint.ok:
+                return checkpoint
         operation_id = _operation_id(self.spec.optimization_id, name)
         input_digest = canonical_digest({"optimization_key": self.spec.optimization_key, "stage": target.value, "inputs": inputs})
         begun = await self.store.begin(
@@ -328,7 +342,28 @@ class OptimizeOrchestrator:
             value = begun.value.outputs.get(output_key)
             if not isinstance(value, Mapping):
                 return _orchestration_error("OPTIMIZATION_REPLAY_INVALID", "Recorded stage output is missing", operation_id=operation_id)
+            await self._emit(
+                "optimization.stage.replayed",
+                target,
+                "replayed",
+                {
+                    "operation_id": operation_id,
+                    "lease_id": begun.value.lease_id,
+                    "aggregate_version": begun.value.aggregate_version,
+                    "output_keys": tuple(sorted(value)),
+                },
+            )
             return ok(value)
+        await self._emit(
+            "optimization.stage.started",
+            target,
+            "running",
+            {
+                "operation_id": operation_id,
+                "lease_id": begun.value.lease_id,
+                "aggregate_version": begun.value.aggregate_version,
+            },
+        )
         called = await _call(action, *args)
         if not called.ok:
             cancelled = await self.store.cancel(
@@ -337,6 +372,17 @@ class OptimizeOrchestrator:
             )
             if not cancelled.ok:
                 return cancelled
+            await self._emit(
+                "optimization.stage.failed",
+                target,
+                "failed",
+                {
+                    "operation_id": operation_id,
+                    "lease_id": begun.value.lease_id,
+                    "error_code": "INTERNAL" if called.error is None else called.error.code,
+                    "error_message": "Stage failed" if called.error is None else called.error.message,
+                },
+            )
             return called
         if not isinstance(called.value, Mapping):
             return _orchestration_error("OPTIMIZATION_STAGE_OUTPUT_INVALID", "Stage service must return a mapping", stage=target.value)
@@ -345,27 +391,20 @@ class OptimizeOrchestrator:
         if not completed.ok:
             return completed
         await self._emit(
+            "optimization.stage.completed",
+            target,
+            "completed",
             {
-                "schema_version": "loom.optimization.event.v1",
-                "optimization_id": self.spec.optimization_id,
                 "operation_id": operation_id,
-                "stage": target.value,
-                "status": "completed",
+                "lease_id": begun.value.lease_id,
                 "aggregate_version": completed.value.aggregate_version,
-                "outputs": thaw_json(called.value),
-            }
+                "output_keys": tuple(sorted(called.value)),
+            },
         )
         return ok(called.value)
 
-    async def _emit(self, event: Mapping[str, Any]) -> None:
-        if self.observer is None:
-            return
-        try:
-            emitted = self.observer.emit(event)
-            if inspect.isawaitable(emitted):
-                await emitted
-        except Exception:
-            return
+    async def _emit(self, event_type: str, stage: OptimizationStage, status: str, payload: Mapping[str, Any]) -> None:
+        await self.event_emitter.emit(event_type, stage=stage.value, status=status, payload=payload)
 
 
 async def _call(function: Callable[..., Any], *args: Any) -> Result:

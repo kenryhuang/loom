@@ -87,6 +87,33 @@ def test_store_pause_resume_and_rebuild_verified_projection(tmp_path: Path):
     asyncio.run(scenario())
 
 
+def test_store_snapshot_returns_sanitized_operation_projection(tmp_path: Path):
+    async def scenario():
+        spec = _spec(tmp_path)
+        store = SQLiteOptimizationStore(tmp_path / "opt")
+        await store.create(spec)
+        lease = (await store.begin(spec.optimization_id, "op-preflight", "input", OptimizationStage.PREFLIGHT_COMPLETE)).unwrap()
+
+        snapshot = (
+            await store.snapshot(
+                spec.optimization_id,
+                campaign_id="cmp_test",
+                budgets={"max_candidates": 4, "max_llm_calls": 20},
+            )
+        ).unwrap()
+
+        assert snapshot.optimization_id == "opt_test"
+        assert snapshot.campaign_id == "cmp_test"
+        assert snapshot.stage == "created"
+        assert snapshot.lifecycle == "running"
+        assert snapshot.budgets["max_candidates"] == 4
+        assert snapshot.operations[0]["operation_id"] == "op-preflight"
+        assert snapshot.operations[0]["lease_id"] == lease.lease_id
+        assert "input_digest" not in snapshot.operations[0]
+
+    asyncio.run(scenario())
+
+
 def test_store_reconciles_expired_lease_before_retry(tmp_path: Path):
     async def scenario():
         spec = _spec(tmp_path)

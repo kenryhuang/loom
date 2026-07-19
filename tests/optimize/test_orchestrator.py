@@ -8,6 +8,7 @@ import pytest
 
 from loom.core import err, make_loom_error, ok
 from loom.optimize.contracts import OptimizationLifecycle, OptimizationSpec, OptimizationStage
+from loom.optimize.control import OptimizeRunControl
 from loom.optimize.orchestrator import OptimizeCampaignServices, OptimizeOrchestrator
 from loom.optimize.store import SQLiteOptimizationStore
 
@@ -119,12 +120,12 @@ def _spec(tmp_path: Path) -> OptimizationSpec:
     )
 
 
-def _fixture(tmp_path: Path, **service_options):
+def _fixture(tmp_path: Path, *, control=None, observer=None, **service_options):
     spec = _spec(tmp_path)
     store = SQLiteOptimizationStore(tmp_path / "optimization")
     services = FakeCampaignServices(**service_options)
-    observer = RecordingObserver()
-    orchestrator = OptimizeOrchestrator(spec, store, services.contract(), iterations=2, observer=observer)
+    observer = observer or RecordingObserver()
+    orchestrator = OptimizeOrchestrator(spec, store, services.contract(), iterations=2, observer=observer, control=control)
     return orchestrator, store, services, observer
 
 
@@ -141,7 +142,7 @@ async def test_orchestrator_runs_seed_search_validation_and_holdout(tmp_path: Pa
     assert services.calls["seed_evolution"] == 1
     assert services.calls["holdout"] == 1
     assert services.holdout_cohorts == [("cand-a",)]
-    stages = [event["stage"] for event in observer.events]
+    stages = [event["stage"] for event in observer.events if event["status"] == "completed"]
     assert stages == [
         "preflight_complete",
         "seed_analysis_complete",
@@ -153,6 +154,69 @@ async def test_orchestrator_runs_seed_search_validation_and_holdout(tmp_path: Pa
         "finalists_selected",
         "holdout_complete",
     ]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_emits_stage_lifecycle_at_durable_boundaries(tmp_path: Path):
+    orchestrator, _store, _services, observer = _fixture(tmp_path)
+
+    await orchestrator.run_campaign()
+
+    assert [(event["type"], event["status"]) for event in observer.events[:2]] == [
+        ("optimization.stage.started", "running"),
+        ("optimization.stage.completed", "completed"),
+    ]
+    assert observer.events[0]["payload"]["lease_id"]
+    assert observer.events[1]["payload"]["aggregate_version"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_emits_failed_after_stage_lease_is_cancelled(tmp_path: Path):
+    orchestrator, _store, services, observer = _fixture(tmp_path)
+    services.fail_once_at("preflight")
+
+    result = await orchestrator.run_campaign()
+
+    assert not result.ok
+    assert [(event["type"], event["status"]) for event in observer.events] == [
+        ("optimization.stage.started", "running"),
+        ("optimization.stage.failed", "failed"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_emits_replayed_without_repeating_completed_service(tmp_path: Path):
+    orchestrator, _store, services, observer = _fixture(tmp_path)
+    services.fail_once_at("search")
+    await orchestrator.run_campaign()
+    observer.events.clear()
+
+    result = await orchestrator.run_campaign()
+
+    assert result.ok
+    assert observer.events[0]["type"] == "optimization.stage.replayed"
+    assert services.calls["preflight"] == 1
+    assert services.calls["seed_evaluation"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pause_request_stops_before_next_stage_and_persists_paused_lifecycle(tmp_path: Path):
+    control = OptimizeRunControl()
+
+    class PauseAfterPreflight(RecordingObserver):
+        def emit(self, event):
+            super().emit(event)
+            if event["stage"] == "preflight_complete" and event["status"] == "completed":
+                control.request_pause("tui pause")
+
+    observer = PauseAfterPreflight()
+    orchestrator, store, services, _observer = _fixture(tmp_path, control=control, observer=observer)
+
+    result = await orchestrator.run_campaign()
+
+    assert result.error.code == "OPTIMIZATION_PAUSED"
+    assert services.calls["seed_evaluation"] == 0
+    assert (await store.load("opt_test")).unwrap().lifecycle is OptimizationLifecycle.PAUSED
 
 
 @pytest.mark.asyncio

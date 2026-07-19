@@ -16,6 +16,7 @@ from typing import Any
 from loom.campaigns.serialization import canonical_json_bytes, utc_now
 from loom.core import FrozenDict, Result, err, freeze_json, make_loom_error, ok, thaw_json
 from loom.optimize.contracts import OptimizationLifecycle, OptimizationSpec, OptimizationStage, OptimizationState
+from loom.optimize.events import OptimizationSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,6 +419,46 @@ class SQLiteOptimizationStore:
         connection = self._connect()
         try:
             return self._state_from_connection(connection, optimization_id)
+        finally:
+            connection.close()
+
+    async def snapshot(
+        self,
+        optimization_id: str,
+        *,
+        campaign_id: str | None = None,
+        budgets: Mapping[str, Any] | None = None,
+    ) -> Result:
+        connection = self._connect()
+        try:
+            state = self._state_from_connection(connection, optimization_id)
+            if not state.ok:
+                return state
+            rows = connection.execute(
+                "SELECT o.operation_id, o.target_stage, o.status, o.lease_id, l.status "
+                "FROM operations o LEFT JOIN leases l ON l.lease_id = o.lease_id ORDER BY o.rowid"
+            ).fetchall()
+            operations = tuple(
+                {
+                    "operation_id": operation_id,
+                    "target_stage": target_stage,
+                    "status": status,
+                    "lease_id": lease_id,
+                    "lease_status": lease_status,
+                }
+                for operation_id, target_stage, status, lease_id, lease_status in rows
+            )
+            return ok(
+                OptimizationSnapshot(
+                    optimization_id,
+                    campaign_id,
+                    state.value.stage.value,
+                    state.value.lifecycle.value,
+                    state.value.aggregate_version,
+                    operations,
+                    {} if budgets is None else budgets,
+                )
+            )
         finally:
             connection.close()
 
