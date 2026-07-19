@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 from loom.campaigns.serialization import canonical_digest
 from loom.core import Result, err, make_loom_error, ok, thaw_json
-from loom.optimize.contracts import OptimizationSpec, OptimizationStage
+from loom.optimize.contracts import OptimizationLifecycle, OptimizationResult, OptimizationSpec, OptimizationStage
+from loom.optimize.reporting import write_report, write_result
 from loom.optimize.store import SQLiteOptimizationStore
 
 
@@ -48,6 +50,8 @@ class OptimizeOrchestrator:
         iterations: int,
         observer: Any | None = None,
         lease_seconds: int = 3600,
+        governance: Callable[..., Any] | None = None,
+        output_dir: str | Path | None = None,
     ):
         if iterations < 1 or lease_seconds < 1:
             raise ValueError("Optimization iterations and lease duration must be positive")
@@ -57,6 +61,76 @@ class OptimizeOrchestrator:
         self.iterations = iterations
         self.observer = observer
         self.lease_seconds = lease_seconds
+        self.governance = governance
+        self.output_dir = Path(output_dir) if output_dir is not None else store.root
+
+    async def run(self) -> Result:
+        campaign = await self.run_campaign()
+        if not campaign.ok:
+            return campaign
+
+        async def governance_action():
+            if campaign.value.disposition == "reject":
+                return ok(
+                    {
+                        "disposition": "rejected",
+                        "candidate_id": None,
+                        "promotion_decision_ref": None,
+                        "monitor_ref": None,
+                    }
+                )
+            if self.governance is None:
+                return _orchestration_error("OPTIMIZATION_GOVERNANCE_MISSING", "Recommended candidate requires a governance service")
+            governed = await _call(self.governance, campaign.value)
+            if not governed.ok:
+                return governed
+            return _normalize_governance_outcome(governed.value)
+
+        governance = await self._stage(
+            OptimizationStage.GOVERNANCE_COMPLETE,
+            "governance",
+            {
+                "campaign_id": campaign.value.campaign_id,
+                "candidate_id": campaign.value.candidate_id,
+                "recommendation_ref": campaign.value.recommendation_ref,
+            },
+            governance_action,
+            terminal_lifecycle=_governance_lifecycle,
+        )
+        if not governance.ok:
+            return governance
+        disposition = str(governance.value["disposition"])
+        summary = {
+            "schema_version": "loom.optimization.result.v1",
+            "optimization_id": self.spec.optimization_id,
+            "campaign_id": campaign.value.campaign_id,
+            "disposition": disposition,
+            "candidate_id": governance.value.get("candidate_id"),
+            "promotion_decision_ref": governance.value.get("promotion_decision_ref"),
+            "monitor_ref": governance.value.get("monitor_ref"),
+            "task_set_digests": self.spec.task_set_digests,
+            "model_digests": self.spec.model_digests,
+            "finalist_ids": campaign.value.finalist_ids,
+            "next_action": (
+                f"loom optimize approve {self.spec.optimization_id} --candidate {governance.value.get('candidate_id')}"
+                if disposition == "awaiting_approval"
+                else "No manual action required."
+            ),
+        }
+        report_path = write_report(self.output_dir, summary)
+        result = OptimizationResult(
+            "loom.optimization.result.v1",
+            self.spec.optimization_id,
+            campaign.value.campaign_id,
+            disposition,
+            governance.value.get("candidate_id"),
+            governance.value.get("promotion_decision_ref"),
+            governance.value.get("monitor_ref"),
+            report_path,
+        )
+        write_result(self.output_dir, result)
+        exported = await self.store.export(self.spec.optimization_id)
+        return exported if not exported.ok else ok(result)
 
     async def run_campaign(self) -> Result:
         created = await self.store.create(self.spec)
@@ -232,6 +306,7 @@ class OptimizeOrchestrator:
         inputs: Mapping[str, Any],
         action: Callable[..., Any],
         *args: Any,
+        terminal_lifecycle: Callable[[Mapping[str, Any]], OptimizationLifecycle] | None = None,
     ) -> Result:
         operation_id = _operation_id(self.spec.optimization_id, name)
         input_digest = canonical_digest({"optimization_key": self.spec.optimization_key, "stage": target.value, "inputs": inputs})
@@ -255,7 +330,8 @@ class OptimizeOrchestrator:
             return called
         if not isinstance(called.value, Mapping):
             return _orchestration_error("OPTIMIZATION_STAGE_OUTPUT_INVALID", "Stage service must return a mapping", stage=target.value)
-        completed = await self.store.complete(begun.value.lease_id, {output_key: called.value})
+        lifecycle = None if terminal_lifecycle is None else terminal_lifecycle(called.value)
+        completed = await self.store.complete(begun.value.lease_id, {output_key: called.value}, lifecycle=lifecycle)
         if not completed.ok:
             return completed
         await self._emit(
@@ -318,6 +394,41 @@ def _empty_validation() -> Result:
 
 def _empty_selection() -> Result:
     return ok({"finalist_ids": (), "finalist_digest": canonical_digest(())})
+
+
+def _normalize_governance_outcome(value: Any) -> Result:
+    if isinstance(value, Mapping):
+        normalized = dict(value)
+    elif all(hasattr(value, field) for field in ("decision", "decision_ref", "monitor")):
+        decision = value.decision
+        normalized = {
+            "disposition": decision.decision.value,
+            "candidate_id": decision.candidate_id,
+            "promotion_decision_ref": asdict(value.decision_ref),
+            "monitor_ref": value.monitor,
+        }
+    else:
+        return _orchestration_error("OPTIMIZATION_GOVERNANCE_INVALID", "Governance service returned an invalid outcome")
+    disposition = normalized.get("disposition")
+    if disposition not in {"promoted", "rejected", "awaiting_approval"}:
+        return _orchestration_error("OPTIMIZATION_GOVERNANCE_INVALID", "Governance disposition is invalid")
+    monitor = normalized.get("monitor_ref")
+    if disposition == "promoted" and not isinstance(monitor, Mapping):
+        return _orchestration_error("OPTIMIZATION_GOVERNANCE_INVALID", "Promoted outcome requires an active monitor reference")
+    if disposition != "promoted" and monitor is not None:
+        return _orchestration_error("OPTIMIZATION_GOVERNANCE_INVALID", "Non-promoted outcome cannot contain an active monitor")
+    candidate_id = normalized.get("candidate_id")
+    if candidate_id is not None and not isinstance(candidate_id, str):
+        return _orchestration_error("OPTIMIZATION_GOVERNANCE_INVALID", "Governance candidate ID is invalid")
+    return ok(normalized)
+
+
+def _governance_lifecycle(value: Mapping[str, Any]) -> OptimizationLifecycle:
+    return {
+        "promoted": OptimizationLifecycle.PROMOTED,
+        "rejected": OptimizationLifecycle.REJECTED,
+        "awaiting_approval": OptimizationLifecycle.AWAITING_APPROVAL,
+    }[str(value["disposition"])]
 
 
 def _optional_text(value: Any) -> str | None:

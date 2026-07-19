@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from loom.core import err, make_loom_error, ok
-from loom.optimize.contracts import OptimizationSpec, OptimizationStage
+from loom.optimize.contracts import OptimizationLifecycle, OptimizationSpec, OptimizationStage
 from loom.optimize.orchestrator import OptimizeCampaignServices, OptimizeOrchestrator
 from loom.optimize.store import SQLiteOptimizationStore
 
@@ -204,3 +204,59 @@ async def test_orchestrator_fails_closed_when_holdout_service_changes_frozen_coh
 
     assert not result.ok
     assert result.error.code == "OPTIMIZATION_HOLDOUT_COHORT_MISMATCH"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("governance_disposition", "lifecycle"),
+    [
+        ("promoted", OptimizationLifecycle.PROMOTED),
+        ("awaiting_approval", OptimizationLifecycle.AWAITING_APPROVAL),
+    ],
+)
+async def test_public_run_completes_governance_and_writes_stable_outputs(tmp_path: Path, governance_disposition, lifecycle):
+    orchestrator, store, _services, _observer = _fixture(tmp_path)
+    governance_calls = []
+
+    async def govern(outcome):
+        governance_calls.append(outcome.candidate_id)
+        return ok(
+            {
+                "disposition": governance_disposition,
+                "candidate_id": outcome.candidate_id,
+                "promotion_decision_ref": {"sha256": "decision-sha"},
+                "monitor_ref": {"monitor_id": "monitor-1"} if governance_disposition == "promoted" else None,
+            }
+        )
+
+    orchestrator.governance = govern
+    orchestrator.output_dir = tmp_path / "result"
+
+    result = (await orchestrator.run()).unwrap()
+    state = (await store.load("opt_test")).unwrap()
+
+    assert state.stage is OptimizationStage.GOVERNANCE_COMPLETE
+    assert state.lifecycle is lifecycle
+    assert result.disposition == governance_disposition
+    assert result.report_path.is_file()
+    assert (tmp_path / "result" / "result.json").is_file()
+    assert governance_calls == ["cand-a"]
+
+
+@pytest.mark.asyncio
+async def test_public_run_maps_empty_campaign_to_terminal_rejection_without_governance_call(tmp_path: Path):
+    orchestrator, store, _services, _observer = _fixture(tmp_path, entrants=(), finalists=())
+    calls = []
+
+    async def govern(outcome):
+        calls.append(outcome)
+        return ok({})
+
+    orchestrator.governance = govern
+    orchestrator.output_dir = tmp_path / "result"
+
+    result = (await orchestrator.run()).unwrap()
+
+    assert result.disposition == "rejected"
+    assert (await store.load("opt_test")).unwrap().lifecycle is OptimizationLifecycle.REJECTED
+    assert calls == []
