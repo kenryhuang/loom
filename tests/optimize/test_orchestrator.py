@@ -220,6 +220,30 @@ async def test_pause_request_stops_before_next_stage_and_persists_paused_lifecyc
 
 
 @pytest.mark.asyncio
+async def test_pause_requested_during_successful_stage_commits_atomic_output_before_pausing(tmp_path: Path):
+    control = OptimizeRunControl()
+    orchestrator, store, services, observer = _fixture(tmp_path, control=control)
+
+    async def pause_during_preflight():
+        services.calls["preflight"] += 1
+        control.request_pause("pause after atomic preflight")
+        return ok({"preflight_digest": "preflight-sha"})
+
+    orchestrator.services = replace(services.contract(), preflight=pause_during_preflight)
+
+    result = await orchestrator.run_campaign()
+
+    assert result.error.code == "OPTIMIZATION_PAUSED"
+    state = (await store.load("opt_test")).unwrap()
+    assert state.stage is OptimizationStage.PREFLIGHT_COMPLETE
+    assert state.lifecycle is OptimizationLifecycle.PAUSED
+    assert services.calls["seed_evaluation"] == 0
+    stored_events = (await store.events("opt_test")).unwrap()
+    assert not any(event["event_type"] == "optimization.stage_cancelled" for event in stored_events)
+    assert any(event["type"] == "optimization.stage.completed" for event in observer.events)
+
+
+@pytest.mark.asyncio
 async def test_cancel_request_cancels_active_stage_lease_without_stage_failure(tmp_path: Path):
     control = OptimizeRunControl()
 

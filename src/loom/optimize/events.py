@@ -48,8 +48,37 @@ _HOLDOUT_ALLOWED_PAYLOAD_KEYS = {
     "optimization.stage.failed": frozenset({"operation_id", "lease_id", "error_code"}),
     "optimization.pause.requested": frozenset({"operation_id", "lease_id"}),
     "optimization.cancel.requested": frozenset({"operation_id", "lease_id"}),
-    "optimization.paused": frozenset({"operation_id", "lease_id"}),
+    "optimization.paused": frozenset({"operation_id", "lease_id", "disposition", "next_action"}),
+    "optimization.failed": frozenset({"error_code"}),
+    "optimization.snapshot.loaded": frozenset(
+        {
+            "lifecycle",
+            "aggregate_version",
+            "operations",
+            "completed_stages",
+            "budgets",
+            "candidates",
+            "frontier_ids",
+            "budget_used",
+            "governance",
+            "search_iteration",
+            "search_iterations",
+        }
+    ),
 }
+_HOLDOUT_STAGE_PROTECTED_EVENT_TYPES = frozenset(
+    {
+        "optimization.stage.started",
+        "optimization.stage.replayed",
+        "optimization.stage.completed",
+        "optimization.stage.failed",
+        "optimization.pause.requested",
+        "optimization.cancel.requested",
+        "optimization.paused",
+        "optimization.failed",
+        "optimization.snapshot.loaded",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,7 +203,11 @@ def build_optimization_event(
     scope_value = {} if scope is None else dict(scope)
     payload_value = {} if payload is None else dict(payload)
     phase = str(scope_value.get("phase", ""))
-    protected_holdout = phase == "holdout" or event_type.startswith("optimization.holdout") or stage == "holdout_complete"
+    protected_holdout = (
+        phase == "holdout"
+        or event_type.startswith("optimization.holdout")
+        or (stage == "holdout_complete" and event_type in _HOLDOUT_STAGE_PROTECTED_EVENT_TYPES)
+    )
     if protected_holdout:
         forbidden_scope = set(map(str, scope_value)) - _HOLDOUT_ALLOWED_SCOPE_KEYS
         allowed_payload = _HOLDOUT_ALLOWED_PAYLOAD_KEYS.get(event_type)

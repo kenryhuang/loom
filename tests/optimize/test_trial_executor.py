@@ -71,11 +71,14 @@ class CancellableSolverProvider(RecordingSolverProvider):
         return err(make_loom_error("ABORTED", "provider cancelled", retryable=False))
 
 
-def _prepared_task(tmp_path: Path, *, verifier_exit: int = 0) -> tuple[SimpleNamespace, TrialEntry]:
+def _prepared_task(tmp_path: Path, *, verifier_exit: int = 0, verifier_code: str | None = None) -> tuple[SimpleNamespace, TrialEntry]:
     snapshot = tmp_path / f"snapshot-{verifier_exit}"
     snapshot.mkdir()
     (snapshot / "README.md").write_text("# Trial workspace\n", encoding="utf-8")
-    verifier = VerifierSpec((sys.executable, "-c", f"raise SystemExit({verifier_exit})"), timeout_ms=5_000)
+    verifier = VerifierSpec(
+        (sys.executable, "-c", verifier_code or f"raise SystemExit({verifier_exit})"),
+        timeout_ms=30_000 if verifier_code is not None else 5_000,
+    )
     task = OptimizeTask("task-1", "Inspect the project", snapshot, verifier=verifier)
     workspace = WorkspaceSnapshot("a" * 64, snapshot, 1, 18)
     row = TaskManifestRow("task-1", "tester", "trace:seed", "discovery", workspace.digest, "b" * 64, "sanitizer-v1", task.objective)
@@ -96,8 +99,9 @@ def _executor(
     provider: RecordingSolverProvider | None = None,
     event_emitter=None,
     control=None,
+    verifier_code: str | None = None,
 ):
-    tasks, entry = _prepared_task(tmp_path, verifier_exit=verifier_exit)
+    tasks, entry = _prepared_task(tmp_path, verifier_exit=verifier_exit, verifier_code=verifier_code)
     solver = provider or RecordingSolverProvider()
     artifacts = ArtifactStore(tmp_path / "artifacts")
     executor = OptimizeTrialExecutor(
@@ -204,6 +208,54 @@ async def test_trial_executor_cancels_in_flight_provider_without_trial_failure_e
     with pytest.raises(OptimizeControlInterrupt):
         await asyncio.wait_for(running, timeout=1)
     assert provider.cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_trial_executor_cancels_in_flight_verifier_without_trial_failure_evidence(tmp_path: Path):
+    control = OptimizeRunControl()
+    executor, _provider, _artifacts, entry = _executor(
+        tmp_path,
+        control=control,
+        verifier_code="from pathlib import Path; import time; Path('verifier-started').write_text('yes'); time.sleep(30)",
+    )
+
+    running = asyncio.create_task(executor.execute("candidate", _candidate(), entry, "trial-verifier"))
+    for _ in range(100):
+        if list(tmp_path.rglob("verifier-started")):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("verifier did not start")
+    control.request_cancel("cancel verifier")
+
+    with pytest.raises(OptimizeControlInterrupt):
+        await asyncio.wait_for(running, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_trial_executor_cancels_in_flight_judge_without_trial_failure_evidence(tmp_path: Path, monkeypatch):
+    control = OptimizeRunControl()
+    judge_started = asyncio.Event()
+    judge_cancelled = asyncio.Event()
+
+    async def blocking_analysis(*args, **kwargs):
+        del args, kwargs
+        judge_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            judge_cancelled.set()
+
+    monkeypatch.setattr("loom.optimize.trial_executor.analyze_trace", blocking_analysis)
+    executor, _provider, _artifacts, entry = _executor(tmp_path, control=control)
+
+    running = asyncio.create_task(executor.execute("candidate", _candidate(), entry, "trial-judge"))
+    await asyncio.wait_for(judge_started.wait(), timeout=1)
+    control.request_cancel("cancel judge")
+
+    with pytest.raises(OptimizeControlInterrupt):
+        await asyncio.wait_for(running, timeout=1)
+    assert judge_cancelled.is_set()
 
 
 @pytest.mark.asyncio

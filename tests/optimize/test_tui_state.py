@@ -190,3 +190,34 @@ async def test_collector_counts_completed_pairs_once_and_shows_opened_holdout():
 
     assert collector.state.candidates["cand_1"].completed_pairs == 1
     assert collector.state.holdout_status == "opened"
+
+
+@pytest.mark.asyncio
+async def test_collector_deduplicates_infrastructure_retry_for_the_same_candidate_pair():
+    collector = OptimizeTuiCollector()
+    await collector.emit(
+        _event(
+            1,
+            "optimization.candidate.admitted",
+            scope={"candidate_id": "cand_1", "phase": "discovery"},
+        )
+    )
+    await collector.emit(
+        _event(
+            2,
+            "optimization.trial.failed",
+            status="failed",
+            scope={"candidate_id": "cand_1", "phase": "discovery", "trial_id": "trial_1", "side": "candidate"},
+            payload={"failure_kind": "infrastructure", "failure_code": "LLM_FAILED"},
+        )
+    )
+    await collector.emit(
+        _event(
+            3,
+            "optimization.trial.completed",
+            status="completed",
+            scope={"candidate_id": "cand_1", "phase": "discovery", "trial_id": "trial_1", "side": "candidate"},
+        )
+    )
+
+    assert collector.state.candidates["cand_1"].completed_pairs == 1

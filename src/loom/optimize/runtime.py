@@ -9,7 +9,7 @@ import sqlite3
 import sys
 import tempfile
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -110,6 +110,91 @@ class _CandidateRuntime:
     harness: TaskHarness
 
 
+class _DurableLlmCallCounter:
+    """Conservatively reserve and persist every provider call before dispatch."""
+
+    def __init__(self, path: Path, counts: Mapping[str, int] | None = None):
+        self.path = path
+        self.counts = dict(counts or {})
+
+    @classmethod
+    def load(cls, path: Path) -> Result:
+        if not path.is_file():
+            return ok(cls(path))
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            counts = payload["by_role"]
+            if (
+                payload.get("schema_version") != "loom.optimization.llm-call-usage.v1"
+                or not isinstance(counts, Mapping)
+                or any(not isinstance(role, str) or not isinstance(value, int) or isinstance(value, bool) or value < 0 for role, value in counts.items())
+                or payload.get("total") != sum(counts.values())
+            ):
+                raise ValueError("invalid LLM call usage payload")
+            return ok(cls(path, counts))
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            return _runtime_error("LLM_CALL_USAGE_INVALID", "Durable LLM call usage is malformed", cause=exc)
+
+    @property
+    def total(self) -> int:
+        return sum(self.counts.values())
+
+    def record(self, role: str) -> Result:
+        previous = self.counts.get(role, 0)
+        self.counts[role] = previous + 1
+        try:
+            _write_json(
+                self.path,
+                {
+                    "schema_version": "loom.optimization.llm-call-usage.v1",
+                    "total": self.total,
+                    "by_role": dict(sorted(self.counts.items())),
+                },
+            )
+        except OSError as exc:
+            self.counts[role] = previous
+            return _runtime_error("LLM_CALL_USAGE_WRITE_FAILED", "Could not persist LLM call usage", cause=exc)
+        return ok(None)
+
+
+@dataclass(frozen=True, slots=True)
+class _CountingProvider:
+    delegate: Any
+    role: str
+    counter: _DurableLlmCallCounter
+    model: str
+    request_options: Mapping[str, Any]
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None) -> Result:
+        recorded = self.counter.record(self.role)
+        if not recorded.ok:
+            return recorded
+        provider = self.delegate
+        existing = getattr(provider, "request_options", None)
+        if is_dataclass(provider) and isinstance(existing, Mapping) and dict(existing) != dict(self.request_options):
+            try:
+                provider = replace(provider, request_options=dict(self.request_options))
+            except (TypeError, ValueError) as exc:
+                return _runtime_error("LLM_PROVIDER_OPTIONS_INVALID", "Could not apply counted provider request options", cause=exc)
+        return await provider.chat(
+            messages,
+            tools=tools,
+            cancellation=cancellation,
+            tool_choice=tool_choice,
+        )
+
+
+def _counting_provider(provider: Any, role: str, counter: _DurableLlmCallCounter) -> _CountingProvider:
+    request_options = getattr(provider, "request_options", {})
+    return _CountingProvider(
+        provider,
+        role,
+        counter,
+        str(getattr(provider, "model", role)),
+        dict(request_options) if isinstance(request_options, Mapping) else {},
+    )
+
+
 class DefaultOptimizeRuntime:
     def __init__(
         self,
@@ -166,7 +251,14 @@ class DefaultOptimizeRuntime:
         campaign = await self.services.snapshot_projection()
         if not campaign.ok:
             return campaign
-        payload.update(campaign.value)
+        campaign_payload = dict(campaign.value)
+        if stage == "holdout_complete":
+            campaign_payload["candidates"] = tuple(
+                {key: candidate[key] for key in ("candidate_id", "status", "surface", "completed_experiments") if key in candidate}
+                for candidate in campaign_payload.get("candidates", ())
+                if isinstance(candidate, Mapping)
+            )
+        payload.update(campaign_payload)
         return await self.event_emitter.emit(
             "optimization.snapshot.loaded",
             stage=stage,
@@ -225,15 +317,17 @@ class DefaultOptimizeRuntime:
             if disposition == "paused"
             else "No manual action required."
         )
+        payload = {
+            "disposition": disposition,
+            "next_action": next_action,
+        }
+        if stage != "holdout_complete":
+            payload["report_path"] = str(getattr(result.value, "report_path", "")) or None
         return await self.event_emitter.emit(
             event_type,
             stage=stage,
             status=status,
-            payload={
-                "disposition": disposition,
-                "report_path": str(getattr(result.value, "report_path", "")) or None,
-                "next_action": next_action,
-            },
+            payload=payload,
         )
 
     def dry_run(self) -> Result:
@@ -272,6 +366,7 @@ class DefaultOptimizeCampaignServices:
         proposer_provider: Any,
         solver_provider: Any,
         judge_provider: Any,
+        llm_call_counter: _DurableLlmCallCounter,
         event_emitter: OptimizationEventEmitter | None = None,
         control: OptimizeRunControl | None = None,
     ):
@@ -287,6 +382,7 @@ class DefaultOptimizeCampaignServices:
         self.proposer_provider = proposer_provider
         self.solver_provider = solver_provider
         self.judge_provider = judge_provider
+        self.llm_call_counter = llm_call_counter
         self.event_emitter = event_emitter
         self.control = control
         self.baseline_harness = _baseline_harness(loaded)
@@ -325,7 +421,16 @@ class DefaultOptimizeCampaignServices:
         projection = await self.store.load(self.spec.campaign_id)
         if not projection.ok:
             if projection.error is not None and projection.error.code == "CAMPAIGN_NOT_FOUND":
-                return ok({"candidates": (), "frontier_ids": (), "budget_used": {}, "governance": {}})
+                return ok(
+                    {
+                        "candidates": (),
+                        "frontier_ids": (),
+                        "budget_used": {"llm_calls": self.llm_call_counter.total},
+                        "governance": {},
+                        "search_iteration": 0,
+                        "search_iterations": self.loaded.meta.search.iterations,
+                    }
+                )
             return projection
         events = await self.store.events(self.spec.campaign_id)
         if not events.ok:
@@ -339,6 +444,7 @@ class DefaultOptimizeCampaignServices:
             for candidate_id, state in projection.value.candidates.items()
         }
         frontier_ids: tuple[str, ...] = ()
+        search_iteration = 0
         for event in events.value:
             candidate_id = event.payload.get("candidate_id")
             if event.event_type == "candidate.created" and isinstance(candidate_id, str):
@@ -347,7 +453,10 @@ class DefaultOptimizeCampaignServices:
                     read = self.store.artifacts.read_bytes(_artifact_ref(candidate_ref), expected_schema="loom.candidate-bundle.v1")
                     if not read.ok:
                         return read
-                    bundle = json.loads(read.value)
+                    try:
+                        bundle = json.loads(read.value)
+                    except json.JSONDecodeError as exc:
+                        return _runtime_error("CANDIDATE_RESTORE_FAILED", "Candidate snapshot artifact is malformed", cause=exc)
                     surfaces = bundle.get("changed_surfaces", ())
                     if isinstance(surfaces, list) and surfaces:
                         candidates[candidate_id]["surface"] = str(surfaces[0])
@@ -362,10 +471,15 @@ class DefaultOptimizeCampaignServices:
                     read = self.store.artifacts.read_bytes(_artifact_ref(artifact_ref), expected_schema="loom.frontier.snapshot.v1")
                     if not read.ok:
                         return read
-                    frontier = json.loads(read.value)
+                    try:
+                        frontier = json.loads(read.value)
+                    except json.JSONDecodeError as exc:
+                        return _runtime_error("FRONTIER_SNAPSHOT_INVALID", "Frontier snapshot artifact is malformed", cause=exc)
                     values = frontier.get("candidate_ids", ())
                     if isinstance(values, list):
                         frontier_ids = tuple(str(value) for value in values)
+            elif event.event_type == "campaign.iteration_completed":
+                search_iteration += 1
         usage = await self.store.budget_usage(self.spec.campaign_id)
         if not usage.ok:
             return usage
@@ -391,6 +505,7 @@ class DefaultOptimizeCampaignServices:
             checkpoint_wall_time += loaded_experiment.value.usage.wall_time_seconds
         budget_used = {
             "candidates": consumed.candidates,
+            "llm_calls": self.llm_call_counter.total,
             "tokens": consumed.proposer_tokens + max(consumed.solver_tokens, checkpoint_tokens),
             "cost": format(max(Decimal(consumed.cost), checkpoint_cost), "f"),
             "wall_time_seconds": max(consumed.wall_time_seconds, checkpoint_wall_time),
@@ -402,11 +517,25 @@ class DefaultOptimizeCampaignServices:
                 request = json.loads(request_path.read_text(encoding="utf-8"))
                 decision = request.get("decision", {})
                 if isinstance(decision, Mapping):
+                    raw_gates = decision.get("gates", ())
+                    gates = (
+                        tuple(
+                            {
+                                "gate_id": gate.get("gate_id"),
+                                "mandatory": gate.get("mandatory"),
+                                "result": gate.get("result"),
+                            }
+                            for gate in raw_gates
+                            if isinstance(gate, Mapping)
+                        )
+                        if isinstance(raw_gates, list)
+                        else ()
+                    )
                     governance = {
                         "status": "awaiting_approval",
                         "candidate_id": request.get("candidate_id"),
                         "risk": decision.get("computed_risk"),
-                        "gates": decision.get("gates", ()),
+                        "gates": gates,
                     }
             except (OSError, json.JSONDecodeError):
                 return _runtime_error("APPROVAL_CONTEXT_INVALID", "Approval snapshot is malformed")
@@ -416,6 +545,8 @@ class DefaultOptimizeCampaignServices:
                 "frontier_ids": frontier_ids,
                 "budget_used": budget_used,
                 "governance": governance,
+                "search_iteration": search_iteration,
+                "search_iterations": self.loaded.meta.search.iterations,
             }
         )
 
@@ -573,7 +704,10 @@ class DefaultOptimizeCampaignServices:
             stage="search_running",
             status="running",
             scope={"phase": "discovery", "iteration": iteration},
-            payload={"max_candidates": self.loaded.meta.search.candidates_per_iteration},
+            payload={
+                "max_candidates": self.loaded.meta.search.candidates_per_iteration,
+                "total_iterations": self.loaded.meta.search.iterations,
+            },
         )
         result = await self.controller.run_iteration(iteration, self.proposer, self.history, workspace, evaluate)
         if not result.ok:
@@ -1057,7 +1191,11 @@ class DefaultOptimizeCampaignServices:
             status="event",
             scope=scope,
             payload={
-                "used": {**self._budget_usage, "cost": format(self._budget_usage["cost"], "f")},
+                "used": {
+                    **self._budget_usage,
+                    "llm_calls": self.llm_call_counter.total,
+                    "cost": format(self._budget_usage["cost"], "f"),
+                },
                 "limits": {
                     "candidates": self.loaded.meta.budgets.max_candidates,
                     "llm_calls": self.loaded.meta.budgets.max_llm_calls,
@@ -1276,6 +1414,9 @@ def build_default_runtime(options, *, observer: Any | None = None, control=None)
         model_digests,
         trace_path,
     )
+    counter = _DurableLlmCallCounter.load(root / "usage" / "llm-calls.json")
+    if not counter.ok:
+        return counter
     providers = {}
     for role in ("proposer", "solver", "judge"):
         selected = create_provider_from_task_config(
@@ -1284,7 +1425,7 @@ def build_default_runtime(options, *, observer: Any | None = None, control=None)
         )
         if not selected.ok:
             return selected
-        providers[role] = selected.value
+        providers[role] = _counting_provider(selected.value, role, counter.value)
     spec = OptimizationSpec(
         "loom.optimization.spec.v1",
         optimization_id,
@@ -1313,6 +1454,7 @@ def build_default_runtime(options, *, observer: Any | None = None, control=None)
         proposer_provider=providers["proposer"],
         solver_provider=providers["solver"],
         judge_provider=providers["judge"],
+        llm_call_counter=counter.value,
         event_emitter=event_emitter,
         control=control,
     )

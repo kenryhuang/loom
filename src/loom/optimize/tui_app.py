@@ -191,6 +191,8 @@ class OptimizeTuiApp(App[None]):
             pass
         if changed or self.collector.state.sequence != self._rendered_sequence:
             self._refresh_dashboard()
+        else:
+            self.query_one("#optimize-header", Static).update(_header_text(self.collector.state, time.monotonic() - self._started_at))
 
     def _refresh_dashboard(self, *, force: bool = False) -> None:
         state = self.collector.state
@@ -205,6 +207,7 @@ class OptimizeTuiApp(App[None]):
         self.query_one("#holdout-governance", Static).update(_governance_text(state))
         self.query_one("#optimize-status", Static).update(_status_text(state))
         feed = self.query_one("#event-feed", DataTable)
+        selected_row = feed.cursor_row
         feed.clear()
         for event in state.recent_events:
             scope = event.get("scope") if isinstance(event.get("scope"), dict) else {}
@@ -216,9 +219,12 @@ class OptimizeTuiApp(App[None]):
                 " / ".join(map(str, labels)) or "—",
                 key=str(event.get("sequence", len(state.recent_events))),
             )
+        if feed.row_count:
+            feed.move_cursor(row=min(selected_row, feed.row_count - 1))
 
     def _refresh_candidates(self, state: OptimizeDashboardState) -> None:
         table = self.query_one("#candidate-table", DataTable)
+        selected_row = table.cursor_row
         table.clear()
         for candidate in state.candidates.values():
             pairs = str(candidate.completed_pairs)
@@ -234,6 +240,8 @@ class OptimizeTuiApp(App[None]):
                 "yes" if candidate.frontier else "—",
                 key=candidate.candidate_id,
             )
+        if table.row_count:
+            table.move_cursor(row=min(selected_row, table.row_count - 1))
 
     def action_detach(self) -> None:
         self.exit()
@@ -320,7 +328,13 @@ def _header_text(state: OptimizeDashboardState, elapsed: float) -> str:
 
 
 def _pipeline_text(state: OptimizeDashboardState) -> str:
-    return "  →  ".join(f"{_STATUS_GLYPHS.get(state.pipeline.get(stage, 'pending'), '○')} {_STAGE_LABELS[stage]}" for stage in PIPELINE_STAGES)
+    labels = []
+    for stage in PIPELINE_STAGES:
+        label = _STAGE_LABELS[stage]
+        if stage == "search_running" and state.search_iteration is not None:
+            label = f"{label} {state.search_iteration}/{state.search_iterations or '?'}"
+        labels.append(f"{_STATUS_GLYPHS.get(state.pipeline.get(stage, 'pending'), '○')} {label}")
+    return "  →  ".join(labels)
 
 
 def _trial_text(state: OptimizeDashboardState) -> str:

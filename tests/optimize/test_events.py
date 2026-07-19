@@ -151,6 +151,54 @@ async def test_holdout_allows_only_aggregate_experiment_progress():
 
 
 @pytest.mark.asyncio
+async def test_holdout_stage_allows_sanitized_resume_snapshot_and_terminal_pause():
+    observer = RecordingObserver()
+    emitter = OptimizationEventEmitter("opt_test", "cmp_test", observer)
+
+    snapshot = await emitter.emit(
+        "optimization.snapshot.loaded",
+        stage="holdout_complete",
+        status="replayed",
+        payload={
+            "lifecycle": "paused",
+            "aggregate_version": 12,
+            "operations": (
+                {
+                    "operation_id": "op_holdout",
+                    "target_stage": "holdout_complete",
+                    "status": "completed",
+                    "lease_id": "lease_holdout",
+                    "lease_status": "completed",
+                },
+            ),
+            "completed_stages": ("holdout_complete",),
+            "budgets": {"llm_calls": 20},
+            "candidates": ({"candidate_id": "cand_test", "status": "holdout_passed", "surface": "agent.loop_policy"},),
+            "frontier_ids": ("cand_test",),
+            "budget_used": {"llm_calls": 9, "tokens": 120},
+            "governance": {},
+            "search_iteration": 1,
+            "search_iterations": 1,
+        },
+    )
+    terminal = await emitter.emit(
+        "optimization.paused",
+        stage="holdout_complete",
+        status="paused",
+        payload={
+            "disposition": "paused",
+            "next_action": "Run the identical optimize command to resume.",
+        },
+    )
+
+    assert snapshot.ok and terminal.ok
+    assert [event["type"] for event in observer.events] == [
+        "optimization.snapshot.loaded",
+        "optimization.paused",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_scoped_runtime_sink_wraps_runtime_event_with_trial_scope():
     observer = RecordingObserver()
     emitter = OptimizationEventEmitter("opt_test", "cmp_test", observer)

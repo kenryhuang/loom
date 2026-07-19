@@ -188,15 +188,19 @@ class OptimizeTrialExecutor:
         if not verifier.ok:
             return self._infrastructure(trial_id, side, verifier.error.code, started)
         try:
-            analyzed = await analyze_trace(
-                EvaluationConfig(
-                    trace_path,
-                    out_dir=evaluation_dir,
-                    judge=self.judge_provider is not None,
-                ),
-                judge_provider=self.judge_provider,
-                event_sink=trace_sink,
+            analyzed = await self._await_cancelable(
+                analyze_trace(
+                    EvaluationConfig(
+                        trace_path,
+                        out_dir=evaluation_dir,
+                        judge=self.judge_provider is not None,
+                    ),
+                    judge_provider=self.judge_provider,
+                    event_sink=trace_sink,
+                )
             )
+        except OptimizeControlInterrupt:
+            raise
         except Exception:
             return self._infrastructure(trial_id, side, "EVALUATION_FAILED", started)
         if not analyzed.ok:
@@ -282,14 +286,24 @@ class OptimizeTrialExecutor:
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
             )
-            try:
-                await asyncio.wait_for(process.communicate(), timeout=timeout)
-            except TimeoutError:
-                process.kill()
-                await process.communicate()
-                from loom.core import ok
+            communicate = asyncio.create_task(process.communicate())
+            deadline = asyncio.get_running_loop().time() + timeout
+            while not communicate.done():
+                if self.control is not None and self.control.cancel_requested:
+                    if process.returncode is None:
+                        process.kill()
+                    await asyncio.gather(communicate, return_exceptions=True)
+                    raise OptimizeControlInterrupt("user cancelled active verifier")
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    if process.returncode is None:
+                        process.kill()
+                    await asyncio.gather(communicate, return_exceptions=True)
+                    from loom.core import ok
 
-                return ok(False)
+                    return ok(False)
+                await asyncio.wait((communicate,), timeout=min(0.01, remaining))
+            await communicate
         except OSError as exc:
             from loom.core import err
 
@@ -304,6 +318,22 @@ class OptimizeTrialExecutor:
         from loom.core import ok
 
         return ok(process.returncode == verifier.expected_exit_code)
+
+    async def _await_cancelable(self, awaitable):
+        task = asyncio.create_task(awaitable)
+        try:
+            while not task.done():
+                if self.control is not None and self.control.cancel_requested:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    raise OptimizeControlInterrupt("user cancelled active evaluation")
+                await asyncio.wait((task,), timeout=0.01)
+            return await task
+        except BaseException:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            raise
 
     @staticmethod
     def _infrastructure(trial_id: str, side: str, code: str, started: float) -> TrialExecution:

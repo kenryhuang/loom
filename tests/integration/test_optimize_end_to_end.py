@@ -416,6 +416,7 @@ def test_optimize_command_resumes_without_repeating_completed_model_calls(tmp_pa
     assert snapshot["payload"]["candidates"]
     assert snapshot["payload"]["frontier_ids"]
     assert snapshot["payload"]["budget_used"]["tokens"] > 0
+    assert snapshot["payload"]["budget_used"]["llm_calls"] == sum(ledger.values())
     assert {role: len(provider.messages) for role, provider in providers.items()} == ledger
 
 

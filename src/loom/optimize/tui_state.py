@@ -64,6 +64,8 @@ class OptimizeDashboardState:
     stage: str = "created"
     lifecycle: str = "running"
     sequence: int = 0
+    search_iteration: int | None = None
+    search_iterations: int | None = None
     pipeline: dict[str, str] = field(default_factory=lambda: {stage: "pending" for stage in PIPELINE_STAGES})
     candidates: dict[str, CandidateRow] = field(default_factory=dict)
     active_trial: TrialRow | None = None
@@ -87,6 +89,7 @@ class OptimizeTuiCollector:
         self.max_recent_events = max_recent_events
         self.state = OptimizeDashboardState()
         self.updates: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
+        self._completed_pair_ids: set[tuple[str, str]] = set()
 
     async def emit(self, event) -> Result:
         value = thaw_json(event)
@@ -117,6 +120,8 @@ class OptimizeTuiCollector:
 
         if event_type == "optimization.snapshot.loaded":
             state.lifecycle = str(payload.get("lifecycle", status))
+            state.search_iteration = payload.get("search_iteration") if isinstance(payload.get("search_iteration"), int) else None
+            state.search_iterations = payload.get("search_iterations") if isinstance(payload.get("search_iterations"), int) else None
             for completed in payload.get("completed_stages", ()):
                 if isinstance(completed, str):
                     state.pipeline[completed] = "completed"
@@ -154,6 +159,10 @@ class OptimizeTuiCollector:
             if status in {"failed", "paused"}:
                 state.lifecycle = status
 
+        if event_type == "optimization.proposal.started":
+            state.search_iteration = scope.get("iteration") if isinstance(scope.get("iteration"), int) else None
+            state.search_iterations = payload.get("total_iterations") if isinstance(payload.get("total_iterations"), int) else None
+
         candidate_id = scope.get("candidate_id") or payload.get("candidate_id")
         if isinstance(candidate_id, str) and candidate_id:
             candidate = state.candidates.setdefault(candidate_id, CandidateRow(candidate_id))
@@ -171,7 +180,11 @@ class OptimizeTuiCollector:
             elif event_type == "optimization.candidate.finalist":
                 candidate.finalist = True
             elif event_type in {"optimization.trial.completed", "optimization.trial.failed"} and scope.get("side") == "candidate":
-                candidate.completed_pairs += 1
+                trial_id = scope.get("trial_id")
+                pair_id = (candidate_id, str(trial_id))
+                if isinstance(trial_id, str) and trial_id and pair_id not in self._completed_pair_ids:
+                    self._completed_pair_ids.add(pair_id)
+                    candidate.completed_pairs += 1
             elif event_type == "optimization.experiment.started":
                 trial_count = payload.get("trial_count")
                 if isinstance(trial_count, int):

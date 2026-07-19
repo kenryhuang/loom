@@ -365,9 +365,11 @@ class OptimizeOrchestrator:
         if self.control is not None and self.control.requested:
             return await self._handle_control(target, operation_id, lease_id=begun.value.lease_id)
         called = await _call(action, *args)
-        if self.control is not None and self.control.requested:
+        if self.control is not None and self.control.cancel_requested:
             return await self._handle_control(target, operation_id, lease_id=begun.value.lease_id)
         if not called.ok:
+            if self.control is not None and self.control.pause_requested:
+                return await self._handle_control(target, operation_id, lease_id=begun.value.lease_id)
             cancelled = await self.store.cancel(
                 begun.value.lease_id,
                 reason="OPTIMIZATION_STAGE_FAILED" if called.error is None else called.error.code,
@@ -402,6 +404,8 @@ class OptimizeOrchestrator:
                 "output_keys": tuple(sorted(called.value)),
             },
         )
+        if self.control is not None and self.control.requested and lifecycle is None:
+            return await self._handle_control(target, operation_id)
         return ok(called.value)
 
     async def _handle_control(
