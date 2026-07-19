@@ -443,16 +443,19 @@ def _derive_candidate_risk_input(artifacts, ref: ArtifactRef, campaign_id: str, 
         for operation in operations:
             if not isinstance(operation, dict) or not isinstance(operation.get("op"), str) or not isinstance(operation.get("path"), str):
                 raise TypeError("governed candidate operation is malformed")
-            parts = operation["path"].split(".")
-            if len(parts) != 2 or not all(parts):
+            resolved = _resolve_materialized_surface_field(operation["path"], payload.get("materialized"))
+            if resolved is None:
                 raise ValueError("governed candidate operation path is invalid")
-            surfaces.append(parts[0])
+            surfaces.append(resolved[0])
             operation_names.append(operation["op"])
         materialized = payload["materialized"]
         if not isinstance(materialized, dict) or set(materialized) != set(surfaces):
             raise ValueError("governed candidate materialization must exactly cover its operation surfaces")
         for operation in operations:
-            surface, field = operation["path"].split(".")
+            resolved = _resolve_materialized_surface_field(operation["path"], materialized)
+            if resolved is None:
+                raise ValueError("governed candidate operation path is invalid")
+            surface, field = resolved
             target = materialized.get(surface)
             if not isinstance(target, dict) or field not in target:
                 raise ValueError("governed candidate operation target is absent from its materialization")
@@ -485,6 +488,24 @@ def _derive_candidate_risk_input(artifacts, ref: ArtifactRef, campaign_id: str, 
     except (AttributeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         return _promotion_error("Governed candidate artifact is invalid", cause=exc)
     return ok((risk_input, source_candidate_ref))
+
+
+def _resolve_materialized_surface_field(path: str, materialized: object) -> tuple[str, str] | None:
+    if not isinstance(materialized, dict):
+        return None
+    matches: list[tuple[str, str]] = []
+    for surface in materialized:
+        if not isinstance(surface, str):
+            continue
+        prefix = f"{surface}."
+        if not path.startswith(prefix):
+            continue
+        field = path[len(prefix) :]
+        if field and "." not in field:
+            matches.append((surface, field))
+    if len(matches) != 1:
+        return None
+    return matches[0]
 
 
 def _verify_recommendation(artifacts, ref: ArtifactRef, campaign_id: str, candidate_id: str, actor: ActorAssertion) -> Result:

@@ -7,6 +7,31 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from loom.llm.request_options import normalize_request_options
+
+
+@dataclass(frozen=True, slots=True)
+class TaskHarness:
+    system_prompt_addendum: str = ""
+    allowed_tools: tuple[str, ...] | None = None
+    max_tool_calls_per_step: int | None = None
+    max_history_steps: int = 5
+    request_options: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.allowed_tools is not None:
+            allowed_tools = tuple(self.allowed_tools)
+            if any(not isinstance(tool, str) or not tool.strip() for tool in allowed_tools):
+                raise ValueError("allowed_tools must contain non-empty tool IDs")
+            if len(set(allowed_tools)) != len(allowed_tools):
+                raise ValueError("allowed_tools must not contain duplicates")
+            object.__setattr__(self, "allowed_tools", allowed_tools)
+        if self.max_tool_calls_per_step is not None and self.max_tool_calls_per_step <= 0:
+            raise ValueError("max_tool_calls_per_step must be positive")
+        if self.max_history_steps <= 0:
+            raise ValueError("max_history_steps must be positive")
+        object.__setattr__(self, "request_options", normalize_request_options(self.request_options))
+
 
 @dataclass(frozen=True, slots=True)
 class TaskRequest:
@@ -45,4 +70,4 @@ class TaskRunResult:
     output: str
 
 
-__all__ = ["TaskRequest", "TaskRunOptions", "TaskRunResult"]
+__all__ = ["TaskHarness", "TaskRequest", "TaskRunOptions", "TaskRunResult"]

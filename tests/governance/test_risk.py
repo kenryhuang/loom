@@ -28,6 +28,13 @@ def test_risk_classification_uses_highest_matching_rule_and_records_all_matches(
         (RiskInput(CandidateKind.DECLARATIVE_PATCH, ("context_numeric_limit",), ("set_limit",), _capability()), RiskLevel.LOW),
         (RiskInput(CandidateKind.DECLARATIVE_PATCH, ("system_prompt",), ("replace",), _capability()), RiskLevel.MEDIUM),
         (RiskInput(CandidateKind.DECLARATIVE_PATCH, ("completion_policy",), ("set",), _capability()), RiskLevel.MEDIUM),
+        (RiskInput(CandidateKind.DECLARATIVE_PATCH, ("agent.loop_policy",), ("set_limit",), _capability()), RiskLevel.LOW),
+        (RiskInput(CandidateKind.DECLARATIVE_PATCH, ("agent.system_prompt",), ("replace",), _capability()), RiskLevel.MEDIUM),
+        (RiskInput(CandidateKind.DECLARATIVE_PATCH, ("agent.tool_policy",), ("set",), _capability()), RiskLevel.MEDIUM),
+        (
+            RiskInput(CandidateKind.DECLARATIVE_PATCH, ("models.solver.request_options",), ("set",), _capability()),
+            RiskLevel.MEDIUM,
+        ),
         (RiskInput(CandidateKind.EXECUTABLE_COMPONENT, ("context_policy",), (), _capability(imports=("json",))), RiskLevel.HIGH),
         (RiskInput(CandidateKind.DECLARATIVE_PATCH, ("evaluator", "context_numeric_limit"), ("set",), _capability()), RiskLevel.FORBIDDEN),
     )

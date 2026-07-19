@@ -99,10 +99,10 @@ class DeclarativePatchCompiler:
             path = operation.get("path")
             if op not in policy.allowed_patch_operations or not isinstance(path, str):
                 return _patch_error("Patch operation or path is not allowed", operation_index=index)
-            parts = path.split(".")
-            if len(parts) != 2 or any(not part for part in parts):
+            resolved = _resolve_surface_field(path, tuple(self._surfaces))
+            if resolved is None:
                 return _patch_error("Patch path must select one typed field", operation_index=index)
-            surface_id, field_name = parts
+            surface_id, field_name = resolved
             if surface_id in policy.forbidden_surfaces or surface_id not in policy.editable_surfaces:
                 return _patch_error("Patch targets a forbidden or non-editable surface", operation_index=index, path=path)
             surface = self._surfaces.get(surface_id)
@@ -140,6 +140,20 @@ def _frozen_mapping(value: Mapping[str, Any]) -> FrozenDict:
     if not isinstance(frozen, FrozenDict):
         raise TypeError("Expected mapping")
     return frozen
+
+
+def _resolve_surface_field(path: str, surface_ids: tuple[str, ...]) -> tuple[str, str] | None:
+    matches: list[tuple[str, str]] = []
+    for surface_id in surface_ids:
+        prefix = f"{surface_id}."
+        if not path.startswith(prefix):
+            continue
+        field_name = path[len(prefix) :]
+        if field_name and "." not in field_name:
+            matches.append((surface_id, field_name))
+    if len(matches) != 1:
+        return None
+    return matches[0]
 
 
 def _patch_error(message: str, **metadata) -> Result:

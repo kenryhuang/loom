@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -33,11 +34,12 @@ from loom.core import (
     thaw_json,
 )
 from loom.llm import create_env_openai_provider, create_llm_step_function
+from loom.llm.request_options import materialize_request_options
 from loom.observability import EventRecordingPolicy, JsonlTraceStore
 from loom.runtime import create, create_runtime_registry, run, run_with_plugins
 from loom.tasks.config import TaskRunnerConfig, create_provider_from_task_config
 from loom.tasks.profiles import TaskProfile, get_task_profile, select_task_profile
-from loom.tasks.request import TaskRequest, TaskRunOptions, TaskRunResult
+from loom.tasks.request import TaskHarness, TaskRequest, TaskRunOptions, TaskRunResult
 from loom.tasks.tools import make_task_tools
 
 STREAM_DELTA_TRACE_EVENTS = (
@@ -48,10 +50,14 @@ STREAM_DELTA_TRACE_EVENTS = (
 )
 
 
-def make_task_context(request: TaskRequest) -> Result:
+def make_task_context(request: TaskRequest, harness: TaskHarness | None = None) -> Result:
+    task_harness = harness or TaskHarness()
     validation = _validate_request(request)
     if not validation.ok:
         return validation
+    tool_validation = _validate_harness_tools(task_harness)
+    if not tool_validation.ok:
+        return tool_validation
 
     profile_result = _resolve_profile(request)
     if not profile_result.ok:
@@ -59,9 +65,9 @@ def make_task_context(request: TaskRequest) -> Result:
     profile = profile_result.value
 
     workspace = request.workspace.resolve() if request.workspace is not None else None
-    constraints = _constraints_for_request(profile, request, workspace)
+    constraints = _constraints_for_request(profile, request, workspace, task_harness)
     criteria = _criteria_for_request(profile, request)
-    tools = _task_tool_refs()
+    tools = _filter_tools(_task_tool_refs(), task_harness.allowed_tools)
     resources = () if workspace is None else (ResourceRef("workspace", "directory", str(workspace), "read-write"),)
 
     return ok(
@@ -100,14 +106,26 @@ def make_task_context(request: TaskRequest) -> Result:
     )
 
 
-def make_task_loop(request: TaskRequest, provider: Any, *, stream: bool = False) -> MinimalLoopDefinition:
+def make_task_loop(
+    request: TaskRequest,
+    provider: Any,
+    *,
+    stream: bool = False,
+    harness: TaskHarness | None = None,
+) -> MinimalLoopDefinition:
+    task_harness = harness or TaskHarness()
     profile = select_task_profile(request)
     return MinimalLoopDefinition(
         id=new_loop_id(),
         version=new_loop_version(),
         identity=IdentityLayer(role=profile.role),
         goal=GoalLayer(objective=request.objective),
-        step=create_llm_step_function(provider, stream=stream, max_tool_calls_per_step=None),
+        step=create_llm_step_function(
+            provider,
+            stream=stream,
+            max_tool_calls_per_step=task_harness.max_tool_calls_per_step,
+            prompt_options={"max_history_steps": task_harness.max_history_steps},
+        ),
         done=lambda context, _runtime: ok(bool(context.state.decisions)),
         metadata={"task_kind": "generic_task", "profile": profile.id, "blueprint": profile.blueprint},
     )
@@ -120,21 +138,30 @@ async def run_generic_task(
     options: TaskRunOptions | None = None,
     config: TaskRunnerConfig | None = None,
     model_name: str | None = None,
+    harness: TaskHarness | None = None,
 ) -> Result:
     run_options = options or TaskRunOptions()
+    task_harness = harness or TaskHarness()
     if provider is None:
         provider_result = _create_provider(config, model_name=model_name)
         if not provider_result.ok:
             return provider_result
         provider = provider_result.value
 
-    context = make_task_context(request)
+    provider_result = _apply_harness_to_provider(provider, task_harness)
+    if not provider_result.ok:
+        return provider_result
+    provider = provider_result.value
+
+    context = make_task_context(request, harness=task_harness)
     if not context.ok:
         return context
 
     handle = create(
-        make_task_loop(request, provider, stream=run_options.stream),
-        registry=create_runtime_registry(tools=make_task_tools(request)),
+        make_task_loop(request, provider, stream=run_options.stream, harness=task_harness),
+        registry=create_runtime_registry(
+            tools=_filter_tool_handlers(make_task_tools(request), task_harness.allowed_tools)
+        ),
         trace_store=JsonlTraceStore(run_options.trace_path) if run_options.trace_path is not None else None,
         event_policy=_task_trace_event_policy() if run_options.trace_path is not None else None,
     )
@@ -184,10 +211,17 @@ def _resolve_profile(request: TaskRequest) -> Result:
     return get_task_profile(request.profile)
 
 
-def _constraints_for_request(profile: TaskProfile, request: TaskRequest, workspace: Path | None) -> tuple[Constraint, ...]:
+def _constraints_for_request(
+    profile: TaskProfile,
+    request: TaskRequest,
+    workspace: Path | None,
+    harness: TaskHarness,
+) -> tuple[Constraint, ...]:
     descriptions = [*profile.constraints, *request.constraints]
     if workspace is not None:
         descriptions.insert(0, f"Workspace root is {workspace}. Treat tool paths as relative to this root unless absolute paths are necessary.")
+    if harness.system_prompt_addendum.strip():
+        descriptions.append(harness.system_prompt_addendum.strip())
     return tuple(Constraint(f"constraint-{index + 1}", description) for index, description in enumerate(descriptions))
 
 
@@ -288,6 +322,64 @@ def _task_tool_refs() -> tuple[ToolRef, ...]:
             },
         ),
     )
+
+
+def _validate_harness_tools(harness: TaskHarness) -> Result:
+    if harness.allowed_tools is None:
+        return ok(None)
+    known = {tool.id for tool in _task_tool_refs()}
+    unknown = sorted(set(harness.allowed_tools) - known)
+    if unknown:
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Task harness contains unknown allowed tools",
+                retryable=False,
+                metadata={"tools": unknown},
+            )
+        )
+    return ok(None)
+
+
+def _filter_tools(tools: tuple[ToolRef, ...], allowed_tools: tuple[str, ...] | None) -> tuple[ToolRef, ...]:
+    if allowed_tools is None:
+        return tools
+    allowed = frozenset(allowed_tools)
+    return tuple(tool for tool in tools if tool.id in allowed)
+
+
+def _filter_tool_handlers(tools: Mapping[str, Any], allowed_tools: tuple[str, ...] | None) -> dict[str, Any]:
+    if allowed_tools is None:
+        return dict(tools)
+    allowed = frozenset(allowed_tools)
+    return {tool_id: handler for tool_id, handler in tools.items() if tool_id in allowed}
+
+
+def _apply_harness_to_provider(provider: Any, harness: TaskHarness) -> Result:
+    if not harness.request_options:
+        return ok(provider)
+    existing = getattr(provider, "request_options", None)
+    if not isinstance(existing, Mapping) or not is_dataclass(provider):
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Provider does not support task harness request options",
+                retryable=False,
+            )
+        )
+    merged = materialize_request_options(existing)
+    merged.update(materialize_request_options(harness.request_options))
+    try:
+        return ok(replace(provider, request_options=merged))
+    except (TypeError, ValueError) as exc:
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Task harness request options are invalid for the provider",
+                cause=exc,
+                retryable=False,
+            )
+        )
 
 
 def _create_provider(config: TaskRunnerConfig | None, *, model_name: str | None) -> Result:

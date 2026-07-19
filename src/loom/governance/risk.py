@@ -19,9 +19,12 @@ _MEDIUM = frozenset(
         "enum_schema",
         "resolver_priority",
         "completion_policy",
+        "agent.system_prompt",
+        "agent.tool_policy",
+        "models.solver.request_options",
     }
 )
-_LOW = frozenset({"context_numeric_limit", "token_numeric_limit", "documentation_wording"})
+_LOW = frozenset({"context_numeric_limit", "token_numeric_limit", "documentation_wording", "agent.loop_policy"})
 
 
 @dataclass(frozen=True, slots=True)

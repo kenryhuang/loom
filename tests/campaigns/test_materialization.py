@@ -97,3 +97,38 @@ def test_declarative_compiler_implements_append_and_bounded_limit_semantics():
     assert compiled.materialized["context_policy"]["max_chars"] == 1500
     assert compiler.apply(compiled.materialized, compiled.inverse_operations, policy).unwrap() == compiled.base
     assert not outside.ok
+
+
+def test_compiler_resolves_longest_dotted_surface_prefix():
+    policy = CandidatePolicy(
+        kinds=(CandidateKind.DECLARATIVE_PATCH,),
+        editable_surfaces=("agent.loop_policy",),
+        forbidden_surfaces=(),
+        allowed_patch_operations=("set_limit", "set"),
+    )
+    compiler = DeclarativePatchCompiler(
+        (
+            SurfaceDefinition(
+                "agent.loop_policy",
+                ("max_tool_calls_per_step",),
+                {"max_tool_calls_per_step": int},
+                {"max_tool_calls_per_step": (1, 64)},
+            ),
+        )
+    )
+
+    compiled = compiler.compile(
+        {"agent.loop_policy": {"max_tool_calls_per_step": 32}},
+        (
+            {
+                "op": "set_limit",
+                "path": "agent.loop_policy.max_tool_calls_per_step",
+                "value": 8,
+            },
+        ),
+        policy,
+        evidence_trace_ids=("trace-1",),
+    ).unwrap()
+
+    assert compiled.materialized["agent.loop_policy"]["max_tool_calls_per_step"] == 8
+    assert compiler.apply(compiled.materialized, compiled.inverse_operations, policy).unwrap() == compiled.base

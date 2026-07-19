@@ -1,9 +1,11 @@
 import asyncio
 import json
+from dataclasses import dataclass, field
+from typing import Any
 
 from loom.llm import LlmResponse, LlmStreamEvent, LlmToolCall, TokenUsage
 from loom.tasks.profiles import select_task_profile
-from loom.tasks.request import TaskRequest, TaskRunOptions
+from loom.tasks.request import TaskHarness, TaskRequest, TaskRunOptions
 from loom.tasks.runner import make_task_context, run_generic_task
 
 
@@ -58,6 +60,30 @@ def test_make_task_context_rejects_missing_workspace(tmp_path):
     request = TaskRequest("Audit this project", workspace=tmp_path / "missing", profile="project_audit")
 
     result = make_task_context(request)
+
+    assert not result.ok
+    assert result.error.code == "VALIDATION_FAILED"
+
+
+def test_task_harness_limits_tools_and_adds_system_prompt_constraint(tmp_path):
+    harness = TaskHarness(
+        system_prompt_addendum="Always cite the exact file path.",
+        allowed_tools=("read_file",),
+        max_tool_calls_per_step=4,
+        max_history_steps=2,
+    )
+
+    context = make_task_context(TaskRequest("Audit", workspace=tmp_path), harness=harness).unwrap()
+
+    assert tuple(tool.id for tool in context.affordances.tools) == ("read_file",)
+    assert any("Always cite the exact file path." in item.description for item in context.identity.constraints)
+
+
+def test_task_harness_rejects_unknown_allowed_tool(tmp_path):
+    result = make_task_context(
+        TaskRequest("Audit", workspace=tmp_path),
+        harness=TaskHarness(allowed_tools=("not_a_real_tool",)),
+    )
 
     assert not result.ok
     assert result.error.code == "VALIDATION_FAILED"
@@ -188,6 +214,36 @@ class StreamingTaskProvider:
         yield LlmStreamEvent(kind="completed", response=LlmResponse(content=content, usage=TokenUsage(4, 5, 9)))
 
 
+@dataclass(frozen=True)
+class OverlayRecordingProvider:
+    api_key: str = "secret-key"
+    model: str = "fixed-model"
+    base_url: str = "https://provider.invalid/v1"
+    request_options: dict[str, Any] = field(default_factory=lambda: {"enable_thinking": False})
+    calls: list[dict[str, Any]] = field(default_factory=list)
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        self.calls.append(
+            {
+                "api_key": self.api_key,
+                "model": self.model,
+                "base_url": self.base_url,
+                "request_options": self.request_options,
+                "tool_names": tuple(tool["function"]["name"] for tool in tools or ()),
+            }
+        )
+        return _response(
+            content=json.dumps(
+                {
+                    "reasoning": "The bounded harness was applied.",
+                    "action": {"kind": "none", "description": "done", "target": None, "input": {}},
+                    "alternatives": [],
+                    "confidence": 0.9,
+                }
+            )
+        )
+
+
 def _response(*, content, tool_calls=(), finish_reason="stop"):
     from loom.core import ok
 
@@ -246,3 +302,30 @@ def test_run_generic_task_trace_omits_stream_token_deltas(tmp_path):
     assert "llm.completed" in event_types
     assert "llm.stream.completed" in event_types
     assert "llm.content.delta" not in event_types
+
+
+def test_run_generic_task_merges_harness_request_options_without_changing_provider_identity(tmp_path):
+    provider = OverlayRecordingProvider()
+
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest("Audit", workspace=tmp_path),
+            provider=provider,
+            harness=TaskHarness(
+                allowed_tools=("read_file",),
+                request_options={"enable_thinking": True, "thinking_budget": 1024},
+            ),
+        )
+    )
+
+    assert result.ok
+    assert provider.request_options == {"enable_thinking": False}
+    assert provider.calls == [
+        {
+            "api_key": "secret-key",
+            "model": "fixed-model",
+            "base_url": "https://provider.invalid/v1",
+            "request_options": {"enable_thinking": True, "thinking_budget": 1024},
+            "tool_names": ("read_file",),
+        }
+    ]

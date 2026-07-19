@@ -557,6 +557,30 @@ def test_candidate_risk_is_derived_from_exact_materialized_override(tmp_path: Pa
     assert not result.ok and result.error.code == "GOVERNANCE_FAILED"
 
 
+def test_candidate_risk_derivation_accepts_dotted_surface_ids(tmp_path: Path):
+    artifacts = ArtifactStore(tmp_path / "artifacts")
+    finalizer = _finalizer()
+    identities = StaticIdentityProvider((finalizer,))
+    candidate = _governed_candidate(
+        artifacts,
+        "cand_dotted_surface",
+        "agent.loop_policy",
+        "set_limit",
+    )
+
+    result = publish_candidate_evidence(
+        artifacts,
+        "cmp_test",
+        "cand_dotted_surface",
+        candidate,
+        _recommendation(artifacts, "cand_dotted_surface", finalizer),
+        finalizer,
+        identities,
+    )
+
+    assert result.ok
+
+
 def test_candidate_evidence_rejects_a_post_holdout_candidate_substitution(tmp_path: Path):
     artifacts = ArtifactStore(tmp_path / "artifacts")
     finalizer = _finalizer()
