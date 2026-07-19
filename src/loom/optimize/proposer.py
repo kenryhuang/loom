@@ -62,7 +62,16 @@ class LoomNativeProposerAdapter:
     async def propose(self, request: ProposalRequest, history, workspace) -> Result:
         request_digest = canonical_digest(
             {
-                "request": request,
+                # remaining_budget is intentionally excluded: once a proposal
+                # for an immutable campaign iteration is paid for and cached,
+                # its own consumed usage lowers the live remaining budget.
+                # Resuming that iteration must replay the same batch instead
+                # of treating the lower budget as a new proposal request.
+                "campaign_id": request.campaign_id,
+                "iteration": request.iteration,
+                "max_candidates": request.max_candidates,
+                "editable_surfaces": request.editable_surfaces,
+                "forbidden_surfaces": request.forbidden_surfaces,
                 "baseline_harness": self.baseline_harness,
                 "evidence_refs": self.evidence_refs,
             }

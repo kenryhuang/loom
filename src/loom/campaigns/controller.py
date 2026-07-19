@@ -306,9 +306,6 @@ class CampaignController:
                     {
                         "iteration": iteration,
                         "proposer": self.spec.proposer,
-                        "proposer_tokens": proposer_tokens,
-                        "cost": cost,
-                        "wall_time_seconds": wall_time_seconds,
                     }
                 ),
                 "campaign.iteration_started",

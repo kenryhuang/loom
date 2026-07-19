@@ -44,7 +44,6 @@ from loom.campaigns.contracts import (
 )
 from loom.campaigns.controller import CampaignController, publish_phase_results
 from loom.campaigns.experiments import (
-    BaselineRunCache,
     PairedExperimentRunner,
     ValidatedCandidate,
     freeze_trial_plan,
@@ -85,7 +84,7 @@ from loom.optimize.task_sets import (
     prepare_task_sets,
     publish_prepared_task_sets,
 )
-from loom.optimize.trial_executor import OptimizeTrialExecutor
+from loom.optimize.trial_executor import DurableBaselineRunCache, OptimizeTrialExecutor, TrialCheckpointError
 from loom.optimize.ui import create_observer
 from loom.tasks import TaskHarness, create_provider_from_task_config
 
@@ -400,7 +399,7 @@ class DefaultOptimizeCampaignServices:
         self.finalist_digest: str | None = None
         self.holdout_results_ref: ArtifactRef | None = None
         self.holdout_experiment_refs: tuple[ArtifactRef, ...] = ()
-        self._baseline_cache = BaselineRunCache()
+        self._baseline_cache = DurableBaselineRunCache(self.root / "evidence" / "baseline-sides", self.store.artifacts)
         self._budget_usage = {"candidates": 0, "tokens": 0, "cost": Decimal("0"), "wall_time_seconds": 0}
 
     def contract(self) -> OptimizeCampaignServices:
@@ -1094,6 +1093,7 @@ class DefaultOptimizeCampaignServices:
             event_emitter=self.event_emitter,
             event_scope={"phase": phase.value, "experiment_id": experiment_id},
             control=self.control,
+            checkpoint_root=self.root / "evidence" / "trial-sides" / phase.value / candidate_id,
         )
         candidate = ValidatedCandidate(
             self.spec.campaign_id,
@@ -1119,7 +1119,10 @@ class DefaultOptimizeCampaignServices:
             infrastructure_retries=1,
             baseline_cache=self._baseline_cache,
         )
-        evaluated = await runner.evaluate(candidate, task_set, plan.value, experiment_id=experiment_id)
+        try:
+            evaluated = await runner.evaluate(candidate, task_set, plan.value, experiment_id=experiment_id)
+        except TrialCheckpointError as exc:
+            return err(exc.error)
         if not evaluated.ok:
             return evaluated
         usage = evaluated.value.usage

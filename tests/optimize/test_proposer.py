@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -163,6 +164,25 @@ async def test_native_proposer_writes_bounded_single_surface_drafts(tmp_path: Pa
     assert '"const":"declarative_patch"' in prompt
     assert "validation" not in prompt.lower()
     assert "holdout" not in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_native_proposer_replays_completed_iteration_when_remaining_budget_has_decreased(tmp_path: Path):
+    provider = FakeChatProvider(_response(_draft()))
+    history = RecordingHistory()
+    workspace = CandidateWorkspace.allocate(tmp_path, "iteration-resume").unwrap()
+    adapter = LoomNativeProposerAdapter(provider, _baseline(), evidence_refs=("trace:seed",))
+
+    first = await adapter.propose(_request(), history, workspace)
+    resumed_request = replace(
+        _request(),
+        remaining_budget={"proposer_tokens": 4054, "cost": "1"},
+    )
+    second = await adapter.propose(resumed_request, history, workspace)
+
+    assert first.ok and second.ok
+    assert first.value == second.value
+    assert provider.calls == 1
 
 
 @pytest.mark.asyncio

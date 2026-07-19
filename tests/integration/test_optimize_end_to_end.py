@@ -13,6 +13,7 @@ from loom.evaluation.judge import ROUND_JUDGE_DIMENSIONS
 from loom.llm import LlmResponse, TokenUsage
 from loom.optimize.cli import OptimizeCliOptions, run_optimize
 from loom.optimize.cli import main as optimize_main
+from loom.optimize.control import OptimizeRunControl
 from loom.optimize.tui_state import OptimizeTuiCollector
 from loom.optimize.ui import JsonObserver, OptimizeTuiObserver
 
@@ -418,6 +419,60 @@ def test_optimize_command_resumes_without_repeating_completed_model_calls(tmp_pa
     assert snapshot["payload"]["budget_used"]["tokens"] > 0
     assert snapshot["payload"]["budget_used"]["llm_calls"] == sum(ledger.values())
     assert {role: len(provider.messages) for role, provider in providers.items()} == ledger
+
+
+@pytest.mark.asyncio
+async def test_pause_after_completed_pair_resumes_without_repeating_paid_trial_sides(tmp_path: Path, monkeypatch):
+    trace, tasks, config = _build_fixture(tmp_path)
+    providers = {role: FakeProvider(role) for role in ("proposer", "solver", "judge")}
+
+    def fake_provider_factory(task_config, *, model_name=None, **kwargs):
+        del task_config, kwargs
+        return ok(providers[model_name])
+
+    monkeypatch.setattr("loom.optimize.runtime.create_provider_from_task_config", fake_provider_factory)
+    output = tmp_path / ".loom" / "optimize"
+    options = OptimizeCliOptions(
+        "run",
+        trace=trace,
+        tasks=tasks,
+        config=config,
+        json=True,
+        output_dir=output,
+    )
+    control = OptimizeRunControl()
+
+    class PauseAfterFirstPair:
+        def __init__(self):
+            self.completed_sides: dict[str, set[str]] = {}
+
+        def emit(self, event):
+            if event["type"] != "optimization.trial.completed":
+                return
+            scope = event["scope"]
+            trial_id = scope.get("trial_id")
+            side = scope.get("side")
+            if isinstance(trial_id, str) and isinstance(side, str):
+                sides = self.completed_sides.setdefault(trial_id, set())
+                sides.add(side)
+                if len(sides) == 2:
+                    control.request_pause("pause after first complete pair")
+
+    paused = await run_optimize(options, observer=PauseAfterFirstPair(), control=control)
+
+    assert paused.ok and paused.value.disposition == "paused"
+    assert len(providers["solver"].messages) == 2
+
+    resumed = await run_optimize(options, control=OptimizeRunControl())
+
+    assert resumed.ok and resumed.value.disposition == "promoted"
+    # 27 frozen pairs across discovery/validation/holdout, two solver sides
+    # each. The first two calls must be restored from durable trial-side
+    # checkpoints rather than paid for again.
+    assert len(providers["solver"].messages) == 54
+    assert len(providers["proposer"].messages) == 1
+    trial_checkpoints = list(output.glob("opt_*/evidence/trial-sides/**/*.json"))
+    assert len(trial_checkpoints) == 54
 
 
 @pytest.mark.asyncio
