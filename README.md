@@ -154,6 +154,122 @@ proposal generation and low-risk auto-apply.
 
 ## Governed Meta-Harness
 
+### One-command optimization
+
+The recommended workflow composes trace evaluation, evolution analysis,
+candidate search, paired trials, campaign finalization, and governance behind
+one command:
+
+```bash
+uv run loom optimize \
+  --trace runs/seed.jsonl \
+  --tasks datasets/project-audit.jsonl \
+  --config config.yaml \
+  --tui
+```
+
+Use `--json` instead of `--tui` for a versioned event stream. A dry run resolves
+models, snapshots workspaces, checks provenance and contamination, freezes the
+three task sets, estimates the campaign, and prints the stable optimization ID
+without calling a proposer, solver, or judge:
+
+```bash
+uv run loom optimize \
+  --trace runs/seed.jsonl \
+  --tasks datasets/project-audit.jsonl \
+  --config config.yaml \
+  --dry-run
+```
+
+Each line in `--tasks` is a small JSON object. `task_id`, `objective`, and
+`workspace` are required; paths are resolved relative to the JSONL file.
+`profile`, `constraints`, `expected_outputs`, `risk_level`, `verifier`, and
+`metadata` are optional:
+
+```json
+{"task_id":"audit-yakdb","objective":"Audit YakDB, run its smallest embedded smoke test, and report evidence-backed improvements.","workspace":"../workspaces/yakDB","profile":"project_audit","constraints":["Do not modify project source files."],"expected_outputs":["A Markdown audit report."]}
+```
+
+With the default three repetitions and five required pairs, every discovery,
+validation, and holdout set needs at least two independent tasks. Automatic
+splitting additionally needs at least three independent snapshot/template
+groups; near-duplicates across sets fail closed. Advanced users can provide
+already separated inputs, which still pass the same checks:
+
+```bash
+uv run loom optimize \
+  --trace runs/seed.jsonl \
+  --discovery-tasks datasets/discovery.jsonl \
+  --validation-tasks datasets/validation.jsonl \
+  --holdout-tasks datasets/holdout.jsonl \
+  --config config.yaml \
+  --tui
+```
+
+The optimization ID is derived from the frozen inputs. Repeating the same
+command resumes incomplete work or replays the terminal result without
+repeating completed model calls or holdout trials. After holdout disclosure,
+`--new-run` is rejected until the corpus or split seed produces a new holdout
+digest. Inspect the durable projection with:
+
+```bash
+uv run loom optimize status opt_<id> --json
+```
+
+Low-risk loop-policy changes may promote automatically. Medium-risk prompt,
+tool-policy, and solver request-option changes stop at `awaiting_approval`
+(exit code 2). Approval is explicit and bound to the stored candidate, policy,
+risk, gate, baseline, and evidence digests:
+
+```bash
+uv run loom optimize approve opt_<id> \
+  --candidate cand_<id> \
+  --identity approver \
+  --reason "Reviewed the bounded change and holdout evidence."
+```
+
+Terminal artifacts are written to
+`.loom/optimize/opt_<id>/{result.json,report.md}`. A successful process exit can
+mean either `promoted` or `rejected`; automation should read `disposition`.
+
+The required configuration block reuses named model profiles from the generic
+task runner:
+
+```yaml
+meta_harness:
+  proposer_model: main
+  solver_model: kimi
+  judge_model: kimi_judge
+  search:
+    iterations: 4
+    candidates_per_iteration: 2
+    candidate_kinds: [declarative_patch]
+    editable_surfaces:
+      - agent.system_prompt
+      - agent.tool_policy
+      - agent.loop_policy
+      - models.solver.request_options
+  tasks:
+    seed: 42
+    repetitions: 3
+    minimum_pairs: 5
+    contamination_threshold: 0.80
+  budgets:
+    max_candidates: 8
+    max_llm_calls: 200
+    max_wall_clock_minutes: 180
+  execution:
+    max_parallel_trials: 2
+    trial_timeout_seconds: 900
+    verifier_timeout_seconds: 120
+  governance:
+    mode: local
+    auto_promote_max_risk: low
+    require_approval_for: [medium, high, executable]
+```
+
+### Domain APIs
+
 Loom's governed Meta-Harness implementation adds two authority-separated
 packages:
 
