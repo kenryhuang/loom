@@ -182,12 +182,8 @@ async def test_plan_handlers_return_canonical_snapshots_and_rejections_are_recov
     handlers = planning.wrap_tools({})
 
     entered = await handlers["enter_plan"]({"reason": "dependent work"}, {})
-    submitted = await handlers["submit_plan"](
-        {"explanation": "inspect first", "items": [{"content": "Inspect"}]}, {}
-    )
-    duplicate_submit = await handlers["submit_plan"](
-        {"explanation": "again", "items": [{"content": "Again"}]}, {}
-    )
+    submitted = await handlers["submit_plan"]({"explanation": "inspect first", "items": [{"content": "Inspect"}]}, {})
+    duplicate_submit = await handlers["submit_plan"]({"explanation": "again", "items": [{"content": "Again"}]}, {})
 
     assert entered.ok and entered.value.value["accepted"] is True
     assert entered.value.value["plan"]["phase"] == "planning"
@@ -195,6 +191,26 @@ async def test_plan_handlers_return_canonical_snapshots_and_rejections_are_recov
     assert duplicate_submit.ok
     assert duplicate_submit.value.source == "planning.guard"
     assert duplicate_submit.value.value["code"] == "PLAN_PHASE_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_update_plan_schema_and_handler_allow_omitted_note():
+    planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
+    update_ref = next(tool for tool in planning.tool_refs() if tool.id == "update_plan")
+    item_schema = update_ref.input_schema["properties"]["items"]["items"]
+    planning.controller.submit("plan", ("Inspect",))
+
+    result = await planning.wrap_tools({})["update_plan"](
+        {
+            "explanation": "started",
+            "items": [{"id": "step_1", "content": "Inspect", "status": "in_progress"}],
+        },
+        {},
+    )
+
+    assert item_schema["required"] == ("content", "status")
+    assert result.ok and result.value.value["accepted"] is True
+    assert result.value.value["plan"]["items"][0]["note"] is None
 
 
 @pytest.mark.asyncio
@@ -220,6 +236,32 @@ async def test_finish_gate_requires_terminal_plan_then_preserves_handler_result(
     assert called == 1
     assert finished.ok and finished.value.source == "finish"
     assert planning.controller.state.phase is PlanPhase.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_finish_rejects_later_stale_tools_from_the_same_batch():
+    planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
+    planning.controller.submit("plan", ("Inspect",))
+    planning.controller.update(
+        "done",
+        ({"id": "step_1", "content": "Inspect", "status": "completed"},),
+    )
+    calls = []
+
+    async def handler(_input, options=None):
+        calls.append(options["name"])
+        return ok(Observation(f"obs-{len(calls)}", options["name"], {"ok": True}, _now()))
+
+    handlers = planning.wrap_tools({"finish": handler, "read_file": handler})
+
+    finished = await handlers["finish"]({}, {"name": "finish"})
+    stale_read = await handlers["read_file"]({}, {"name": "read_file"})
+    stale_finish = await handlers["finish"]({}, {"name": "finish-again"})
+
+    assert finished.ok and finished.value.source == "finish"
+    assert calls == ["finish"]
+    assert stale_read.value.value["code"] == "PLAN_PHASE_INVALID"
+    assert stale_finish.value.value["code"] == "PLAN_PHASE_INVALID"
 
 
 @pytest.mark.asyncio
@@ -298,9 +340,7 @@ async def test_planning_wrapper_persists_snapshot_emits_events_and_blocks_done()
 
     async def base_step(context, _runtime_value):
         seen_tools.append(tuple(tool.id for tool in context.affordances.tools))
-        await planning.wrap_tools({})["submit_plan"](
-            {"explanation": "plan", "items": [{"content": "Inspect"}]}, {}
-        )
+        await planning.wrap_tools({})["submit_plan"]({"explanation": "plan", "items": [{"content": "Inspect"}]}, {})
         return ok(_step_result_for(context))
 
     definition = MinimalLoopDefinition(
@@ -339,9 +379,7 @@ async def test_wrapper_reprojects_tools_and_replaces_workflow_constraint_each_st
         if planning.controller.state.phase is PlanPhase.INACTIVE:
             await handlers["enter_plan"]({"reason": "complex"}, {})
         else:
-            await handlers["submit_plan"](
-                {"explanation": "plan", "items": [{"content": "Inspect"}]}, {}
-            )
+            await handlers["submit_plan"]({"explanation": "plan", "items": [{"content": "Inspect"}]}, {})
         return ok(_step_result_for(context))
 
     definition = MinimalLoopDefinition(

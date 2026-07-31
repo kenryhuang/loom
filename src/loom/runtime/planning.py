@@ -187,9 +187,7 @@ class PlanController:
             if old_item.status not in terminal:
                 continue
             if index >= len(normalized):
-                return self._error(
-                    "PLAN_TERMINAL_HISTORY_IMMUTABLE", "Completed and skipped plan items cannot be removed"
-                )
+                return self._error("PLAN_TERMINAL_HISTORY_IMMUTABLE", "Completed and skipped plan items cannot be removed")
             new_id, content, status, note = normalized[index]
             if (new_id, content, status, note) != (
                 old_item.id,
@@ -202,10 +200,7 @@ class PlanController:
                     "Completed and skipped plan items cannot be changed or reordered",
                 )
 
-        updated_items = tuple(
-            PlanItem(item_id or self._id_factory("step_"), content, status, note)
-            for item_id, content, status, note in normalized
-        )
+        updated_items = tuple(PlanItem(item_id or self._id_factory("step_"), content, status, note) for item_id, content, status, note in normalized)
         at = self._now()
         self._state = replace(
             self._state,
@@ -290,7 +285,7 @@ class PlanningRuntime:
                 },
                 "note": {"type": ["string", "null"]},
             },
-            "required": ["content", "status", "note"],
+            "required": ["content", "status"],
             "additionalProperties": False,
         }
         return (
@@ -396,9 +391,7 @@ class PlanningRuntime:
         async def planned_step(context: Any, runtime: Any) -> Result:
             self._sync_from_context(context)
             if self._normal_refs is None:
-                self._normal_refs = tuple(
-                    tool for tool in context.affordances.tools if tool.id not in PLAN_TOOL_IDS
-                )
+                self._normal_refs = tuple(tool for tool in context.affordances.tools if tool.id not in PLAN_TOOL_IDS)
             self._bound_runtime = runtime
             self._bound_context = context
             try:
@@ -451,11 +444,7 @@ class PlanningRuntime:
         visible = self.visible_tool_refs(normal_refs)
 
         workflow = Constraint("runtime-plan-workflow", self._workflow_description(state))
-        constraints = tuple(
-            constraint
-            for constraint in context.identity.constraints
-            if constraint.id != workflow.id
-        )
+        constraints = tuple(constraint for constraint in context.identity.constraints if constraint.id != workflow.id)
         return replace(
             context,
             identity=replace(context.identity, constraints=(*constraints, workflow)),
@@ -465,17 +454,10 @@ class PlanningRuntime:
     @staticmethod
     def _workflow_description(state: PlanState) -> str:
         if state.phase is PlanPhase.INACTIVE:
-            return (
-                "Use enter_plan when the task requires multiple dependent steps; otherwise continue "
-                "with the normal ReAct workflow."
-            )
+            return "Use enter_plan when the task requires multiple dependent steps; otherwise continue with the normal ReAct workflow."
         if state.phase is PlanPhase.PLANNING:
             return "Planning is active. Submit an ordered checklist with submit_plan before executing task tools."
-        checklist = "\n".join(
-            f"- [{_status_mark(item.status)}] {item.id}: {item.content}"
-            + (f" — {item.note}" if item.note else "")
-            for item in state.items
-        )
+        checklist = "\n".join(f"- [{_status_mark(item.status)}] {item.id}: {item.content}" + (f" — {item.note}" if item.note else "") for item in state.items)
         if state.phase is PlanPhase.EXECUTING:
             prefix = (
                 "Execute the checklist dynamically. Keep exactly one item in_progress before calling normal "
@@ -497,6 +479,11 @@ class PlanningRuntime:
     def _guard_handler(self, tool_id: str, handler: Any) -> Callable[..., Any]:
         async def guarded(input_value: Any, options: Any = None) -> Result:
             phase = self._controller.state.phase
+            if phase is PlanPhase.COMPLETED:
+                return self._rejected(
+                    "PLAN_PHASE_INVALID",
+                    "The plan is complete; no further task tools may be used",
+                )
             if phase is PlanPhase.PLANNING:
                 return self._rejected(
                     "PLAN_PHASE_INVALID",
@@ -505,16 +492,12 @@ class PlanningRuntime:
             if phase is PlanPhase.EXECUTING:
                 if tool_id == self.finish_tool_id:
                     terminal = {PlanItemStatus.COMPLETED, PlanItemStatus.SKIPPED}
-                    if not self._controller.state.items or any(
-                        item.status not in terminal for item in self._controller.state.items
-                    ):
+                    if not self._controller.state.items or any(item.status not in terminal for item in self._controller.state.items):
                         return self._rejected(
                             "PLAN_INCOMPLETE",
                             "All plan items must be completed or skipped before finishing",
                         )
-                elif sum(
-                    item.status is PlanItemStatus.IN_PROGRESS for item in self._controller.state.items
-                ) != 1:
+                elif sum(item.status is PlanItemStatus.IN_PROGRESS for item in self._controller.state.items) != 1:
                     return self._rejected(
                         "PLAN_ACTIVE_ITEM_REQUIRED",
                         "Exactly one plan item must be in progress before using execution tools",
