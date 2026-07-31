@@ -138,12 +138,15 @@ Planning wraps both `step` and `done`.
 The step wrapper:
 
 1. synchronizes the controller from the input context;
-2. emits queued events, including forced entry before the first LLM request;
-3. derives phase-specific tool references and workflow instructions;
-4. invokes the original step;
-5. drains and emits plan domain events;
-6. writes the canonical plan snapshot into `StateLayer.scratch`; and
-7. returns a normal `StepResult` with the original trace/output semantics.
+2. binds the current step runtime and trace coordinates to the per-run planning
+   assembly;
+3. emits queued events, including forced entry before the first LLM request;
+4. derives phase-specific tool references and workflow instructions;
+5. invokes the original step, while each successful plan transition flushes its
+   newly queued domain event immediately through the bound runtime sink;
+6. drains any remaining events and unbinds the step runtime;
+7. writes the canonical plan snapshot into `StateLayer.scratch`; and
+8. returns a normal `StepResult` with the original trace/output semantics.
 
 The done wrapper behaves as follows:
 
@@ -284,10 +287,13 @@ Every event contains:
 - the complete canonical `PlanState`; and
 - event timestamp.
 
-The controller queues domain events and the wrapper emits them through the
-existing step runtime trace sink. Full snapshots make each event independently
-renderable and avoid requiring consumers to replay patches. Existing JSONL
-trace policy records these non-streaming events.
+The controller queues domain events. During a step, the wrapper binds the
+current runtime sink and trace coordinates; each async plan-tool handler flushes
+its successful transition immediately, so TUI progress updates do not wait for
+the outer LLM step to finish. The wrapper emits forced entry before the first
+LLM request and drains any leftovers when the step returns. Full snapshots make
+each event independently renderable and avoid requiring consumers to replay
+patches. Existing JSONL trace policy records these non-streaming events.
 
 ## Recoverable Protocol Rejections
 
