@@ -87,6 +87,22 @@ trace records under `runs/loom-task-*.jsonl`. Set `run.trace_path_template` for
 dynamic trace names, or pass `--config` / `--trace-path` to override those
 locations.
 
+Complex tasks can use the Plan & Execute workflow through the unified entry
+point:
+
+```bash
+uv run loom task "Audit and improve this project" --plan-mode auto --tui
+uv run loom task "Exercise the planning workflow" --plan-mode force --tui
+uv run loom task "Run the legacy ReAct path" --plan-mode off
+```
+
+`auto` lets the model enter planning dynamically, including after exploratory
+tool calls. `force` starts in planning and requires plan submission before task
+tools are available. `off` exposes no planning tools and keeps the legacy ReAct
+path. Plan-enabled traces retain every `plan.*` lifecycle event as a complete
+checklist snapshot, while the TUI presents those snapshots as one live-updating
+checklist.
+
 The task config supports task defaults, run defaults, and multiple named
 OpenAI-compatible models:
 
@@ -103,6 +119,7 @@ task:
 run:
   tui: false
   stream: true
+  plan_mode: auto
   trace_path_template: runs/{task_slug}-{model}-{timestamp}.jsonl
   max_steps:
   timeout_ms:
