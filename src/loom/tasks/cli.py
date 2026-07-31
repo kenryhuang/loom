@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from loom.core import Result
+from loom.runtime import PlanMode
 from loom.tasks.config import RunDefaults, TaskDefaults, TaskRunnerConfig, load_task_config
 from loom.tasks.request import TaskRequest, TaskRunOptions
 from loom.tasks.runner import run_generic_task
@@ -66,6 +67,9 @@ def parse_task_cli_args(argv: tuple[str, ...] | list[str] | None = None) -> Task
             trace_path=trace_path,
             max_steps=_coalesce(args.max_steps, run_defaults.max_steps, None),
             timeout_ms=_coalesce(args.timeout_ms, run_defaults.timeout_ms, None),
+            plan_mode=PlanMode(
+                args.plan_mode or run_defaults.plan_mode or PlanMode.AUTO.value
+            ),
         ),
         config_path=config_path,
         config=config,
@@ -112,6 +116,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trace-path", type=Path, help="Persist full loop trace events and traces to a JSONL file. Defaults to runs/loom-task-*.jsonl.")
     parser.add_argument("--max-steps", type=int, help="Optional runtime loop step budget. Tool calls inside a step are not capped.")
     parser.add_argument("--timeout-ms", type=int, help="Per-step timeout in milliseconds.")
+    parser.add_argument(
+        "--plan-mode",
+        choices=tuple(mode.value for mode in PlanMode),
+        help="Planning behavior: auto lets the model decide, force requires a plan, off uses the legacy ReAct loop.",
+    )
     return parser
 
 

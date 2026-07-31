@@ -34,6 +34,27 @@ api_key = "inline-key"
     assert loaded.models["fast"].api_key == "inline-key"
 
 
+def test_load_task_config_reads_plan_mode_from_toml_and_yaml(tmp_path):
+    toml_path = tmp_path / "config.toml"
+    toml_path.write_text('[run]\nplan_mode = "force"\n', encoding="utf-8")
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text("run:\n  plan_mode: force\n", encoding="utf-8")
+
+    assert load_task_config(toml_path).unwrap().run.plan_mode == "force"
+    assert load_task_config(yaml_path).unwrap().run.plan_mode == "force"
+
+
+def test_load_task_config_rejects_invalid_plan_mode(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[run]\nplan_mode = "sometimes"\n', encoding="utf-8")
+
+    result = load_task_config(path)
+
+    assert not result.ok
+    assert result.error.code == "VALIDATION_FAILED"
+    assert result.error.metadata["field"] == "plan_mode"
+
+
 def test_load_task_config_reads_yaml_config(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text(

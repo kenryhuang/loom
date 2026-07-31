@@ -2,7 +2,27 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from loom.core import ok
+from loom.runtime import PlanMode
 from loom.tasks.cli import parse_task_cli_args
+
+
+def test_parse_task_cli_defaults_plan_mode_to_auto(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    parsed = parse_task_cli_args(["Summarize"])
+
+    assert parsed.options.plan_mode is PlanMode.AUTO
+
+
+def test_cli_plan_mode_overrides_config(tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text('[run]\nplan_mode = "force"\n', encoding="utf-8")
+
+    parsed = parse_task_cli_args(
+        ["Summarize", "--config", str(config), "--plan-mode", "off"]
+    )
+
+    assert parsed.options.plan_mode is PlanMode.OFF
 
 
 def test_parse_task_cli_args_supports_config_file_and_model_alias(tmp_path):

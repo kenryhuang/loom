@@ -61,6 +61,7 @@ class RunDefaults:
     trace_path_template: str | None = None
     max_steps: int | None = None
     timeout_ms: int | None = None
+    plan_mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +230,18 @@ def _parse_run_defaults(payload: Any, path: Path) -> Result:
         payload = {}
     if not isinstance(payload, Mapping):
         return err(make_loom_error("VALIDATION_FAILED", "Task config run must be a table", retryable=False, metadata={"path": str(path)}))
+    plan_mode = payload.get("plan_mode")
+    if plan_mode is not None and (
+        not isinstance(plan_mode, str) or plan_mode not in {"auto", "force", "off"}
+    ):
+        return err(
+            make_loom_error(
+                "VALIDATION_FAILED",
+                "Task config run.plan_mode must be auto, force, or off",
+                retryable=False,
+                metadata={"path": str(path), "field": "plan_mode"},
+            )
+        )
     try:
         return ok(
             RunDefaults(
@@ -238,6 +251,7 @@ def _parse_run_defaults(payload: Any, path: Path) -> Result:
                 trace_path_template=_optional_str(payload.get("trace_path_template")),
                 max_steps=_optional_int(payload.get("max_steps")),
                 timeout_ms=_optional_int(payload.get("timeout_ms")),
+                plan_mode=plan_mode,
             )
         )
     except (TypeError, ValueError) as exc:
