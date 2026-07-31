@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from loom.core import Result, err, make_loom_error, now_iso, ok
+from loom.core import (
+    Constraint,
+    MinimalLoopDefinition,
+    Observation,
+    Result,
+    StepResult,
+    ToolRef,
+    err,
+    make_loom_error,
+    now_iso,
+    ok,
+)
+
+PLAN_TOOL_IDS = frozenset({"enter_plan", "submit_plan", "update_plan"})
 
 
 class PlanMode(StrEnum):
@@ -223,9 +237,360 @@ class PlanController:
         self._events.clear()
         return events
 
+    def restore(self, state: PlanState) -> None:
+        """Restore trusted state persisted by the loop wrapper."""
+        self._state = state
+        self._events.clear()
+
     @staticmethod
     def _error(code: str, message: str) -> Result:
         return err(make_loom_error(code, message, retryable=False))
+
+
+class PlanningRuntime:
+    """Expose planning transitions as tools and guard execution tools."""
+
+    def __init__(
+        self,
+        mode: PlanMode | str,
+        *,
+        finish_tool_id: str = "finish",
+        id_factory: Callable[[str], str] = _new_id,
+        now: Callable[[], str] = now_iso,
+    ) -> None:
+        self.mode = PlanMode(mode)
+        self.finish_tool_id = finish_tool_id
+        self._now = now
+        self._controller = PlanController(self.mode, id_factory=id_factory, now=now)
+        self._bound_runtime: Any | None = None
+        self._bound_context: Any | None = None
+        self._normal_refs: tuple[ToolRef, ...] | None = None
+
+    @property
+    def controller(self) -> PlanController:
+        return self._controller
+
+    def tool_refs(self) -> tuple[ToolRef, ...]:
+        if self.mode is PlanMode.OFF:
+            return ()
+        item_schema = {
+            "type": "object",
+            "properties": {"content": {"type": "string", "minLength": 1}},
+            "required": ["content"],
+            "additionalProperties": False,
+        }
+        update_item_schema = {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "minLength": 1},
+                "content": {"type": "string", "minLength": 1},
+                "status": {
+                    "type": "string",
+                    "enum": [status.value for status in PlanItemStatus],
+                },
+                "note": {"type": ["string", "null"]},
+            },
+            "required": ["content", "status", "note"],
+            "additionalProperties": False,
+        }
+        return (
+            ToolRef(
+                "enter_plan",
+                "Enter planning mode when the task needs a multi-step workflow.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"reason": {"type": "string", "minLength": 1}},
+                    "required": ["reason"],
+                    "additionalProperties": False,
+                },
+            ),
+            ToolRef(
+                "submit_plan",
+                "Submit the initial ordered checklist after entering planning mode.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "explanation": {"type": "string"},
+                        "items": {"type": "array", "minItems": 1, "items": item_schema},
+                    },
+                    "required": ["explanation", "items"],
+                    "additionalProperties": False,
+                },
+            ),
+            ToolRef(
+                "update_plan",
+                "Update checklist progress or revise future non-terminal steps.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "explanation": {"type": "string"},
+                        "items": {"type": "array", "minItems": 1, "items": update_item_schema},
+                    },
+                    "required": ["explanation", "items"],
+                    "additionalProperties": False,
+                },
+            ),
+        )
+
+    def wrap_tools(self, handlers: Mapping[str, Any]) -> Mapping[str, Any]:
+        if self.mode is PlanMode.OFF:
+            return handlers
+
+        wrapped = {tool_id: self._guard_handler(tool_id, handler) for tool_id, handler in handlers.items()}
+
+        async def enter_plan(input_value: Mapping[str, Any], _options: Any = None) -> Result:
+            return await self._transition_result(
+                "enter_plan",
+                self._controller.enter(str(input_value.get("reason", ""))),
+            )
+
+        async def submit_plan(input_value: Mapping[str, Any], _options: Any = None) -> Result:
+            return await self._transition_result(
+                "submit_plan",
+                self._controller.submit(
+                    str(input_value.get("explanation", "")),
+                    input_value.get("items", ()),
+                ),
+            )
+
+        async def update_plan(input_value: Mapping[str, Any], _options: Any = None) -> Result:
+            return await self._transition_result(
+                "update_plan",
+                self._controller.update(
+                    str(input_value.get("explanation", "")),
+                    input_value.get("items", ()),
+                ),
+            )
+
+        wrapped.update(
+            {
+                "enter_plan": enter_plan,
+                "submit_plan": submit_plan,
+                "update_plan": update_plan,
+            }
+        )
+        return wrapped
+
+    def wrap_loop(self, definition: MinimalLoopDefinition) -> MinimalLoopDefinition:
+        if self.mode is PlanMode.OFF:
+            return definition
+
+        async def planned_step(context: Any, runtime: Any) -> Result:
+            self._sync_from_context(context)
+            if self._normal_refs is None:
+                self._normal_refs = tuple(
+                    tool for tool in context.affordances.tools if tool.id not in PLAN_TOOL_IDS
+                )
+            self._bound_runtime = runtime
+            self._bound_context = context
+            try:
+                emitted = await self._emit_pending_events()
+                if not emitted.ok:
+                    return emitted
+                prompt_context = self._project_context(context)
+                result = definition.step(prompt_context, runtime)
+                if inspect.isawaitable(result):
+                    result = await result
+                if not isinstance(result, Result):
+                    result = ok(result)
+                if not result.ok:
+                    return result
+                emitted = await self._emit_pending_events()
+                if not emitted.ok:
+                    return emitted
+                return ok(self._with_plan_snapshot(result.value))
+            finally:
+                self._bound_runtime = None
+                self._bound_context = None
+
+        async def planned_done(context: Any, runtime: Any) -> Result:
+            state = self._state_from_context(context) or self._controller.state
+            if state.phase in {PlanPhase.PLANNING, PlanPhase.EXECUTING}:
+                return ok(False)
+            result = definition.done(context, runtime)
+            if inspect.isawaitable(result):
+                result = await result
+            return result if isinstance(result, Result) else ok(bool(result))
+
+        return replace(definition, step=planned_step, done=planned_done)
+
+    def _sync_from_context(self, context: Any) -> None:
+        state = self._state_from_context(context)
+        if state is not None and state != self._controller.state:
+            self._controller.restore(state)
+
+    @staticmethod
+    def _state_from_context(context: Any) -> PlanState | None:
+        scratch = context.state.scratch
+        if not isinstance(scratch, Mapping):
+            return None
+        value = scratch.get("plan")
+        return plan_state_from_mapping(value) if isinstance(value, Mapping) else None
+
+    def _project_context(self, context: Any) -> Any:
+        state = self._controller.state
+        refs = {tool.id: tool for tool in self.tool_refs()}
+        normal_refs = self._normal_refs or ()
+        if state.phase is PlanPhase.INACTIVE:
+            visible = (*normal_refs, refs["enter_plan"])
+        elif state.phase is PlanPhase.PLANNING:
+            visible = (refs["submit_plan"],)
+        elif state.phase is PlanPhase.EXECUTING:
+            visible = (*normal_refs, refs["update_plan"])
+        else:
+            visible = normal_refs
+
+        workflow = Constraint("runtime-plan-workflow", self._workflow_description(state))
+        constraints = tuple(
+            constraint
+            for constraint in context.identity.constraints
+            if constraint.id != workflow.id
+        )
+        return replace(
+            context,
+            identity=replace(context.identity, constraints=(*constraints, workflow)),
+            affordances=replace(context.affordances, tools=visible),
+        )
+
+    @staticmethod
+    def _workflow_description(state: PlanState) -> str:
+        if state.phase is PlanPhase.INACTIVE:
+            return (
+                "Use enter_plan when the task requires multiple dependent steps; otherwise continue "
+                "with the normal ReAct workflow."
+            )
+        if state.phase is PlanPhase.PLANNING:
+            return "Planning is active. Submit an ordered checklist with submit_plan before executing task tools."
+        checklist = "\n".join(
+            f"- [{_status_mark(item.status)}] {item.id}: {item.content}"
+            + (f" — {item.note}" if item.note else "")
+            for item in state.items
+        )
+        if state.phase is PlanPhase.EXECUTING:
+            prefix = (
+                "Execute the checklist dynamically. Keep exactly one item in_progress before calling normal "
+                "tools, update progress with update_plan, and finish only after every item is terminal."
+            )
+        else:
+            prefix = "The checklist is complete; provide the final response."
+        return f"{prefix}\nCurrent plan (revision {state.revision}):\n{checklist}"
+
+    def _with_plan_snapshot(self, value: Any) -> StepResult:
+        if not isinstance(value, StepResult):
+            raise TypeError("Planning loop step must return StepResult")
+        context = value.context
+        scratch = dict(context.state.scratch or {})
+        scratch["plan"] = plan_state_dict(self._controller.state)
+        planned_context = replace(context, state=replace(context.state, scratch=scratch))
+        return replace(value, context=planned_context)
+
+    def _guard_handler(self, tool_id: str, handler: Any) -> Callable[..., Any]:
+        async def guarded(input_value: Any, options: Any = None) -> Result:
+            phase = self._controller.state.phase
+            if phase is PlanPhase.PLANNING:
+                return self._rejected(
+                    "PLAN_PHASE_INVALID",
+                    "Submit the plan before using execution tools",
+                )
+            if phase is PlanPhase.EXECUTING:
+                if tool_id == self.finish_tool_id:
+                    terminal = {PlanItemStatus.COMPLETED, PlanItemStatus.SKIPPED}
+                    if not self._controller.state.items or any(
+                        item.status not in terminal for item in self._controller.state.items
+                    ):
+                        return self._rejected(
+                            "PLAN_INCOMPLETE",
+                            "All plan items must be completed or skipped before finishing",
+                        )
+                elif sum(
+                    item.status is PlanItemStatus.IN_PROGRESS for item in self._controller.state.items
+                ) != 1:
+                    return self._rejected(
+                        "PLAN_ACTIVE_ITEM_REQUIRED",
+                        "Exactly one plan item must be in progress before using execution tools",
+                    )
+
+            result = await _invoke_handler(handler, input_value, options)
+            if result.ok and phase is PlanPhase.EXECUTING and tool_id == self.finish_tool_id:
+                completed = self._controller.complete(trigger="finish_tool")
+                if not completed.ok:
+                    return self._rejected(completed.error.code, completed.error.message)
+                emitted = await self._emit_pending_events()
+                if not emitted.ok:
+                    return emitted
+            return result
+
+        return guarded
+
+    async def _transition_result(self, tool_id: str, transition: Result) -> Result:
+        if not transition.ok:
+            return self._rejected(transition.error.code, transition.error.message)
+        emitted = await self._emit_pending_events()
+        if not emitted.ok:
+            return emitted
+        return ok(
+            Observation(
+                _new_id("obs_"),
+                tool_id,
+                {"accepted": True, "plan": plan_state_dict(transition.value)},
+                self._now(),
+            )
+        )
+
+    def _rejected(self, code: str, message: str) -> Result:
+        return ok(
+            Observation(
+                _new_id("obs_"),
+                "planning.guard",
+                {
+                    "accepted": False,
+                    "code": code,
+                    "message": message,
+                    "plan": plan_state_dict(self._controller.state),
+                },
+                self._now(),
+            )
+        )
+
+    async def _emit_pending_events(self) -> Result:
+        if self._bound_runtime is None or self._bound_context is None:
+            return ok(None)
+        for event in self._controller.drain_events():
+            emitted = await self._bound_runtime.trace_sink.emit(
+                {
+                    "type": event.event_type,
+                    "run_id": self._bound_context.run_id,
+                    "loop_id": self._bound_runtime.loop_id,
+                    "trace_id": self._bound_runtime.trace_id,
+                    "step_number": len(self._bound_context.state.observations),
+                    "plan_id": event.plan.plan_id,
+                    "revision": event.plan.revision,
+                    "trigger": event.trigger,
+                    "explanation": event.explanation,
+                    "plan": plan_state_dict(event.plan),
+                    "at": self._now(),
+                }
+            )
+            if not emitted.ok:
+                return emitted
+        return ok(None)
+
+
+async def _invoke_handler(handler: Any, input_value: Any, options: Any) -> Result:
+    invoke = getattr(handler, "invoke", handler)
+    result = invoke(input_value, options)
+    if hasattr(result, "__await__"):
+        result = await result
+    return result if isinstance(result, Result) else ok(result)
+
+
+def _status_mark(status: PlanItemStatus) -> str:
+    return {
+        PlanItemStatus.PENDING: " ",
+        PlanItemStatus.IN_PROGRESS: "~",
+        PlanItemStatus.COMPLETED: "x",
+        PlanItemStatus.SKIPPED: "-",
+    }[status]
 
 
 def plan_state_dict(state: PlanState) -> dict[str, Any]:
@@ -280,6 +645,8 @@ __all__ = [
     "PlanMode",
     "PlanPhase",
     "PlanState",
+    "PLAN_TOOL_IDS",
+    "PlanningRuntime",
     "plan_state_dict",
     "plan_state_from_mapping",
 ]

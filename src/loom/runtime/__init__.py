@@ -16,6 +16,16 @@ from loom.runtime.engine import (
     step,
     step_stream,
 )
+from loom.runtime.planning import (
+    PlanController,
+    PlanItem,
+    PlanItemStatus,
+    PlanMode,
+    PlanningRuntime,
+    PlanPhase,
+    PlanState,
+    plan_state_dict,
+)
 from loom.runtime.plugins import LoopPlugin, RunPluginContext, run_with_plugins
 
 __all__ = [
@@ -34,6 +44,14 @@ __all__ = [
     "step",
     "step_stream",
     "LoopPlugin",
+    "PlanController",
+    "PlanItem",
+    "PlanItemStatus",
+    "PlanMode",
+    "PlanPhase",
+    "PlanState",
+    "PlanningRuntime",
     "RunPluginContext",
+    "plan_state_dict",
     "run_with_plugins",
 ]

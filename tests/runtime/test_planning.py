@@ -1,4 +1,24 @@
-from loom.runtime.planning import PlanController, PlanMode, PlanPhase
+from types import SimpleNamespace
+
+import pytest
+
+from loom.core import (
+    AffordanceLayer,
+    Context,
+    GoalLayer,
+    IdentityLayer,
+    KnowledgeLayer,
+    MinimalLoopDefinition,
+    Observation,
+    StateLayer,
+    StepResult,
+    ToolRef,
+    Trace,
+    err,
+    make_loom_error,
+    ok,
+)
+from loom.runtime.planning import PlanController, PlanMode, PlanningRuntime, PlanPhase
 
 
 def _now():
@@ -133,3 +153,226 @@ def test_wrong_phase_calls_are_rejected_and_controllers_are_isolated():
     assert left.state.phase is PlanPhase.INACTIVE
     assert entered.ok
     assert right.state.phase is PlanPhase.PLANNING
+
+
+@pytest.mark.asyncio
+async def test_guard_rejects_execution_without_active_item_as_observation():
+    planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
+    planning.controller.submit("plan", ("Inspect",))
+    called = False
+
+    async def normal_handler(_input, _options=None):
+        nonlocal called
+        called = True
+        return ok(Observation("obs", "normal", {"ok": True}, _now()))
+
+    guarded = planning.wrap_tools({"read_file": normal_handler, "finish": normal_handler})
+    result = await guarded["read_file"]({}, {})
+
+    assert result.ok
+    assert called is False
+    assert result.value.source == "planning.guard"
+    assert result.value.value["accepted"] is False
+    assert result.value.value["code"] == "PLAN_ACTIVE_ITEM_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_plan_handlers_return_canonical_snapshots_and_rejections_are_recoverable():
+    planning = PlanningRuntime(PlanMode.AUTO, id_factory=_ids(), now=_now)
+    handlers = planning.wrap_tools({})
+
+    entered = await handlers["enter_plan"]({"reason": "dependent work"}, {})
+    submitted = await handlers["submit_plan"](
+        {"explanation": "inspect first", "items": [{"content": "Inspect"}]}, {}
+    )
+    duplicate_submit = await handlers["submit_plan"](
+        {"explanation": "again", "items": [{"content": "Again"}]}, {}
+    )
+
+    assert entered.ok and entered.value.value["accepted"] is True
+    assert entered.value.value["plan"]["phase"] == "planning"
+    assert submitted.ok and submitted.value.value["plan"]["items"][0]["id"] == "step_1"
+    assert duplicate_submit.ok
+    assert duplicate_submit.value.source == "planning.guard"
+    assert duplicate_submit.value.value["code"] == "PLAN_PHASE_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_finish_gate_requires_terminal_plan_then_preserves_handler_result():
+    planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
+    planning.controller.submit("plan", ("Inspect",))
+    called = 0
+
+    async def finish_handler(_input, _options=None):
+        nonlocal called
+        called += 1
+        return ok(Observation("finish-obs", "finish", {"report": "done"}, _now()))
+
+    handlers = planning.wrap_tools({"finish": finish_handler})
+    premature = await handlers["finish"]({"report": "early"}, {})
+    planning.controller.update(
+        "done",
+        ({"id": "step_1", "content": "Inspect", "status": "completed", "note": None},),
+    )
+    finished = await handlers["finish"]({"report": "done"}, {})
+
+    assert premature.ok and premature.value.value["code"] == "PLAN_INCOMPLETE"
+    assert called == 1
+    assert finished.ok and finished.value.source == "finish"
+    assert planning.controller.state.phase is PlanPhase.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_guard_does_not_convert_underlying_business_tool_errors():
+    planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
+    planning.controller.submit("plan", ("Inspect",))
+    planning.controller.update(
+        "started",
+        ({"id": "step_1", "content": "Inspect", "status": "in_progress", "note": None},),
+    )
+
+    async def failing_handler(_input, _options=None):
+        return err(make_loom_error("TOOL_FAILED", "boom", retryable=False))
+
+    result = await planning.wrap_tools({"read_file": failing_handler})["read_file"]({}, {})
+
+    assert not result.ok
+    assert result.error.code == "TOOL_FAILED"
+
+
+class RecordingSink:
+    def __init__(self):
+        self.events = []
+
+    async def emit(self, event):
+        self.events.append(event)
+        return ok(None)
+
+
+def _context(*tools):
+    return Context(
+        id="context_test",
+        run_id="run_test",
+        created_at=_now(),
+        identity=IdentityLayer(role="test loop"),
+        goal=GoalLayer(objective="test planning"),
+        state=StateLayer(),
+        knowledge=KnowledgeLayer(),
+        affordances=AffordanceLayer(tools=tools),
+    )
+
+
+def _step_result_for(context):
+    trace = Trace(
+        id="trace_result",
+        run_id=context.run_id,
+        loop_id="loop_test",
+        loop_version="v1",
+        step_number=0,
+        root_trace_id="trace_result",
+        started_at=_now(),
+        ended_at=_now(),
+        duration_ms=0,
+        input_context_id=context.id,
+        output_context_id=context.id,
+        outcome="pass",
+    )
+    return StepResult(context, trace)
+
+
+def _runtime(sink):
+    return SimpleNamespace(
+        run_id="run_test",
+        loop_id="loop_test",
+        trace_id="trace_test",
+        trace_sink=sink,
+        now=_now,
+    )
+
+
+@pytest.mark.asyncio
+async def test_planning_wrapper_persists_snapshot_emits_events_and_blocks_done():
+    seen_tools = []
+    emitted = RecordingSink()
+    planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
+
+    async def base_step(context, _runtime_value):
+        seen_tools.append(tuple(tool.id for tool in context.affordances.tools))
+        await planning.wrap_tools({})["submit_plan"](
+            {"explanation": "plan", "items": [{"content": "Inspect"}]}, {}
+        )
+        return ok(_step_result_for(context))
+
+    definition = MinimalLoopDefinition(
+        id="loop_test",
+        version="v1",
+        identity=IdentityLayer(role="test loop"),
+        goal=GoalLayer(objective="test planning"),
+        step=base_step,
+        done=lambda _context_value, _runtime_value: ok(True),
+    )
+    wrapped = planning.wrap_loop(definition)
+
+    stepped = await wrapped.step(_context(ToolRef("read_file", "read")), _runtime(emitted))
+    done = await wrapped.done(stepped.value.context, SimpleNamespace())
+
+    assert seen_tools == [("submit_plan",)]
+    assert stepped.value.context.state.scratch["plan"]["phase"] == "executing"
+    assert done.value is False
+    assert [event["type"] for event in emitted.events] == ["plan.entered", "plan.submitted"]
+
+
+@pytest.mark.asyncio
+async def test_wrapper_reprojects_tools_and_replaces_workflow_constraint_each_step():
+    planning = PlanningRuntime(PlanMode.AUTO, id_factory=_ids(), now=_now)
+    sink = RecordingSink()
+    seen = []
+
+    async def base_step(context, _runtime_value):
+        seen.append(
+            (
+                tuple(tool.id for tool in context.affordances.tools),
+                tuple(constraint.id for constraint in context.identity.constraints),
+            )
+        )
+        handlers = planning.wrap_tools({})
+        if planning.controller.state.phase is PlanPhase.INACTIVE:
+            await handlers["enter_plan"]({"reason": "complex"}, {})
+        else:
+            await handlers["submit_plan"](
+                {"explanation": "plan", "items": [{"content": "Inspect"}]}, {}
+            )
+        return ok(_step_result_for(context))
+
+    definition = MinimalLoopDefinition(
+        id="loop_test",
+        version="v1",
+        identity=IdentityLayer(role="test loop"),
+        goal=GoalLayer(objective="test planning"),
+        step=base_step,
+        done=lambda _context_value, _runtime_value: ok(False),
+    )
+    wrapped = planning.wrap_loop(definition)
+    first = await wrapped.step(_context(ToolRef("read_file", "read")), _runtime(sink))
+    await wrapped.step(first.value.context, _runtime(sink))
+
+    assert seen == [
+        (("read_file", "enter_plan"), ("runtime-plan-workflow",)),
+        (("submit_plan",), ("runtime-plan-workflow",)),
+    ]
+
+
+def test_off_mode_returns_exact_legacy_definition_and_handlers():
+    definition = MinimalLoopDefinition(
+        id="loop_test",
+        version="v1",
+        identity=IdentityLayer(role="test loop"),
+        goal=GoalLayer(objective="test planning"),
+        step=lambda context, _runtime_value: ok(_step_result_for(context)),
+        done=lambda _context_value, _runtime_value: ok(True),
+    )
+    handlers = {"read_file": lambda _input, _options=None: ok(None)}
+    planning = PlanningRuntime(PlanMode.OFF)
+
+    assert planning.wrap_loop(definition) is definition
+    assert planning.wrap_tools(handlers) is handlers
