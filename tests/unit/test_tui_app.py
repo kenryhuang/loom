@@ -23,6 +23,7 @@ def _plan_event(event_type="plan.updated", revision=4):
             "plan": {
                 "plan_id": "plan_test",
                 "phase": "executing",
+                "reason": "The task has dependent steps",
                 "revision": revision,
                 "items": [
                     {"id": "step_1", "content": "Inspect", "status": "completed", "note": None},
@@ -50,6 +51,59 @@ def test_plan_event_formats_as_checklist_summary_and_detail():
     assert "○ step_4" in detail
     assert "⊘ step_5" in detail
     assert "not required" in detail
+
+
+def test_submitted_plan_line_identifies_transition_and_revision():
+    event = _plan_event("plan.submitted", 1)
+    event.data["plan"]["items"] = [
+        {"id": "step_1", "content": "Inspect", "status": "pending", "note": None},
+        {"id": "step_2", "content": "Implement", "status": "pending", "note": None},
+    ]
+
+    line = str(_format_event_line(event))
+    detail = _format_event_detail_plain(event)
+
+    assert "Plan submitted" in line
+    assert "revision 1" in line
+    assert "0/2 terminal" in line
+    assert "○ step_1  Inspect" in detail
+    assert "○ step_2  Implement" in detail
+
+
+def test_updated_plan_detail_keeps_reason_and_latest_explanation():
+    detail = _format_event_detail_plain(_plan_event("plan.updated", 2))
+
+    assert "reason: The task has dependent steps" in detail
+    assert "update: Adjusted after inspection" in detail
+
+
+@pytest.mark.asyncio
+async def test_plan_update_scrolls_existing_checklist_back_into_view():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test(size=(100, 24)) as pilot:
+        app._handle_event(_plan_event("plan.submitted", 1))
+        for index in range(30):
+            app._handle_event(
+                TuiEvent(
+                    timestamp=index + 2,
+                    event_type="run.started",
+                    data={"type": "run.started", "context_id": f"ctx-{index}"},
+                )
+            )
+        await pilot.pause()
+
+        feed = app.query_one("#event_feed", EventFeedWidget)
+        feed.scroll_end(animate=False)
+        await pilot.pause()
+        assert feed.max_scroll_y > 0
+
+        app._handle_event(_plan_event("plan.updated", 2))
+        await pilot.pause()
+
+        assert feed.get_selected_index() == 0
+        assert feed.scroll_y == feed.get_item(0).virtual_region.y
 
 
 @pytest.mark.asyncio

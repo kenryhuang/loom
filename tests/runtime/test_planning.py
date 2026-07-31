@@ -213,6 +213,15 @@ async def test_update_plan_schema_and_handler_allow_omitted_note():
     assert result.value.value["plan"]["items"][0]["note"] is None
 
 
+def test_update_plan_tool_advertises_full_snapshot_semantics():
+    planning = PlanningRuntime(PlanMode.AUTO, id_factory=_ids(), now=_now)
+    update_ref = next(tool for tool in planning.tool_refs() if tool.id == "update_plan")
+    items_schema = update_ref.input_schema["properties"]["items"]
+
+    assert "complete checklist snapshot" in update_ref.description.lower()
+    assert items_schema["description"] == ("The complete replacement checklist. Include every item that must remain; omitted non-terminal items are removed.")
+
+
 @pytest.mark.asyncio
 async def test_finish_gate_requires_terminal_plan_then_preserves_handler_result():
     planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)

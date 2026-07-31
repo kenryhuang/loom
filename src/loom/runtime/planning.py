@@ -314,12 +314,19 @@ class PlanningRuntime:
             ),
             ToolRef(
                 "update_plan",
-                "Update checklist progress or revise future non-terminal steps.",
+                "Submit the complete checklist snapshot to update progress or revise future "
+                "non-terminal steps. Include every item that must remain; omitted non-terminal "
+                "items are removed.",
                 input_schema={
                     "type": "object",
                     "properties": {
                         "explanation": {"type": "string"},
-                        "items": {"type": "array", "minItems": 1, "items": update_item_schema},
+                        "items": {
+                            "type": "array",
+                            "minItems": 1,
+                            "description": ("The complete replacement checklist. Include every item that must remain; omitted non-terminal items are removed."),
+                            "items": update_item_schema,
+                        },
                     },
                     "required": ["explanation", "items"],
                     "additionalProperties": False,
@@ -461,7 +468,8 @@ class PlanningRuntime:
         if state.phase is PlanPhase.EXECUTING:
             prefix = (
                 "Execute the checklist dynamically. Keep exactly one item in_progress before calling normal "
-                "tools, update progress with update_plan, and finish only after every item is terminal."
+                "tools, update progress with update_plan using the complete checklist snapshot every time, "
+                "and finish only after every item is terminal."
             )
         else:
             prefix = "The checklist is complete; provide the final response."

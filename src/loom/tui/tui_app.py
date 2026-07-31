@@ -295,7 +295,13 @@ def _event_conversation_parts(event: TuiEvent) -> tuple[str, str, str]:
     data = event.data
     if event.event_type in PLAN_PRESENTATION_EVENTS:
         phase, terminal, total = _plan_event_parts(event)
-        return "Plan", f"{phase} · {terminal}/{total} terminal", _event_marker_color(event)
+        revision = _plan_revision(event)
+        transition = event.event_type.removeprefix("plan.")
+        return (
+            f"Plan {transition}",
+            f"{phase} · revision {revision} · {terminal}/{total} terminal",
+            _event_marker_color(event),
+        )
 
     if event.event_type in {"llm.stream.started", "llm.stream.completed", "llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
         elapsed = _format_seconds(data.get("elapsed_ms") or event.duration_ms)
@@ -603,16 +609,28 @@ def _plan_event_parts(event: TuiEvent) -> tuple[str, int, int]:
     return phase, terminal, len(items)
 
 
+def _plan_revision(event: TuiEvent) -> int:
+    plan = event.data.get("plan", {})
+    value = plan.get("revision") if isinstance(plan, dict) else None
+    if value is None:
+        value = event.data.get("revision", 0)
+    return int(value) if isinstance(value, int | float) else 0
+
+
 def _append_plan_detail(lines: list[str], event: TuiEvent) -> None:
     data = event.data
     plan = data.get("plan", {})
     if not isinstance(plan, dict):
         return
     phase, terminal, total = _plan_event_parts(event)
-    revision = plan.get("revision", data.get("revision", 0))
-    lines.append(f"[bold {COLORS['blue']}]─── Plan · {phase} ───[/]")
+    revision = _plan_revision(event)
+    transition = event.event_type.removeprefix("plan.")
+    lines.append(f"[bold {COLORS['blue']}]─── Plan {transition} · {phase} ───[/]")
     lines.append(f"[dim]progress:[/] {terminal}/{total} terminal · revision {revision}")
-    explanation = data.get("explanation") or plan.get("explanation") or plan.get("reason")
+    reason = plan.get("reason")
+    if reason:
+        lines.append(f"[dim]reason:[/] {_safe_markup(reason)}")
+    explanation = data.get("explanation") or plan.get("explanation")
     if explanation:
         lines.append(f"[dim]update:[/] {_safe_markup(explanation)}")
     items = plan.get("items", [])
@@ -1478,7 +1496,13 @@ class LoomTuiApp(App[None]):
         else:
             feed.update_event(index, event)
             feed.select_event(index)
-            feed.scroll_end(animate=False)
+            feed.scroll_to_widget(
+                feed.get_item(index),
+                animate=False,
+                top=True,
+                force=True,
+                immediate=True,
+            )
         return True
 
     def _handle_llm_event(self, event: TuiEvent) -> bool:
