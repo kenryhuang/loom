@@ -240,3 +240,19 @@ models:
     assert parsed.options.trace_path is not None
     assert parsed.options.trace_path.parent == tmp_path / "runs"
     assert parsed.options.trace_path.name.startswith("audit-this-project-briefly-glm-")
+
+
+def test_top_level_cli_dispatches_task_arguments_unchanged(monkeypatch):
+    calls = []
+
+    def fake_task_main(argv):
+        calls.append(argv)
+        return 23
+
+    monkeypatch.setattr("loom.tasks.cli.main", fake_task_main)
+    from loom.cli import main as loom_main
+
+    code = loom_main(["task", "Audit this project", "--workspace", ".", "--model", "main"])
+
+    assert code == 23
+    assert calls == [["Audit this project", "--workspace", ".", "--model", "main"]]
