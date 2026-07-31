@@ -36,7 +36,14 @@ from loom.core import (
 from loom.llm import create_env_openai_provider, create_llm_step_function
 from loom.llm.request_options import materialize_request_options
 from loom.observability import EventRecordingPolicy, JsonlTraceStore
-from loom.runtime import create, create_runtime_registry, run, run_with_plugins
+from loom.runtime import (
+    PlanMode,
+    PlanningRuntime,
+    create,
+    create_runtime_registry,
+    run,
+    run_with_plugins,
+)
 from loom.tasks.config import TaskRunnerConfig, create_provider_from_task_config
 from loom.tasks.profiles import TaskProfile, get_task_profile, select_task_profile
 from loom.tasks.request import TaskHarness, TaskRequest, TaskRunOptions, TaskRunResult
@@ -50,8 +57,15 @@ STREAM_DELTA_TRACE_EVENTS = (
 )
 
 
-def make_task_context(request: TaskRequest, harness: TaskHarness | None = None) -> Result:
+def make_task_context(
+    request: TaskRequest,
+    harness: TaskHarness | None = None,
+    *,
+    plan_mode: PlanMode | str = PlanMode.AUTO,
+    planning: PlanningRuntime | None = None,
+) -> Result:
     task_harness = harness or TaskHarness()
+    plan_runtime = planning or PlanningRuntime(plan_mode)
     validation = _validate_request(request)
     if not validation.ok:
         return validation
@@ -67,7 +81,9 @@ def make_task_context(request: TaskRequest, harness: TaskHarness | None = None) 
     workspace = request.workspace.resolve() if request.workspace is not None else None
     constraints = _constraints_for_request(profile, request, workspace, task_harness)
     criteria = _criteria_for_request(profile, request)
-    tools = _filter_tools(_task_tool_refs(), task_harness.allowed_tools)
+    normal_tools = _filter_tools(_task_tool_refs(), task_harness.allowed_tools)
+    plan_runtime.configure_normal_tool_refs(normal_tools)
+    tools = plan_runtime.visible_tool_refs(normal_tools)
     resources = () if workspace is None else (ResourceRef("workspace", "directory", str(workspace), "read-write"),)
 
     return ok(
@@ -155,13 +171,25 @@ async def run_generic_task(
         return provider_result
     provider = provider_result.value
 
-    context = make_task_context(request, harness=task_harness)
+    planning = PlanningRuntime(run_options.plan_mode)
+    context = make_task_context(
+        request,
+        harness=task_harness,
+        plan_mode=run_options.plan_mode,
+        planning=planning,
+    )
     if not context.ok:
         return context
 
+    normal_handlers = _filter_tool_handlers(
+        make_task_tools(request), task_harness.allowed_tools
+    )
+    definition = planning.wrap_loop(
+        make_task_loop(request, provider, stream=run_options.stream, harness=task_harness)
+    )
     handle = create(
-        make_task_loop(request, provider, stream=run_options.stream, harness=task_harness),
-        registry=create_runtime_registry(tools=_filter_tool_handlers(make_task_tools(request), task_harness.allowed_tools)),
+        definition,
+        registry=create_runtime_registry(tools=planning.wrap_tools(normal_handlers)),
         trace_store=JsonlTraceStore(run_options.trace_path) if run_options.trace_path is not None else None,
         event_policy=_task_trace_event_policy() if run_options.trace_path is not None else None,
     )

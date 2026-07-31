@@ -5,6 +5,7 @@ from typing import Any
 
 from loom.core import ok
 from loom.llm import LlmResponse, LlmStreamEvent, LlmToolCall, TokenUsage
+from loom.runtime import PlanMode
 from loom.tasks.profiles import select_task_profile
 from loom.tasks.request import TaskHarness, TaskRequest, TaskRunOptions
 from loom.tasks.runner import make_task_context, run_generic_task
@@ -42,7 +43,32 @@ def test_make_task_context_maps_request_to_loom_layers(tmp_path):
         "write_file",
         "shell_execute",
         "finish",
+        "enter_plan",
     }
+
+
+def test_task_run_options_normalizes_plan_mode():
+    assert TaskRunOptions().plan_mode is PlanMode.AUTO
+    assert TaskRunOptions(plan_mode="force").plan_mode is PlanMode.FORCE
+
+
+def test_make_task_context_adds_phase_appropriate_plan_tools(tmp_path):
+    auto = make_task_context(
+        TaskRequest("Audit", workspace=tmp_path), plan_mode=PlanMode.AUTO
+    ).unwrap()
+    forced = make_task_context(
+        TaskRequest("Audit", workspace=tmp_path), plan_mode=PlanMode.FORCE
+    ).unwrap()
+    off = make_task_context(
+        TaskRequest("Audit", workspace=tmp_path), plan_mode=PlanMode.OFF
+    ).unwrap()
+
+    assert "enter_plan" in {tool.id for tool in auto.affordances.tools}
+    assert tuple(tool.id for tool in forced.affordances.tools)[-1] == "submit_plan"
+    assert not (
+        {"enter_plan", "submit_plan", "update_plan"}
+        & {tool.id for tool in off.affordances.tools}
+    )
 
 
 def test_make_task_context_exposes_exact_edit_file_schema(tmp_path):
@@ -85,7 +111,7 @@ def test_task_harness_limits_tools_and_adds_system_prompt_constraint(tmp_path):
 
     context = make_task_context(TaskRequest("Audit", workspace=tmp_path), harness=harness).unwrap()
 
-    assert tuple(tool.id for tool in context.affordances.tools) == ("read_file",)
+    assert tuple(tool.id for tool in context.affordances.tools) == ("read_file", "enter_plan")
     assert any("Always cite the exact file path." in item.description for item in context.identity.constraints)
 
 
@@ -224,6 +250,121 @@ class StreamingTaskProvider:
         yield LlmStreamEvent(kind="completed", response=LlmResponse(content=content, usage=TokenUsage(4, 5, 9)))
 
 
+class ForcedPlanTaskProvider:
+    model = "fake-plan-task-model"
+
+    def __init__(self):
+        self.calls = 0
+        self.tool_sets = []
+        self.step_ids = ()
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        self.calls += 1
+        self.tool_sets.append(tuple(tool["function"]["name"] for tool in tools or ()))
+        if self.calls == 1:
+            return _response(
+                content="",
+                tool_calls=(
+                    LlmToolCall(
+                        "call-submit",
+                        "submit_plan",
+                        json.dumps(
+                            {
+                                "explanation": "inspect then verify",
+                                "items": [{"content": "Inspect"}, {"content": "Verify"}],
+                            }
+                        ),
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        if self.calls == 2:
+            submitted = json.loads(next(message.content for message in reversed(messages) if message.role == "tool"))
+            self.step_ids = tuple(item["id"] for item in submitted["plan"]["items"])
+            return self._decision("The plan is ready.")
+        if self.calls == 3:
+            return _response(
+                content="",
+                tool_calls=(
+                    LlmToolCall(
+                        "call-update-1",
+                        "update_plan",
+                        json.dumps(
+                            {
+                                "explanation": "inspection started",
+                                "items": [
+                                    {"id": self.step_ids[0], "content": "Inspect", "status": "in_progress", "note": None},
+                                    {"id": self.step_ids[1], "content": "Verify", "status": "pending", "note": None},
+                                ],
+                            }
+                        ),
+                    ),
+                    LlmToolCall("call-read", "read_file", json.dumps({"path": "README.md"})),
+                ),
+                finish_reason="tool_calls",
+            )
+        if self.calls == 4:
+            return _response(
+                content="",
+                tool_calls=(
+                    LlmToolCall(
+                        "call-update-2",
+                        "update_plan",
+                        json.dumps(
+                            {
+                                "explanation": "inspection complete",
+                                "items": [
+                                    {"id": self.step_ids[0], "content": "Inspect", "status": "completed", "note": None},
+                                    {"id": self.step_ids[1], "content": "Verify", "status": "in_progress", "note": None},
+                                ],
+                            }
+                        ),
+                    ),
+                    LlmToolCall(
+                        "call-shell",
+                        "shell_execute",
+                        json.dumps({"command": ["pwd"]}),
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        if self.calls == 5:
+            return _response(
+                content="",
+                tool_calls=(
+                    LlmToolCall(
+                        "call-update-3",
+                        "update_plan",
+                        json.dumps(
+                            {
+                                "explanation": "verification complete",
+                                "items": [
+                                    {"id": self.step_ids[0], "content": "Inspect", "status": "completed", "note": None},
+                                    {"id": self.step_ids[1], "content": "Verify", "status": "completed", "note": None},
+                                ],
+                            }
+                        ),
+                    ),
+                    LlmToolCall("call-finish", "finish", json.dumps({"report": "done"})),
+                ),
+                finish_reason="tool_calls",
+            )
+        return self._decision("The planned task is complete.")
+
+    @staticmethod
+    def _decision(reasoning):
+        return _response(
+            content=json.dumps(
+                {
+                    "reasoning": reasoning,
+                    "action": {"kind": "none", "description": "done", "target": None, "input": {}},
+                    "alternatives": [],
+                    "confidence": 0.9,
+                }
+            )
+        )
+
+
 @dataclass(frozen=True)
 class OverlayRecordingProvider:
     api_key: str = "secret-key"
@@ -270,6 +411,37 @@ def test_run_generic_task_executes_llm_tool_loop_and_returns_finish_report(tmp_p
     assert "Demo audit" in result.value.output
     assert provider.calls >= 2
     assert any(message.role == "tool" for message in provider.messages_seen[-1])
+
+
+def test_run_generic_task_executes_forced_dynamic_plan(tmp_path):
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    provider = ForcedPlanTaskProvider()
+    sink = RecordingTraceSink()
+
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest("Audit this project", workspace=tmp_path),
+            provider=provider,
+            options=TaskRunOptions(plan_mode=PlanMode.FORCE),
+            trace_sink=sink,
+        )
+    )
+
+    assert result.ok
+    assert result.value.output == "done"
+    assert result.value.run_result.context.state.scratch["plan"]["phase"] == "completed"
+    assert provider.tool_sets[0] == ("submit_plan",)
+    assert "update_plan" in provider.tool_sets[2]
+    assert {"read_file", "shell_execute", "finish"} <= set(provider.tool_sets[2])
+    plan_events = [event["type"] for event in sink.events if event["type"].startswith("plan.")]
+    assert plan_events == [
+        "plan.entered",
+        "plan.submitted",
+        "plan.updated",
+        "plan.updated",
+        "plan.updated",
+        "plan.completed",
+    ]
 
 
 def test_run_generic_task_forwards_runtime_events_to_additional_trace_sink(tmp_path):
@@ -359,6 +531,6 @@ def test_run_generic_task_merges_harness_request_options_without_changing_provid
             "model": "fixed-model",
             "base_url": "https://provider.invalid/v1",
             "request_options": {"enable_thinking": True, "thinking_budget": 1024},
-            "tool_names": ("read_file",),
+            "tool_names": ("read_file", "enter_plan"),
         }
     ]

@@ -371,6 +371,24 @@ class PlanningRuntime:
         )
         return wrapped
 
+    def visible_tool_refs(self, normal_refs: Sequence[ToolRef]) -> tuple[ToolRef, ...]:
+        """Return the tools the model may use in the controller's current phase."""
+        if self.mode is PlanMode.OFF:
+            return tuple(normal_refs)
+        refs = {tool.id: tool for tool in self.tool_refs()}
+        state = self._controller.state
+        if state.phase is PlanPhase.INACTIVE:
+            return (*normal_refs, refs["enter_plan"])
+        if state.phase is PlanPhase.PLANNING:
+            return (refs["submit_plan"],)
+        if state.phase is PlanPhase.EXECUTING:
+            return (*normal_refs, refs["update_plan"])
+        return tuple(normal_refs)
+
+    def configure_normal_tool_refs(self, normal_refs: Sequence[ToolRef]) -> None:
+        """Retain normal tools when an initial forced-planning context hides them."""
+        self._normal_refs = tuple(normal_refs)
+
     def wrap_loop(self, definition: MinimalLoopDefinition) -> MinimalLoopDefinition:
         if self.mode is PlanMode.OFF:
             return definition
@@ -429,16 +447,8 @@ class PlanningRuntime:
 
     def _project_context(self, context: Any) -> Any:
         state = self._controller.state
-        refs = {tool.id: tool for tool in self.tool_refs()}
         normal_refs = self._normal_refs or ()
-        if state.phase is PlanPhase.INACTIVE:
-            visible = (*normal_refs, refs["enter_plan"])
-        elif state.phase is PlanPhase.PLANNING:
-            visible = (refs["submit_plan"],)
-        elif state.phase is PlanPhase.EXECUTING:
-            visible = (*normal_refs, refs["update_plan"])
-        else:
-            visible = normal_refs
+        visible = self.visible_tool_refs(normal_refs)
 
         workflow = Constraint("runtime-plan-workflow", self._workflow_description(state))
         constraints = tuple(

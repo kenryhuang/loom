@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from loom.llm.request_options import normalize_request_options
+from loom.runtime.planning import PlanMode
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,10 +59,12 @@ class TaskRunOptions:
     trace_path: Path | None = None
     max_steps: int | None = None
     timeout_ms: int | None = None
+    plan_mode: PlanMode = PlanMode.AUTO
 
     def __post_init__(self) -> None:
         if self.trace_path is not None:
             object.__setattr__(self, "trace_path", Path(self.trace_path))
+        object.__setattr__(self, "plan_mode", PlanMode(self.plan_mode))
 
 
 @dataclass(frozen=True, slots=True)
