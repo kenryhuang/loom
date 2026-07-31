@@ -1,5 +1,7 @@
 from pathlib import Path
+from types import SimpleNamespace
 
+from loom.core import ok
 from loom.tasks.cli import parse_task_cli_args
 
 
@@ -256,3 +258,20 @@ def test_top_level_cli_dispatches_task_arguments_unchanged(monkeypatch):
 
     assert code == 23
     assert calls == [["Audit this project", "--workspace", ".", "--model", "main"]]
+
+
+def test_task_cli_main_returns_zero_after_success(monkeypatch, capsys):
+    parsed = object()
+
+    async def fake_run_task_cli(options):
+        assert options is parsed
+        return ok(SimpleNamespace(output="Task complete"))
+
+    monkeypatch.setattr("loom.tasks.cli.parse_task_cli_args", lambda argv: parsed)
+    monkeypatch.setattr("loom.tasks.cli.run_task_cli", fake_run_task_cli)
+    from loom.tasks.cli import main
+
+    code = main(["Audit this project"])
+
+    assert code == 0
+    assert capsys.readouterr().out == "Task complete\n"

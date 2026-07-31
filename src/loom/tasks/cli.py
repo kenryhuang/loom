@@ -88,12 +88,13 @@ async def run_task_cli(options: TaskCliOptions) -> Result:
     )
 
 
-def main(argv: tuple[str, ...] | list[str] | None = None) -> None:
+def main(argv: tuple[str, ...] | list[str] | None = None) -> int:
     parsed = parse_task_cli_args(argv)
     result = asyncio.run(run_task_cli(parsed))
     if not result.ok:
         raise SystemExit(result.error.message if result.error else "Task run failed")
     print(result.value.output)
+    return 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
