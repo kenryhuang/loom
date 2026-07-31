@@ -18,9 +18,7 @@ def test_cli_plan_mode_overrides_config(tmp_path):
     config = tmp_path / "config.toml"
     config.write_text('[run]\nplan_mode = "force"\n', encoding="utf-8")
 
-    parsed = parse_task_cli_args(
-        ["Summarize", "--config", str(config), "--plan-mode", "off"]
-    )
+    parsed = parse_task_cli_args(["Summarize", "--config", str(config), "--plan-mode", "off"])
 
     assert parsed.options.plan_mode is PlanMode.OFF
 

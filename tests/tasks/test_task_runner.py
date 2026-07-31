@@ -53,22 +53,13 @@ def test_task_run_options_normalizes_plan_mode():
 
 
 def test_make_task_context_adds_phase_appropriate_plan_tools(tmp_path):
-    auto = make_task_context(
-        TaskRequest("Audit", workspace=tmp_path), plan_mode=PlanMode.AUTO
-    ).unwrap()
-    forced = make_task_context(
-        TaskRequest("Audit", workspace=tmp_path), plan_mode=PlanMode.FORCE
-    ).unwrap()
-    off = make_task_context(
-        TaskRequest("Audit", workspace=tmp_path), plan_mode=PlanMode.OFF
-    ).unwrap()
+    auto = make_task_context(TaskRequest("Audit", workspace=tmp_path), plan_mode=PlanMode.AUTO).unwrap()
+    forced = make_task_context(TaskRequest("Audit", workspace=tmp_path), plan_mode=PlanMode.FORCE).unwrap()
+    off = make_task_context(TaskRequest("Audit", workspace=tmp_path), plan_mode=PlanMode.OFF).unwrap()
 
     assert "enter_plan" in {tool.id for tool in auto.affordances.tools}
     assert tuple(tool.id for tool in forced.affordances.tools)[-1] == "submit_plan"
-    assert not (
-        {"enter_plan", "submit_plan", "update_plan"}
-        & {tool.id for tool in off.affordances.tools}
-    )
+    assert not ({"enter_plan", "submit_plan", "update_plan"} & {tool.id for tool in off.affordances.tools})
 
 
 def test_make_task_context_exposes_exact_edit_file_schema(tmp_path):
@@ -461,9 +452,7 @@ def test_force_plan_events_are_persisted_as_full_snapshots(tmp_path):
 
     assert result.ok
     records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
-    plan_records = [
-        record for record in records if record.get("eventType", "").startswith("plan.")
-    ]
+    plan_records = [record for record in records if record.get("eventType", "").startswith("plan.")]
     assert [record["eventType"] for record in plan_records] == [
         "plan.entered",
         "plan.submitted",

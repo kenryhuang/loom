@@ -181,12 +181,8 @@ async def run_generic_task(
     if not context.ok:
         return context
 
-    normal_handlers = _filter_tool_handlers(
-        make_task_tools(request), task_harness.allowed_tools
-    )
-    definition = planning.wrap_loop(
-        make_task_loop(request, provider, stream=run_options.stream, harness=task_harness)
-    )
+    normal_handlers = _filter_tool_handlers(make_task_tools(request), task_harness.allowed_tools)
+    definition = planning.wrap_loop(make_task_loop(request, provider, stream=run_options.stream, harness=task_harness))
     handle = create(
         definition,
         registry=create_runtime_registry(tools=planning.wrap_tools(normal_handlers)),

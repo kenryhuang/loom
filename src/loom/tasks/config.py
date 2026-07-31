@@ -231,9 +231,7 @@ def _parse_run_defaults(payload: Any, path: Path) -> Result:
     if not isinstance(payload, Mapping):
         return err(make_loom_error("VALIDATION_FAILED", "Task config run must be a table", retryable=False, metadata={"path": str(path)}))
     plan_mode = payload.get("plan_mode")
-    if plan_mode is not None and (
-        not isinstance(plan_mode, str) or plan_mode not in {"auto", "force", "off"}
-    ):
+    if plan_mode is not None and (not isinstance(plan_mode, str) or plan_mode not in {"auto", "force", "off"}):
         return err(
             make_loom_error(
                 "VALIDATION_FAILED",

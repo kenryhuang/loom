@@ -599,10 +599,7 @@ def _plan_event_parts(event: TuiEvent) -> tuple[str, int, int]:
     items = plan.get("items", [])
     if not isinstance(items, list | tuple):
         return phase, 0, 0
-    terminal = sum(
-        isinstance(item, dict) and item.get("status") in {"completed", "skipped"}
-        for item in items
-    )
+    terminal = sum(isinstance(item, dict) and item.get("status") in {"completed", "skipped"} for item in items)
     return phase, terminal, len(items)
 
 

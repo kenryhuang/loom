@@ -67,9 +67,7 @@ def parse_task_cli_args(argv: tuple[str, ...] | list[str] | None = None) -> Task
             trace_path=trace_path,
             max_steps=_coalesce(args.max_steps, run_defaults.max_steps, None),
             timeout_ms=_coalesce(args.timeout_ms, run_defaults.timeout_ms, None),
-            plan_mode=PlanMode(
-                args.plan_mode or run_defaults.plan_mode or PlanMode.AUTO.value
-            ),
+            plan_mode=PlanMode(args.plan_mode or run_defaults.plan_mode or PlanMode.AUTO.value),
         ),
         config_path=config_path,
         config=config,

@@ -22,9 +22,7 @@ async def test_tui_collector_tracks_llm_stream_duration() -> None:
 async def test_tui_collector_preserves_every_plan_event_in_history_and_queue() -> None:
     collector = TuiEventCollector()
 
-    for revision, event_type in enumerate(
-        ("plan.entered", "plan.submitted", "plan.updated")
-    ):
+    for revision, event_type in enumerate(("plan.entered", "plan.submitted", "plan.updated")):
         result = await collector.emit(
             {
                 "type": event_type,
