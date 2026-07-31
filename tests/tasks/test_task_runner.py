@@ -444,6 +444,40 @@ def test_run_generic_task_executes_forced_dynamic_plan(tmp_path):
     ]
 
 
+def test_force_plan_events_are_persisted_as_full_snapshots(tmp_path):
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    trace_path = tmp_path / "runs" / "forced-plan.jsonl"
+
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest("Audit this project", workspace=tmp_path),
+            provider=ForcedPlanTaskProvider(),
+            options=TaskRunOptions(
+                plan_mode=PlanMode.FORCE,
+                trace_path=trace_path,
+            ),
+        )
+    )
+
+    assert result.ok
+    records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    plan_records = [
+        record for record in records if record.get("eventType", "").startswith("plan.")
+    ]
+    assert [record["eventType"] for record in plan_records] == [
+        "plan.entered",
+        "plan.submitted",
+        "plan.updated",
+        "plan.updated",
+        "plan.updated",
+        "plan.completed",
+    ]
+    plan_ids = {record["payload"]["plan"]["plan_id"] for record in plan_records}
+    assert len(plan_ids) == 1
+    assert all("items" in record["payload"]["plan"] for record in plan_records)
+    assert [record["payload"]["revision"] for record in plan_records] == [0, 1, 2, 3, 4, 5]
+
+
 def test_run_generic_task_forwards_runtime_events_to_additional_trace_sink(tmp_path):
     (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
     trace_path = tmp_path / "runs" / "observed.jsonl"
