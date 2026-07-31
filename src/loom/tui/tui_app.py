@@ -63,6 +63,15 @@ TOOL_PRESENTATION_EVENTS = {
     "tool.failed",
 }
 
+PLAN_PRESENTATION_EVENTS = {
+    "plan.entered",
+    "plan.submitted",
+    "plan.updated",
+    "plan.completed",
+}
+
+PLAN_TOOL_IDS = frozenset({"enter_plan", "submit_plan", "update_plan"})
+
 
 @dataclass
 class _LlmStreamState:
@@ -262,6 +271,15 @@ def _event_tool_execution_key(event: TuiEvent) -> str:
     return f"{trace_id}:{step_number}:{tool_id}:{started_at}"
 
 
+def _plan_tool_accepted(output: Any) -> bool | None:
+    value = output.value if hasattr(output, "value") else output
+    if isinstance(value, dict) and isinstance(value.get("value"), dict):
+        value = value["value"]
+    if isinstance(value, dict) and "accepted" in value:
+        return value["accepted"] is not False
+    return None
+
+
 def _format_event_line(event: TuiEvent) -> Text:
     """Format the event text that sits to the right of the timeline gutter."""
     title, description, color = _event_conversation_parts(event)
@@ -275,6 +293,10 @@ def _format_event_line(event: TuiEvent) -> Text:
 
 def _event_conversation_parts(event: TuiEvent) -> tuple[str, str, str]:
     data = event.data
+    if event.event_type in PLAN_PRESENTATION_EVENTS:
+        phase, terminal, total = _plan_event_parts(event)
+        return "Plan", f"{phase} · {terminal}/{total} terminal", _event_marker_color(event)
+
     if event.event_type in {"llm.stream.started", "llm.stream.completed", "llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
         elapsed = _format_seconds(data.get("elapsed_ms") or event.duration_ms)
         token_count = int(data.get("token_count") or data.get("delta_count") or 0)
@@ -406,6 +428,8 @@ def _event_scope(event: TuiEvent) -> tuple[str, str]:
         return "TOOLSEL", COLORS["teal"]
     if event.event_type.startswith("tool."):
         return "TOOL", COLORS["orange"] if event.event_type != "tool.completed" else COLORS["green"]
+    if event.event_type in PLAN_PRESENTATION_EVENTS:
+        return "PLAN", COLORS["blue"]
     if event.event_type == "_tui_done":
         return "TUI", COLORS["text_dim"]
     return "EVENT", COLORS["text_dim"]
@@ -438,6 +462,9 @@ def _event_name(event: TuiEvent) -> str:
 
 def _event_description(event: TuiEvent) -> str:
     data = event.data
+    if event.event_type in PLAN_PRESENTATION_EVENTS:
+        phase, terminal, total = _plan_event_parts(event)
+        return f"{phase} / {terminal}/{total} terminal"
     if event.event_type == "run.started":
         meta = data.get("metadata", {})
         if isinstance(meta, dict):
@@ -511,6 +538,9 @@ def _event_status(event: TuiEvent) -> str:
         return data_status
     if event.event_type.endswith(".failed"):
         return "failed"
+    if event.event_type in PLAN_PRESENTATION_EVENTS:
+        phase, _, _ = _plan_event_parts(event)
+        return "done" if phase == "completed" else "running"
     if event.event_type in {"run.completed", "step.completed", "llm.completed", "tool.completed", "tool_selection.decided", "_tui_done"}:
         return "done"
     if event.event_type in {"llm.stream.started", "llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
@@ -537,6 +567,9 @@ def _event_marker_color(event: TuiEvent) -> str:
         return COLORS["red"]
     if event.event_type.startswith("tool.") and event.event_type != "tool.started":
         return COLORS["green"]
+    if event.event_type in PLAN_PRESENTATION_EVENTS:
+        phase, _, _ = _plan_event_parts(event)
+        return COLORS["green"] if phase == "completed" else COLORS["blue"]
     if event.event_type == "tool.started":
         return COLORS["orange"]
     if event.event_type.startswith("llm.stream") or event.event_type in {"llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
@@ -558,12 +591,65 @@ def _format_event_gutter(event: TuiEvent, *, expanded: bool, detail_height: int)
     return "\n".join(lines)
 
 
+def _plan_event_parts(event: TuiEvent) -> tuple[str, int, int]:
+    plan = event.data.get("plan", {})
+    if not isinstance(plan, dict):
+        return "unknown", 0, 0
+    phase = str(plan.get("phase") or "unknown")
+    items = plan.get("items", [])
+    if not isinstance(items, list | tuple):
+        return phase, 0, 0
+    terminal = sum(
+        isinstance(item, dict) and item.get("status") in {"completed", "skipped"}
+        for item in items
+    )
+    return phase, terminal, len(items)
+
+
+def _append_plan_detail(lines: list[str], event: TuiEvent) -> None:
+    data = event.data
+    plan = data.get("plan", {})
+    if not isinstance(plan, dict):
+        return
+    phase, terminal, total = _plan_event_parts(event)
+    revision = plan.get("revision", data.get("revision", 0))
+    lines.append(f"[bold {COLORS['blue']}]─── Plan · {phase} ───[/]")
+    lines.append(f"[dim]progress:[/] {terminal}/{total} terminal · revision {revision}")
+    explanation = data.get("explanation") or plan.get("explanation") or plan.get("reason")
+    if explanation:
+        lines.append(f"[dim]update:[/] {_safe_markup(explanation)}")
+    items = plan.get("items", [])
+    symbols = {
+        "completed": "✓",
+        "in_progress": "→",
+        "pending": "○",
+        "skipped": "⊘",
+    }
+    if isinstance(items, list | tuple):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status") or "pending")
+            symbol = symbols.get(status, "?")
+            item_id = item.get("id") or "step"
+            content = item.get("content") or ""
+            line = f"{symbol} {item_id}  {content}"
+            note = item.get("note")
+            if note:
+                line += f" — {note}"
+            lines.append(_safe_markup(line))
+    lines.append("")
+
+
 def _format_event_detail(event: TuiEvent) -> str:
     """Format full event detail for the detail panel."""
     lines: list[str] = []
     data = event.data
 
-    if event.event_type == "llm.requested":
+    if event.event_type in PLAN_PRESENTATION_EVENTS:
+        _append_plan_detail(lines, event)
+
+    elif event.event_type == "llm.requested":
         lines.append(f"[bold {COLORS['magenta']}]─── LLM Request ───[/]")
         _append_llm_input_details(lines, data)
 
@@ -1305,6 +1391,8 @@ class LoomTuiApp(App[None]):
         self._llm_rounds: dict[str, int] = {}
         self._tool_executions: dict[str, _ToolExecutionState] = {}
         self._tool_execution_indices: dict[str, int] = {}
+        self._plan_event_indices: dict[str, int] = {}
+        self._pending_plan_tool_executions: dict[str, _ToolExecutionState] = {}
 
     def compose(self) -> ComposeResult:
         yield LoopHeader(id="loop_header")
@@ -1334,6 +1422,8 @@ class LoomTuiApp(App[None]):
             status_bar.status = "completed"
             return
 
+        if self._handle_plan_event(event):
+            return
         if self._handle_llm_event(event):
             return
         if self._handle_tool_event(event):
@@ -1372,6 +1462,27 @@ class LoomTuiApp(App[None]):
             status_bar = self.query_one("#status", StatusBar)
             status_bar.status = "completed"
             status_bar.duration = event.duration_ms or 0
+
+    def _handle_plan_event(self, event: TuiEvent) -> bool:
+        if event.event_type not in PLAN_PRESENTATION_EVENTS:
+            return False
+        plan = event.data.get("plan", {})
+        plan_id = event.data.get("plan_id")
+        if not plan_id and isinstance(plan, dict):
+            plan_id = plan.get("plan_id")
+        if not plan_id:
+            return False
+        key = str(plan_id)
+        feed = self.query_one("#event_feed", EventFeedWidget)
+        index = self._plan_event_indices.get(key)
+        if index is None:
+            feed.add_event(event, pinned_expanded=True)
+            self._plan_event_indices[key] = feed.event_count - 1
+        else:
+            feed.update_event(index, event)
+            feed.select_event(index)
+            feed.scroll_end(animate=False)
+        return True
 
     def _handle_llm_event(self, event: TuiEvent) -> bool:
         if event.event_type not in LLM_PRESENTATION_EVENTS:
@@ -1435,6 +1546,20 @@ class LoomTuiApp(App[None]):
 
         key = _event_tool_execution_key(event)
         feed = self.query_one("#event_feed", EventFeedWidget)
+        tool_name = _event_tool_name(event)
+        if key in self._pending_plan_tool_executions or tool_name in PLAN_TOOL_IDS:
+            execution = self._pending_plan_tool_executions.get(key)
+            if execution is None:
+                execution = _ToolExecutionState.from_event(event)
+                self._pending_plan_tool_executions[key] = execution
+            else:
+                execution.absorb(event)
+            if event.event_type in {"tool.completed", "tool.failed"}:
+                self._pending_plan_tool_executions.pop(key, None)
+                if event.event_type == "tool.failed" or _plan_tool_accepted(execution.output_value) is False:
+                    feed.add_event(execution.current_event or event, pinned_expanded=True)
+            return True
+
         execution = self._tool_executions.get(key)
 
         if execution is None:

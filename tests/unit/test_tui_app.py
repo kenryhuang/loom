@@ -11,6 +11,110 @@ from loom.tui.tui_app import EventDetailBox, EventFeedWidget, LoomTuiApp, LoopHe
 from loom.tui.tui_collector import TuiEvent, TuiEventCollector
 
 
+def _plan_event(event_type="plan.updated", revision=4):
+    return TuiEvent(
+        timestamp=revision,
+        event_type=event_type,
+        data={
+            "type": event_type,
+            "plan_id": "plan_test",
+            "revision": revision,
+            "explanation": "Adjusted after inspection",
+            "plan": {
+                "plan_id": "plan_test",
+                "phase": "executing",
+                "revision": revision,
+                "items": [
+                    {"id": "step_1", "content": "Inspect", "status": "completed", "note": None},
+                    {"id": "step_2", "content": "Review", "status": "completed", "note": None},
+                    {"id": "step_3", "content": "Implement", "status": "in_progress", "note": None},
+                    {"id": "step_4", "content": "Verify", "status": "pending", "note": None},
+                    {"id": "step_5", "content": "Publish", "status": "skipped", "note": "not required"},
+                ],
+            },
+        },
+    )
+
+
+def test_plan_event_formats_as_checklist_summary_and_detail():
+    event = _plan_event()
+
+    line = str(_format_event_line(event))
+    detail = _format_event_detail_plain(event)
+
+    assert "Plan" in line
+    assert "executing" in line
+    assert "3/5 terminal" in line
+    assert "✓ step_1" in detail
+    assert "→ step_3" in detail
+    assert "○ step_4" in detail
+    assert "⊘ step_5" in detail
+    assert "not required" in detail
+
+
+@pytest.mark.asyncio
+async def test_tui_coalesces_plan_events_and_suppresses_successful_plan_tools():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test():
+        app._handle_event(_plan_event("plan.entered", 0))
+        app._handle_event(_plan_event("plan.submitted", 1))
+        app._handle_event(_plan_event("plan.updated", 2))
+
+        feed = app.query_one("#event_feed", EventFeedWidget)
+        assert feed.event_count == 1
+        assert feed.get_event(0).data["revision"] == 2
+
+        app._handle_event(
+            TuiEvent(
+                timestamp=3,
+                event_type="tool.started",
+                data={"type": "tool.started", "tool_id": "update_plan", "tool_call_id": "accepted"},
+                tool_call_id="accepted",
+            )
+        )
+        app._handle_event(
+            TuiEvent(
+                timestamp=4,
+                event_type="tool.completed",
+                data={
+                    "type": "tool.completed",
+                    "tool_id": "update_plan",
+                    "tool_call_id": "accepted",
+                    "output": {"value": {"accepted": True}},
+                },
+                tool_call_id="accepted",
+            )
+        )
+        assert feed.event_count == 1
+
+        app._handle_event(
+            TuiEvent(
+                timestamp=5,
+                event_type="tool.started",
+                data={"type": "tool.started", "tool_id": "update_plan", "tool_call_id": "rejected"},
+                tool_call_id="rejected",
+            )
+        )
+        app._handle_event(
+            TuiEvent(
+                timestamp=6,
+                event_type="tool.completed",
+                data={
+                    "type": "tool.completed",
+                    "tool_id": "update_plan",
+                    "tool_call_id": "rejected",
+                    "output": {"value": {"accepted": False, "code": "PLAN_PHASE_INVALID"}},
+                },
+                tool_call_id="rejected",
+            )
+        )
+
+        assert feed.event_count == 2
+        assert feed.get_event(1).data["output"]["value"]["accepted"] is False
+
+
 @pytest.mark.asyncio
 async def test_set_loop_info_before_mount_updates_header_after_mount():
     collector = TuiEventCollector()
