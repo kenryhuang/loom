@@ -153,7 +153,7 @@ async def test_trial_executor_materializes_fresh_paired_workspaces_and_applies_o
     assert "Candidate overlay marker." not in provider.calls[0]["system"]
     assert provider.calls[0]["request_options"] == {"enable_thinking": False}
     assert provider.calls[1]["request_options"] == {"enable_thinking": True}
-    assert provider.calls[1]["tools"] == ("read_file",)
+    assert provider.calls[1]["tools"] == ("read_file", "enter_plan")
     assert baseline.trace_ref is not None and artifacts.read_bytes(baseline.trace_ref).ok
     assert baseline.evaluation_ref is not None
     evaluation = json.loads(artifacts.read_bytes(baseline.evaluation_ref).unwrap())
