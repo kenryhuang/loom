@@ -179,7 +179,7 @@ async def test_event_feed_resumes_following_after_user_returns_to_bottom():
                 data={"type": "run.completed", "outcome": "pass", "steps": 1},
             )
         )
-        await pilot.pause()
+        await pilot.wait_for_scheduled_animations()
         assert feed.is_vertical_scroll_end
         assert feed.get_selected_index() == feed.event_count - 1
 
@@ -266,18 +266,84 @@ async def test_llm_stream_growth_preserves_manual_scroll_position():
 
 
 @pytest.mark.asyncio
-async def test_tui_coalesces_plan_events_and_suppresses_successful_plan_tools():
+async def test_tui_preserves_each_plan_revision_as_a_timeline_node():
     collector = TuiEventCollector()
     app = LoomTuiApp(collector)
 
     async with app.run_test():
-        app._handle_event(_plan_event("plan.entered", 0))
-        app._handle_event(_plan_event("plan.submitted", 1))
-        app._handle_event(_plan_event("plan.updated", 2))
+        entered = _plan_event("plan.entered", 0)
+        submitted = _plan_event("plan.submitted", 1)
+        updated = _plan_event("plan.updated", 2)
+        completed = _plan_event("plan.completed", 3)
+        submitted.data["plan"]["items"][0]["status"] = "pending"
+        updated.data["plan"]["items"][0]["status"] = "in_progress"
+        completed.data["plan"]["items"][0]["status"] = "completed"
+
+        for event in (entered, submitted, updated, completed):
+            app._handle_event(event)
 
         feed = app.query_one("#event_feed", EventFeedWidget)
-        assert feed.event_count == 1
-        assert feed.get_event(0).data["revision"] == 2
+        plan_events = [event for event in feed.get_events() if event.event_type.startswith("plan.")]
+
+        assert [event.event_type for event in plan_events] == [
+            "plan.entered",
+            "plan.submitted",
+            "plan.updated",
+            "plan.completed",
+        ]
+        assert [event.data["plan"]["revision"] for event in plan_events] == [0, 1, 2, 3]
+        assert [event.data["plan"]["items"][0]["status"] for event in plan_events] == [
+            "completed",
+            "pending",
+            "in_progress",
+            "completed",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_plan_lifecycle_rows_keep_their_chronological_positions():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test():
+        events = (
+            TuiEvent(0, "run.started", {"type": "run.started"}),
+            _plan_event("plan.entered", 0),
+            TuiEvent(
+                2,
+                "llm.requested",
+                {"type": "llm.requested", "llm_call_id": "llm-1"},
+                llm_call_id="llm-1",
+            ),
+            _plan_event("plan.submitted", 1),
+            TuiEvent(4, "run.completed", {"type": "run.completed", "outcome": "pass"}),
+            _plan_event("plan.updated", 2),
+            _plan_event("plan.completed", 3),
+        )
+
+        for event in events:
+            app._handle_event(event)
+
+        feed = app.query_one("#event_feed", EventFeedWidget)
+        assert [event.event_type for event in feed.get_events()] == [
+            "run.started",
+            "plan.entered",
+            "llm.requested",
+            "plan.submitted",
+            "run.completed",
+            "plan.updated",
+            "plan.completed",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_tui_suppresses_successful_plan_tools_and_keeps_rejections():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test():
+        app._handle_event(_plan_event("plan.updated", 2))
+        feed = app.query_one("#event_feed", EventFeedWidget)
 
         app._handle_event(
             TuiEvent(

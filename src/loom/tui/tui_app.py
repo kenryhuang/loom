@@ -1432,7 +1432,6 @@ class LoomTuiApp(App[None]):
         self._llm_rounds: dict[str, int] = {}
         self._tool_executions: dict[str, _ToolExecutionState] = {}
         self._tool_execution_indices: dict[str, int] = {}
-        self._plan_event_indices: dict[str, int] = {}
         self._pending_plan_tool_executions: dict[str, _ToolExecutionState] = {}
 
     def compose(self) -> ComposeResult:
@@ -1507,20 +1506,7 @@ class LoomTuiApp(App[None]):
     def _handle_plan_event(self, event: TuiEvent) -> bool:
         if event.event_type not in PLAN_PRESENTATION_EVENTS:
             return False
-        plan = event.data.get("plan", {})
-        plan_id = event.data.get("plan_id")
-        if not plan_id and isinstance(plan, dict):
-            plan_id = plan.get("plan_id")
-        if not plan_id:
-            return False
-        key = str(plan_id)
-        feed = self.query_one("#event_feed", EventFeedWidget)
-        index = self._plan_event_indices.get(key)
-        if index is None:
-            feed.add_event(event, pinned_expanded=True)
-            self._plan_event_indices[key] = feed.event_count - 1
-        else:
-            feed.update_event(index, event)
+        self.query_one("#event_feed", EventFeedWidget).add_event(event, pinned_expanded=True)
         return True
 
     def _handle_llm_event(self, event: TuiEvent) -> bool:
