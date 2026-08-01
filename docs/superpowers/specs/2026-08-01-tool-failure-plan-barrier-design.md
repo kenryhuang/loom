@@ -2,7 +2,13 @@
 
 ## Status
 
-Approved design for two failures observed in
+Partially superseded. The recoverable-tool-failure and TUI sticky-tail designs
+remain valid. The `llm_call_id` plan update barrier is replaced by
+[`2026-08-01-llm-driven-plan-checkpoints-design.md`](./2026-08-01-llm-driven-plan-checkpoints-design.md)
+because one LLM response is a transport boundary, not a semantic execution
+checkpoint. New runs let the LLM call `update_plan` when plan state changes.
+
+This document originally described two failures observed in
 `runs/yakdb-reliability-plan.jsonl` and the related event-feed follow behavior.
 
 ## Goal
