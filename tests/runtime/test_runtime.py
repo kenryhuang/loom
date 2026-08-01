@@ -16,7 +16,9 @@ from loom.core import (
     empty_affordances,
     empty_knowledge,
     empty_state,
+    err,
     freeze_context,
+    make_loom_error,
     new_context_id,
     new_loop_id,
     new_loop_version,
@@ -188,6 +190,153 @@ def test_run_emits_run_step_and_tool_events_to_trace_store():
         assert tool_started["metadata"]["tool_call_id"] == "call_search"
         assert tool_completed["output"].value["hit"] == "loom"
         assert store.events()[-1]["steps"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_runtime_marks_handler_failure_as_tool_domain():
+    async def scenario():
+        captured = []
+
+        async def broken_tool(_input, _options):
+            return err(
+                make_loom_error(
+                    "VALIDATION_FAILED",
+                    "old_text missing",
+                    retryable=False,
+                    metadata={"edit_index": 4},
+                )
+            )
+
+        async def step_fn(_context, runtime):
+            result = await runtime.call_tool("edit_file", {"path": "sample.py"})
+            captured.append(result)
+            return result
+
+        definition = MinimalLoopDefinition(
+            id=new_loop_id(),
+            version=new_loop_version(),
+            identity=IdentityLayer(role="runtime failure test"),
+            goal=GoalLayer(objective="classify a failed tool"),
+            step=step_fn,
+            done=lambda _context, _runtime: ok(False),
+        )
+        store = InMemoryTraceStore()
+        handle = create(
+            definition,
+            trace_store=store,
+            registry=create_runtime_registry(tools={"edit_file": broken_tool}),
+        ).unwrap()
+
+        result = await run(handle, make_context(), max_steps=1)
+
+        assert not result.ok
+        assert captured[0].error.metadata == {"edit_index": 4, "failureDomain": "tool"}
+        assert [event["type"] for event in store.events()].count("tool.failed") == 1
+
+    asyncio.run(scenario())
+
+
+def test_runtime_marks_missing_handler_as_tool_domain():
+    async def scenario():
+        captured = []
+
+        async def step_fn(_context, runtime):
+            result = await runtime.call_tool("missing_tool", {})
+            captured.append(result)
+            return result
+
+        definition = MinimalLoopDefinition(
+            id=new_loop_id(),
+            version=new_loop_version(),
+            identity=IdentityLayer(role="missing tool test"),
+            goal=GoalLayer(objective="classify a missing tool"),
+            step=step_fn,
+            done=lambda _context, _runtime: ok(False),
+        )
+        handle = create(definition, registry=create_runtime_registry()).unwrap()
+
+        result = await run(handle, make_context(), max_steps=1)
+
+        assert not result.ok
+        assert captured[0].error.code == "VALIDATION_FAILED"
+        assert captured[0].error.metadata["failureDomain"] == "tool"
+
+    asyncio.run(scenario())
+
+
+def test_runtime_does_not_mark_aborted_handler_failure_as_tool_domain():
+    async def scenario():
+        captured = []
+
+        async def aborted_tool(_input, _options):
+            return err(make_loom_error("ABORTED", "cancelled", retryable=False))
+
+        async def step_fn(_context, runtime):
+            result = await runtime.call_tool("cancel", {})
+            captured.append(result)
+            return result
+
+        definition = MinimalLoopDefinition(
+            id=new_loop_id(),
+            version=new_loop_version(),
+            identity=IdentityLayer(role="aborted tool test"),
+            goal=GoalLayer(objective="preserve cancellation"),
+            step=step_fn,
+            done=lambda _context, _runtime: ok(False),
+        )
+        handle = create(definition, registry=create_runtime_registry(tools={"cancel": aborted_tool})).unwrap()
+
+        result = await run(handle, make_context(), max_steps=1)
+
+        assert not result.ok
+        assert captured[0].error.code == "ABORTED"
+        assert "failureDomain" not in (captured[0].error.metadata or {})
+
+    asyncio.run(scenario())
+
+
+def test_runtime_does_not_reclassify_trace_sink_failure_as_tool_domain():
+    async def scenario():
+        captured = []
+        called = False
+
+        class FailingRecorder:
+            async def emit(self, event):
+                if event["type"] == "tool.started":
+                    return err(make_loom_error("TRACE_WRITE_FAILED", "trace unavailable", retryable=False))
+                return ok(None)
+
+        async def tool(_input, _options):
+            nonlocal called
+            called = True
+            return ok(Observation("obs", "tool", {"ok": True}, NOW))
+
+        async def step_fn(_context, runtime):
+            result = await runtime.call_tool("read_file", {})
+            captured.append(result)
+            return result
+
+        definition = MinimalLoopDefinition(
+            id=new_loop_id(),
+            version=new_loop_version(),
+            identity=IdentityLayer(role="trace failure test"),
+            goal=GoalLayer(objective="preserve trace failures"),
+            step=step_fn,
+            done=lambda _context, _runtime: ok(False),
+        )
+        handle = create(
+            definition,
+            event_recorder=FailingRecorder(),
+            registry=create_runtime_registry(tools={"read_file": tool}),
+        ).unwrap()
+
+        result = await run(handle, make_context(), max_steps=1)
+
+        assert not result.ok
+        assert not called
+        assert captured[0].error.code == "TRACE_WRITE_FAILED"
+        assert "failureDomain" not in (captured[0].error.metadata or {})
 
     asyncio.run(scenario())
 

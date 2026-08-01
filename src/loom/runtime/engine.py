@@ -6,11 +6,12 @@ import asyncio
 import inspect
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from loom.core.models import (
     Context,
+    LoomError,
     LoopHandle,
     MinimalLoopDefinition,
     Result,
@@ -36,6 +37,14 @@ from loom.observability.traces import (
 )
 
 _RUNTIME_STATE: dict[int, RuntimeState] = {}
+
+
+def _tool_domain_error(error: LoomError) -> LoomError:
+    if error.code == "ABORTED":
+        return error
+    metadata = dict(error.metadata or {})
+    metadata["failureDomain"] = "tool"
+    return replace(error, metadata=metadata)
 
 
 class CancellationToken:
@@ -449,6 +458,7 @@ def _make_step_runtime(
             return started
         handler = state.registry.tools.get(tool_id)
         if not handler.ok:
+            tool_error = _tool_domain_error(handler.error)
             failed = await emit(
                 {
                     "type": "tool.failed",
@@ -458,13 +468,13 @@ def _make_step_runtime(
                     "tool_call_id": tool_call_id,
                     "trace_id": trace_id,
                     "step_number": step_number,
-                    "error": handler.error,
+                    "error": tool_error,
                     "at": now_iso(),
                 }
             )
             if not failed.ok:
                 return failed
-            return handler
+            return err(tool_error)
         invoke = getattr(handler.value, "invoke", handler.value)
         try:
             result = await _maybe_await(invoke(input_value, options))
@@ -473,6 +483,7 @@ def _make_step_runtime(
         if not isinstance(result, Result):
             result = ok(result)
         if not result.ok:
+            tool_error = _tool_domain_error(result.error)
             failed = await emit(
                 {
                     "type": "tool.failed",
@@ -482,11 +493,11 @@ def _make_step_runtime(
                     "tool_call_id": tool_call_id,
                     "trace_id": trace_id,
                     "step_number": step_number,
-                    "error": result.error,
+                    "error": tool_error,
                     "at": now_iso(),
                 }
             )
-            return result if failed.ok else failed
+            return err(tool_error) if failed.ok else failed
         completed = await emit(
             {
                 "type": "tool.completed",
