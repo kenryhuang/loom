@@ -1224,6 +1224,7 @@ class EventFeedWidget(VerticalScroll):
         super().__init__(**kwargs)
         self._event_items: list[EventItem] = []
         self._selected_index = -1
+        self._follow_tail = True
 
     def compose(self) -> ComposeResult:
         yield Label(
@@ -1234,22 +1235,47 @@ class EventFeedWidget(VerticalScroll):
 
     def add_event(self, event: TuiEvent, *, pinned_expanded: bool = False, expanded: bool = True, selected: bool = True) -> None:
         """Append an event item and expand it as the active event."""
-        for item in self._event_items:
-            item.set_selected(False)
-            if not item.is_pinned_expanded:
-                item.set_expanded(False)
+        following = self._follow_tail
+        if following:
+            for item in self._event_items:
+                item.set_selected(False)
+                if not item.is_pinned_expanded:
+                    item.set_expanded(False)
 
-        item = EventItem(event, expanded=expanded, selected=selected, pinned_expanded=pinned_expanded)
+        item = EventItem(
+            event,
+            expanded=expanded,
+            selected=selected and following,
+            pinned_expanded=pinned_expanded,
+        )
         self.mount(item)
         self._event_items.append(item)
-        if selected:
+        if selected and following:
             self._selected_index = len(self._event_items) - 1
-        self.scroll_end(animate=False)
+        if following:
+            self.scroll_end(animate=False)
 
     def update_event(self, index: int, event: TuiEvent) -> None:
         """Update one existing event item in place."""
         if 0 <= index < len(self._event_items):
             self._event_items[index].set_event(event)
+            if self._follow_tail:
+                self.scroll_end(animate=False)
+
+    @property
+    def follow_tail(self) -> bool:
+        return self._follow_tail
+
+    def pause_following(self) -> None:
+        self._follow_tail = False
+
+    def resume_following(self) -> None:
+        self._follow_tail = True
+        self.scroll_end(animate=False)
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
+        self._follow_tail = new_value >= self.max_scroll_y
 
     def get_event(self, index: int) -> TuiEvent | None:
         if 0 <= index < len(self._event_items):
@@ -1495,14 +1521,6 @@ class LoomTuiApp(App[None]):
             self._plan_event_indices[key] = feed.event_count - 1
         else:
             feed.update_event(index, event)
-            feed.select_event(index)
-            feed.scroll_to_widget(
-                feed.get_item(index),
-                animate=False,
-                top=True,
-                force=True,
-                immediate=True,
-            )
         return True
 
     def _handle_llm_event(self, event: TuiEvent) -> bool:
@@ -1535,7 +1553,6 @@ class LoomTuiApp(App[None]):
         else:
             aggregate = stream.absorb(event)
             feed.update_event(self._llm_stream_indices[llm_call_id], aggregate)
-            feed.scroll_end(animate=False)
 
         return True
 
@@ -1594,7 +1611,8 @@ class LoomTuiApp(App[None]):
             index = self._tool_execution_indices[key]
             feed.update_event(index, aggregate)
 
-        feed.select_event(self._tool_execution_indices[key])
+        if feed.follow_tail:
+            feed.select_event(self._tool_execution_indices[key])
         return True
 
     def action_cursor_down(self) -> None:
@@ -1602,7 +1620,10 @@ class LoomTuiApp(App[None]):
         feed = self.query_one("#event_feed", EventFeedWidget)
         idx = feed.get_selected_index()
         if idx < feed.event_count - 1:
-            feed.select_event(idx + 1)
+            next_index = idx + 1
+            feed.select_event(next_index)
+            if next_index == feed.event_count - 1:
+                feed.resume_following()
 
     def action_cursor_up(self) -> None:
         """Move selection up in timeline."""
@@ -1610,6 +1631,7 @@ class LoomTuiApp(App[None]):
         idx = feed.get_selected_index()
         if idx > 0:
             feed.select_event(idx - 1)
+            feed.pause_following()
 
     def action_scroll_top(self) -> None:
         """Scroll to top of timeline."""
@@ -1617,13 +1639,14 @@ class LoomTuiApp(App[None]):
         if feed.event_count > 0:
             feed.select_event(0)
         feed.scroll_home(animate=False)
+        feed.pause_following()
 
     def action_scroll_bottom(self) -> None:
         """Scroll to bottom of timeline."""
         feed = self.query_one("#event_feed", EventFeedWidget)
         if feed.event_count > 0:
             feed.select_event(feed.event_count - 1)
-        feed.scroll_end(animate=False)
+        feed.resume_following()
 
     def action_toggle_detail(self) -> None:
         """Toggle the selected event detail."""

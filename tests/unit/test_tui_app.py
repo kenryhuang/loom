@@ -78,7 +78,7 @@ def test_updated_plan_detail_keeps_reason_and_latest_explanation():
 
 
 @pytest.mark.asyncio
-async def test_plan_update_scrolls_existing_checklist_back_into_view():
+async def test_plan_update_preserves_manual_scroll_and_selection():
     collector = TuiEventCollector()
     app = LoomTuiApp(collector)
 
@@ -98,12 +98,171 @@ async def test_plan_update_scrolls_existing_checklist_back_into_view():
         feed.scroll_end(animate=False)
         await pilot.pause()
         assert feed.max_scroll_y > 0
+        feed.select_event(10)
+        feed.scroll_to(y=feed.max_scroll_y // 2, animate=False, immediate=True)
+        await pilot.pause()
+        manual_y = feed.scroll_y
+        selected_index = feed.get_selected_index()
 
         app._handle_event(_plan_event("plan.updated", 2))
         await pilot.pause()
 
+        assert feed.get_selected_index() == selected_index
+        assert feed.scroll_y == manual_y
+
+
+@pytest.mark.asyncio
+async def test_new_event_preserves_manual_scroll_and_reviewed_event():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test(size=(100, 24)) as pilot:
+        for index in range(30):
+            app._handle_event(
+                TuiEvent(
+                    timestamp=index,
+                    event_type="run.started",
+                    data={"type": "run.started", "context_id": f"ctx-{index}"},
+                )
+            )
+        await pilot.pause()
+
+        feed = app.query_one("#event_feed", EventFeedWidget)
+        feed.select_event(10)
+        feed.scroll_to(y=feed.max_scroll_y // 2, animate=False, immediate=True)
+        await pilot.pause()
+        manual_y = feed.scroll_y
+
+        app._handle_event(
+            TuiEvent(
+                timestamp=31,
+                event_type="run.completed",
+                data={"type": "run.completed", "outcome": "pass", "steps": 1},
+            )
+        )
+        await pilot.pause()
+
+        assert feed.get_selected_index() == 10
+        assert feed.scroll_y == manual_y
+        assert feed.get_item(10).is_expanded is True
+
+
+@pytest.mark.asyncio
+async def test_event_feed_resumes_following_after_user_returns_to_bottom():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test(size=(100, 24)) as pilot:
+        for index in range(30):
+            app._handle_event(
+                TuiEvent(
+                    timestamp=index,
+                    event_type="run.started",
+                    data={"type": "run.started", "context_id": f"ctx-{index}"},
+                )
+            )
+        await pilot.pause()
+
+        feed = app.query_one("#event_feed", EventFeedWidget)
+        feed.scroll_to(y=feed.max_scroll_y // 2, animate=False, immediate=True)
+        await pilot.pause()
+        assert feed.follow_tail is False
+
+        feed.scroll_end(animate=False)
+        await pilot.pause()
+        assert feed.follow_tail is True
+
+        app._handle_event(
+            TuiEvent(
+                timestamp=31,
+                event_type="run.completed",
+                data={"type": "run.completed", "outcome": "pass", "steps": 1},
+            )
+        )
+        await pilot.pause()
+        assert feed.is_vertical_scroll_end
+        assert feed.get_selected_index() == feed.event_count - 1
+
+
+@pytest.mark.asyncio
+async def test_keyboard_up_and_top_pause_following_until_bottom():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test(size=(100, 24)) as pilot:
+        for index in range(8):
+            app._handle_event(
+                TuiEvent(
+                    timestamp=index,
+                    event_type="run.started",
+                    data={"type": "run.started", "context_id": f"ctx-{index}"},
+                )
+            )
+        await pilot.pause()
+        feed = app.query_one("#event_feed", EventFeedWidget)
+        assert feed.follow_tail is True
+
+        await pilot.press("k")
+        assert feed.follow_tail is False
+        assert feed.get_selected_index() == 6
+
+        await pilot.press("G")
+        assert feed.follow_tail is True
+        assert feed.get_selected_index() == 7
+
+        await pilot.press("g")
+        assert feed.follow_tail is False
         assert feed.get_selected_index() == 0
-        assert feed.scroll_y == feed.get_item(0).virtual_region.y
+
+        for _index in range(7):
+            await pilot.press("j")
+        assert feed.get_selected_index() == 7
+        assert feed.follow_tail is True
+
+
+@pytest.mark.asyncio
+async def test_llm_stream_growth_preserves_manual_scroll_position():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test(size=(100, 24)) as pilot:
+        for index in range(30):
+            app._handle_event(
+                TuiEvent(
+                    timestamp=index,
+                    event_type="run.started",
+                    data={"type": "run.started", "context_id": f"ctx-{index}"},
+                )
+            )
+        app._handle_event(
+            TuiEvent(
+                timestamp=31,
+                event_type="llm.stream.started",
+                data={"type": "llm.stream.started", "llm_call_id": "llm-stream", "model": "test-model"},
+                llm_call_id="llm-stream",
+            )
+        )
+        await pilot.pause()
+
+        feed = app.query_one("#event_feed", EventFeedWidget)
+        feed.select_event(10)
+        feed.scroll_to(y=feed.max_scroll_y // 2, animate=False, immediate=True)
+        await pilot.pause()
+        manual_y = feed.scroll_y
+
+        app._handle_event(
+            TuiEvent(
+                timestamp=32,
+                event_type="llm.content.delta",
+                data={"type": "llm.content.delta", "llm_call_id": "llm-stream", "delta": "new streamed content"},
+                llm_call_id="llm-stream",
+            )
+        )
+        await pilot.pause()
+
+        assert feed.follow_tail is False
+        assert feed.get_selected_index() == 10
+        assert feed.scroll_y == manual_y
 
 
 @pytest.mark.asyncio
