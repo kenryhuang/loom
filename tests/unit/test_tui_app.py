@@ -452,6 +452,32 @@ def test_event_line_uses_conversation_timeline_text_without_marker():
     assert line == "Answer Task complete."
 
 
+def test_thinking_event_line_uses_elapsed_time_and_token_count_only():
+    event = TuiEvent(
+        timestamp=0,
+        event_type="llm.stream.completed",
+        data={
+            "type": "llm.stream.completed",
+            "elapsed_ms": 3410,
+            "token_count": 2,
+            "reasoning": "Inspect the project before editing.",
+        },
+        duration_ms=3410,
+    )
+
+    assert str(_format_event_line(event)) == "Thought for 3s 2 tokens >"
+
+
+def test_thinking_event_line_uses_singular_token():
+    event = TuiEvent(
+        timestamp=0,
+        event_type="llm.stream.started",
+        data={"type": "llm.stream.started", "elapsed_ms": 1000, "delta_count": 1, "content": "hidden"},
+    )
+
+    assert str(_format_event_line(event)) == "Thought for 1s 1 token >"
+
+
 @pytest.mark.asyncio
 async def test_tui_curates_redundant_lifecycle_events_into_progress_rows():
     collector = TuiEventCollector()
@@ -591,7 +617,7 @@ async def test_tui_curates_redundant_lifecycle_events_into_progress_rows():
             "tool.completed",
             "step.completed",
         ]
-        assert str(_format_event_line(feed.get_event(1))) == "Thinking Inspect the project before editing."
+        assert str(_format_event_line(feed.get_event(1))) == "Thought for 0s 1 token >"
         assert str(_format_event_line(feed.get_event(2))) == "Decision Run the full test suite"
         assert str(_format_event_line(feed.get_event(3))) == "Bash Passed · exit 0 · 43 passed, 8 skipped · 3.41s"
         assert app.query_one("#status").tokens == 42
@@ -1687,6 +1713,7 @@ async def test_tui_app_aggregates_llm_stream_tokens_into_one_sse_row():
         assert stream_event.event_type == "llm.stream.completed"
         assert stream_event.duration_ms == 42
         assert stream_event.data["content"] == "hello world"
+        assert str(_format_event_line(stream_event)) == "Thought for 0s 2 tokens >"
         assert stream_item.is_expanded is False
 
 

@@ -305,8 +305,10 @@ def _event_conversation_parts(event: TuiEvent) -> tuple[str, str, str]:
         )
 
     if event.event_type in {"llm.stream.started", "llm.stream.completed", "llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
-        progress = _stream_progress_preview(data)
-        return "Thinking", progress or "Working…", COLORS["text_dim"]
+        elapsed = _format_seconds(data.get("elapsed_ms") or event.duration_ms)
+        token_count = _stream_token_count(data)
+        suffix = "tokens" if token_count != 1 else "token"
+        return f"Thought for {elapsed}", f"{token_count} {suffix} >", COLORS["text_dim"]
 
     if event.event_type == "llm.completed":
         summary = summarize_event(event)
@@ -360,16 +362,8 @@ def _event_conversation_parts(event: TuiEvent) -> tuple[str, str, str]:
     return event.event_type.replace("_", " ").replace(".", " ").title(), "", COLORS["text"]
 
 
-def _stream_progress_preview(data: dict[str, Any]) -> str:
-    for key in ("reasoning", "content", "reasoning_context", "delta"):
-        value = data.get(key)
-        if not isinstance(value, str):
-            continue
-        for line in _normalize_display_text(value).splitlines():
-            normalized = " ".join(line.split())
-            if normalized:
-                return _truncate_inline(normalized, 96)
-    return ""
+def _stream_token_count(data: dict[str, Any]) -> int:
+    return int(data.get("token_count") or data.get("delta_count") or 0)
 
 
 def _format_seconds(value: Any) -> str:
@@ -1689,14 +1683,14 @@ class LoomTuiApp(App[None]):
             stream = _LlmStreamState.from_event(event)
             self._llm_streams[llm_call_id] = stream
             aggregate = stream.current_event or event
-            if _stream_progress_preview(aggregate.data):
+            if _stream_token_count(aggregate.data) > 0:
                 feed.add_event(aggregate, expanded=False)
                 self._llm_stream_indices[llm_call_id] = feed.event_count - 1
         else:
             aggregate = stream.absorb(event)
             index = self._llm_stream_indices.get(llm_call_id)
             if index is None:
-                if _stream_progress_preview(aggregate.data):
+                if _stream_token_count(aggregate.data) > 0:
                     feed.add_event(aggregate, expanded=False)
                     self._llm_stream_indices[llm_call_id] = feed.event_count - 1
             else:
