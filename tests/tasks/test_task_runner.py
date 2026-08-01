@@ -356,6 +356,92 @@ class ForcedPlanTaskProvider:
         )
 
 
+class OneToolPerResponsePlanProvider:
+    model = "fake-one-tool-per-response-plan-model"
+
+    def __init__(self):
+        self.calls = 0
+        self.step_ids = ()
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        self.calls += 1
+        if self.calls == 1:
+            return self._tool(
+                "call-submit",
+                "submit_plan",
+                {
+                    "explanation": "inspect then verify",
+                    "items": [{"content": "Inspect"}, {"content": "Verify"}],
+                },
+            )
+        if self.calls == 2:
+            submitted = json.loads(next(message.content for message in reversed(messages) if message.role == "tool"))
+            self.step_ids = tuple(item["id"] for item in submitted["plan"]["items"])
+            return self._decision("The plan is ready.")
+        if self.calls == 3:
+            return self._update(
+                "call-start-inspection",
+                "Start inspection",
+                (
+                    {"id": self.step_ids[0], "content": "Inspect", "status": "in_progress", "note": None},
+                    {"id": self.step_ids[1], "content": "Verify", "status": "pending", "note": None},
+                ),
+            )
+        if self.calls == 4:
+            return self._tool("call-read-readme", "read_file", {"path": "README.md"})
+        if self.calls == 5:
+            return self._tool("call-read-config", "read_file", {"path": "pyproject.toml"})
+        if self.calls == 6:
+            return self._tool("call-inspect-shell", "shell_execute", {"command": ["pwd"]})
+        if self.calls == 7:
+            return self._update(
+                "call-start-verification",
+                "Inspection complete; start verification",
+                (
+                    {"id": self.step_ids[0], "content": "Inspect", "status": "completed", "note": "Read project files"},
+                    {"id": self.step_ids[1], "content": "Verify", "status": "in_progress", "note": None},
+                ),
+            )
+        if self.calls == 8:
+            return self._tool("call-verify-shell", "shell_execute", {"command": ["pwd"]})
+        if self.calls == 9:
+            return self._update(
+                "call-complete-verification",
+                "Verification complete",
+                (
+                    {"id": self.step_ids[0], "content": "Inspect", "status": "completed", "note": "Read project files"},
+                    {"id": self.step_ids[1], "content": "Verify", "status": "completed", "note": "Command passed"},
+                ),
+            )
+        if self.calls == 10:
+            return self._tool("call-finish", "finish", {"report": "done"})
+        return self._decision("The planned task is complete.")
+
+    @staticmethod
+    def _tool(call_id, name, arguments):
+        return _response(
+            content="",
+            tool_calls=(LlmToolCall(call_id, name, json.dumps(arguments)),),
+            finish_reason="tool_calls",
+        )
+
+    def _update(self, call_id, explanation, items):
+        return self._tool(call_id, "update_plan", {"explanation": explanation, "items": items})
+
+    @staticmethod
+    def _decision(reasoning):
+        return _response(
+            content=json.dumps(
+                {
+                    "reasoning": reasoning,
+                    "action": {"kind": "none", "description": "done", "target": None, "input": {}},
+                    "alternatives": [],
+                    "confidence": 0.9,
+                }
+            )
+        )
+
+
 class RecoveringForcedPlanProvider:
     model = "fake-recovering-plan-model"
 
@@ -525,6 +611,41 @@ def test_run_generic_task_executes_forced_dynamic_plan(tmp_path):
     ]
 
 
+def test_run_generic_task_allows_one_tool_per_response_until_llm_checkpoint(tmp_path):
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n', encoding="utf-8")
+    sink = RecordingTraceSink()
+
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest("Inspect and verify this project", workspace=tmp_path),
+            provider=OneToolPerResponsePlanProvider(),
+            options=TaskRunOptions(plan_mode=PlanMode.FORCE),
+            trace_sink=sink,
+        )
+    )
+
+    assert result.ok
+    assert result.value.output == "done"
+    assert result.value.run_result.context.state.scratch["plan"]["phase"] == "completed"
+    completed_normal_tools = [
+        event["tool_id"]
+        for event in sink.events
+        if event["type"] == "tool.completed"
+        and event["tool_id"] in {"read_file", "shell_execute"}
+        and getattr(event["output"], "source", None) == event["tool_id"]
+    ]
+    assert completed_normal_tools == ["read_file", "read_file", "shell_execute", "shell_execute"]
+    guard_codes = [
+        getattr(event["observation"], "value", {}).get("code")
+        for event in sink.events
+        if event["type"] == "observation.recorded" and getattr(event["observation"], "source", None) == "planning.guard"
+    ]
+    assert "PLAN_UPDATE_REQUIRED" not in guard_codes
+    revisions = [event["revision"] for event in sink.events if event["type"].startswith("plan.")]
+    assert revisions == [0, 1, 2, 3, 4, 5]
+
+
 def test_force_plan_events_are_persisted_as_full_snapshots(tmp_path):
     (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
     trace_path = tmp_path / "runs" / "forced-plan.jsonl"
@@ -575,11 +696,7 @@ def test_run_generic_task_recovers_from_failed_edit_between_plan_updates(tmp_pat
     assert result.ok
     assert result.value.output == "done"
     assert target.read_text(encoding="utf-8") == "corrected\n"
-    failure_messages = [
-        json.loads(message.content)
-        for message in provider.messages_seen[3]
-        if message.role == "tool" and message.name == "edit_file"
-    ]
+    failure_messages = [json.loads(message.content) for message in provider.messages_seen[3] if message.role == "tool" and message.name == "edit_file"]
     assert failure_messages[-1]["ok"] is False
     assert failure_messages[-1]["error"]["code"] == "VALIDATION_FAILED"
     event_types = [event["type"] for event in sink.events]

@@ -381,14 +381,16 @@ async def test_semantic_item_transition_allows_tools_under_next_active_item():
     assert calls == ["llm-1", "llm-3"]
 
 
-def test_workflow_description_requires_update_between_execution_batches():
+def test_workflow_description_uses_semantic_plan_checkpoints():
     planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
-    planning.controller.submit("plan", ("Inspect",))
+    planning.controller.submit("plan", ("Inspect", "Verify"))
 
     description = planning._workflow_description(planning.controller.state)
 
-    assert "after each normal-tool batch" in description
-    assert "before starting the next" in description
+    assert "using as many normal tools as needed" in description
+    assert "only when item status" in description
+    assert "mark the current item completed or skipped and the next item in_progress" in description
+    assert "after each normal-tool batch" not in description
 
 
 class RecordingSink:

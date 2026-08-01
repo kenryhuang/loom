@@ -467,10 +467,10 @@ class PlanningRuntime:
         checklist = "\n".join(f"- [{_status_mark(item.status)}] {item.id}: {item.content}" + (f" — {item.note}" if item.note else "") for item in state.items)
         if state.phase is PlanPhase.EXECUTING:
             prefix = (
-                "Execute the checklist dynamically. Keep exactly one item in_progress before calling normal "
-                "tools, call update_plan with the complete checklist snapshot after each normal-tool batch "
-                "and before starting the next execution batch, "
-                "and finish only after every item is terminal."
+                "Execute the active checklist item using as many normal tools as needed. Call update_plan with the "
+                "complete checklist snapshot only when item status, a material note, or future work changes. When "
+                "moving forward, mark the current item completed or skipped and the next item in_progress in the "
+                "same update. Keep exactly one item in_progress during execution. Finish only after every item is terminal."
             )
         else:
             prefix = "The checklist is complete; provide the final response."
