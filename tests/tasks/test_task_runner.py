@@ -356,6 +356,96 @@ class ForcedPlanTaskProvider:
         )
 
 
+class RecoveringForcedPlanProvider:
+    model = "fake-recovering-plan-model"
+
+    def __init__(self):
+        self.calls = 0
+        self.messages_seen = []
+        self.step_id = ""
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        self.calls += 1
+        self.messages_seen.append(tuple(messages))
+        if self.calls == 1:
+            return _response(
+                content="",
+                tool_calls=(
+                    LlmToolCall(
+                        "call-submit",
+                        "submit_plan",
+                        json.dumps({"explanation": "edit then verify", "items": [{"content": "Edit sample"}]}),
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        if self.calls == 2:
+            submitted = json.loads(next(message.content for message in reversed(messages) if message.role == "tool"))
+            self.step_id = submitted["plan"]["items"][0]["id"]
+            return self._decision("The plan is ready.")
+        if self.calls == 3:
+            return _response(
+                content="",
+                tool_calls=(
+                    self._update("call-start", "Start editing", "in_progress", None),
+                    LlmToolCall(
+                        "call-bad-edit",
+                        "edit_file",
+                        json.dumps({"path": "sample.txt", "edits": [{"old_text": "missing", "new_text": "corrected"}]}),
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        if self.calls == 4:
+            return _response(
+                content="",
+                tool_calls=(
+                    self._update("call-note-failure", "Retry with the exact text", "in_progress", "First exact match failed"),
+                    LlmToolCall(
+                        "call-fixed-edit",
+                        "edit_file",
+                        json.dumps({"path": "sample.txt", "edits": [{"old_text": "original", "new_text": "corrected"}]}),
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        if self.calls == 5:
+            return _response(
+                content="",
+                tool_calls=(
+                    self._update("call-complete", "The corrected edit succeeded", "completed", None),
+                    LlmToolCall("call-finish", "finish", json.dumps({"report": "done"})),
+                ),
+                finish_reason="tool_calls",
+            )
+        return self._decision("The planned task recovered and completed.")
+
+    def _update(self, call_id, explanation, status, note):
+        return LlmToolCall(
+            call_id,
+            "update_plan",
+            json.dumps(
+                {
+                    "explanation": explanation,
+                    "items": [{"id": self.step_id, "content": "Edit sample", "status": status, "note": note}],
+                }
+            ),
+        )
+
+    @staticmethod
+    def _decision(reasoning):
+        return _response(
+            content=json.dumps(
+                {
+                    "reasoning": reasoning,
+                    "action": {"kind": "none", "description": "done", "target": None, "input": {}},
+                    "alternatives": [],
+                    "confidence": 0.9,
+                }
+            )
+        )
+
+
 @dataclass(frozen=True)
 class OverlayRecordingProvider:
     api_key: str = "secret-key"
@@ -465,6 +555,37 @@ def test_force_plan_events_are_persisted_as_full_snapshots(tmp_path):
     assert len(plan_ids) == 1
     assert all("items" in record["payload"]["plan"] for record in plan_records)
     assert [record["payload"]["revision"] for record in plan_records] == [0, 1, 2, 3, 4, 5]
+
+
+def test_run_generic_task_recovers_from_failed_edit_between_plan_updates(tmp_path):
+    target = tmp_path / "sample.txt"
+    target.write_text("original\n", encoding="utf-8")
+    provider = RecoveringForcedPlanProvider()
+    sink = RecordingTraceSink()
+
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest("Replace the sample text", workspace=tmp_path),
+            provider=provider,
+            options=TaskRunOptions(plan_mode=PlanMode.FORCE),
+            trace_sink=sink,
+        )
+    )
+
+    assert result.ok
+    assert result.value.output == "done"
+    assert target.read_text(encoding="utf-8") == "corrected\n"
+    failure_messages = [
+        json.loads(message.content)
+        for message in provider.messages_seen[3]
+        if message.role == "tool" and message.name == "edit_file"
+    ]
+    assert failure_messages[-1]["ok"] is False
+    assert failure_messages[-1]["error"]["code"] == "VALIDATION_FAILED"
+    event_types = [event["type"] for event in sink.events]
+    assert event_types.count("tool.failed") == 1
+    assert event_types.count("plan.updated") == 3
+    assert event_types.index("tool.failed") < event_types.index("plan.updated", event_types.index("tool.failed"))
 
 
 def test_run_generic_task_forwards_runtime_events_to_additional_trace_sink(tmp_path):
