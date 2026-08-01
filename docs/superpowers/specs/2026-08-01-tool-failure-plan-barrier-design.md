@@ -3,7 +3,7 @@
 ## Status
 
 Approved design for two failures observed in
-`runs/yakdb-reliability-plan.jsonl`.
+`runs/yakdb-reliability-plan.jsonl` and the related event-feed follow behavior.
 
 ## Goal
 
@@ -13,6 +13,8 @@ Fix two related control-loop problems:
    entire LLM step instead of returning the failure to the model for recovery.
 2. Plan & Execute asks the model to update its checklist, but does not enforce
    an update between successive LLM tool batches.
+3. The TUI currently forces the event feed to the bottom, or back to the plan
+   node, even after the user scrolls upward to inspect earlier output.
 
 The fixes must preserve the current ReAct loop, runtime trace events, planning
 wrapper, and native/JSON-action tool-call paths.
@@ -26,6 +28,7 @@ wrapper, and native/JSON-action tool-call paths.
 - Do not require an update between individual calls emitted by the same
   assistant response.
 - Do not implement context compaction or task resume in this change.
+- Do not change scrolling inside an individual event's detail pane.
 
 ## Recoverable Tool Failures
 
@@ -141,6 +144,38 @@ tool.failed trace
   -> update_plan required before another normal-tool batch
 ```
 
+## TUI Sticky-Tail Scrolling
+
+### Follow State
+
+`EventFeedWidget` owns a single sticky-tail state rather than leaving event
+handlers to call `scroll_end()` independently. It starts in follow mode.
+
+The feed pauses following when the user expresses upward navigation intent or
+moves the viewport away from the bottom. This includes mouse-wheel or trackpad
+scrolling, dragging the scrollbar, `k`, and `g`. Selecting an older visible
+event with `k` pauses following even if the viewport has not moved yet.
+
+Following resumes when the user manually returns the viewport to the bottom or
+invokes `G`. Downward navigation with `j` resumes following once it reaches the
+last event and the viewport reaches the bottom.
+
+### Content Mutations
+
+All feed mutations capture whether the feed was following before content or
+layout changes. New events and growing LLM stream aggregates scroll to the new
+end only when follow mode was active. Otherwise they preserve the user's
+viewport.
+
+`plan.updated` replaces the existing checklist content in place. It never
+forces the plan node into view. When the user is following, the viewport stays
+at the event-stream tail; when following is paused, the current viewport is
+preserved.
+
+Automatic scroll operations must not be interpreted as manual navigation.
+The behavior is centralized behind `EventFeedWidget` methods so plan, LLM, and
+tool event handlers cannot bypass the sticky-tail policy.
+
 ## Error Handling
 
 - Tool-domain serialization must be JSON-safe and preserve the original code,
@@ -190,6 +225,17 @@ Use a fake provider sequence equivalent to the observed yakDB failure:
 Assert that the run does not fail at step 2, both tool attempts appear in the
 trace, and a plan update occurs before the corrected execution batch.
 
+### TUI Tests
+
+- A newly appended event follows the tail when the viewport is already at the
+  bottom.
+- Scrolling upward prevents later events and stream updates from moving the
+  viewport.
+- `k` and `g` pause following even when the selected item was already visible.
+- Returning to the bottom or invoking `G` resumes following.
+- Updating a coalesced plan checklist does not jump back to the plan node.
+- A plan update while following leaves the viewport at the stream tail.
+
 ## Acceptance Criteria
 
 - A recoverable tool validation/execution failure no longer terminates the
@@ -199,4 +245,7 @@ trace, and a plan update occurs before the corrected execution batch.
 - Plan & Execute prevents a new normal-tool batch until the model submits a
   full checklist update.
 - Same-response multi-tool batches remain executable.
+- The event feed follows new output only while sticky-tail mode is active.
+- Manual review of earlier events is not interrupted by new events, streaming
+  updates, or plan checklist revisions.
 - Existing ReAct, planning, trace, and TUI tests pass.
