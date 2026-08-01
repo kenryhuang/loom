@@ -328,7 +328,6 @@ async def test_plan_lifecycle_rows_keep_their_chronological_positions():
         assert [event.event_type for event in feed.get_events()] == [
             "run.started",
             "plan.entered",
-            "llm.requested",
             "plan.submitted",
             "run.completed",
             "plan.updated",
@@ -441,7 +440,7 @@ def test_event_line_uses_conversation_timeline_text_without_marker():
                     "type": "llm.completed",
                     "llm_call_id": "llm-1",
                     "llm_round": 2,
-                    "response": {"usage": {"total_tokens": 42}, "finish_reason": "stop"},
+                    "response": {"content": "Task complete.", "usage": {"total_tokens": 42}, "finish_reason": "stop"},
                 },
                 step_number=3,
                 llm_call_id="llm-1",
@@ -450,8 +449,218 @@ def test_event_line_uses_conversation_timeline_text_without_marker():
     )
 
     assert not line.startswith("●")
-    assert "Response" in line
-    assert "42 tokens" in line
+    assert line == "Answer Task complete."
+
+
+@pytest.mark.asyncio
+async def test_tui_curates_redundant_lifecycle_events_into_progress_rows():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test():
+        events = (
+            TuiEvent(0, "run.started", {"type": "run.started", "context_id": "ctx-1"}),
+            TuiEvent(
+                1,
+                "llm.requested",
+                {"type": "llm.requested", "llm_call_id": "llm-1", "model": "test-model", "messages": [], "tools": []},
+                llm_call_id="llm-1",
+            ),
+            TuiEvent(
+                2,
+                "llm.stream.started",
+                {"type": "llm.stream.started", "llm_call_id": "llm-1", "model": "test-model"},
+                llm_call_id="llm-1",
+            ),
+            TuiEvent(
+                3,
+                "llm.reasoning.delta",
+                {"type": "llm.reasoning.delta", "llm_call_id": "llm-1", "delta": "Inspect the project before editing."},
+                llm_call_id="llm-1",
+            ),
+            TuiEvent(
+                4,
+                "llm.stream.completed",
+                {"type": "llm.stream.completed", "llm_call_id": "llm-1", "model": "test-model"},
+                llm_call_id="llm-1",
+                duration_ms=25,
+            ),
+            TuiEvent(
+                5,
+                "llm.completed",
+                {
+                    "type": "llm.completed",
+                    "llm_call_id": "llm-1",
+                    "response": {
+                        "content": "",
+                        "tool_calls": [{"name": "shell_execute", "arguments": {"command": ["pytest", "-q"]}}],
+                        "usage": {"total_tokens": 42},
+                    },
+                },
+                llm_call_id="llm-1",
+            ),
+            TuiEvent(
+                6,
+                "decision.recorded",
+                {
+                    "type": "decision.recorded",
+                    "decision": {
+                        "action": {"kind": "tool", "target": "run_command", "description": "Run the full test suite"},
+                        "reasoning": "Establish a clean verification baseline.",
+                        "confidence": 0.96,
+                    },
+                },
+                trace_id="trace-1",
+            ),
+            TuiEvent(
+                7,
+                "action.started",
+                {"type": "action.started", "action": {"description": "Run the full test suite", "target": "run_command"}},
+                trace_id="trace-1",
+            ),
+            TuiEvent(
+                8,
+                "tool.started",
+                {
+                    "type": "tool.started",
+                    "tool_id": "shell_execute",
+                    "tool_call_id": "tool-1",
+                    "input": {"command": ["pytest", "-q"]},
+                },
+                tool_call_id="tool-1",
+            ),
+            TuiEvent(
+                9,
+                "tool.completed",
+                {
+                    "type": "tool.completed",
+                    "tool_id": "shell_execute",
+                    "tool_call_id": "tool-1",
+                    "input": {"command": ["pytest", "-q"]},
+                    "output": {
+                        "source": "shell_execute",
+                        "value": {
+                            "exit_code": 0,
+                            "stdout": "43 passed, 8 skipped in 3.41s\n",
+                            "stderr": "",
+                            "duration_ms": 3410,
+                            "timed_out": False,
+                        },
+                    },
+                },
+                tool_call_id="tool-1",
+            ),
+            TuiEvent(
+                10,
+                "observation.recorded",
+                {
+                    "type": "observation.recorded",
+                    "observation": {"source": "shell_execute", "value": {"exit_code": 0}},
+                },
+                trace_id="trace-1",
+            ),
+            TuiEvent(
+                11,
+                "action.completed",
+                {"type": "action.completed", "action": {"description": "Run the full test suite"}, "outcome": "pass"},
+                trace_id="trace-1",
+            ),
+            TuiEvent(
+                12,
+                "action.recorded",
+                {"type": "action.recorded", "action": {"description": "Run the full test suite"}},
+                trace_id="trace-1",
+            ),
+            TuiEvent(
+                13,
+                "step.completed",
+                {"type": "step.completed", "trace": {"outcome": "pass"}},
+                trace_id="trace-1",
+            ),
+        )
+
+        for event in events:
+            app._handle_event(event)
+
+        feed = app.query_one("#event_feed", EventFeedWidget)
+
+        assert [event.event_type for event in feed.get_events()] == [
+            "run.started",
+            "llm.stream.completed",
+            "decision.recorded",
+            "tool.completed",
+            "step.completed",
+        ]
+        assert str(_format_event_line(feed.get_event(1))) == "Thinking Inspect the project before editing."
+        assert str(_format_event_line(feed.get_event(2))) == "Decision Run the full test suite"
+        assert str(_format_event_line(feed.get_event(3))) == "Bash Passed · exit 0 · 43 passed, 8 skipped · 3.41s"
+        assert app.query_one("#status").tokens == 42
+
+
+@pytest.mark.asyncio
+async def test_tui_keeps_guard_observation_and_final_answer():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test():
+        app._handle_event(
+            TuiEvent(
+                0,
+                "observation.recorded",
+                {
+                    "type": "observation.recorded",
+                    "observation": {
+                        "source": "planning.guard",
+                        "value": {
+                            "accepted": False,
+                            "code": "PLAN_UPDATE_REQUIRED",
+                            "message": "Update the complete plan checklist",
+                        },
+                    },
+                },
+            )
+        )
+        app._handle_event(
+            TuiEvent(
+                1,
+                "llm.completed",
+                {
+                    "type": "llm.completed",
+                    "llm_call_id": "llm-final",
+                    "response": {"content": "Task complete. All tests pass.", "tool_calls": [], "usage": {"total_tokens": 12}},
+                },
+                llm_call_id="llm-final",
+            )
+        )
+
+        feed = app.query_one("#event_feed", EventFeedWidget)
+
+        assert [str(_format_event_line(event)) for event in feed.get_events()] == [
+            "Plan blocked PLAN_UPDATE_REQUIRED · Update the complete plan checklist",
+            "Answer Task complete. All tests pass.",
+        ]
+        assert app.query_one("#status").tokens == 12
+
+
+@pytest.mark.asyncio
+async def test_tui_keeps_failed_action_without_a_correlated_decision():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test():
+        app._handle_event(
+            TuiEvent(
+                0,
+                "action.completed",
+                {"type": "action.completed", "action": {"description": "Validate output"}, "outcome": "failed"},
+                trace_id="trace-without-decision",
+            )
+        )
+
+        event = app.query_one("#event_feed", EventFeedWidget).get_event(0)
+
+        assert event is not None
+        assert str(_format_event_line(event)) == "Action completed Validate output · failed"
 
 
 def test_event_detail_omits_trace_metadata():
@@ -814,19 +1023,14 @@ async def test_tui_app_displays_llm_round_as_request_sse_tool_and_response_rows(
         )
 
         feed = app.query_one("#event_feed", EventFeedWidget)
-        request_event = feed.get_event(0)
-        sse_event = feed.get_event(1)
-        tool_event = feed.get_event(2)
-        response_event = feed.get_event(3)
-        response_item = feed.get_item(3)
+        sse_event = feed.get_event(0)
+        tool_event = feed.get_event(1)
+        completed_event = feed.get_event(2)
 
-        assert feed.event_count == 5
-        assert request_event is not None
-        assert request_event.event_type == "llm.requested"
-        assert request_event.data["llm_round"] == 1
-        assert request_event.data["messages"] == [{"role": "user", "content": "inspect project"}]
+        assert feed.event_count == 3
         assert sse_event is not None
         assert sse_event.event_type == "llm.stream.completed"
+        assert sse_event.data["llm_round"] == 1
         assert sse_event.data["content"] == "answer"
         assert sse_event.data["reasoning"] == "thinking "
         assert sse_event.data["reasoning_context"] == "ctx"
@@ -834,12 +1038,10 @@ async def test_tui_app_displays_llm_round_as_request_sse_tool_and_response_rows(
         assert tool_event.event_type == "tool.completed"
         assert tool_event.data["tool_name"] == "search"
         assert tool_event.data["arguments"] == '{"query":"loom"}'
-        assert response_event is not None
-        assert response_event.event_type == "llm.completed"
-        assert response_event.data["llm_round"] == 1
-        assert response_event.data["response"]["content"] == "final answer"
-        assert feed.get_item(1).is_expanded is False
-        assert response_item.is_expanded is True
+        assert completed_event is not None
+        assert completed_event.event_type == "run.completed"
+        assert app.query_one("#status").tokens == 42
+        assert feed.get_item(0).is_expanded is False
 
 
 def test_event_detail_box_includes_tool_result(monkeypatch):

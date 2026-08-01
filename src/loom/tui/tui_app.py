@@ -17,6 +17,7 @@ from textual.containers import Container, VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import Footer, Label, RichLog, Static
 
+from loom.tui.event_summary import is_redundant_observation, llm_response_text, summarize_event
 from loom.tui.tui_collector import TuiEvent
 
 # ─── Color palette (Codex/Claude dark style) ───────────────────────────
@@ -304,16 +305,14 @@ def _event_conversation_parts(event: TuiEvent) -> tuple[str, str, str]:
         )
 
     if event.event_type in {"llm.stream.started", "llm.stream.completed", "llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
-        elapsed = _format_seconds(data.get("elapsed_ms") or event.duration_ms)
-        token_count = int(data.get("token_count") or data.get("delta_count") or 0)
-        suffix = "tokens" if token_count != 1 else "token"
-        return f"Thought for {elapsed}", f"{token_count} {suffix} >", COLORS["text_dim"]
+        progress = _stream_progress_preview(data)
+        return "Thinking", progress or "Working…", COLORS["text_dim"]
 
     if event.event_type == "llm.completed":
-        response = data.get("response", {})
-        usage = response.get("usage", {}) if isinstance(response, dict) else {}
-        total = usage.get("total_tokens", 0) if isinstance(usage, dict) else 0
-        return "Response", f"{total} tokens" if total else "", COLORS["text"]
+        summary = summarize_event(event)
+        if summary is not None:
+            return summary.title, summary.description, COLORS.get(summary.color_role, COLORS["text"])
+        return "Answer", "", COLORS["text"]
 
     if event.event_type == "llm.requested":
         model = data.get("model") or "model"
@@ -327,7 +326,10 @@ def _event_conversation_parts(event: TuiEvent) -> tuple[str, str, str]:
         return "LLM failed", str(event.error or data.get("error") or ""), COLORS["red"]
 
     if event.event_type.startswith("tool."):
-        return _tool_event_title(data), _tool_event_preview(data), _event_marker_color(event)
+        summary = summarize_event(event)
+        if summary is not None:
+            return summary.title, summary.description, COLORS.get(summary.color_role, _event_marker_color(event))
+        return _tool_event_title(data), "", _event_marker_color(event)
 
     if event.event_type == "run.started":
         meta = data.get("metadata", {})
@@ -352,7 +354,22 @@ def _event_conversation_parts(event: TuiEvent) -> tuple[str, str, str]:
     if event.event_type.startswith("evolution."):
         return "Evolution", _event_description(event), COLORS["teal"]
 
-    return event.event_type, _event_description(event), COLORS["text"]
+    summary = summarize_event(event)
+    if summary is not None:
+        return summary.title, summary.description, COLORS.get(summary.color_role, COLORS["text"])
+    return event.event_type.replace("_", " ").replace(".", " ").title(), "", COLORS["text"]
+
+
+def _stream_progress_preview(data: dict[str, Any]) -> str:
+    for key in ("reasoning", "content", "reasoning_context", "delta"):
+        value = data.get(key)
+        if not isinstance(value, str):
+            continue
+        for line in _normalize_display_text(value).splitlines():
+            normalized = " ".join(line.split())
+            if normalized:
+                return _truncate_inline(normalized, 96)
+    return ""
 
 
 def _format_seconds(value: Any) -> str:
@@ -1433,6 +1450,7 @@ class LoomTuiApp(App[None]):
         self._tool_executions: dict[str, _ToolExecutionState] = {}
         self._tool_execution_indices: dict[str, int] = {}
         self._pending_plan_tool_executions: dict[str, _ToolExecutionState] = {}
+        self._decision_trace_ids: set[str] = set()
 
     def compose(self) -> ComposeResult:
         yield LoopHeader(id="loop_header")
@@ -1469,10 +1487,15 @@ class LoomTuiApp(App[None]):
         if self._handle_tool_event(event):
             return
 
+        self._update_runtime_metrics(event)
+        if not self._should_present_event(event):
+            return
+
         feed = self.query_one("#event_feed", EventFeedWidget)
         feed.add_event(event)
 
-        # Update metrics
+    def _update_runtime_metrics(self, event: TuiEvent) -> None:
+        """Update status independently from whether an event gets a timeline row."""
         if event.event_type == "step.completed":
             self._step_count += 1
             status_bar = self.query_one("#status", StatusBar)
@@ -1503,6 +1526,27 @@ class LoomTuiApp(App[None]):
             status_bar.status = "completed"
             status_bar.duration = event.duration_ms or 0
 
+    def _should_present_event(self, event: TuiEvent) -> bool:
+        if event.event_type == "decision.recorded":
+            summary = summarize_event(event)
+            if summary is None or summary.description == "Use unstructured LLM response":
+                return False
+            if event.trace_id:
+                self._decision_trace_ids.add(event.trace_id)
+            return True
+        if event.event_type == "action.recorded":
+            return False
+        if event.event_type in {"action.started", "action.completed"}:
+            outcome = str(event.data.get("outcome") or "").lower()
+            if outcome in {"fail", "failed", "error"}:
+                return True
+            return event.trace_id not in self._decision_trace_ids and summarize_event(event) is not None
+        if event.event_type == "observation.recorded":
+            return not is_redundant_observation(event) and summarize_event(event) is not None
+        if event.event_type.startswith(("run.", "step.", "tool_selection.", "evolution.")):
+            return True
+        return summarize_event(event) is not None
+
     def _handle_plan_event(self, event: TuiEvent) -> bool:
         if event.event_type not in PLAN_PRESENTATION_EVENTS:
             return False
@@ -1514,20 +1558,25 @@ class LoomTuiApp(App[None]):
             return False
 
         llm_call_id = _event_llm_call_id(event)
-        if not llm_call_id:
-            return False
-
-        event = self._with_llm_round(event, llm_call_id)
         feed = self.query_one("#event_feed", EventFeedWidget)
 
+        if llm_call_id:
+            event = self._with_llm_round(event, llm_call_id)
+
         if event.event_type == "llm.requested":
-            feed.add_event(event)
             return True
 
-        if event.event_type in {"llm.completed", "llm.failed"}:
+        if event.event_type == "llm.completed":
+            self._add_llm_usage(event)
+            if llm_response_text(event):
+                feed.add_event(event, pinned_expanded=True)
+            return True
+
+        if event.event_type == "llm.failed":
             feed.add_event(event, pinned_expanded=True)
-            if event.event_type == "llm.completed":
-                self._add_llm_usage(event)
+            return True
+
+        if not llm_call_id:
             return True
 
         stream = self._llm_streams.get(llm_call_id)
