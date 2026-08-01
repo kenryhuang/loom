@@ -201,6 +201,27 @@ def test_rejected_plan_tool_uses_guard_result():
     assert summarize_event(event) == EventSummary("Update Plan blocked", "PLAN_PHASE_INVALID · No active plan", "red")
 
 
+def test_execution_tool_rejected_by_plan_guard_is_not_reported_as_success():
+    event = _tool_event(
+        "write_file",
+        input_value={"path": "docs/reliability-report.md", "content": "report"},
+        output={
+            "source": "planning.guard",
+            "value": {
+                "accepted": False,
+                "code": "PLAN_ACTIVE_ITEM_REQUIRED",
+                "message": "Exactly one plan item must be in progress before using execution tools",
+            },
+        },
+    )
+
+    assert summarize_event(event) == EventSummary(
+        "Write blocked",
+        "PLAN_ACTIVE_ITEM_REQUIRED · Exactly one plan item must be in progress before using execution tools",
+        "red",
+    )
+
+
 @pytest.mark.parametrize(
     "response",
     [

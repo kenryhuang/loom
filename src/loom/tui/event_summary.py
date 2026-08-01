@@ -164,6 +164,10 @@ def _tool_summary(event_type: str, data: Mapping[str, Any], event_error: str | N
         return EventSummary(title, _running_tool_description(tool_id, input_value), "orange")
 
     output = _unwrap_output(data.get("output"))
+    output_mapping = _mapping(output)
+    if output_mapping and (output_mapping.get("accepted") is False or output_mapping.get("code")):
+        code, message = _code_and_message(output_mapping)
+        return EventSummary(f"{title} blocked", _join_parts(code, message) or "Rejected", "red")
     if tool_id in {"enter_plan", "submit_plan", "update_plan"}:
         return _plan_tool_summary(title, output)
     if tool_id == "shell_execute":

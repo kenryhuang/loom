@@ -663,6 +663,206 @@ async def test_tui_keeps_failed_action_without_a_correlated_decision():
         assert str(_format_event_line(event)) == "Action completed Validate output · failed"
 
 
+@pytest.mark.asyncio
+async def test_tui_hides_empty_thinking_and_unstructured_fallback_actions():
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test():
+        for event in (
+            TuiEvent(
+                0,
+                "llm.stream.started",
+                {"type": "llm.stream.started", "llm_call_id": "llm-empty"},
+                llm_call_id="llm-empty",
+            ),
+            TuiEvent(
+                1,
+                "llm.stream.completed",
+                {"type": "llm.stream.completed", "llm_call_id": "llm-empty"},
+                llm_call_id="llm-empty",
+            ),
+            TuiEvent(
+                2,
+                "action.started",
+                {"type": "action.started", "action": {"kind": "custom", "description": "Use unstructured LLM response"}},
+                trace_id="trace-fallback",
+            ),
+            TuiEvent(
+                3,
+                "action.completed",
+                {
+                    "type": "action.completed",
+                    "action": {"kind": "custom", "description": "Use unstructured LLM response"},
+                    "outcome": "pass",
+                },
+                trace_id="trace-fallback",
+            ),
+        ):
+            app._handle_event(event)
+
+        assert app.query_one("#event_feed", EventFeedWidget).event_count == 0
+
+
+@pytest.mark.asyncio
+async def test_collected_trace_replays_as_semantic_timeline(tmp_path):
+    trace_path = tmp_path / "representative-run.jsonl"
+    raw_events = [
+        {"type": "run.started", "run_id": "run-1", "context_id": "ctx-1"},
+        {
+            "type": "plan.updated",
+            "run_id": "run-1",
+            "trace_id": "trace-1",
+            "plan": {
+                "plan_id": "plan-1",
+                "phase": "executing",
+                "revision": 2,
+                "items": [
+                    {"id": "step-1", "content": "Run tests", "status": "in_progress"},
+                    {"id": "step-2", "content": "Fix defect", "status": "pending"},
+                ],
+            },
+            "explanation": "Starting verification",
+        },
+        {
+            "type": "decision.recorded",
+            "run_id": "run-1",
+            "trace_id": "trace-1",
+            "decision": {
+                "action": {"kind": "tool", "target": "run_command", "description": "Run the full test suite"},
+                "reasoning": "Verify the current baseline.",
+                "confidence": 0.95,
+            },
+        },
+        {
+            "type": "action.started",
+            "run_id": "run-1",
+            "trace_id": "trace-1",
+            "action": {"kind": "tool", "target": "run_command", "description": "Run the full test suite"},
+        },
+        {
+            "type": "tool.started",
+            "run_id": "run-1",
+            "trace_id": "trace-1",
+            "tool_call_id": "tool-1",
+            "tool_id": "shell_execute",
+            "input": {"command": ["pytest", "-q"], "cwd": "."},
+        },
+        {
+            "type": "tool.completed",
+            "run_id": "run-1",
+            "trace_id": "trace-1",
+            "tool_call_id": "tool-1",
+            "tool_id": "shell_execute",
+            "input": {"command": ["pytest", "-q"], "cwd": "."},
+            "output": {
+                "source": "shell_execute",
+                "value": {
+                    "exit_code": 0,
+                    "stdout": "43 passed, 8 skipped in 3.41s\n",
+                    "stderr": "",
+                    "duration_ms": 3410,
+                    "timed_out": False,
+                },
+            },
+        },
+        {
+            "type": "observation.recorded",
+            "run_id": "run-1",
+            "trace_id": "trace-1",
+            "observation": {"source": "shell_execute", "value": {"exit_code": 0}},
+        },
+        {
+            "type": "action.completed",
+            "run_id": "run-1",
+            "trace_id": "trace-1",
+            "action": {"description": "Run the full test suite"},
+            "outcome": "pass",
+        },
+        {
+            "type": "action.recorded",
+            "run_id": "run-1",
+            "trace_id": "trace-1",
+            "action": {"description": "Run the full test suite"},
+        },
+        {
+            "type": "tool.started",
+            "run_id": "run-1",
+            "trace_id": "trace-2",
+            "tool_call_id": "tool-2",
+            "tool_id": "write_file",
+            "input": {"path": "docs/reliability-report.md", "content": "report"},
+        },
+        {
+            "type": "tool.completed",
+            "run_id": "run-1",
+            "trace_id": "trace-2",
+            "tool_call_id": "tool-2",
+            "tool_id": "write_file",
+            "input": {"path": "docs/reliability-report.md", "content": "report"},
+            "output": {
+                "source": "planning.guard",
+                "value": {
+                    "accepted": False,
+                    "code": "PLAN_UPDATE_REQUIRED",
+                    "message": "Update the complete plan checklist",
+                },
+            },
+        },
+        {
+            "type": "observation.recorded",
+            "run_id": "run-1",
+            "trace_id": "trace-2",
+            "observation": {
+                "source": "planning.guard",
+                "value": {
+                    "accepted": False,
+                    "code": "PLAN_UPDATE_REQUIRED",
+                    "message": "Update the complete plan checklist",
+                },
+            },
+        },
+        {
+            "type": "llm.completed",
+            "run_id": "run-1",
+            "trace_id": "trace-3",
+            "llm_call_id": "llm-final",
+            "response": {"content": "Task complete. All tests pass.", "tool_calls": [], "usage": {"total_tokens": 22}},
+        },
+        {"type": "run.completed", "run_id": "run-1", "outcome": "pass", "steps": 1},
+    ]
+    trace_path.write_text("\n".join(json.dumps({"type": "event", "eventType": event["type"], "payload": event}) for event in raw_events), encoding="utf-8")
+    collector = TuiEventCollector()
+    app = LoomTuiApp(collector)
+
+    async with app.run_test():
+        for line in trace_path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            await collector.emit(record["payload"])
+        app._poll_events()
+
+        feed = app.query_one("#event_feed", EventFeedWidget)
+        lines = [str(_format_event_line(event)) for event in feed.get_events()]
+
+        assert [event.event_type for event in feed.get_events()] == [
+            "run.started",
+            "plan.updated",
+            "decision.recorded",
+            "tool.completed",
+            "tool.completed",
+            "llm.completed",
+            "run.completed",
+        ]
+        assert "Bash Passed · exit 0 · 43 passed, 8 skipped · 3.41s" in lines
+        assert "Write blocked PLAN_UPDATE_REQUIRED · Update the complete plan checklist" in lines
+        assert "Plan blocked PLAN_UPDATE_REQUIRED · Update the complete plan checklist" not in lines
+        assert "Answer Task complete. All tests pass." in lines
+        assert all("decision.recorded decision.recorded" not in line for line in lines)
+        assert all("action." not in line for line in lines)
+        bash_line = next(line for line in lines if line.startswith("Bash "))
+        assert "pytest" not in bash_line
+
+
 def test_event_detail_omits_trace_metadata():
     event = TuiEvent(
         timestamp=0,

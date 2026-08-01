@@ -1542,6 +1542,7 @@ class LoomTuiApp(App[None]):
         self._tool_execution_indices: dict[str, int] = {}
         self._pending_plan_tool_executions: dict[str, _ToolExecutionState] = {}
         self._decision_trace_ids: set[str] = set()
+        self._presented_issue_keys: set[tuple[str, str]] = set()
 
     def compose(self) -> ComposeResult:
         yield LoopHeader(id="loop_header")
@@ -1628,12 +1629,25 @@ class LoomTuiApp(App[None]):
         if event.event_type == "action.recorded":
             return False
         if event.event_type in {"action.started", "action.completed"}:
+            action = event.data.get("action")
+            if isinstance(action, dict) and action.get("description") == "Use unstructured LLM response":
+                return False
             outcome = str(event.data.get("outcome") or "").lower()
             if outcome in {"fail", "failed", "error"}:
                 return True
             return event.trace_id not in self._decision_trace_ids and summarize_event(event) is not None
         if event.event_type == "observation.recorded":
-            return not is_redundant_observation(event) and summarize_event(event) is not None
+            if is_redundant_observation(event):
+                return False
+            summary = summarize_event(event)
+            if summary is None:
+                return False
+            issue_key = self._issue_key(event)
+            if issue_key is not None and issue_key in self._presented_issue_keys:
+                return False
+            if issue_key is not None:
+                self._presented_issue_keys.add(issue_key)
+            return True
         if event.event_type.startswith(("run.", "step.", "tool_selection.", "evolution.")):
             return True
         return summarize_event(event) is not None
@@ -1674,11 +1688,19 @@ class LoomTuiApp(App[None]):
         if stream is None:
             stream = _LlmStreamState.from_event(event)
             self._llm_streams[llm_call_id] = stream
-            feed.add_event(stream.current_event or event, expanded=False)
-            self._llm_stream_indices[llm_call_id] = feed.event_count - 1
+            aggregate = stream.current_event or event
+            if _stream_progress_preview(aggregate.data):
+                feed.add_event(aggregate, expanded=False)
+                self._llm_stream_indices[llm_call_id] = feed.event_count - 1
         else:
             aggregate = stream.absorb(event)
-            feed.update_event(self._llm_stream_indices[llm_call_id], aggregate)
+            index = self._llm_stream_indices.get(llm_call_id)
+            if index is None:
+                if _stream_progress_preview(aggregate.data):
+                    feed.add_event(aggregate, expanded=False)
+                    self._llm_stream_indices[llm_call_id] = feed.event_count - 1
+            else:
+                feed.update_event(index, aggregate)
 
         return True
 
@@ -1721,7 +1743,9 @@ class LoomTuiApp(App[None]):
             if event.event_type in {"tool.completed", "tool.failed"}:
                 self._pending_plan_tool_executions.pop(key, None)
                 if event.event_type == "tool.failed" or _plan_tool_accepted(execution.output_value) is False:
-                    feed.add_event(execution.current_event or event, pinned_expanded=True)
+                    presented = execution.current_event or event
+                    self._remember_presented_issue(presented)
+                    feed.add_event(presented, pinned_expanded=True)
             return True
 
         execution = self._tool_executions.get(key)
@@ -1737,9 +1761,26 @@ class LoomTuiApp(App[None]):
             index = self._tool_execution_indices[key]
             feed.update_event(index, aggregate)
 
+        if event.event_type in {"tool.completed", "tool.failed"}:
+            self._remember_presented_issue(execution.current_event or event)
+
         if feed.follow_tail:
             feed.select_event(self._tool_execution_indices[key])
         return True
+
+    def _remember_presented_issue(self, event: TuiEvent) -> None:
+        issue_key = self._issue_key(event)
+        if issue_key is not None:
+            self._presented_issue_keys.add(issue_key)
+
+    @staticmethod
+    def _issue_key(event: TuiEvent) -> tuple[str, str] | None:
+        if not event.trace_id:
+            return None
+        summary = summarize_event(event)
+        if summary is None or summary.color_role != "red" or not summary.description:
+            return None
+        return event.trace_id, summary.description
 
     def action_cursor_down(self) -> None:
         """Move selection down in timeline."""

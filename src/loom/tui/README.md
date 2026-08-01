@@ -6,10 +6,18 @@ Real-time terminal visualization for Loom loop execution — Codex/Claude style.
 
 The TUI provides a live, interactive view of a Loom loop as it runs:
 
-- **Event Stream**: Chronological stream of loop events with inline collapsible detail boxes
+- **Event Stream**: Chronological semantic progress stream with inline collapsible detail boxes
 - **Inline Details**: Fixed-height scrollable detail area for LLM prompts/responses, tool inputs/outputs, and trace data
-- **LLM Rounds**: Each round is shown as separate request, SSE, tool call, and response rows
+- **LLM Progress**: Streaming reasoning is updated in place; tool-only transport responses and duplicate lifecycle events stay out of the visible stream
+- **Tool Outcomes**: Tool calls update one row in place from a compact target to structured result data such as exit status, test counts, bytes, or replacements
 - **Status Bar**: Live metrics — step count, token usage, duration, run status
+
+The TUI is a curated presentation of the run, not a replacement for its trace.
+Every raw event remains in the configured JSONL trace. Successful action and
+observation events that repeat decisions or tool results are hidden from the
+visible timeline; guard failures and other actionable observations remain.
+Expanding a row retains full reasoning, inputs, outputs, diffs, stdout, stderr,
+and error metadata.
 
 ## Style
 
@@ -108,14 +116,18 @@ Rows use a flat timeline layout:
 │  └─
 ```
 
-LLM calls are not collapsed into one large event. A single round is represented
-as request, SSE, tool call, and response rows. SSE token deltas update one SSE
-row in place, and tool calls merge function arguments with the final tool result.
+An LLM round produces a streaming `Thinking` row when reasoning is available.
+Transport-only request and tool-call response events do not add rows. A genuine
+final text response is shown as an `Answer` row. Each tool execution occupies one
+row: argument deltas and runtime lifecycle events are merged into it, and a
+completed row summarizes structured output instead of repeating invocation
+arguments. Run, step, plan, decision, guard, tool, and answer rows keep their
+chronological positions and remain available in the full scrollable history.
 
 ## Dependencies
 
 ```bash
-uv sync --extra tui
+uv sync --group tui
 # or
 pip install textual rich
 ```
