@@ -860,7 +860,6 @@ def _format_event_detail(event: TuiEvent) -> str:
 
 
 def _append_decision_detail(lines: list[str], data: dict[str, Any]) -> None:
-    lines.append(f"[bold {COLORS['blue']}]─── Decision ───[/]")
     decision = data.get("decision")
     if not isinstance(decision, dict):
         lines.append(f"[dim]value:[/] {_safe_markup(decision)}")
@@ -1011,8 +1010,7 @@ def _has_llm_stream_details(data: dict[str, Any]) -> bool:
 def _append_llm_stream_details(lines: list[str], data: dict[str, Any]) -> None:
     reasoning = data.get("reasoning")
     if isinstance(reasoning, str) and reasoning:
-        lines.append(f"[bold {COLORS['blue']}]thinking:[/]")
-        _append_wrapped(lines, reasoning, indent="  ")
+        _append_wrapped(lines, reasoning)
         lines.append("")
 
     reasoning_context = data.get("reasoning_context")

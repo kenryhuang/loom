@@ -943,7 +943,8 @@ def test_decision_detail_prioritizes_semantic_fields():
 
     detail = _format_event_detail_plain(event)
 
-    assert "Decision" in detail
+    assert detail.startswith("action: List project structure")
+    assert "─── Decision ───" not in detail
     assert "action: List project structure" in detail
     assert "kind: tool" in detail
     assert "target: run_command" in detail
@@ -1631,7 +1632,8 @@ def test_llm_stream_detail_starts_with_stream_content_and_does_not_render_header
     )
 
     detail = writes[0]
-    assert detail.startswith("[bold #7aa2f7]thinking:")
+    assert detail.startswith("thinking through evidence")
+    assert "thinking:" not in detail
     assert detail.index("thinking through evidence") < detail.index("final visible answer")
     assert detail.index("context window") < detail.index("final visible answer")
     assert "LLM Stream" not in detail
