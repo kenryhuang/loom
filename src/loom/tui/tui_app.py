@@ -751,6 +751,15 @@ def _format_event_detail(event: TuiEvent) -> str:
             lines.append(f"[{COLORS['red']}]error:[/] {_safe_markup(err_data)}")
         lines.append("")
 
+    elif event.event_type == "decision.recorded":
+        _append_decision_detail(lines, data)
+
+    elif event.event_type.startswith("action."):
+        _append_action_detail(lines, event.event_type, data)
+
+    elif event.event_type == "observation.recorded":
+        _append_observation_detail(lines, data)
+
     elif event.event_type == "step.completed":
         lines.append(f"[bold {COLORS['cyan']}]─── Step Complete ───[/]")
         trace = data.get("trace", {})
@@ -854,6 +863,88 @@ def _format_event_detail(event: TuiEvent) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _append_decision_detail(lines: list[str], data: dict[str, Any]) -> None:
+    lines.append(f"[bold {COLORS['blue']}]─── Decision ───[/]")
+    decision = data.get("decision")
+    if not isinstance(decision, dict):
+        lines.append(f"[dim]value:[/] {_safe_markup(decision)}")
+        lines.append("")
+        return
+    action = decision.get("action")
+    if isinstance(action, dict):
+        description = action.get("description") or action.get("target") or "?"
+        lines.append(f"[dim]action:[/] {_safe_markup(description)}")
+        if action.get("kind"):
+            lines.append(f"[dim]kind:[/] {_safe_markup(action['kind'])}")
+        if action.get("target"):
+            lines.append(f"[dim]target:[/] {_safe_markup(action['target'])}")
+        if "input" in action:
+            lines.append("[dim]input:[/]")
+            if not _append_jsonish(lines, action.get("input"), indent="  "):
+                lines.append(f"  {_safe_markup(action.get('input'))}")
+    reasoning = decision.get("reasoning")
+    if reasoning:
+        lines.append("[dim]reasoning:[/]")
+        _append_wrapped(lines, str(reasoning), indent="  ")
+    if "confidence" in decision:
+        lines.append(f"[dim]confidence:[/] {_safe_markup(decision.get('confidence'))}")
+    alternatives = decision.get("alternatives")
+    if isinstance(alternatives, list | tuple) and alternatives:
+        lines.append("[dim]alternatives:[/]")
+        for alternative in alternatives:
+            if not isinstance(alternative, dict):
+                lines.append(f"  - {_safe_markup(alternative)}")
+                continue
+            description = alternative.get("description") or alternative.get("target") or alternative.get("kind") or "?"
+            target = alternative.get("target")
+            suffix = f" · {target}" if target and target != description else ""
+            lines.append(f"  - {_safe_markup(description)}{_safe_markup(suffix)}")
+    lines.append("")
+
+
+def _append_action_detail(lines: list[str], event_type: str, data: dict[str, Any]) -> None:
+    transition = event_type.removeprefix("action.").replace("_", " ").title()
+    lines.append(f"[bold {COLORS['orange']}]─── Action {transition} ───[/]")
+    action = data.get("action")
+    if isinstance(action, dict):
+        for key in ("description", "kind", "target"):
+            value = action.get(key)
+            if value:
+                lines.append(f"[dim]{key}:[/] {_safe_markup(value)}")
+        if "input" in action:
+            lines.append("[dim]input:[/]")
+            if not _append_jsonish(lines, action.get("input"), indent="  "):
+                lines.append(f"  {_safe_markup(action.get('input'))}")
+    if data.get("outcome"):
+        lines.append(f"[dim]outcome:[/] {_safe_markup(data['outcome'])}")
+    lines.append("")
+
+
+def _append_observation_detail(lines: list[str], data: dict[str, Any]) -> None:
+    lines.append(f"[bold {COLORS['teal']}]─── Observation ───[/]")
+    observation = data.get("observation")
+    if not isinstance(observation, dict):
+        lines.append(f"[dim]value:[/] {_safe_markup(observation)}")
+        lines.append("")
+        return
+    source = observation.get("source")
+    if source:
+        lines.append(f"[dim]source:[/] {_safe_markup(source)}")
+    value = observation.get("value")
+    if isinstance(value, dict):
+        if value.get("code"):
+            lines.append(f"[dim]code:[/] {_safe_markup(value['code'])}")
+        if value.get("message"):
+            lines.append(f"[dim]message:[/] {_safe_markup(value['message'])}")
+        remaining = {key: item for key, item in value.items() if key not in {"code", "message"}}
+        if remaining:
+            lines.append("[dim]value:[/]")
+            _append_jsonish(lines, remaining, indent="  ")
+    elif value is not None:
+        lines.append(f"[dim]value:[/] {_safe_markup(value)}")
+    lines.append("")
 
 
 def _response_tool_call_count(response: dict[str, Any]) -> int:

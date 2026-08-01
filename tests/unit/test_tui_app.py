@@ -690,6 +690,101 @@ def test_event_detail_omits_trace_metadata():
     assert "duration:" not in detail
 
 
+def test_decision_detail_prioritizes_semantic_fields():
+    event = TuiEvent(
+        timestamp=0,
+        event_type="decision.recorded",
+        data={
+            "type": "decision.recorded",
+            "decision": {
+                "action": {
+                    "kind": "tool",
+                    "description": "List project structure",
+                    "target": "run_command",
+                    "input": {"command": ["ls", "-la"]},
+                },
+                "reasoning": "The first plan item requires discovery.",
+                "confidence": 0.95,
+                "alternatives": [
+                    {"kind": "tool", "description": "Use find for a broader view", "target": "run_command"},
+                ],
+            },
+        },
+        run_id="run-1",
+        trace_id="trace-1",
+        step_number=1,
+    )
+
+    detail = _format_event_detail_plain(event)
+
+    assert "Decision" in detail
+    assert "action: List project structure" in detail
+    assert "kind: tool" in detail
+    assert "target: run_command" in detail
+    assert "reasoning:" in detail
+    assert "The first plan item requires discovery." in detail
+    assert "confidence: 0.95" in detail
+    assert "alternatives:" in detail
+    assert "Use find for a broader view" in detail
+    assert "run_id" not in detail
+    assert "trace_id" not in detail
+
+
+def test_actionable_observation_detail_prioritizes_guard_fields():
+    event = TuiEvent(
+        timestamp=0,
+        event_type="observation.recorded",
+        data={
+            "type": "observation.recorded",
+            "observation": {
+                "id": "obs-1",
+                "source": "planning.guard",
+                "value": {
+                    "accepted": False,
+                    "code": "PLAN_UPDATE_REQUIRED",
+                    "message": "Update the complete plan checklist",
+                    "plan": {"phase": "executing"},
+                },
+            },
+        },
+        run_id="run-1",
+        trace_id="trace-1",
+    )
+
+    detail = _format_event_detail_plain(event)
+
+    assert "Observation" in detail
+    assert "source: planning.guard" in detail
+    assert "code: PLAN_UPDATE_REQUIRED" in detail
+    assert "message: Update the complete plan checklist" in detail
+    assert '"phase": "executing"' in detail
+    assert "run_id" not in detail
+    assert "trace_id" not in detail
+
+
+def test_completed_tool_detail_retains_full_structured_output():
+    event = TuiEvent(
+        timestamp=0,
+        event_type="tool.completed",
+        data={
+            "type": "tool.completed",
+            "tool_id": "shell_execute",
+            "input": {"command": ["pytest", "-q"]},
+            "output": {
+                "source": "shell_execute",
+                "value": {"exit_code": 1, "stdout": "one failed", "stderr": "assertion failed", "duration_ms": 250},
+            },
+        },
+    )
+
+    detail = _format_event_detail_plain(event)
+
+    assert '"command":' in detail
+    assert '"pytest"' in detail
+    assert '"stdout": "one failed"' in detail
+    assert '"stderr": "assertion failed"' in detail
+
+
 @pytest.mark.asyncio
 async def test_event_feed_collapses_previous_event_and_uses_adaptive_detail_height():
     collector = TuiEventCollector()
