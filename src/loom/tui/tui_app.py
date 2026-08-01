@@ -687,14 +687,12 @@ def _format_event_detail(event: TuiEvent) -> str:
         if _has_llm_stream_details(data):
             _append_llm_stream_details(lines, data)
 
-        lines.append(f"[bold {COLORS['magenta']}]─── LLM Response ───[/]")
         resp = data.get("response", {})
         if isinstance(resp, dict):
             content = resp.get("content")
             if content:
-                lines.append(f"[bold {COLORS['magenta']}]content:[/]")
-                if not _append_llm_content(lines, content, indent="  "):
-                    _append_wrapped(lines, str(content), indent="  ")
+                if not _append_llm_content(lines, content):
+                    _append_wrapped(lines, str(content))
                 lines.append("")
             else:
                 tool_call_count = _response_tool_call_count(resp)

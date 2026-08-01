@@ -1666,7 +1666,9 @@ def test_llm_response_detail_does_not_render_tool_calls(monkeypatch):
     )
 
     detail = writes[0]
-    assert "final answer" in detail
+    assert detail.startswith("final answer")
+    assert "LLM Response" not in detail
+    assert "content:" not in detail
     assert "tool_calls" not in detail
     assert '"query": "loom"' not in detail
 
