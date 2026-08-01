@@ -17,7 +17,9 @@ from loom.core import (
     ToolRef,
     empty_affordances,
     empty_knowledge,
+    err,
     freeze_context,
+    make_loom_error,
     new_context_id,
     new_loop_id,
     new_run_id,
@@ -288,6 +290,185 @@ def test_llm_step_executes_json_tool_action_when_model_does_not_emit_native_tool
         assert len(result.value.context.state.observations) == 4
 
     asyncio.run(scenario())
+
+
+def test_llm_step_recovers_from_native_tool_failure_and_preserves_required_tool():
+    async def scenario():
+        provider = FakeProvider(
+            [
+                ok(
+                    LlmResponse(
+                        content=None,
+                        tool_calls=(LlmToolCall("call-bad", "edit_file", '{"old_text":"wrong"}'),),
+                        finish_reason="tool_calls",
+                    )
+                ),
+                ok(
+                    LlmResponse(
+                        content=None,
+                        tool_calls=(LlmToolCall("call-fixed", "edit_file", '{"old_text":"exact"}'),),
+                        finish_reason="tool_calls",
+                    )
+                ),
+                ok(
+                    LlmResponse(
+                        content=json.dumps(
+                            {
+                                "reasoning": "The corrected edit succeeded",
+                                "action": {"kind": "custom", "description": "Finish"},
+                                "alternatives": [],
+                                "confidence": 0.9,
+                            }
+                        )
+                    )
+                ),
+            ]
+        )
+        calls = []
+
+        async def call_tool(name, input_value, **options):
+            calls.append((name, input_value, options))
+            if len(calls) == 1:
+                return err(
+                    make_loom_error(
+                        "VALIDATION_FAILED",
+                        "old_text was not found",
+                        retryable=False,
+                        metadata={"edit_index": 4, "failureDomain": "tool"},
+                    )
+                )
+            return ok(Observation("edit-observation", "edit_file", {"replacements": 1}, NOW))
+
+        context = make_context(tools=(ToolRef("edit_file", "Edit a file", input_schema={"type": "object"}),))
+        result = await create_llm_step_function(provider, required_tools=("edit_file",))(context, make_runtime(call_tool=call_tool))
+
+        assert result.ok
+        assert len(calls) == 2
+        assert calls[0][2]["metadata"]["llm_call_id"].endswith("-llm-1")
+        assert calls[1][2]["metadata"]["llm_call_id"].endswith("-llm-2")
+        assert provider.messages[1][2] == "required"
+        failure_message = next(message for message in provider.messages[1][0] if message.role == "tool")
+        assert json.loads(failure_message.content) == {
+            "ok": False,
+            "error": {
+                "code": "VALIDATION_FAILED",
+                "message": "old_text was not found",
+                "retryable": False,
+                "metadata": {"edit_index": 4, "failureDomain": "tool"},
+            },
+        }
+        assert result.value.trace.observations[0].value["ok"] is False
+        assert result.value.trace.observations[1].value["replacements"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_llm_step_gives_json_tool_failure_feedback_then_recovers():
+    async def scenario():
+        def tool_decision(query):
+            return json.dumps(
+                {
+                    "reasoning": "Try the tool",
+                    "action": {
+                        "kind": "tool",
+                        "target": "search",
+                        "description": "Search",
+                        "input": {"query": query},
+                    },
+                    "alternatives": [],
+                    "confidence": 0.8,
+                }
+            )
+
+        provider = FakeProvider(
+            [
+                ok(LlmResponse(content=tool_decision("bad"))),
+                ok(LlmResponse(content=tool_decision("fixed"))),
+                ok(
+                    LlmResponse(
+                        content=json.dumps(
+                            {
+                                "reasoning": "The corrected search succeeded",
+                                "action": {"kind": "custom", "description": "Finish"},
+                                "alternatives": [],
+                                "confidence": 0.9,
+                            }
+                        )
+                    )
+                ),
+            ]
+        )
+        calls = []
+
+        async def call_tool(name, input_value, **options):
+            calls.append((name, input_value, options))
+            if len(calls) == 1:
+                return err(
+                    make_loom_error(
+                        "TOOL_FAILED",
+                        "index unavailable",
+                        retryable=True,
+                        metadata={"failureDomain": "tool"},
+                    )
+                )
+            return ok(Observation("search-observation", "search", {"hits": 1}, NOW))
+
+        result = await create_llm_step_function(provider)(make_context(), make_runtime(call_tool=call_tool))
+
+        assert result.ok
+        assert [input_value["query"] for _name, input_value, _options in calls] == ["bad", "fixed"]
+        assert calls[0][2]["metadata"]["llm_call_id"].endswith("-llm-1")
+        assert calls[1][2]["metadata"]["llm_call_id"].endswith("-llm-2")
+        assert calls[0][2]["metadata"]["tool_call_source"] == "json_action"
+        failure_feedback = provider.messages[1][0][-1].content
+        assert '"ok":false' in failure_feedback
+        assert '"message":"index unavailable"' in failure_feedback
+
+    asyncio.run(scenario())
+
+
+def test_failed_tool_consumes_tool_call_budget():
+    async def scenario():
+        provider = FakeProvider(
+            [
+                ok(LlmResponse(content=None, tool_calls=(LlmToolCall("call-1", "search", "{}"),), finish_reason="tool_calls")),
+                ok(LlmResponse(content=None, tool_calls=(LlmToolCall("call-2", "search", "{}"),), finish_reason="tool_calls")),
+            ]
+        )
+        calls = 0
+
+        async def call_tool(_name, _input_value, **_options):
+            nonlocal calls
+            calls += 1
+            return err(make_loom_error("TOOL_FAILED", "boom", retryable=False, metadata={"failureDomain": "tool"}))
+
+        result = await create_llm_step_function(provider, max_tool_calls_per_step=1)(make_context(), make_runtime(call_tool=call_tool))
+
+        assert not result.ok
+        assert result.error.code == "LLM_FAILED"
+        assert result.error.cause["maxToolCalls"] == 1
+        assert calls == 1
+        assert len(provider.messages) == 2
+
+    asyncio.run(scenario())
+
+
+def test_llm_step_keeps_aborted_and_unclassified_tool_failures_terminal():
+    async def run_failure(error):
+        provider = FakeProvider(
+            [ok(LlmResponse(content=None, tool_calls=(LlmToolCall("call-1", "search", "{}"),), finish_reason="tool_calls"))]
+        )
+
+        async def call_tool(_name, _input_value, **_options):
+            return err(error)
+
+        return await create_llm_step_function(provider)(make_context(), make_runtime(call_tool=call_tool))
+
+    aborted = asyncio.run(run_failure(make_loom_error("ABORTED", "cancelled", retryable=False, metadata={"failureDomain": "tool"})))
+    infrastructure = asyncio.run(run_failure(make_loom_error("INTERNAL", "trace failed", retryable=False)))
+
+    assert not aborted.ok and aborted.error.code == "ABORTED"
+    assert not infrastructure.ok and infrastructure.error.code == "INTERNAL"
 
 
 def test_llm_step_requests_required_tool_choice_until_required_tools_complete():

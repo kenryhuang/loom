@@ -17,6 +17,7 @@ from loom.core.models import (
     Action,
     Context,
     Decision,
+    LoomError,
     Observation,
     Result,
     StepResult,
@@ -412,21 +413,34 @@ def create_llm_step_function(
                         tool_call.name,
                         parsed_input.value,
                         metadata={
+                            "llm_call_id": llm_call_id,
                             "tool_call_id": tool_call.id,
                             "tool_name": tool_call.name,
                             "model": provider.model,
                         },
                     )
-                    if not observation.ok:
-                        return observation
                     tool_call_count += 1
-                    pending_required_tools.discard(tool_call.name)
-                    tool_observations.append(observation.value)
-                    native_tool_results.append((tool_call, observation.value))
+                    if not observation.ok:
+                        if not _recoverable_tool_failure(observation.error):
+                            return observation
+                        failure = _tool_failure_observation(
+                            observation.error,
+                            observation_id=f"{trace_id}-{tool_call.id}-failure-observation",
+                            source=tool_call.name,
+                            at=runtime.now(),
+                        )
+                        if not failure.ok:
+                            return failure
+                        tool_observation = failure.value
+                    else:
+                        pending_required_tools.discard(tool_call.name)
+                        tool_observation = observation.value
+                    tool_observations.append(tool_observation)
+                    native_tool_results.append((tool_call, tool_observation))
                     messages.append(
                         LlmMessage(
                             "tool",
-                            json.dumps(thaw_json(observation.value.value), separators=(",", ":")),
+                            json.dumps(thaw_json(tool_observation.value), separators=(",", ":")),
                             name=tool_call.name,
                             tool_call_id=tool_call.id,
                         )
@@ -450,18 +464,31 @@ def create_llm_step_function(
                     json_tool_action.target,
                     tool_input,
                     metadata={
+                        "llm_call_id": llm_call_id,
                         "tool_call_id": tool_call_id,
                         "tool_name": json_tool_action.target,
                         "tool_call_source": "json_action",
                         "model": provider.model,
                     },
                 )
-                if not observation.ok:
-                    return observation
                 tool_call_count += 1
-                pending_required_tools.discard(json_tool_action.target or "")
-                tool_observations.append(observation.value)
-                json_tool_results.append((json_tool_action, observation.value))
+                if not observation.ok:
+                    if not _recoverable_tool_failure(observation.error):
+                        return observation
+                    failure = _tool_failure_observation(
+                        observation.error,
+                        observation_id=f"{trace_id}-{tool_call_id}-failure-observation",
+                        source=json_tool_action.target,
+                        at=runtime.now(),
+                    )
+                    if not failure.ok:
+                        return failure
+                    tool_observation = failure.value
+                else:
+                    pending_required_tools.discard(json_tool_action.target or "")
+                    tool_observation = observation.value
+                tool_observations.append(tool_observation)
+                json_tool_results.append((json_tool_action, tool_observation))
             messages.append(LlmMessage("assistant", "" if final_response.content is None else final_response.content))
             messages.append(LlmMessage("assistant", _json_tool_result_feedback(tuple(json_tool_results))))
 
@@ -1263,6 +1290,45 @@ def _parse_tool_arguments(tool_call: LlmToolCall) -> Result:
                 f"Failed to parse tool call {tool_call.id} arguments",
                 retryable=False,
                 cause={"toolCallId": tool_call.id, "cause": str(exc)},
+            )
+        )
+
+
+def _recoverable_tool_failure(error: LoomError | None) -> bool:
+    return bool(error and error.code != "ABORTED" and (error.metadata or {}).get("failureDomain") == "tool")
+
+
+def _tool_failure_observation(
+    error: LoomError,
+    *,
+    observation_id: str,
+    source: str,
+    at: str,
+) -> Result:
+    try:
+        return ok(
+            Observation(
+                observation_id,
+                source,
+                {
+                    "ok": False,
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                        "retryable": error.retryable,
+                        "metadata": dict(error.metadata or {}),
+                    },
+                },
+                at,
+            )
+        )
+    except BaseException as exc:
+        return err(
+            make_loom_error(
+                "INTERNAL",
+                "Failed to construct tool failure observation",
+                retryable=False,
+                cause={"name": type(exc).__name__, "message": str(exc)},
             )
         )
 
