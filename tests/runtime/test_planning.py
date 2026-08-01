@@ -18,7 +18,7 @@ from loom.core import (
     make_loom_error,
     ok,
 )
-from loom.runtime.planning import PlanController, PlanMode, PlanningRuntime, PlanPhase
+from loom.runtime.planning import PlanController, PlanItemStatus, PlanMode, PlanningRuntime, PlanPhase
 
 
 def _now():
@@ -292,41 +292,33 @@ async def test_guard_does_not_convert_underlying_business_tool_errors():
 
 
 @pytest.mark.asyncio
-async def test_execution_batch_allows_same_batch_and_blocks_next_batch_until_plan_update():
+async def test_active_item_allows_tools_across_multiple_llm_responses():
     planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
-    planning.controller.submit("plan", ("Inspect",))
+    planning.controller.submit("plan", ("Inspect", "Verify"))
     planning.controller.update(
-        "started",
-        ({"id": "step_1", "content": "Inspect", "status": "in_progress", "note": None},),
+        "start inspection",
+        (
+            {"id": "step_1", "content": "Inspect", "status": "in_progress", "note": None},
+            {"id": "step_2", "content": "Verify", "status": "pending", "note": None},
+        ),
     )
     calls = []
 
     async def handler(_input, options):
-        tool_name = options["name"]
-        calls.append(tool_name)
-        return ok(Observation(f"obs-{tool_name}", tool_name, {"ok": True}, _now()))
+        calls.append(options["metadata"]["llm_call_id"])
+        return ok(Observation(f"obs-{len(calls)}", "read_file", {"ok": True}, _now()))
 
-    handlers = planning.wrap_tools(
-        {
-            "read_file": handler,
-            "shell_execute": handler,
-            "write_file": handler,
-        }
-    )
+    read_file = planning.wrap_tools({"read_file": handler})["read_file"]
+    first = await read_file({}, {"metadata": {"llm_call_id": "llm-1"}})
+    second = await read_file({}, {"metadata": {"llm_call_id": "llm-2"}})
+    third = await read_file({}, {"metadata": {"llm_call_id": "llm-3"}})
 
-    first = await handlers["read_file"]({}, {"name": "read_file", "metadata": {"llm_call_id": "llm-1"}})
-    same_batch = await handlers["shell_execute"]({}, {"name": "shell_execute", "metadata": {"llm_call_id": "llm-1"}})
-    blocked = await handlers["write_file"]({}, {"name": "write_file", "metadata": {"llm_call_id": "llm-2"}})
-
-    assert first.value.source == "read_file"
-    assert same_batch.value.source == "shell_execute"
-    assert blocked.value.source == "planning.guard"
-    assert blocked.value.value["code"] == "PLAN_UPDATE_REQUIRED"
-    assert calls == ["read_file", "shell_execute"]
+    assert all(result.ok and result.value.source == "read_file" for result in (first, second, third))
+    assert calls == ["llm-1", "llm-2", "llm-3"]
 
 
 @pytest.mark.asyncio
-async def test_failed_execution_batch_also_requires_plan_update():
+async def test_tool_failure_does_not_require_plan_update_before_recovery():
     planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
     planning.controller.submit("plan", ("Inspect",))
     planning.controller.update(
@@ -344,20 +336,23 @@ async def test_failed_execution_batch_also_requires_plan_update():
     handlers = planning.wrap_tools({"edit_file": handler, "read_file": handler})
 
     failed = await handlers["edit_file"]({}, {"name": "edit_file", "metadata": {"llm_call_id": "llm-1"}})
-    blocked = await handlers["read_file"]({}, {"name": "read_file", "metadata": {"llm_call_id": "llm-2"}})
+    recovered = await handlers["read_file"]({}, {"name": "read_file", "metadata": {"llm_call_id": "llm-2"}})
 
     assert not failed.ok and failed.error.code == "VALIDATION_FAILED"
-    assert blocked.ok and blocked.value.value["code"] == "PLAN_UPDATE_REQUIRED"
-    assert calls == ["edit_file"]
+    assert recovered.ok and recovered.value.source == "read_file"
+    assert calls == ["edit_file", "read_file"]
 
 
 @pytest.mark.asyncio
-async def test_successful_plan_update_clears_execution_batch_barrier():
+async def test_semantic_item_transition_allows_tools_under_next_active_item():
     planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
-    planning.controller.submit("plan", ("Inspect",))
+    planning.controller.submit("plan", ("Inspect", "Verify"))
     planning.controller.update(
         "started",
-        ({"id": "step_1", "content": "Inspect", "status": "in_progress", "note": None},),
+        (
+            {"id": "step_1", "content": "Inspect", "status": "in_progress", "note": None},
+            {"id": "step_2", "content": "Verify", "status": "pending", "note": None},
+        ),
     )
     calls = []
 
@@ -369,16 +364,21 @@ async def test_successful_plan_update_clears_execution_batch_barrier():
     await handlers["read_file"]({}, {"metadata": {"llm_call_id": "llm-1"}})
     updated = await handlers["update_plan"](
         {
-            "explanation": "inspection continues after reading",
-            "items": [{"id": "step_1", "content": "Inspect", "status": "in_progress", "note": None}],
+            "explanation": "inspection complete; begin verification",
+            "items": [
+                {"id": "step_1", "content": "Inspect", "status": "completed", "note": "Reviewed core files"},
+                {"id": "step_2", "content": "Verify", "status": "in_progress", "note": None},
+            ],
         },
         {"metadata": {"llm_call_id": "llm-2"}},
     )
-    next_batch = await handlers["read_file"]({}, {"metadata": {"llm_call_id": "llm-2"}})
+    next_item_tool = await handlers["read_file"]({}, {"metadata": {"llm_call_id": "llm-3"}})
 
     assert updated.value.value["accepted"] is True
-    assert next_batch.value.source == "read_file"
-    assert calls == ["llm-1", "llm-2"]
+    assert planning.controller.state.items[0].status is PlanItemStatus.COMPLETED
+    assert planning.controller.state.items[1].status is PlanItemStatus.IN_PROGRESS
+    assert next_item_tool.value.source == "read_file"
+    assert calls == ["llm-1", "llm-3"]
 
 
 def test_workflow_description_requires_update_between_execution_batches():
