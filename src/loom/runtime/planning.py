@@ -260,6 +260,8 @@ class PlanningRuntime:
         self._bound_runtime: Any | None = None
         self._bound_context: Any | None = None
         self._normal_refs: tuple[ToolRef, ...] | None = None
+        self._execution_batch_id: str | None = None
+        self._plan_update_required = False
 
     @property
     def controller(self) -> PlanController:
@@ -356,13 +358,17 @@ class PlanningRuntime:
             )
 
         async def update_plan(input_value: Mapping[str, Any], _options: Any = None) -> Result:
-            return await self._transition_result(
+            result = await self._transition_result(
                 "update_plan",
                 self._controller.update(
                     str(input_value.get("explanation", "")),
                     input_value.get("items", ()),
                 ),
             )
+            if result.ok and result.value.value.get("accepted") is True:
+                self._execution_batch_id = None
+                self._plan_update_required = False
+            return result
 
         wrapped.update(
             {
@@ -468,7 +474,8 @@ class PlanningRuntime:
         if state.phase is PlanPhase.EXECUTING:
             prefix = (
                 "Execute the checklist dynamically. Keep exactly one item in_progress before calling normal "
-                "tools, update progress with update_plan using the complete checklist snapshot every time, "
+                "tools, call update_plan with the complete checklist snapshot after each normal-tool batch "
+                "and before starting the next execution batch, "
                 "and finish only after every item is terminal."
             )
         else:
@@ -487,6 +494,7 @@ class PlanningRuntime:
     def _guard_handler(self, tool_id: str, handler: Any) -> Callable[..., Any]:
         async def guarded(input_value: Any, options: Any = None) -> Result:
             phase = self._controller.state.phase
+            batch_id = self._llm_batch_id(options)
             if phase is PlanPhase.COMPLETED:
                 return self._rejected(
                     "PLAN_PHASE_INVALID",
@@ -498,6 +506,11 @@ class PlanningRuntime:
                     "Submit the plan before using execution tools",
                 )
             if phase is PlanPhase.EXECUTING:
+                if self._plan_update_required and batch_id and batch_id != self._execution_batch_id:
+                    return self._rejected(
+                        "PLAN_UPDATE_REQUIRED",
+                        "Update the complete plan checklist before starting another execution batch",
+                    )
                 if tool_id == self.finish_tool_id:
                     terminal = {PlanItemStatus.COMPLETED, PlanItemStatus.SKIPPED}
                     if not self._controller.state.items or any(item.status not in terminal for item in self._controller.state.items):
@@ -512,6 +525,9 @@ class PlanningRuntime:
                     )
 
             result = await _invoke_handler(handler, input_value, options)
+            if phase is PlanPhase.EXECUTING and batch_id:
+                self._execution_batch_id = batch_id
+                self._plan_update_required = True
             if result.ok and phase is PlanPhase.EXECUTING and tool_id == self.finish_tool_id:
                 completed = self._controller.complete(trigger="finish_tool")
                 if not completed.ok:
@@ -522,6 +538,16 @@ class PlanningRuntime:
             return result
 
         return guarded
+
+    @staticmethod
+    def _llm_batch_id(options: Any) -> str | None:
+        if not isinstance(options, Mapping):
+            return None
+        metadata = options.get("metadata")
+        if not isinstance(metadata, Mapping):
+            return None
+        value = metadata.get("llm_call_id")
+        return value if isinstance(value, str) and value else None
 
     async def _transition_result(self, tool_id: str, transition: Result) -> Result:
         if not transition.ok:

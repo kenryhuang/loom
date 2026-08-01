@@ -291,6 +291,106 @@ async def test_guard_does_not_convert_underlying_business_tool_errors():
     assert result.error.code == "TOOL_FAILED"
 
 
+@pytest.mark.asyncio
+async def test_execution_batch_allows_same_batch_and_blocks_next_batch_until_plan_update():
+    planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
+    planning.controller.submit("plan", ("Inspect",))
+    planning.controller.update(
+        "started",
+        ({"id": "step_1", "content": "Inspect", "status": "in_progress", "note": None},),
+    )
+    calls = []
+
+    async def handler(_input, options):
+        tool_name = options["name"]
+        calls.append(tool_name)
+        return ok(Observation(f"obs-{tool_name}", tool_name, {"ok": True}, _now()))
+
+    handlers = planning.wrap_tools(
+        {
+            "read_file": handler,
+            "shell_execute": handler,
+            "write_file": handler,
+        }
+    )
+
+    first = await handlers["read_file"]({}, {"name": "read_file", "metadata": {"llm_call_id": "llm-1"}})
+    same_batch = await handlers["shell_execute"]({}, {"name": "shell_execute", "metadata": {"llm_call_id": "llm-1"}})
+    blocked = await handlers["write_file"]({}, {"name": "write_file", "metadata": {"llm_call_id": "llm-2"}})
+
+    assert first.value.source == "read_file"
+    assert same_batch.value.source == "shell_execute"
+    assert blocked.value.source == "planning.guard"
+    assert blocked.value.value["code"] == "PLAN_UPDATE_REQUIRED"
+    assert calls == ["read_file", "shell_execute"]
+
+
+@pytest.mark.asyncio
+async def test_failed_execution_batch_also_requires_plan_update():
+    planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
+    planning.controller.submit("plan", ("Inspect",))
+    planning.controller.update(
+        "started",
+        ({"id": "step_1", "content": "Inspect", "status": "in_progress", "note": None},),
+    )
+    calls = []
+
+    async def handler(_input, options):
+        calls.append(options["name"])
+        if options["name"] == "edit_file":
+            return err(make_loom_error("VALIDATION_FAILED", "old_text missing", retryable=False))
+        return ok(Observation("obs-read", "read_file", {"ok": True}, _now()))
+
+    handlers = planning.wrap_tools({"edit_file": handler, "read_file": handler})
+
+    failed = await handlers["edit_file"]({}, {"name": "edit_file", "metadata": {"llm_call_id": "llm-1"}})
+    blocked = await handlers["read_file"]({}, {"name": "read_file", "metadata": {"llm_call_id": "llm-2"}})
+
+    assert not failed.ok and failed.error.code == "VALIDATION_FAILED"
+    assert blocked.ok and blocked.value.value["code"] == "PLAN_UPDATE_REQUIRED"
+    assert calls == ["edit_file"]
+
+
+@pytest.mark.asyncio
+async def test_successful_plan_update_clears_execution_batch_barrier():
+    planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
+    planning.controller.submit("plan", ("Inspect",))
+    planning.controller.update(
+        "started",
+        ({"id": "step_1", "content": "Inspect", "status": "in_progress", "note": None},),
+    )
+    calls = []
+
+    async def handler(_input, options):
+        calls.append(options["metadata"]["llm_call_id"])
+        return ok(Observation(f"obs-{len(calls)}", "read_file", {"ok": True}, _now()))
+
+    handlers = planning.wrap_tools({"read_file": handler})
+    await handlers["read_file"]({}, {"metadata": {"llm_call_id": "llm-1"}})
+    updated = await handlers["update_plan"](
+        {
+            "explanation": "inspection continues after reading",
+            "items": [{"id": "step_1", "content": "Inspect", "status": "in_progress", "note": None}],
+        },
+        {"metadata": {"llm_call_id": "llm-2"}},
+    )
+    next_batch = await handlers["read_file"]({}, {"metadata": {"llm_call_id": "llm-2"}})
+
+    assert updated.value.value["accepted"] is True
+    assert next_batch.value.source == "read_file"
+    assert calls == ["llm-1", "llm-2"]
+
+
+def test_workflow_description_requires_update_between_execution_batches():
+    planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
+    planning.controller.submit("plan", ("Inspect",))
+
+    description = planning._workflow_description(planning.controller.state)
+
+    assert "after each normal-tool batch" in description
+    assert "before starting the next" in description
+
+
 class RecordingSink:
     def __init__(self):
         self.events = []
