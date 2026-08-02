@@ -23,6 +23,18 @@ from loom.core import (
 )
 
 PLAN_TOOL_IDS = frozenset({"enter_plan", "submit_plan", "update_plan"})
+_PLAN_TRANSITION_BOUNDARY = {
+    "controlFlow": {
+        "stepBoundary": True,
+        "reason": "planning_transition",
+    }
+}
+
+
+def _with_plan_transition_boundary(observation: Observation) -> Observation:
+    metadata = dict(observation.metadata or {})
+    metadata.update(_PLAN_TRANSITION_BOUNDARY)
+    return replace(observation, metadata=metadata)
 
 
 class PlanMode(StrEnum):
@@ -520,6 +532,7 @@ class PlanningRuntime:
                 emitted = await self._emit_pending_events()
                 if not emitted.ok:
                     return emitted
+                return ok(_with_plan_transition_boundary(result.value))
             return result
 
         return guarded
@@ -536,6 +549,7 @@ class PlanningRuntime:
                 tool_id,
                 {"accepted": True, "plan": plan_state_dict(transition.value)},
                 self._now(),
+                metadata=_PLAN_TRANSITION_BOUNDARY,
             )
         )
 

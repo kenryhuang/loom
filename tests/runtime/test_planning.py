@@ -187,10 +187,13 @@ async def test_plan_handlers_return_canonical_snapshots_and_rejections_are_recov
 
     assert entered.ok and entered.value.value["accepted"] is True
     assert entered.value.value["plan"]["phase"] == "planning"
+    assert entered.value.metadata["controlFlow"]["stepBoundary"] is True
     assert submitted.ok and submitted.value.value["plan"]["items"][0]["id"] == "step_1"
+    assert submitted.value.metadata["controlFlow"]["stepBoundary"] is True
     assert duplicate_submit.ok
     assert duplicate_submit.value.source == "planning.guard"
     assert duplicate_submit.value.value["code"] == "PLAN_PHASE_INVALID"
+    assert duplicate_submit.value.metadata is None
 
 
 @pytest.mark.asyncio
@@ -211,6 +214,9 @@ async def test_update_plan_schema_and_handler_allow_omitted_note():
     assert item_schema["required"] == ("content", "status")
     assert result.ok and result.value.value["accepted"] is True
     assert result.value.value["plan"]["items"][0]["note"] is None
+    assert result.value.metadata == {
+        "controlFlow": {"stepBoundary": True, "reason": "planning_transition"}
+    }
 
 
 def test_update_plan_tool_advertises_full_snapshot_semantics():
@@ -242,8 +248,12 @@ async def test_finish_gate_requires_terminal_plan_then_preserves_handler_result(
     finished = await handlers["finish"]({"report": "done"}, {})
 
     assert premature.ok and premature.value.value["code"] == "PLAN_INCOMPLETE"
+    assert premature.value.metadata is None
     assert called == 1
     assert finished.ok and finished.value.source == "finish"
+    assert finished.value.metadata == {
+        "controlFlow": {"stepBoundary": True, "reason": "planning_transition"}
+    }
     assert planning.controller.state.phase is PlanPhase.COMPLETED
 
 
