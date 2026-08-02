@@ -648,6 +648,104 @@ def test_llm_step_executes_json_tool_action_with_multiple_targets():
     asyncio.run(scenario())
 
 
+def test_native_tool_boundary_ends_batch_and_skips_later_calls():
+    async def scenario():
+        provider = FakeProvider(
+            [
+                ok(
+                    LlmResponse(
+                        content=None,
+                        tool_calls=(
+                            LlmToolCall("call-transition", "transition", "{}"),
+                            LlmToolCall("call-stale", "stale_tool", "{}"),
+                        ),
+                        finish_reason="tool_calls",
+                    )
+                )
+            ]
+        )
+        calls = []
+
+        async def call_tool(name, _input_value, **_options):
+            calls.append(name)
+            return ok(
+                Observation(
+                    "transition-observation",
+                    name,
+                    {"accepted": True},
+                    NOW,
+                    metadata={"controlFlow": {"stepBoundary": True}},
+                )
+            )
+
+        context = make_context(
+            tools=(
+                ToolRef("transition", "Change workflow phase"),
+                ToolRef("stale_tool", "Tool from the old workflow phase"),
+            )
+        )
+        result = await create_llm_step_function(provider)(context, make_runtime(call_tool=call_tool))
+
+        assert result.ok
+        assert calls == ["transition"]
+        assert len(provider.messages) == 1
+
+    asyncio.run(scenario())
+
+
+def test_json_tool_boundary_ends_batch_and_skips_later_calls():
+    async def scenario():
+        provider = FakeProvider(
+            [
+                ok(
+                    LlmResponse(
+                        content=json.dumps(
+                            {
+                                "reasoning": "Change phase before continuing",
+                                "action": {
+                                    "kind": "tool",
+                                    "target": "transition, stale_tool",
+                                    "description": "Enter the new workflow phase",
+                                    "input": {},
+                                },
+                                "alternatives": [],
+                                "confidence": 0.9,
+                            }
+                        ),
+                        finish_reason="stop",
+                    )
+                )
+            ]
+        )
+        calls = []
+
+        async def call_tool(name, _input_value, **_options):
+            calls.append(name)
+            return ok(
+                Observation(
+                    "transition-observation",
+                    name,
+                    {"accepted": True},
+                    NOW,
+                    metadata={"controlFlow": {"stepBoundary": True}},
+                )
+            )
+
+        context = make_context(
+            tools=(
+                ToolRef("transition", "Change workflow phase"),
+                ToolRef("stale_tool", "Tool from the old workflow phase"),
+            )
+        )
+        result = await create_llm_step_function(provider)(context, make_runtime(call_tool=call_tool))
+
+        assert result.ok
+        assert calls == ["transition"]
+        assert len(provider.messages) == 1
+
+    asyncio.run(scenario())
+
+
 def test_llm_step_can_run_unbounded_tool_calls_when_limit_is_none():
     async def scenario():
         provider = FakeProvider(

@@ -391,6 +391,7 @@ def create_llm_step_function(
             if not tracker.is_within_budget(context.goal.budget.max_tokens):
                 return _token_budget_exceeded(tracker.total, context.goal.budget.max_tokens)
 
+            step_boundary_requested = False
             if enable_tool_calling and final_response.tool_calls:
                 if max_tool_calls_per_step is not None and tool_call_count >= max_tool_calls_per_step:
                     return _max_tool_calls_exceeded(max_tool_calls_per_step)
@@ -445,7 +446,12 @@ def create_llm_step_function(
                             tool_call_id=tool_call.id,
                         )
                     )
+                    if _requests_step_boundary(tool_observation):
+                        step_boundary_requested = True
+                        break
                 messages.append(_native_tool_execution_transcript(native_tool_results))
+                if step_boundary_requested:
+                    break
                 continue
 
             json_tool_actions = ()
@@ -489,8 +495,13 @@ def create_llm_step_function(
                     tool_observation = observation.value
                 tool_observations.append(tool_observation)
                 json_tool_results.append((json_tool_action, tool_observation))
+                if _requests_step_boundary(tool_observation):
+                    step_boundary_requested = True
+                    break
             messages.append(LlmMessage("assistant", "" if final_response.content is None else final_response.content))
             messages.append(LlmMessage("assistant", _json_tool_result_feedback(tuple(json_tool_results))))
+            if step_boundary_requested:
+                break
 
         if final_response is None:
             return err(make_loom_error("LLM_FAILED", "LLM provider returned no response", retryable=False))
@@ -1296,6 +1307,14 @@ def _parse_tool_arguments(tool_call: LlmToolCall) -> Result:
 
 def _recoverable_tool_failure(error: LoomError | None) -> bool:
     return bool(error and error.code != "ABORTED" and (error.metadata or {}).get("failureDomain") == "tool")
+
+
+def _requests_step_boundary(observation: Observation) -> bool:
+    metadata = observation.metadata
+    if not isinstance(metadata, Mapping):
+        return False
+    control_flow = metadata.get("controlFlow")
+    return isinstance(control_flow, Mapping) and control_flow.get("stepBoundary") is True
 
 
 def _tool_failure_observation(
