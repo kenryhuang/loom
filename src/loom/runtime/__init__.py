@@ -27,6 +27,15 @@ from loom.runtime.planning import (
     plan_state_dict,
 )
 from loom.runtime.plugins import LoopPlugin, RunPluginContext, run_with_plugins
+from loom.runtime.workflow_routing import (
+    WorkflowRouteController,
+    WorkflowRouteEvent,
+    WorkflowRoutePhase,
+    WorkflowRoutePolicy,
+    WorkflowRouteState,
+    workflow_route_state_dict,
+    workflow_route_state_from_mapping,
+)
 
 __all__ = [
     "CancellationToken",
@@ -54,4 +63,11 @@ __all__ = [
     "RunPluginContext",
     "plan_state_dict",
     "run_with_plugins",
+    "WorkflowRouteController",
+    "WorkflowRouteEvent",
+    "WorkflowRoutePhase",
+    "WorkflowRoutePolicy",
+    "WorkflowRouteState",
+    "workflow_route_state_dict",
+    "workflow_route_state_from_mapping",
 ]
