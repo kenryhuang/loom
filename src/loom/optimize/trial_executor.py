@@ -24,7 +24,7 @@ from loom.evaluation.experiments import TrialEntry
 from loom.optimize.control import OptimizeControlInterrupt, OptimizeRunControl
 from loom.optimize.events import OptimizationEventEmitter, ScopedOptimizationTraceSink
 from loom.optimize.task_sets import PreparedTaskSets, VerifierSpec
-from loom.runtime import CancellationToken
+from loom.runtime import CancellationToken, PlanMode
 from loom.tasks import TaskHarness, TaskRequest, TaskRunOptions, run_generic_task
 
 _TRIAL_CHECKPOINT_SCHEMA = "loom.optimization.trial-side-checkpoint.v3"
@@ -304,6 +304,7 @@ class OptimizeTrialExecutor:
                     request,
                     provider=self.solver_provider,
                     options=TaskRunOptions(
+                        plan_mode=PlanMode.OFF,
                         trace_path=trace_path,
                         timeout_ms=self.trial_timeout_seconds * 1000,
                     ),
