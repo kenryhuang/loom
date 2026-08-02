@@ -1,6 +1,8 @@
 import asyncio
+import io
 import json
 import threading
+import urllib.error
 from dataclasses import replace
 from pathlib import Path
 
@@ -1681,6 +1683,82 @@ def test_llm_step_streaming_provider_emits_delta_events_and_executes_tool_calls(
         assert event_types.count("llm.stream.completed") == 2
         assert events[event_types.index("llm.content.delta")]["delta"]
         assert result.value.trace.metadata["streaming"] is True
+
+    asyncio.run(scenario())
+
+
+def test_llm_step_streaming_required_tool_choice_retries_without_rejected_option():
+    async def scenario():
+        class RejectingRequiredProvider:
+            model = "thinking-model"
+
+            def __init__(self):
+                self.tool_choices = []
+
+            async def stream_chat(self, _messages, tools=None, cancellation=None, tool_choice=None):
+                self.tool_choices.append(tool_choice)
+                if tool_choice == "required":
+                    raise RuntimeError(
+                        "<400> InvalidParameter: The tool_choice parameter does not support "
+                        "being set to required in thinking mode"
+                    )
+                yield LlmStreamEvent(
+                    kind="completed",
+                    response=LlmResponse(
+                        content=json.dumps(
+                            {
+                                "reasoning": "Continue without a forced provider option",
+                                "action": {"kind": "custom", "description": "Finish"},
+                                "alternatives": [],
+                                "confidence": 0.9,
+                            }
+                        )
+                    ),
+                )
+
+        provider = RejectingRequiredProvider()
+        result = await create_llm_step_function(provider, required_tools=("search",), stream=True)(
+            make_context(),
+            make_runtime(),
+        )
+
+        assert result.ok
+        assert provider.tool_choices == ["required", None]
+
+    asyncio.run(scenario())
+
+
+def test_openai_provider_streaming_http_error_preserves_provider_diagnostic(monkeypatch):
+    async def scenario():
+        payload = json.dumps(
+            {
+                "error": {
+                    "code": "InvalidParameter",
+                    "message": "The tool_choice parameter does not support being set to required in thinking mode",
+                }
+            }
+        ).encode()
+
+        def fake_urlopen(request):
+            raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", None, io.BytesIO(payload))
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        provider = create_openai_provider(api_key="key", model="thinking-model")
+
+        with pytest.raises(RuntimeError, match="tool_choice") as exc_info:
+            [
+                event
+                async for event in provider.stream_chat(
+                    [LlmMessage("user", "route")],
+                    tools=(to_llm_tool(ToolRef("enter_plan", "Enter plan")),),
+                    tool_choice="required",
+                )
+            ]
+
+        assert "400" in str(exc_info.value)
+        assert "thinking mode" in str(exc_info.value)
+        assert exc_info.value.status == 400
+        assert exc_info.value.body["error"]["code"] == "InvalidParameter"
 
     asyncio.run(scenario())
 

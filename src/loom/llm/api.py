@@ -185,6 +185,40 @@ def _tool_choice_retryable(error: Any) -> bool:
     return "tool_choice" in text and ("invalidparameter" in text or "not support" in text or "unsupported" in text)
 
 
+class _OpenAIHTTPError(RuntimeError):
+    def __init__(self, status: int, body: Any):
+        self.status = status
+        self.body = body
+        super().__init__(_openai_error_message(status, body))
+
+
+def _openai_error_message(status: int, payload: Any) -> str:
+    error = payload.get("error") if isinstance(payload, Mapping) else None
+    if isinstance(error, Mapping):
+        message = error.get("message")
+        code = error.get("code")
+        if message:
+            detail = f"{code}: {message}" if code else str(message)
+            return f"<{status}> {detail}"
+    if isinstance(payload, str) and payload.strip():
+        return f"<{status}> {payload.strip()}"
+    return f"OpenAI request failed with status {status}"
+
+
+def _http_error_body(error: urllib.error.HTTPError) -> Any:
+    try:
+        raw = error.read()
+    except BaseException:
+        return {}
+    if not raw:
+        return {}
+    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
 def build_system_prompt(context: Context) -> str:
     lines = [
         f"You are the loop brain for this Loom context. Your role is: {context.identity.role}.",
@@ -778,12 +812,17 @@ async def _consume_streaming_chat(
             if not emitted.ok:
                 return emitted
     except BaseException as exc:
+        cause = {"name": type(exc).__name__, "message": str(exc)}
+        status = getattr(exc, "status", None)
+        if isinstance(status, int):
+            cause["status"] = status
+            cause["body"] = getattr(exc, "body", {})
         return err(
             make_loom_error(
                 "LLM_FAILED",
                 str(exc),
-                retryable=True,
-                cause={"name": type(exc).__name__, "message": str(exc)},
+                retryable=status is None or status == 429 or status >= 500,
+                cause=cause,
             )
         )
 
@@ -908,7 +947,7 @@ class OpenAIProvider:
         if not response.get("ok", False):
             status = int(response.get("status", 0))
             payload = response.get("json") or {}
-            message = (payload.get("error", {}).get("message") if isinstance(payload, dict) else None) or f"OpenAI request failed with status {status}"
+            message = _openai_error_message(status, payload)
             return err(
                 make_loom_error(
                     "LLM_FAILED",
@@ -936,8 +975,7 @@ class OpenAIProvider:
         if not response.get("ok", False):
             status = int(response.get("status", 0))
             payload = response.get("json") or {}
-            message = (payload.get("error", {}).get("message") if isinstance(payload, dict) else None) or f"OpenAI stream request failed with status {status}"
-            raise RuntimeError(message)
+            raise _OpenAIHTTPError(status, payload)
 
         async for event in _parse_openai_sse_stream(response.get("chunks", ())):
             yield event
@@ -1917,6 +1955,8 @@ async def _urlopen_stream_chunks(url: str, request: dict[str, Any]):
             with urllib.request.urlopen(req) as response:  # noqa: S310
                 for line in response:
                     put(line)
+        except urllib.error.HTTPError as exc:
+            put(_OpenAIHTTPError(exc.code, _http_error_body(exc)))
         except BaseException as exc:
             put(exc)
         finally:
