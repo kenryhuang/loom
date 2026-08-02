@@ -25,6 +25,7 @@ from loom.llm import LlmStepPolicy
 from loom.runtime.workflow_routing import (
     WorkflowRouteController,
     WorkflowRoutePhase,
+    WorkflowRoutePolicy,
     WorkflowRouteState,
     workflow_route_state_dict,
     workflow_route_state_from_mapping,
@@ -278,12 +279,14 @@ class PlanningRuntime:
         finish_tool_id: str = "finish",
         id_factory: Callable[[str], str] = _new_id,
         now: Callable[[], str] = now_iso,
+        route_policy: WorkflowRoutePolicy | None = None,
     ) -> None:
         self.mode = PlanMode(mode)
         self.finish_tool_id = finish_tool_id
         self._now = now
         self._controller = PlanController(self.mode, id_factory=id_factory, now=now)
-        self._route = WorkflowRouteController(self.mode, now=now)
+        self._route = WorkflowRouteController(self.mode, policy=route_policy, now=now)
+        self._route_invalid_attempts = 0
         self._bound_runtime: Any | None = None
         self._bound_context: Any | None = None
         self._normal_refs: tuple[ToolRef, ...] | None = None
@@ -387,7 +390,8 @@ class PlanningRuntime:
                 return self._rejected("PLAN_PHASE_INVALID", "A plan can only be entered from the inactive phase")
             route = self._route.select_plan(reason)
             if not route.ok:
-                return self._route_rejected(route.error.code, route.error.message)
+                return self._routing_attempt_rejected(route.error.code, route.error.message)
+            self._route_invalid_attempts = 0
             return await self._transition_result(
                 "enter_plan",
                 self._controller.enter(reason),
@@ -396,7 +400,8 @@ class PlanningRuntime:
         async def continue_react(input_value: Mapping[str, Any], _options: Any = None) -> Result:
             route = self._route.select_react(str(input_value.get("reason", "")))
             if not route.ok:
-                return self._route_rejected(route.error.code, route.error.message)
+                return self._routing_attempt_rejected(route.error.code, route.error.message)
+            self._route_invalid_attempts = 0
             emitted = await self._emit_pending_events()
             if not emitted.ok:
                 return emitted
@@ -480,8 +485,40 @@ class PlanningRuntime:
         return LlmStepPolicy()
 
     def observe_tool(self, _context: Any, observation: Observation) -> Observation:
-        """Return the observation unchanged until runtime checkpoints are enabled."""
-        return observation
+        if (
+            self.mode is not PlanMode.AUTO
+            or self._route.state.phase is not WorkflowRoutePhase.REACT
+            or observation.source in PLAN_TOOL_IDS
+            or observation.source == self.finish_tool_id
+        ):
+            return observation
+        value = observation.value
+        failed = isinstance(value, Mapping) and value.get("ok") is False
+        if not self._route.observe_tool(failed=failed):
+            return observation
+        metadata = dict(observation.metadata or {})
+        metadata["controlFlow"] = {
+            "stepBoundary": True,
+            "reason": "workflow_route_review",
+        }
+        return replace(observation, metadata=metadata)
+
+    def request_route_review(self, trigger: str, reason: str) -> Result:
+        """Accept an optional external signal such as future context compaction."""
+        return self._route.request_review(trigger, reason)
+
+    def _routing_attempt_rejected(self, code: str, message: str) -> Result:
+        self._route_invalid_attempts += 1
+        if self._route_invalid_attempts >= 2:
+            return err(
+                make_loom_error(
+                    "WORKFLOW_ROUTE_FAILED",
+                    "The model failed to select a valid workflow route after one retry",
+                    retryable=False,
+                    cause={"code": code, "message": message},
+                )
+            )
+        return self._route_rejected(code, message)
 
     def wrap_loop(self, definition: MinimalLoopDefinition) -> MinimalLoopDefinition:
         if self.mode is PlanMode.OFF:

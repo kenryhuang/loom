@@ -221,6 +221,21 @@ async def test_auto_routing_exposes_exact_choice_and_continue_crosses_boundary()
 
 
 @pytest.mark.asyncio
+async def test_invalid_route_calls_are_bounded_to_one_recoverable_feedback():
+    planning = PlanningRuntime(PlanMode.AUTO, id_factory=_ids(), now=_now)
+    continue_react = planning.wrap_tools({})["continue_react"]
+
+    first = await continue_react({"reason": ""}, {})
+    second = await continue_react({"reason": ""}, {})
+
+    assert first.ok
+    assert first.value.source == "workflow.guard"
+    assert first.value.value["code"] == "WORKFLOW_ROUTE_REASON_REQUIRED"
+    assert not second.ok
+    assert second.error.code == "WORKFLOW_ROUTE_FAILED"
+
+
+@pytest.mark.asyncio
 async def test_update_plan_schema_and_handler_allow_omitted_note():
     planning = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
     update_ref = next(tool for tool in planning.tool_refs() if tool.id == "update_plan")

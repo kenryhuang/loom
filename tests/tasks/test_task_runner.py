@@ -561,6 +561,66 @@ class AutoUpgradePlanProvider:
         return AutoBoundaryPlanProvider._tool("call-finish", "finish", {"report": "upgraded and completed"})
 
 
+class FailureReviewPlanProvider:
+    model = "fake-failure-review-plan-model"
+
+    def __init__(self):
+        self.calls = 0
+        self.tool_sets = []
+        self.step_id = ""
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        self.calls += 1
+        self.tool_sets.append(tuple(tool["function"]["name"] for tool in tools or ()))
+        if self.calls == 1:
+            return AutoBoundaryPlanProvider._tool(
+                "call-route-react",
+                "continue_react",
+                {"reason": "Attempt the direct edit first"},
+            )
+        if self.calls in {2, 3}:
+            return AutoBoundaryPlanProvider._tool(
+                f"call-failed-edit-{self.calls}",
+                "edit_file",
+                {
+                    "path": "sample.txt",
+                    "edits": [{"old_text": "missing text", "new_text": "replacement"}],
+                },
+            )
+        if self.calls == 4:
+            return AutoBoundaryPlanProvider._tool(
+                "call-review-plan",
+                "enter_plan",
+                {"reason": "Repeated edit failures require investigation before repair"},
+            )
+        if self.calls == 5:
+            return AutoBoundaryPlanProvider._tool(
+                "call-submit",
+                "submit_plan",
+                {"explanation": "investigate then repair", "items": [{"content": "Repair safely"}]},
+            )
+        if self.calls == 6:
+            self.step_id = _plan_step_ids(messages)[0]
+            return AutoBoundaryPlanProvider._tool(
+                "call-start",
+                "update_plan",
+                {
+                    "explanation": "start safe repair",
+                    "items": [{"id": self.step_id, "content": "Repair safely", "status": "in_progress", "note": None}],
+                },
+            )
+        if self.calls == 7:
+            return AutoBoundaryPlanProvider._tool(
+                "call-complete",
+                "update_plan",
+                {
+                    "explanation": "repair analysis complete",
+                    "items": [{"id": self.step_id, "content": "Repair safely", "status": "completed", "note": None}],
+                },
+            )
+        return AutoBoundaryPlanProvider._tool("call-finish", "finish", {"report": "reviewed and completed"})
+
+
 class OneToolPerResponsePlanProvider:
     model = "fake-one-tool-per-response-plan-model"
 
@@ -914,6 +974,27 @@ def test_auto_react_model_can_upgrade_to_plan_without_runtime_signal(tmp_path):
     assert provider.tool_sets[2] == ("submit_plan",)
     assert result.value.run_result.context.state.scratch["workflowRoute"]["phase"] == "plan"
     assert result.value.run_result.context.state.scratch["plan"]["phase"] == "completed"
+
+
+def test_auto_react_reviews_route_after_two_recoverable_failures(tmp_path):
+    (tmp_path / "sample.txt").write_text("original\n", encoding="utf-8")
+    provider = FailureReviewPlanProvider()
+
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest("Repair the sample file", workspace=tmp_path),
+            provider=provider,
+            options=TaskRunOptions(plan_mode=PlanMode.AUTO),
+        )
+    )
+
+    assert result.ok
+    assert result.value.output == "reviewed and completed"
+    assert provider.tool_sets[3] == ("enter_plan", "continue_react")
+    route = result.value.run_result.context.state.scratch["workflowRoute"]
+    assert route["phase"] == "plan"
+    assert route["review_count"] == 1
+    assert route["trigger"] == "tool_failures"
 
 
 def test_run_generic_task_allows_one_tool_per_response_until_llm_checkpoint(tmp_path):
