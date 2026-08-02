@@ -452,13 +452,19 @@ def _json_safe(value: Any) -> Any:
 def _report_from_run_result(run_result: Any) -> str:
     output = thaw_json(run_result.output)
     report = _report_from_decision_output(output)
-    if report:
+    if report and not _is_empty_llm_decision_output(output):
         return report
 
     latest = run_result.context.state.decisions[-1] if run_result.context.state.decisions else None
     if latest is not None:
-        report = _report_from_decision_output({"action": {"input": thaw_json(latest.action.input)}})
-        if report:
+        latest_output = {
+            "action": {
+                "description": latest.action.description,
+                "input": thaw_json(latest.action.input),
+            }
+        }
+        report = _report_from_decision_output(latest_output)
+        if report and not _is_empty_llm_decision_output(latest_output):
             return report
 
     for observation in reversed(run_result.context.state.observations):
@@ -468,6 +474,16 @@ def _report_from_run_result(run_result: Any) -> str:
         if isinstance(value, Mapping) and isinstance(value.get("report"), str):
             return value["report"]
     return "" if output is None else str(output)
+
+
+def _is_empty_llm_decision_output(output: Any) -> bool:
+    if not isinstance(output, Mapping):
+        return False
+    action = output.get("action")
+    if not isinstance(action, Mapping) or action.get("description") != "Use unstructured LLM response":
+        return False
+    input_value = action.get("input")
+    return isinstance(input_value, Mapping) and input_value.get("content") == "LLM returned no decision content"
 
 
 def _report_from_decision_output(output: Any) -> str:

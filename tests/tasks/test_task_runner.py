@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,6 +19,11 @@ class RecordingTraceSink:
     async def emit(self, event):
         self.events.append(event)
         return ok(None)
+
+
+def _plan_step_ids(messages):
+    system_prompt = next(message.content for message in messages if message.role == "system")
+    return tuple(re.findall(r"^- \[[^]]\] (step_[^:]+):", system_prompt, flags=re.MULTILINE))
 
 
 def test_make_task_context_maps_request_to_loom_layers(tmp_path):
@@ -270,10 +276,7 @@ class ForcedPlanTaskProvider:
                 finish_reason="tool_calls",
             )
         if self.calls == 2:
-            submitted = json.loads(next(message.content for message in reversed(messages) if message.role == "tool"))
-            self.step_ids = tuple(item["id"] for item in submitted["plan"]["items"])
-            return self._decision("The plan is ready.")
-        if self.calls == 3:
+            self.step_ids = _plan_step_ids(messages)
             return _response(
                 content="",
                 tool_calls=(
@@ -290,8 +293,13 @@ class ForcedPlanTaskProvider:
                             }
                         ),
                     ),
-                    LlmToolCall("call-read", "read_file", json.dumps({"path": "README.md"})),
                 ),
+                finish_reason="tool_calls",
+            )
+        if self.calls == 3:
+            return _response(
+                content="",
+                tool_calls=(LlmToolCall("call-read", "read_file", json.dumps({"path": "README.md"})),),
                 finish_reason="tool_calls",
             )
         if self.calls == 4:
@@ -311,15 +319,16 @@ class ForcedPlanTaskProvider:
                             }
                         ),
                     ),
-                    LlmToolCall(
-                        "call-shell",
-                        "shell_execute",
-                        json.dumps({"command": ["pwd"]}),
-                    ),
                 ),
                 finish_reason="tool_calls",
             )
         if self.calls == 5:
+            return _response(
+                content="",
+                tool_calls=(LlmToolCall("call-shell", "shell_execute", json.dumps({"command": ["pwd"]})),),
+                finish_reason="tool_calls",
+            )
+        if self.calls == 6:
             return _response(
                 content="",
                 tool_calls=(
@@ -336,8 +345,13 @@ class ForcedPlanTaskProvider:
                             }
                         ),
                     ),
-                    LlmToolCall("call-finish", "finish", json.dumps({"report": "done"})),
                 ),
+                finish_reason="tool_calls",
+            )
+        if self.calls == 7:
+            return _response(
+                content="",
+                tool_calls=(LlmToolCall("call-finish", "finish", json.dumps({"report": "done"})),),
                 finish_reason="tool_calls",
             )
         return self._decision("The planned task is complete.")
@@ -354,6 +368,76 @@ class ForcedPlanTaskProvider:
                 }
             )
         )
+
+
+class AutoBoundaryPlanProvider:
+    model = "fake-auto-boundary-plan-model"
+
+    def __init__(self):
+        self.calls = 0
+        self.tool_sets = []
+        self.step_ids = ()
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        self.calls += 1
+        self.tool_sets.append(tuple(tool["function"]["name"] for tool in tools or ()))
+        if self.calls == 1:
+            return self._tool("call-enter", "enter_plan", {"reason": "The work has dependent inspection and verification phases"})
+        if self.calls == 2:
+            return self._tool(
+                "call-submit",
+                "submit_plan",
+                {
+                    "explanation": "inspect before verification",
+                    "items": [{"content": "Inspect"}, {"content": "Verify"}],
+                },
+            )
+        if self.calls == 3:
+            self.step_ids = _plan_step_ids(messages)
+            return self._update(
+                "call-start-inspection",
+                "Start inspection",
+                (
+                    {"id": self.step_ids[0], "content": "Inspect", "status": "in_progress", "note": None},
+                    {"id": self.step_ids[1], "content": "Verify", "status": "pending", "note": None},
+                ),
+            )
+        if self.calls == 4:
+            return self._tool("call-read", "read_file", {"path": "README.md"})
+        if self.calls == 5:
+            return self._update(
+                "call-start-verification",
+                "Inspection complete; start verification",
+                (
+                    {"id": self.step_ids[0], "content": "Inspect", "status": "completed", "note": "README inspected"},
+                    {"id": self.step_ids[1], "content": "Verify", "status": "in_progress", "note": None},
+                ),
+            )
+        if self.calls == 6:
+            return self._tool("call-shell", "shell_execute", {"command": ["pwd"]})
+        if self.calls == 7:
+            return self._update(
+                "call-complete",
+                "Verification complete",
+                (
+                    {"id": self.step_ids[0], "content": "Inspect", "status": "completed", "note": "README inspected"},
+                    {"id": self.step_ids[1], "content": "Verify", "status": "completed", "note": "Command passed"},
+                ),
+            )
+        if self.calls == 8:
+            return self._tool("call-finish", "finish", {"report": "done"})
+        return ForcedPlanTaskProvider._decision("The planned task is complete.")
+
+    @staticmethod
+    def _tool(call_id, name, arguments):
+        return _response(
+            content="",
+            tool_calls=(LlmToolCall(call_id, name, json.dumps(arguments)),),
+            finish_reason="tool_calls",
+        )
+
+    def _update(self, call_id, explanation, items):
+        return self._tool(call_id, "update_plan", {"explanation": explanation, "items": items})
 
 
 class OneToolPerResponsePlanProvider:
@@ -375,10 +459,7 @@ class OneToolPerResponsePlanProvider:
                 },
             )
         if self.calls == 2:
-            submitted = json.loads(next(message.content for message in reversed(messages) if message.role == "tool"))
-            self.step_ids = tuple(item["id"] for item in submitted["plan"]["items"])
-            return self._decision("The plan is ready.")
-        if self.calls == 3:
+            self.step_ids = _plan_step_ids(messages)
             return self._update(
                 "call-start-inspection",
                 "Start inspection",
@@ -387,13 +468,13 @@ class OneToolPerResponsePlanProvider:
                     {"id": self.step_ids[1], "content": "Verify", "status": "pending", "note": None},
                 ),
             )
-        if self.calls == 4:
+        if self.calls == 3:
             return self._tool("call-read-readme", "read_file", {"path": "README.md"})
-        if self.calls == 5:
+        if self.calls == 4:
             return self._tool("call-read-config", "read_file", {"path": "pyproject.toml"})
-        if self.calls == 6:
+        if self.calls == 5:
             return self._tool("call-inspect-shell", "shell_execute", {"command": ["pwd"]})
-        if self.calls == 7:
+        if self.calls == 6:
             return self._update(
                 "call-start-verification",
                 "Inspection complete; start verification",
@@ -402,9 +483,9 @@ class OneToolPerResponsePlanProvider:
                     {"id": self.step_ids[1], "content": "Verify", "status": "in_progress", "note": None},
                 ),
             )
-        if self.calls == 8:
+        if self.calls == 7:
             return self._tool("call-verify-shell", "shell_execute", {"command": ["pwd"]})
-        if self.calls == 9:
+        if self.calls == 8:
             return self._update(
                 "call-complete-verification",
                 "Verification complete",
@@ -413,7 +494,7 @@ class OneToolPerResponsePlanProvider:
                     {"id": self.step_ids[1], "content": "Verify", "status": "completed", "note": "Command passed"},
                 ),
             )
-        if self.calls == 10:
+        if self.calls == 9:
             return self._tool("call-finish", "finish", {"report": "done"})
         return self._decision("The planned task is complete.")
 
@@ -466,14 +547,16 @@ class RecoveringForcedPlanProvider:
                 finish_reason="tool_calls",
             )
         if self.calls == 2:
-            submitted = json.loads(next(message.content for message in reversed(messages) if message.role == "tool"))
-            self.step_id = submitted["plan"]["items"][0]["id"]
-            return self._decision("The plan is ready.")
+            self.step_id = _plan_step_ids(messages)[0]
+            return _response(
+                content="",
+                tool_calls=(self._update("call-start", "Start editing", "in_progress", None),),
+                finish_reason="tool_calls",
+            )
         if self.calls == 3:
             return _response(
                 content="",
                 tool_calls=(
-                    self._update("call-start", "Start editing", "in_progress", None),
                     LlmToolCall(
                         "call-bad-edit",
                         "edit_file",
@@ -485,8 +568,13 @@ class RecoveringForcedPlanProvider:
         if self.calls == 4:
             return _response(
                 content="",
+                tool_calls=(self._update("call-note-failure", "Retry with the exact text", "in_progress", "First exact match failed"),),
+                finish_reason="tool_calls",
+            )
+        if self.calls == 5:
+            return _response(
+                content="",
                 tool_calls=(
-                    self._update("call-note-failure", "Retry with the exact text", "in_progress", "First exact match failed"),
                     LlmToolCall(
                         "call-fixed-edit",
                         "edit_file",
@@ -495,13 +583,16 @@ class RecoveringForcedPlanProvider:
                 ),
                 finish_reason="tool_calls",
             )
-        if self.calls == 5:
+        if self.calls == 6:
             return _response(
                 content="",
-                tool_calls=(
-                    self._update("call-complete", "The corrected edit succeeded", "completed", None),
-                    LlmToolCall("call-finish", "finish", json.dumps({"report": "done"})),
-                ),
+                tool_calls=(self._update("call-complete", "The corrected edit succeeded", "completed", None),),
+                finish_reason="tool_calls",
+            )
+        if self.calls == 7:
+            return _response(
+                content="",
+                tool_calls=(LlmToolCall("call-finish", "finish", json.dumps({"report": "done"})),),
                 finish_reason="tool_calls",
             )
         return self._decision("The planned task recovered and completed.")
@@ -609,6 +700,34 @@ def test_run_generic_task_executes_forced_dynamic_plan(tmp_path):
         "plan.updated",
         "plan.completed",
     ]
+
+
+def test_auto_plan_transitions_reproject_before_next_llm_request(tmp_path):
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    provider = AutoBoundaryPlanProvider()
+    sink = RecordingTraceSink()
+
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest("Inspect and verify this project", workspace=tmp_path),
+            provider=provider,
+            options=TaskRunOptions(plan_mode=PlanMode.AUTO),
+            trace_sink=sink,
+        )
+    )
+
+    assert result.ok
+    assert result.value.output == "done"
+    assert result.value.run_result.context.state.scratch["plan"]["phase"] == "completed"
+    assert provider.tool_sets[0][-1] == "enter_plan"
+    assert provider.tool_sets[1] == ("submit_plan",)
+    assert "update_plan" in provider.tool_sets[2]
+    guard_codes = [
+        event["observation"].value.get("code")
+        for event in sink.events
+        if event["type"] == "observation.recorded" and event["observation"].source == "planning.guard"
+    ]
+    assert "PLAN_PHASE_INVALID" not in guard_codes
 
 
 def test_run_generic_task_allows_one_tool_per_response_until_llm_checkpoint(tmp_path):
