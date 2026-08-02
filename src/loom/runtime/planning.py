@@ -474,7 +474,7 @@ class PlanningRuntime:
             WorkflowRoutePhase.REVIEWING,
         }:
             return LlmStepPolicy(
-                tool_choice="required",
+                tool_choice="auto",
                 preserve_all_tools=True,
                 require_tool_call=True,
                 missing_tool_call_retries=1,

@@ -204,8 +204,9 @@ async def test_auto_routing_exposes_exact_choice_and_continue_crosses_boundary()
 
     assert tuple(tool.id for tool in planning.visible_tool_refs(normal)) == ("enter_plan", "continue_react")
     policy = planning.step_policy(_context(*normal))
-    assert policy.tool_choice == "required"
+    assert policy.tool_choice == "auto"
     assert policy.require_tool_call is True
+    assert policy.missing_tool_call_retries == 1
     assert policy.preserve_all_tools is True
 
     continued = await planning.wrap_tools({})["continue_react"]({"reason": "direct task"}, {})
