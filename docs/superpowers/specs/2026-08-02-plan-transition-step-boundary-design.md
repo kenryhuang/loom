@@ -25,7 +25,8 @@ step rebuilds the prompt, visible tools, and persisted plan snapshot.
 ## Control Contract
 
 Successful `enter_plan`, `submit_plan`, and `update_plan` observations carry
-internal metadata:
+internal metadata. A successful `finish` carries the same metadata only when it
+completes an executing plan:
 
 ```python
 {"controlFlow": {"stepBoundary": True, "reason": "planning_transition"}}
@@ -57,6 +58,7 @@ inactive tools: normal tools + enter_plan
 planning tools: submit_plan only
   -> submit_plan succeeds and requests a step boundary
 executing tools: normal tools + update_plan
+  -> terminal-plan finish succeeds and requests a step boundary
 ```
 
 If a response contains a transition followed by other tool calls, calls after
@@ -77,7 +79,8 @@ behavior.
 ## Testing
 
 - Planning unit tests assert accepted transitions carry the metadata and
-  rejected transitions do not.
+  rejected transitions do not. They also assert that only a `finish` which
+  completes an executing plan carries the boundary.
 - Native tool-loop tests assert a boundary stops the provider loop and skips
   later calls in the same response.
 - JSON-action tests assert the same behavior.
