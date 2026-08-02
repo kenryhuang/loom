@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from loom.core import Result
+from loom.llm import load_env_openai_config
+from loom.llm.request_options import materialize_request_options
 from loom.runtime import PlanMode
 from loom.tasks.config import RunDefaults, TaskDefaults, TaskRunnerConfig, load_task_config
 from loom.tasks.request import TaskRequest, TaskRunOptions
@@ -92,11 +97,98 @@ async def run_task_cli(options: TaskCliOptions) -> Result:
 
 def main(argv: tuple[str, ...] | list[str] | None = None) -> int:
     parsed = parse_task_cli_args(argv)
+    print(_format_task_configuration(parsed), flush=True)
     result = asyncio.run(run_task_cli(parsed))
     if not result.ok:
         raise SystemExit(result.error.message if result.error else "Task run failed")
     print(result.value.output)
     return 0
+
+
+def _format_task_configuration(options: TaskCliOptions) -> str:
+    request = options.request
+    run = options.options
+    lines = [
+        "Task configuration:",
+        f"  objective: {request.objective}",
+        f"  workspace: {(request.workspace or Path.cwd()).expanduser().resolve()}",
+        f"  profile: {request.profile}",
+        f"  risk_level: {request.risk_level}",
+    ]
+    if request.constraints:
+        lines.append(f"  constraints: {_format_json(request.constraints)}")
+    if request.expected_outputs:
+        lines.append(f"  expected_outputs: {_format_json(request.expected_outputs)}")
+    lines.append(f"  config: {options.config_path.expanduser().resolve() if options.config_path is not None else '<environment>'}")
+    lines.extend(_model_configuration_lines(options))
+    lines.extend(
+        (
+            f"  plan_mode: {run.plan_mode.value}",
+            f"  tui: {str(run.tui).lower()}",
+            f"  stream: {str(run.stream).lower()}",
+            f"  trace_path: {run.trace_path}",
+            f"  max_steps: {run.max_steps if run.max_steps is not None else '<unlimited>'}",
+            f"  timeout_ms: {run.timeout_ms if run.timeout_ms is not None else '<default>'}",
+        )
+    )
+    return "\n".join(lines)
+
+
+def _model_configuration_lines(options: TaskCliOptions) -> list[str]:
+    if options.config is None:
+        loaded = load_env_openai_config(model=options.model_name)
+        if not loaded.ok:
+            return [f"  model: {options.model_name or '<environment default>'} (unresolved)"]
+        model = loaded.value
+        return [f"  model: {options.model_name or '<environment default>'} (openai/{model.model})", f"  base_url: {model.base_url}"]
+
+    alias = options.model_name or options.config.default_model
+    model = options.config.models.get(alias) if alias is not None else None
+    if model is None:
+        return [f"  model: {alias or '<not selected>'} (unresolved)"]
+
+    lines = [f"  model: {alias} ({model.provider}/{model.model})", f"  base_url: {model.base_url}"]
+    if model.temperature is not None:
+        lines.append(f"  temperature: {model.temperature}")
+    if model.max_completion_tokens is not None:
+        lines.append(f"  max_completion_tokens: {model.max_completion_tokens}")
+    request_options = _without_sensitive_values(materialize_request_options(model.request_options))
+    if request_options:
+        lines.append(f"  request_options: {_format_json(request_options)}")
+    return lines
+
+
+def _without_sensitive_values(value):
+    if isinstance(value, Mapping):
+        return {key: _without_sensitive_values(item) for key, item in value.items() if not _is_sensitive_config_key(str(key))}
+    if isinstance(value, list | tuple):
+        return [_without_sensitive_values(item) for item in value]
+    return value
+
+
+def _is_sensitive_config_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    if normalized in {
+        "ak",
+        "sk",
+        "apikeyenv",
+        "accesskeyid",
+        "passwd",
+        "credentials",
+        "token",
+        "accesstoken",
+        "refreshtoken",
+        "bearertoken",
+        "sessiontoken",
+        "securitytoken",
+        "authorization",
+    }:
+        return True
+    return normalized.endswith(("apikey", "accesskey", "secret", "secretkey", "password", "credential", "privatekey"))
+
+
+def _format_json(value) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(", ", ": "))
 
 
 def _build_parser() -> argparse.ArgumentParser:

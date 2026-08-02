@@ -224,6 +224,54 @@ def test_llm_step_structured_tool_calls_fallback_and_budget():
     asyncio.run(scenario())
 
 
+def test_llm_step_extracts_tool_decision_from_think_delimited_duplicate_json():
+    async def scenario():
+        tool_decision = json.dumps(
+            {
+                "reasoning": "Run the requested verification",
+                "action": {
+                    "kind": "tool",
+                    "target": "search",
+                    "description": "Search before finishing",
+                    "input": {"query": "loom"},
+                },
+                "alternatives": [],
+                "confidence": 0.9,
+            }
+        )
+        provider = FakeProvider(
+            [
+                ok(LlmResponse(content=f"{tool_decision}</think>{tool_decision}")),
+                ok(
+                    LlmResponse(
+                        content=json.dumps(
+                            {
+                                "reasoning": "Verification complete",
+                                "action": {"kind": "none", "description": "Stop"},
+                                "alternatives": [],
+                                "confidence": 0.9,
+                            }
+                        )
+                    )
+                ),
+            ]
+        )
+        tool_calls = []
+
+        async def call_tool(name, input_value, **_options):
+            tool_calls.append((name, input_value))
+            return ok(Observation("search-result", name, {"result": "found"}, NOW))
+
+        result = await create_llm_step_function(provider)(make_context(), make_runtime(call_tool=call_tool))
+
+        assert result.ok
+        assert tool_calls == [("search", {"query": "loom"})]
+        assert len(provider.messages) == 2
+        assert result.value.context.state.decisions[-1].metadata["parseFallback"] is False
+
+    asyncio.run(scenario())
+
+
 def test_llm_step_executes_json_tool_action_when_model_does_not_emit_native_tool_call():
     async def scenario():
         provider = FakeProvider(

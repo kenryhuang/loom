@@ -3,7 +3,9 @@ from types import SimpleNamespace
 
 from loom.core import ok
 from loom.runtime import PlanMode
-from loom.tasks.cli import parse_task_cli_args
+from loom.tasks.cli import TaskCliOptions, parse_task_cli_args
+from loom.tasks.config import ModelConfig, TaskRunnerConfig
+from loom.tasks.request import TaskRequest, TaskRunOptions
 
 
 def test_parse_task_cli_defaults_plan_mode_to_auto(tmp_path, monkeypatch):
@@ -279,10 +281,52 @@ def test_top_level_cli_dispatches_task_arguments_unchanged(monkeypatch):
 
 
 def test_task_cli_main_returns_zero_after_success(monkeypatch, capsys):
-    parsed = object()
+    parsed = TaskCliOptions(
+        request=TaskRequest(
+            "Audit this project",
+            workspace=Path("workspace"),
+            profile="project_audit",
+            constraints=("Do not edit source files.",),
+            expected_outputs=("Markdown report",),
+            risk_level="medium",
+        ),
+        options=TaskRunOptions(
+            tui=False,
+            stream=True,
+            trace_path=Path("runs/audit.jsonl"),
+            max_steps=8,
+            timeout_ms=30000,
+            plan_mode=PlanMode.AUTO,
+        ),
+        config_path=Path("config.yaml"),
+        config=TaskRunnerConfig(
+            default_model="main",
+            models={
+                "main": ModelConfig(
+                    provider="openai",
+                    model="qwen3.7-max",
+                    base_url="https://example.test/v1",
+                    api_key="do-not-print-api-key",
+                    api_key_env="LOOM_API_KEY",
+                    temperature=0.2,
+                    max_completion_tokens=8192,
+                    request_options={
+                        "enable_thinking": True,
+                        "thinking_budget": 2048,
+                        "secret_key": "do-not-print-secret",
+                        "dashscope_api_key": "do-not-print-prefixed-api-key",
+                        "client_secret": "do-not-print-client-secret",
+                    },
+                )
+            },
+        ),
+        model_name="main",
+    )
+    output_before_run = []
 
     async def fake_run_task_cli(options):
         assert options is parsed
+        output_before_run.append(capsys.readouterr().out)
         return ok(SimpleNamespace(output="Task complete"))
 
     monkeypatch.setattr("loom.tasks.cli.parse_task_cli_args", lambda argv: parsed)
@@ -292,4 +336,21 @@ def test_task_cli_main_returns_zero_after_success(monkeypatch, capsys):
     code = main(["Audit this project"])
 
     assert code == 0
+    configuration = output_before_run[0]
+    assert configuration.startswith("Task configuration:\n")
+    assert "  objective: Audit this project\n" in configuration
+    assert "  workspace: " in configuration and configuration.endswith("\n")
+    assert "  profile: project_audit\n" in configuration
+    assert "  model: main (openai/qwen3.7-max)\n" in configuration
+    assert "  base_url: https://example.test/v1\n" in configuration
+    assert "  plan_mode: auto\n" in configuration
+    assert "  tui: false\n" in configuration
+    assert "  stream: true\n" in configuration
+    assert "  trace_path: runs/audit.jsonl\n" in configuration
+    assert '  request_options: {"enable_thinking": true, "thinking_budget": 2048}\n' in configuration
+    assert "do-not-print-api-key" not in configuration
+    assert "LOOM_API_KEY" not in configuration
+    assert "do-not-print-secret" not in configuration
+    assert "do-not-print-prefixed-api-key" not in configuration
+    assert "do-not-print-client-secret" not in configuration
     assert capsys.readouterr().out == "Task complete\n"

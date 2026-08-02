@@ -1466,6 +1466,15 @@ def _json_candidates(content: str):
     if start >= 0 and end > start:
         yield stripped[start : end + 1]
 
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", stripped):
+        candidate = stripped[match.start() :]
+        try:
+            _value, consumed = decoder.raw_decode(candidate)
+        except json.JSONDecodeError:
+            continue
+        yield candidate[:consumed]
+
 
 def _fallback_decision(reasoning: str, trace_id: str) -> dict[str, Any]:
     action = Action(

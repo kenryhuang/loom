@@ -142,9 +142,18 @@ def make_task_loop(
             max_tool_calls_per_step=task_harness.max_tool_calls_per_step,
             prompt_options={"max_history_steps": task_harness.max_history_steps},
         ),
-        done=lambda context, _runtime: ok(bool(context.state.decisions)),
+        done=_task_done,
         metadata={"task_kind": "generic_task", "profile": profile.id, "blueprint": profile.blueprint},
     )
+
+
+def _task_done(context: Context, _runtime: Any) -> Result:
+    if any(observation.source == "finish" for observation in context.state.observations):
+        return ok(True)
+    if not context.state.decisions:
+        return ok(False)
+    latest = context.state.decisions[-1]
+    return ok(not bool((latest.metadata or {}).get("parseFallback")))
 
 
 async def run_generic_task(

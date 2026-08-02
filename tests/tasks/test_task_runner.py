@@ -164,6 +164,32 @@ class FakeTaskProvider:
         )
 
 
+class MalformedThenFinalTaskProvider:
+    model = "malformed-then-final-model"
+
+    def __init__(self):
+        self.calls = 0
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        self.calls += 1
+        if self.calls == 1:
+            return _response(content="not valid decision JSON")
+        return _response(
+            content=json.dumps(
+                {
+                    "reasoning": "Recovered with a valid terminal decision",
+                    "action": {
+                        "kind": "custom",
+                        "description": "Return the final report",
+                        "input": {"report": "done"},
+                    },
+                    "alternatives": [],
+                    "confidence": 0.9,
+                }
+            )
+        )
+
+
 class FakeEditTaskProvider:
     model = "fake-edit-task-model"
 
@@ -669,6 +695,16 @@ def test_run_generic_task_executes_llm_tool_loop_and_returns_finish_report(tmp_p
     assert "Demo audit" in result.value.output
     assert provider.calls >= 2
     assert any(message.role == "tool" for message in provider.messages_seen[-1])
+
+
+def test_run_generic_task_does_not_finish_on_parse_fallback(tmp_path):
+    provider = MalformedThenFinalTaskProvider()
+
+    result = asyncio.run(run_generic_task(TaskRequest("Audit this project", workspace=tmp_path), provider=provider))
+
+    assert result.ok
+    assert provider.calls == 2
+    assert result.value.output == "done"
 
 
 def test_run_generic_task_executes_forced_dynamic_plan(tmp_path):
