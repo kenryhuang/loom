@@ -455,9 +455,7 @@ def test_failed_tool_consumes_tool_call_budget():
 
 def test_llm_step_keeps_aborted_and_unclassified_tool_failures_terminal():
     async def run_failure(error):
-        provider = FakeProvider(
-            [ok(LlmResponse(content=None, tool_calls=(LlmToolCall("call-1", "search", "{}"),), finish_reason="tool_calls"))]
-        )
+        provider = FakeProvider([ok(LlmResponse(content=None, tool_calls=(LlmToolCall("call-1", "search", "{}"),), finish_reason="tool_calls"))])
 
         async def call_tool(_name, _input_value, **_options):
             return err(error)

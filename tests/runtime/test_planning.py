@@ -214,9 +214,7 @@ async def test_update_plan_schema_and_handler_allow_omitted_note():
     assert item_schema["required"] == ("content", "status")
     assert result.ok and result.value.value["accepted"] is True
     assert result.value.value["plan"]["items"][0]["note"] is None
-    assert result.value.metadata == {
-        "controlFlow": {"stepBoundary": True, "reason": "planning_transition"}
-    }
+    assert result.value.metadata == {"controlFlow": {"stepBoundary": True, "reason": "planning_transition"}}
 
 
 def test_update_plan_tool_advertises_full_snapshot_semantics():
@@ -251,9 +249,7 @@ async def test_finish_gate_requires_terminal_plan_then_preserves_handler_result(
     assert premature.value.metadata is None
     assert called == 1
     assert finished.ok and finished.value.source == "finish"
-    assert finished.value.metadata == {
-        "controlFlow": {"stepBoundary": True, "reason": "planning_transition"}
-    }
+    assert finished.value.metadata == {"controlFlow": {"stepBoundary": True, "reason": "planning_transition"}}
     assert planning.controller.state.phase is PlanPhase.COMPLETED
 
 
