@@ -71,7 +71,12 @@ PLAN_PRESENTATION_EVENTS = {
     "plan.completed",
 }
 
-PLAN_TOOL_IDS = frozenset({"enter_plan", "submit_plan", "update_plan"})
+WORKFLOW_PRESENTATION_EVENTS = {
+    "workflow.routing.requested",
+    "workflow.route.selected",
+}
+
+PLAN_TOOL_IDS = frozenset({"enter_plan", "continue_react", "submit_plan", "update_plan"})
 
 
 @dataclass
@@ -443,6 +448,8 @@ def _event_scope(event: TuiEvent) -> tuple[str, str]:
         return (f"LLM#{round_number}" if round_number else "LLM", COLORS["magenta"])
     if event.event_type.startswith("tool_selection."):
         return "TOOLSEL", COLORS["teal"]
+    if event.event_type in WORKFLOW_PRESENTATION_EVENTS:
+        return "WORKFLOW", COLORS["teal"]
     if event.event_type.startswith("tool."):
         return "TOOL", COLORS["orange"] if event.event_type != "tool.completed" else COLORS["green"]
     if event.event_type in PLAN_PRESENTATION_EVENTS:
@@ -482,6 +489,9 @@ def _event_description(event: TuiEvent) -> str:
     if event.event_type in PLAN_PRESENTATION_EVENTS:
         phase, terminal, total = _plan_event_parts(event)
         return f"{phase} / {terminal}/{total} terminal"
+    if event.event_type in WORKFLOW_PRESENTATION_EVENTS:
+        summary = summarize_event(event)
+        return summary.description if summary is not None else "workflow routing"
     if event.event_type == "run.started":
         meta = data.get("metadata", {})
         if isinstance(meta, dict):
@@ -558,6 +568,8 @@ def _event_status(event: TuiEvent) -> str:
     if event.event_type in PLAN_PRESENTATION_EVENTS:
         phase, _, _ = _plan_event_parts(event)
         return "done" if phase == "completed" else "running"
+    if event.event_type in WORKFLOW_PRESENTATION_EVENTS:
+        return "done" if event.event_type == "workflow.route.selected" else "running"
     if event.event_type in {"run.completed", "step.completed", "llm.completed", "tool.completed", "tool_selection.decided", "_tui_done"}:
         return "done"
     if event.event_type in {"llm.stream.started", "llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
@@ -587,6 +599,8 @@ def _event_marker_color(event: TuiEvent) -> str:
     if event.event_type in PLAN_PRESENTATION_EVENTS:
         phase, _, _ = _plan_event_parts(event)
         return COLORS["green"] if phase == "completed" else COLORS["blue"]
+    if event.event_type in WORKFLOW_PRESENTATION_EVENTS:
+        return COLORS["green"] if event.event_type == "workflow.route.selected" else COLORS["orange"]
     if event.event_type == "tool.started":
         return COLORS["orange"]
     if event.event_type.startswith("llm.stream") or event.event_type in {"llm.content.delta", "llm.reasoning.delta", "llm.reasoning_context.delta"}:
@@ -667,6 +681,31 @@ def _append_plan_detail(lines: list[str], event: TuiEvent) -> None:
     lines.append("")
 
 
+def _append_workflow_detail(lines: list[str], event: TuiEvent) -> None:
+    data = event.data
+    summary = summarize_event(event)
+    title = summary.title if summary is not None else "Workflow routing"
+    lines.append(f"[bold {COLORS['teal']}]─── {_safe_markup(title)} ───[/]")
+    trigger = data.get("trigger")
+    route = data.get("route")
+    if trigger:
+        lines.append(f"[dim]trigger:[/] {_safe_markup(trigger)}")
+    if route:
+        lines.append(f"[dim]route:[/] {_safe_markup(route)}")
+    lines.append(f"[dim]revision:[/] {data.get('revision', 0)}")
+    lines.append(f"[dim]review:[/] {data.get('review_count', 0)}")
+    reason = data.get("reason")
+    if reason:
+        lines.append(f"[dim]reason:[/] {_safe_markup(reason)}")
+    state = data.get("workflow_route")
+    if isinstance(state, dict):
+        lines.append(
+            f"[dim]evidence:[/] calls={state.get('calls_since_review', 0)} "
+            f"failures={state.get('consecutive_failures', 0)} cooldown={state.get('cooldown_remaining', 0)}"
+        )
+    lines.append("")
+
+
 def _format_event_detail(event: TuiEvent) -> str:
     """Format full event detail for the detail panel."""
     lines: list[str] = []
@@ -674,6 +713,9 @@ def _format_event_detail(event: TuiEvent) -> str:
 
     if event.event_type in PLAN_PRESENTATION_EVENTS:
         _append_plan_detail(lines, event)
+
+    elif event.event_type in WORKFLOW_PRESENTATION_EVENTS:
+        _append_workflow_detail(lines, event)
 
     elif event.event_type == "llm.requested":
         lines.append(f"[bold {COLORS['magenta']}]─── LLM Request ───[/]")

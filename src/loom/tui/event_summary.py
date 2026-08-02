@@ -19,6 +19,7 @@ _REDUNDANT_OBSERVATION_SOURCES = frozenset(
         "shell_execute",
         "finish",
         "enter_plan",
+        "continue_react",
         "submit_plan",
         "update_plan",
     }
@@ -43,6 +44,8 @@ class EventSummary:
 
 def summarize_event(event: TuiEvent) -> EventSummary | None:
     """Return a concise semantic summary, or ``None`` for non-semantic data."""
+    if event.event_type.startswith("workflow."):
+        return _workflow_summary(event.event_type, event.data)
     if event.event_type == "decision.recorded":
         return _decision_summary(event.data)
     if event.event_type.startswith("action."):
@@ -56,6 +59,18 @@ def summarize_event(event: TuiEvent) -> EventSummary | None:
         if content:
             return EventSummary("Answer", _first_meaningful_line(content), "text")
         return None
+    return None
+
+
+def _workflow_summary(event_type: str, data: Mapping[str, Any]) -> EventSummary | None:
+    reason = _truncate(_text(data.get("reason")))
+    if event_type == "workflow.routing.requested":
+        title = "Workflow evaluating" if data.get("trigger") == "initial" else "Workflow reviewing"
+        return EventSummary(title, reason, "orange")
+    if event_type == "workflow.route.selected":
+        route = _text(data.get("route")).lower()
+        label = "ReAct" if route == "react" else "Plan" if route == "plan" else _humanize(route)
+        return EventSummary(f"Workflow {label}", reason, "blue" if route == "plan" else "green")
     return None
 
 

@@ -979,12 +979,13 @@ def test_auto_react_model_can_upgrade_to_plan_without_runtime_signal(tmp_path):
 def test_auto_react_reviews_route_after_two_recoverable_failures(tmp_path):
     (tmp_path / "sample.txt").write_text("original\n", encoding="utf-8")
     provider = FailureReviewPlanProvider()
+    trace_path = tmp_path / "runs" / "auto-review.jsonl"
 
     result = asyncio.run(
         run_generic_task(
             TaskRequest("Repair the sample file", workspace=tmp_path),
             provider=provider,
-            options=TaskRunOptions(plan_mode=PlanMode.AUTO),
+            options=TaskRunOptions(plan_mode=PlanMode.AUTO, trace_path=trace_path),
         )
     )
 
@@ -995,6 +996,21 @@ def test_auto_react_reviews_route_after_two_recoverable_failures(tmp_path):
     assert route["phase"] == "plan"
     assert route["review_count"] == 1
     assert route["trigger"] == "tool_failures"
+    records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    workflow_records = [record for record in records if record.get("eventType", "").startswith("workflow.")]
+    assert [record["eventType"] for record in workflow_records] == [
+        "workflow.routing.requested",
+        "workflow.route.selected",
+        "workflow.routing.requested",
+        "workflow.route.selected",
+    ]
+    assert [record["payload"]["trigger"] for record in workflow_records] == [
+        "initial",
+        "initial",
+        "tool_failures",
+        "tool_failures",
+    ]
+    assert all("revision" in record["payload"] and "reason" in record["payload"] for record in workflow_records)
 
 
 def test_run_generic_task_allows_one_tool_per_response_until_llm_checkpoint(tmp_path):

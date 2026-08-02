@@ -37,6 +37,66 @@ def _plan_event(event_type="plan.updated", revision=4):
     )
 
 
+def _workflow_event(event_type, *, trigger="initial", route=None, reason="Determine workflow"):
+    return TuiEvent(
+        timestamp=1,
+        event_type=event_type,
+        data={
+            "type": event_type,
+            "trigger": trigger,
+            "route": route,
+            "reason": reason,
+            "revision": 1,
+            "review_count": 1 if trigger != "initial" else 0,
+            "workflow_route": {
+                "phase": "reviewing" if event_type == "workflow.routing.requested" else route,
+                "calls_since_review": 2,
+                "consecutive_failures": 2,
+                "cooldown_remaining": 0,
+            },
+        },
+    )
+
+
+def test_workflow_event_formats_compact_line_and_structured_detail():
+    event = _workflow_event(
+        "workflow.route.selected",
+        trigger="tool_failures",
+        route="plan",
+        reason="Investigation and verification are dependent",
+    )
+
+    assert str(_format_event_line(event)) == "Workflow Plan Investigation and verification are dependent"
+    detail = _format_event_detail_plain(event)
+    assert "trigger: tool_failures" in detail
+    assert "route: plan" in detail
+    assert "review: 1" in detail
+    assert "reason: Investigation and verification are dependent" in detail
+
+
+@pytest.mark.asyncio
+async def test_workflow_timeline_keeps_initial_selection_and_later_review():
+    app = LoomTuiApp(TuiEventCollector())
+
+    async with app.run_test():
+        app._handle_event(_workflow_event("workflow.routing.requested", trigger="initial"))
+        app._handle_event(_workflow_event("workflow.route.selected", route="react", reason="Direct execution"))
+        app._handle_event(
+            _workflow_event(
+                "workflow.routing.requested",
+                trigger="tool_failures",
+                reason="2 consecutive tool failures",
+            )
+        )
+        feed = app.query_one("#event_feed", EventFeedWidget)
+
+        assert [event.event_type for event in feed.get_events()] == [
+            "workflow.routing.requested",
+            "workflow.route.selected",
+            "workflow.routing.requested",
+        ]
+
+
 def test_plan_event_formats_as_checklist_summary_and_detail():
     event = _plan_event()
 

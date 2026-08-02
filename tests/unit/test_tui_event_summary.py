@@ -62,6 +62,40 @@ def test_guard_observation_uses_code_and_message():
     assert is_redundant_observation(event) is False
 
 
+def test_workflow_review_event_summarizes_trigger():
+    event = _event(
+        "workflow.routing.requested",
+        {
+            "trigger": "tool_failures",
+            "reason": "2 consecutive tool failures",
+            "review_count": 1,
+        },
+    )
+
+    assert summarize_event(event) == EventSummary(
+        "Workflow reviewing",
+        "2 consecutive tool failures",
+        "orange",
+    )
+
+
+def test_workflow_selection_summarizes_route_and_reason():
+    event = _event(
+        "workflow.route.selected",
+        {
+            "route": "plan",
+            "reason": "Investigation, implementation, and verification are dependent",
+            "revision": 2,
+        },
+    )
+
+    assert summarize_event(event) == EventSummary(
+        "Workflow Plan",
+        "Investigation, implementation, and verification are dependent",
+        "blue",
+    )
+
+
 @pytest.mark.parametrize(
     "source",
     ["llm", "read_file", "edit_file", "write_file", "shell_execute", "finish", "submit_plan", "update_plan"],
