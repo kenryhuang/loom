@@ -19,6 +19,7 @@ from loom.core import (
     ok,
 )
 from loom.runtime.planning import PlanController, PlanItemStatus, PlanMode, PlanningRuntime, PlanPhase
+from loom.runtime.workflow_routing import WorkflowRoutePhase
 
 
 def _now():
@@ -194,6 +195,29 @@ async def test_plan_handlers_return_canonical_snapshots_and_rejections_are_recov
     assert duplicate_submit.value.source == "planning.guard"
     assert duplicate_submit.value.value["code"] == "PLAN_PHASE_INVALID"
     assert duplicate_submit.value.metadata is None
+
+
+@pytest.mark.asyncio
+async def test_auto_routing_exposes_exact_choice_and_continue_crosses_boundary():
+    planning = PlanningRuntime(PlanMode.AUTO, id_factory=_ids(), now=_now)
+    normal = (ToolRef("read_file", "read"), ToolRef("finish", "finish"))
+
+    assert tuple(tool.id for tool in planning.visible_tool_refs(normal)) == ("enter_plan", "continue_react")
+    policy = planning.step_policy(_context(*normal))
+    assert policy.tool_choice == "required"
+    assert policy.require_tool_call is True
+    assert policy.preserve_all_tools is True
+
+    continued = await planning.wrap_tools({})["continue_react"]({"reason": "direct task"}, {})
+
+    assert continued.ok
+    assert continued.value.value["accepted"] is True
+    assert continued.value.value["route"]["phase"] == "react"
+    assert continued.value.metadata == {
+        "controlFlow": {"stepBoundary": True, "reason": "workflow_routing_transition"}
+    }
+    assert planning.route.state.phase is WorkflowRoutePhase.REACT
+    assert {tool.id for tool in planning.visible_tool_refs(normal)} == {"read_file", "finish", "enter_plan"}
 
 
 @pytest.mark.asyncio
@@ -512,7 +536,7 @@ async def test_wrapper_reprojects_tools_and_replaces_workflow_constraint_each_st
     await wrapped.step(first.value.context, _runtime(sink))
 
     assert seen == [
-        (("read_file", "enter_plan"), ("runtime-plan-workflow",)),
+        (("enter_plan", "continue_react"), ("runtime-plan-workflow",)),
         (("submit_plan",), ("runtime-plan-workflow",)),
     ]
 

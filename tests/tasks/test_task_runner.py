@@ -35,7 +35,7 @@ def test_make_task_context_maps_request_to_loom_layers(tmp_path):
         expected_outputs=("markdown report",),
     )
 
-    context = make_task_context(request).unwrap()
+    context = make_task_context(request, plan_mode=PlanMode.OFF).unwrap()
 
     assert context.goal.objective == "Audit this project"
     assert context.goal.criteria[0].description == "markdown report"
@@ -49,7 +49,6 @@ def test_make_task_context_maps_request_to_loom_layers(tmp_path):
         "write_file",
         "shell_execute",
         "finish",
-        "enter_plan",
     }
 
 
@@ -63,13 +62,13 @@ def test_make_task_context_adds_phase_appropriate_plan_tools(tmp_path):
     forced = make_task_context(TaskRequest("Audit", workspace=tmp_path), plan_mode=PlanMode.FORCE).unwrap()
     off = make_task_context(TaskRequest("Audit", workspace=tmp_path), plan_mode=PlanMode.OFF).unwrap()
 
-    assert "enter_plan" in {tool.id for tool in auto.affordances.tools}
+    assert tuple(tool.id for tool in auto.affordances.tools) == ("enter_plan", "continue_react")
     assert tuple(tool.id for tool in forced.affordances.tools)[-1] == "submit_plan"
     assert not ({"enter_plan", "submit_plan", "update_plan"} & {tool.id for tool in off.affordances.tools})
 
 
 def test_make_task_context_exposes_exact_edit_file_schema(tmp_path):
-    context = make_task_context(TaskRequest("Edit this project", workspace=tmp_path)).unwrap()
+    context = make_task_context(TaskRequest("Edit this project", workspace=tmp_path), plan_mode=PlanMode.OFF).unwrap()
     tool = next(item for item in context.affordances.tools if item.id == "edit_file")
     schema = tool.input_schema
 
@@ -106,9 +105,9 @@ def test_task_harness_limits_tools_and_adds_system_prompt_constraint(tmp_path):
         max_history_steps=2,
     )
 
-    context = make_task_context(TaskRequest("Audit", workspace=tmp_path), harness=harness).unwrap()
+    context = make_task_context(TaskRequest("Audit", workspace=tmp_path), harness=harness, plan_mode=PlanMode.OFF).unwrap()
 
-    assert tuple(tool.id for tool in context.affordances.tools) == ("read_file", "enter_plan")
+    assert tuple(tool.id for tool in context.affordances.tools) == ("read_file",)
     assert any("Always cite the exact file path." in item.description for item in context.identity.constraints)
 
 
@@ -466,6 +465,102 @@ class AutoBoundaryPlanProvider:
         return self._tool(call_id, "update_plan", {"explanation": explanation, "items": items})
 
 
+class AutoReactTaskProvider:
+    model = "fake-auto-react-model"
+
+    def __init__(self):
+        self.calls = 0
+        self.tool_sets = []
+        self.tool_choices = []
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        self.calls += 1
+        self.tool_sets.append(tuple(tool["function"]["name"] for tool in tools or ()))
+        self.tool_choices.append(tool_choice)
+        if self.calls == 1:
+            return _response(
+                content="",
+                tool_calls=(
+                    LlmToolCall(
+                        "call-route",
+                        "continue_react",
+                        json.dumps({"reason": "The task is a direct read and report"}),
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        if self.calls == 2:
+            return _response(
+                content="",
+                tool_calls=(
+                    LlmToolCall("call-read", "read_file", json.dumps({"path": "README.md"})),
+                    LlmToolCall("call-finish", "finish", json.dumps({"report": "read complete"})),
+                ),
+                finish_reason="tool_calls",
+            )
+        return _response(
+            content=json.dumps(
+                {
+                    "reasoning": "The file was read and the report was recorded.",
+                    "action": {"kind": "none", "description": "task complete", "input": {}},
+                    "alternatives": [],
+                    "confidence": 0.9,
+                }
+            )
+        )
+
+
+class AutoUpgradePlanProvider:
+    model = "fake-auto-upgrade-plan-model"
+
+    def __init__(self):
+        self.calls = 0
+        self.tool_sets = []
+        self.step_id = ""
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        self.calls += 1
+        self.tool_sets.append(tuple(tool["function"]["name"] for tool in tools or ()))
+        if self.calls == 1:
+            return AutoBoundaryPlanProvider._tool(
+                "call-route-react",
+                "continue_react",
+                {"reason": "Begin with direct inspection"},
+            )
+        if self.calls == 2:
+            return AutoBoundaryPlanProvider._tool(
+                "call-upgrade",
+                "enter_plan",
+                {"reason": "Inspection revealed dependent repair and verification work"},
+            )
+        if self.calls == 3:
+            return AutoBoundaryPlanProvider._tool(
+                "call-submit",
+                "submit_plan",
+                {"explanation": "repair then verify", "items": [{"content": "Repair"}]},
+            )
+        if self.calls == 4:
+            self.step_id = _plan_step_ids(messages)[0]
+            return AutoBoundaryPlanProvider._tool(
+                "call-start",
+                "update_plan",
+                {
+                    "explanation": "start repair",
+                    "items": [{"id": self.step_id, "content": "Repair", "status": "in_progress", "note": None}],
+                },
+            )
+        if self.calls == 5:
+            return AutoBoundaryPlanProvider._tool(
+                "call-complete",
+                "update_plan",
+                {
+                    "explanation": "repair verified",
+                    "items": [{"id": self.step_id, "content": "Repair", "status": "completed", "note": None}],
+                },
+            )
+        return AutoBoundaryPlanProvider._tool("call-finish", "finish", {"report": "upgraded and completed"})
+
+
 class OneToolPerResponsePlanProvider:
     model = "fake-one-tool-per-response-plan-model"
 
@@ -689,7 +784,13 @@ def test_run_generic_task_executes_llm_tool_loop_and_returns_finish_report(tmp_p
     (tmp_path / "README.md").write_text("# Demo\nA demo project.\n", encoding="utf-8")
     provider = FakeTaskProvider()
 
-    result = asyncio.run(run_generic_task(TaskRequest("Audit this project", workspace=tmp_path, profile="project_audit"), provider=provider))
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest("Audit this project", workspace=tmp_path, profile="project_audit"),
+            provider=provider,
+            options=TaskRunOptions(plan_mode=PlanMode.OFF),
+        )
+    )
 
     assert result.ok
     assert "Demo audit" in result.value.output
@@ -700,7 +801,13 @@ def test_run_generic_task_executes_llm_tool_loop_and_returns_finish_report(tmp_p
 def test_run_generic_task_does_not_finish_on_parse_fallback(tmp_path):
     provider = MalformedThenFinalTaskProvider()
 
-    result = asyncio.run(run_generic_task(TaskRequest("Audit this project", workspace=tmp_path), provider=provider))
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest("Audit this project", workspace=tmp_path),
+            provider=provider,
+            options=TaskRunOptions(plan_mode=PlanMode.OFF),
+        )
+    )
 
     assert result.ok
     assert provider.calls == 2
@@ -755,7 +862,7 @@ def test_auto_plan_transitions_reproject_before_next_llm_request(tmp_path):
     assert result.ok
     assert result.value.output == "done"
     assert result.value.run_result.context.state.scratch["plan"]["phase"] == "completed"
-    assert provider.tool_sets[0][-1] == "enter_plan"
+    assert provider.tool_sets[0] == ("enter_plan", "continue_react")
     assert provider.tool_sets[1] == ("submit_plan",)
     assert "update_plan" in provider.tool_sets[2]
     guard_codes = [
@@ -764,6 +871,49 @@ def test_auto_plan_transitions_reproject_before_next_llm_request(tmp_path):
         if event["type"] == "observation.recorded" and event["observation"].source == "planning.guard"
     ]
     assert "PLAN_PHASE_INVALID" not in guard_codes
+
+
+def test_auto_continue_react_crosses_boundary_before_task_execution(tmp_path):
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    provider = AutoReactTaskProvider()
+
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest("Read and report", workspace=tmp_path),
+            provider=provider,
+            options=TaskRunOptions(plan_mode=PlanMode.AUTO),
+        )
+    )
+
+    assert result.ok
+    assert result.value.output == "read complete"
+    assert provider.tool_sets[0] == ("enter_plan", "continue_react")
+    assert {"read_file", "finish", "enter_plan"} <= set(provider.tool_sets[1])
+    assert provider.tool_choices[0] == "required"
+    assert provider.calls == 3
+    route = result.value.run_result.context.state.scratch["workflowRoute"]
+    assert route["phase"] == "react"
+    assert route["task_execution_started"] is True
+
+
+def test_auto_react_model_can_upgrade_to_plan_without_runtime_signal(tmp_path):
+    provider = AutoUpgradePlanProvider()
+
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest("Inspect then repair", workspace=tmp_path),
+            provider=provider,
+            options=TaskRunOptions(plan_mode=PlanMode.AUTO),
+        )
+    )
+
+    assert result.ok
+    assert result.value.output == "upgraded and completed"
+    assert provider.tool_sets[0] == ("enter_plan", "continue_react")
+    assert "enter_plan" in provider.tool_sets[1]
+    assert provider.tool_sets[2] == ("submit_plan",)
+    assert result.value.run_result.context.state.scratch["workflowRoute"]["phase"] == "plan"
+    assert result.value.run_result.context.state.scratch["plan"]["phase"] == "completed"
 
 
 def test_run_generic_task_allows_one_tool_per_response_until_llm_checkpoint(tmp_path):
@@ -869,7 +1019,7 @@ def test_run_generic_task_forwards_runtime_events_to_additional_trace_sink(tmp_p
         run_generic_task(
             TaskRequest("Audit this project", workspace=tmp_path, profile="project_audit"),
             provider=FakeTaskProvider(),
-            options=TaskRunOptions(trace_path=trace_path),
+                options=TaskRunOptions(plan_mode=PlanMode.OFF, trace_path=trace_path),
             trace_sink=sink,
         )
     )
@@ -892,7 +1042,7 @@ def test_run_generic_task_executes_edit_file_and_traces_observation(tmp_path):
         run_generic_task(
             TaskRequest("Edit the second repeated string", workspace=tmp_path),
             provider=FakeEditTaskProvider(),
-            options=TaskRunOptions(trace_path=trace_path),
+                options=TaskRunOptions(plan_mode=PlanMode.OFF, trace_path=trace_path),
         )
     )
 
@@ -912,7 +1062,7 @@ def test_run_generic_task_trace_omits_stream_token_deltas(tmp_path):
         run_generic_task(
             TaskRequest("Audit this project briefly", workspace=tmp_path, profile="project_audit"),
             provider=StreamingTaskProvider(),
-            options=TaskRunOptions(stream=True, trace_path=trace_path),
+                options=TaskRunOptions(plan_mode=PlanMode.OFF, stream=True, trace_path=trace_path),
         )
     )
 
@@ -932,6 +1082,7 @@ def test_run_generic_task_merges_harness_request_options_without_changing_provid
         run_generic_task(
             TaskRequest("Audit", workspace=tmp_path),
             provider=provider,
+            options=TaskRunOptions(plan_mode=PlanMode.OFF),
             harness=TaskHarness(
                 allowed_tools=("read_file",),
                 request_options={"enable_thinking": True, "thinking_budget": 1024},
@@ -947,6 +1098,6 @@ def test_run_generic_task_merges_harness_request_options_without_changing_provid
             "model": "fixed-model",
             "base_url": "https://provider.invalid/v1",
             "request_options": {"enable_thinking": True, "thinking_budget": 1024},
-            "tool_names": ("read_file", "enter_plan"),
+            "tool_names": ("read_file",),
         }
     ]

@@ -21,12 +21,26 @@ from loom.core import (
     now_iso,
     ok,
 )
+from loom.llm import LlmStepPolicy
+from loom.runtime.workflow_routing import (
+    WorkflowRouteController,
+    WorkflowRoutePhase,
+    WorkflowRouteState,
+    workflow_route_state_dict,
+    workflow_route_state_from_mapping,
+)
 
-PLAN_TOOL_IDS = frozenset({"enter_plan", "submit_plan", "update_plan"})
+PLAN_TOOL_IDS = frozenset({"enter_plan", "continue_react", "submit_plan", "update_plan"})
 _PLAN_TRANSITION_BOUNDARY = {
     "controlFlow": {
         "stepBoundary": True,
         "reason": "planning_transition",
+    }
+}
+_WORKFLOW_ROUTE_TRANSITION_BOUNDARY = {
+    "controlFlow": {
+        "stepBoundary": True,
+        "reason": "workflow_routing_transition",
     }
 }
 
@@ -269,6 +283,7 @@ class PlanningRuntime:
         self.finish_tool_id = finish_tool_id
         self._now = now
         self._controller = PlanController(self.mode, id_factory=id_factory, now=now)
+        self._route = WorkflowRouteController(self.mode, now=now)
         self._bound_runtime: Any | None = None
         self._bound_context: Any | None = None
         self._normal_refs: tuple[ToolRef, ...] | None = None
@@ -276,6 +291,10 @@ class PlanningRuntime:
     @property
     def controller(self) -> PlanController:
         return self._controller
+
+    @property
+    def route(self) -> WorkflowRouteController:
+        return self._route
 
     def tool_refs(self) -> tuple[ToolRef, ...]:
         if self.mode is PlanMode.OFF:
@@ -304,6 +323,16 @@ class PlanningRuntime:
             ToolRef(
                 "enter_plan",
                 "Enter planning mode when the task needs a multi-step workflow.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"reason": {"type": "string", "minLength": 1}},
+                    "required": ["reason"],
+                    "additionalProperties": False,
+                },
+            ),
+            ToolRef(
+                "continue_react",
+                "Continue with the normal ReAct workflow when the task can be completed directly.",
                 input_schema={
                     "type": "object",
                     "properties": {"reason": {"type": "string", "minLength": 1}},
@@ -353,9 +382,32 @@ class PlanningRuntime:
         wrapped = {tool_id: self._guard_handler(tool_id, handler) for tool_id, handler in handlers.items()}
 
         async def enter_plan(input_value: Mapping[str, Any], _options: Any = None) -> Result:
+            reason = str(input_value.get("reason", ""))
+            if self._controller.state.phase is not PlanPhase.INACTIVE:
+                return self._rejected("PLAN_PHASE_INVALID", "A plan can only be entered from the inactive phase")
+            route = self._route.select_plan(reason)
+            if not route.ok:
+                return self._route_rejected(route.error.code, route.error.message)
             return await self._transition_result(
                 "enter_plan",
-                self._controller.enter(str(input_value.get("reason", ""))),
+                self._controller.enter(reason),
+            )
+
+        async def continue_react(input_value: Mapping[str, Any], _options: Any = None) -> Result:
+            route = self._route.select_react(str(input_value.get("reason", "")))
+            if not route.ok:
+                return self._route_rejected(route.error.code, route.error.message)
+            emitted = await self._emit_pending_events()
+            if not emitted.ok:
+                return emitted
+            return ok(
+                Observation(
+                    _new_id("obs_"),
+                    "continue_react",
+                    {"accepted": True, "route": workflow_route_state_dict(route.value)},
+                    self._now(),
+                    metadata=_WORKFLOW_ROUTE_TRANSITION_BOUNDARY,
+                )
             )
 
         async def submit_plan(input_value: Mapping[str, Any], _options: Any = None) -> Result:
@@ -379,6 +431,7 @@ class PlanningRuntime:
         wrapped.update(
             {
                 "enter_plan": enter_plan,
+                "continue_react": continue_react,
                 "submit_plan": submit_plan,
                 "update_plan": update_plan,
             }
@@ -391,6 +444,12 @@ class PlanningRuntime:
             return tuple(normal_refs)
         refs = {tool.id: tool for tool in self.tool_refs()}
         state = self._controller.state
+        route = self._route.state
+        if self.mode is PlanMode.AUTO and state.phase is PlanPhase.INACTIVE:
+            if route.phase in {WorkflowRoutePhase.UNDECIDED, WorkflowRoutePhase.REVIEWING}:
+                return (refs["enter_plan"], refs["continue_react"])
+            if route.phase is WorkflowRoutePhase.REACT:
+                return (*normal_refs, refs["enter_plan"])
         if state.phase is PlanPhase.INACTIVE:
             return (*normal_refs, refs["enter_plan"])
         if state.phase is PlanPhase.PLANNING:
@@ -402,6 +461,27 @@ class PlanningRuntime:
     def configure_normal_tool_refs(self, normal_refs: Sequence[ToolRef]) -> None:
         """Retain normal tools when an initial forced-planning context hides them."""
         self._normal_refs = tuple(normal_refs)
+
+    def step_policy(self, _context: Any) -> LlmStepPolicy:
+        route = self._route.state
+        if self.mode is PlanMode.AUTO and route.phase in {
+            WorkflowRoutePhase.UNDECIDED,
+            WorkflowRoutePhase.REVIEWING,
+        }:
+            return LlmStepPolicy(
+                tool_choice="required",
+                preserve_all_tools=True,
+                require_tool_call=True,
+                missing_tool_call_retries=1,
+                invalid_tool_call_retries=1,
+                retry_prompt="Call exactly one of enter_plan or continue_react with a concise reason.",
+                failure_code="WORKFLOW_ROUTE_FAILED",
+            )
+        return LlmStepPolicy()
+
+    def observe_tool(self, _context: Any, observation: Observation) -> Observation:
+        """Return the observation unchanged until runtime checkpoints are enabled."""
+        return observation
 
     def wrap_loop(self, definition: MinimalLoopDefinition) -> MinimalLoopDefinition:
         if self.mode is PlanMode.OFF:
@@ -417,6 +497,8 @@ class PlanningRuntime:
                 emitted = await self._emit_pending_events()
                 if not emitted.ok:
                     return emitted
+                if self.mode is PlanMode.AUTO and self._route.state.phase is WorkflowRoutePhase.REACT:
+                    self._route.mark_task_execution_started()
                 prompt_context = self._project_context(context)
                 result = definition.step(prompt_context, runtime)
                 if inspect.isawaitable(result):
@@ -435,6 +517,12 @@ class PlanningRuntime:
 
         async def planned_done(context: Any, runtime: Any) -> Result:
             state = self._state_from_context(context) or self._controller.state
+            route = self._route_state_from_context(context) or self._route.state
+            if self.mode is PlanMode.AUTO and (
+                route.phase in {WorkflowRoutePhase.UNDECIDED, WorkflowRoutePhase.REVIEWING}
+                or (route.phase is WorkflowRoutePhase.REACT and not route.task_execution_started)
+            ):
+                return ok(False)
             if state.phase in {PlanPhase.PLANNING, PlanPhase.EXECUTING}:
                 return ok(False)
             result = definition.done(context, runtime)
@@ -448,6 +536,19 @@ class PlanningRuntime:
         state = self._state_from_context(context)
         if state is not None and state != self._controller.state:
             self._controller.restore(state)
+        route = self._route_state_from_context(context)
+        if route is not None and route != self._route.state:
+            self._route.restore(route)
+        elif route is None and self.mode is PlanMode.AUTO and context.state.observations:
+            inferred_phase = WorkflowRoutePhase.PLAN if state and state.phase is not PlanPhase.INACTIVE else WorkflowRoutePhase.REACT
+            self._route.restore(
+                WorkflowRouteState(
+                    inferred_phase,
+                    reason="Restored from task history",
+                    trigger="context_restore",
+                    task_execution_started=inferred_phase is WorkflowRoutePhase.REACT,
+                )
+            )
 
     @staticmethod
     def _state_from_context(context: Any) -> PlanState | None:
@@ -456,6 +557,14 @@ class PlanningRuntime:
             return None
         value = scratch.get("plan")
         return plan_state_from_mapping(value) if isinstance(value, Mapping) else None
+
+    @staticmethod
+    def _route_state_from_context(context: Any) -> WorkflowRouteState | None:
+        scratch = context.state.scratch
+        if not isinstance(scratch, Mapping):
+            return None
+        value = scratch.get("workflowRoute")
+        return workflow_route_state_from_mapping(value) if isinstance(value, Mapping) else None
 
     def _project_context(self, context: Any) -> Any:
         state = self._controller.state
@@ -470,9 +579,25 @@ class PlanningRuntime:
             affordances=replace(context.affordances, tools=visible),
         )
 
-    @staticmethod
-    def _workflow_description(state: PlanState) -> str:
+    def _workflow_description(self, state: PlanState) -> str:
         if state.phase is PlanPhase.INACTIVE:
+            route = self._route.state
+            if self.mode is PlanMode.AUTO and route.phase in {
+                WorkflowRoutePhase.UNDECIDED,
+                WorkflowRoutePhase.REVIEWING,
+            }:
+                review = (
+                    "initial task routing"
+                    if route.phase is WorkflowRoutePhase.UNDECIDED
+                    else f"runtime review triggered by {route.trigger}: {route.reason}"
+                )
+                return (
+                    f"Choose the workflow for {review}. Call exactly one routing tool. "
+                    "Use enter_plan for three or more dependent phases, investigation followed by implementation "
+                    "and verification, multiple modules or artifacts, high uncertainty, or work needing explicit "
+                    "progress tracking. Use continue_react for a one-shot query, read-only lookup, single local edit, "
+                    "or a few independent actions. Give a concise reason; do not execute task tools in this step."
+                )
             return "Use enter_plan when the task requires multiple dependent steps; otherwise continue with the normal ReAct workflow."
         if state.phase is PlanPhase.PLANNING:
             return "Planning is active. Submit an ordered checklist with submit_plan before executing task tools."
@@ -494,12 +619,21 @@ class PlanningRuntime:
         context = value.context
         scratch = dict(context.state.scratch or {})
         scratch["plan"] = plan_state_dict(self._controller.state)
+        scratch["workflowRoute"] = workflow_route_state_dict(self._route.state)
         planned_context = replace(context, state=replace(context.state, scratch=scratch))
         return replace(value, context=planned_context)
 
     def _guard_handler(self, tool_id: str, handler: Any) -> Callable[..., Any]:
         async def guarded(input_value: Any, options: Any = None) -> Result:
             phase = self._controller.state.phase
+            if self.mode is PlanMode.AUTO and self._route.state.phase in {
+                WorkflowRoutePhase.UNDECIDED,
+                WorkflowRoutePhase.REVIEWING,
+            }:
+                return self._route_rejected(
+                    "WORKFLOW_ROUTE_PHASE_INVALID",
+                    "Choose enter_plan or continue_react before using task tools",
+                )
             if phase is PlanPhase.COMPLETED:
                 return self._rejected(
                     "PLAN_PHASE_INVALID",
@@ -547,7 +681,11 @@ class PlanningRuntime:
             Observation(
                 _new_id("obs_"),
                 tool_id,
-                {"accepted": True, "plan": plan_state_dict(transition.value)},
+                {
+                    "accepted": True,
+                    "plan": plan_state_dict(transition.value),
+                    "route": workflow_route_state_dict(self._route.state),
+                },
                 self._now(),
                 metadata=_PLAN_TRANSITION_BOUNDARY,
             )
@@ -568,9 +706,43 @@ class PlanningRuntime:
             )
         )
 
+    def _route_rejected(self, code: str, message: str) -> Result:
+        return ok(
+            Observation(
+                _new_id("obs_"),
+                "workflow.guard",
+                {
+                    "accepted": False,
+                    "code": code,
+                    "message": message,
+                    "route": workflow_route_state_dict(self._route.state),
+                },
+                self._now(),
+            )
+        )
+
     async def _emit_pending_events(self) -> Result:
         if self._bound_runtime is None or self._bound_context is None:
             return ok(None)
+        for event in self._route.drain_events():
+            emitted = await self._bound_runtime.trace_sink.emit(
+                {
+                    "type": event.event_type,
+                    "run_id": self._bound_context.run_id,
+                    "loop_id": self._bound_runtime.loop_id,
+                    "trace_id": self._bound_runtime.trace_id,
+                    "step_number": len(self._bound_context.state.observations),
+                    "revision": event.state.revision,
+                    "trigger": event.trigger,
+                    "reason": event.reason,
+                    "route": event.route.value if event.route is not None else None,
+                    "review_count": event.state.review_count,
+                    "workflow_route": workflow_route_state_dict(event.state),
+                    "at": event.at,
+                }
+            )
+            if not emitted.ok:
+                return emitted
         for event in self._controller.drain_events():
             emitted = await self._bound_runtime.trace_sink.emit(
                 {

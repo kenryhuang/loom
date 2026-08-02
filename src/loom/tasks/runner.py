@@ -128,6 +128,7 @@ def make_task_loop(
     *,
     stream: bool = False,
     harness: TaskHarness | None = None,
+    planning: PlanningRuntime | None = None,
 ) -> MinimalLoopDefinition:
     task_harness = harness or TaskHarness()
     profile = select_task_profile(request)
@@ -141,6 +142,8 @@ def make_task_loop(
             stream=stream,
             max_tool_calls_per_step=task_harness.max_tool_calls_per_step,
             prompt_options={"max_history_steps": task_harness.max_history_steps},
+            step_policy_resolver=planning.step_policy if planning is not None else None,
+            observation_policy=planning.observe_tool if planning is not None else None,
         ),
         done=_task_done,
         metadata={"task_kind": "generic_task", "profile": profile.id, "blueprint": profile.blueprint},
@@ -191,7 +194,15 @@ async def run_generic_task(
         return context
 
     normal_handlers = _filter_tool_handlers(make_task_tools(request), task_harness.allowed_tools)
-    definition = planning.wrap_loop(make_task_loop(request, provider, stream=run_options.stream, harness=task_harness))
+    definition = planning.wrap_loop(
+        make_task_loop(
+            request,
+            provider,
+            stream=run_options.stream,
+            harness=task_harness,
+            planning=planning,
+        )
+    )
     handle = create(
         definition,
         registry=create_runtime_registry(tools=planning.wrap_tools(normal_handlers)),
