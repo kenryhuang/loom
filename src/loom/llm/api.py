@@ -60,6 +60,29 @@ class TokenUsage:
 
 
 @dataclass(frozen=True, slots=True)
+class LlmStepPolicy:
+    """Per-step controls for constrained tool-choice workflows."""
+
+    tool_choice: Any = None
+    preserve_all_tools: bool = False
+    require_tool_call: bool = False
+    missing_tool_call_retries: int = 0
+    invalid_tool_call_retries: int = 0
+    retry_prompt: str = "Call one of the available tools."
+    failure_code: str = "LLM_TOOL_REQUIRED"
+
+    def __post_init__(self) -> None:
+        if self.missing_tool_call_retries < 0:
+            raise ValueError("missing_tool_call_retries must be non-negative")
+        if self.invalid_tool_call_retries < 0:
+            raise ValueError("invalid_tool_call_retries must be non-negative")
+        if self.require_tool_call and not self.retry_prompt.strip():
+            raise ValueError("retry_prompt is required when a tool call is required")
+        if not self.failure_code.strip():
+            raise ValueError("failure_code must be non-empty")
+
+
+@dataclass(frozen=True, slots=True)
 class ToolSelectionConfig:
     """Configuration for LLM-based dynamic tool selection.
 
@@ -274,6 +297,8 @@ def create_llm_step_function(
     required_tools: tuple[str, ...] = (),
     tool_selection: ToolSelectionConfig | None = None,
     tool_resolver: Any = None,
+    step_policy_resolver: Any = None,
+    observation_policy: Any = None,
     stream: bool = False,
 ):
     async def llm_step(context: Context, runtime: Any) -> Result:
@@ -297,11 +322,22 @@ def create_llm_step_function(
             all_tools, tool_resolution_metadata = _normalize_tool_resolution(all_tools, resolved)
             prompt_context = replace(context, affordances=replace(context.affordances, tools=all_tools))
 
+        step_policy_result = await _resolve_step_policy(step_policy_resolver, prompt_context)
+        if not step_policy_result.ok:
+            return step_policy_result
+        step_policy = step_policy_result.value
+
         # ── Phase 1: Tool Selection ────────────────────────────────────
         effective_tools = all_tools
         tool_selection_result: ToolSelectionResult | None = None
 
-        if enable_tool_calling and all_tools and tool_selection is not None and tool_selection.enabled:
+        if (
+            enable_tool_calling
+            and all_tools
+            and tool_selection is not None
+            and tool_selection.enabled
+            and not step_policy.preserve_all_tools
+        ):
             selection_provider = tool_selection.provider or provider
             tool_selection_result = await _select_tools(prompt_context, selection_provider, tool_selection, runtime, trace_id)
 
@@ -317,11 +353,15 @@ def create_llm_step_function(
         llm_call_count = 0
         tool_call_count = 0
         tool_observations: list[Observation] = []
+        missing_tool_call_attempts = 0
+        invalid_tool_call_attempts = 0
 
         while True:
             llm_call_count += 1
             llm_call_id = f"{trace_id}-llm-{llm_call_count}"
-            tool_choice = "required" if tools and pending_required_tools else None
+            tool_choice = step_policy.tool_choice if tools else None
+            if tool_choice is None and tools and pending_required_tools:
+                tool_choice = "required"
             requested = await _emit_runtime_event(
                 runtime,
                 {
@@ -404,11 +444,43 @@ def create_llm_step_function(
                     )
                 )
                 native_tool_results = []
+                retry_invalid_tool_call = False
                 for tool_call in final_response.tool_calls:
                     if max_tool_calls_per_step is not None and tool_call_count >= max_tool_calls_per_step:
                         return _max_tool_calls_exceeded(max_tool_calls_per_step)
                     parsed_input = _parse_tool_arguments(tool_call)
                     if not parsed_input.ok:
+                        if step_policy.require_tool_call:
+                            if invalid_tool_call_attempts >= step_policy.invalid_tool_call_retries:
+                                return err(
+                                    make_loom_error(
+                                        step_policy.failure_code,
+                                        "The model produced invalid required tool arguments",
+                                        retryable=False,
+                                        cause=parsed_input.error,
+                                    )
+                                )
+                            invalid_tool_call_attempts += 1
+                            messages.append(
+                                LlmMessage(
+                                    "tool",
+                                    json.dumps(
+                                        {
+                                            "ok": False,
+                                            "error": {
+                                                "code": parsed_input.error.code,
+                                                "message": parsed_input.error.message,
+                                            },
+                                        },
+                                        separators=(",", ":"),
+                                    ),
+                                    name=tool_call.name,
+                                    tool_call_id=tool_call.id,
+                                )
+                            )
+                            messages.append(LlmMessage("user", step_policy.retry_prompt))
+                            retry_invalid_tool_call = True
+                            break
                         return parsed_input
                     observation = await runtime.call_tool(
                         tool_call.name,
@@ -436,6 +508,10 @@ def create_llm_step_function(
                     else:
                         pending_required_tools.discard(tool_call.name)
                         tool_observation = observation.value
+                    controlled = await _apply_observation_policy(observation_policy, context, tool_observation)
+                    if not controlled.ok:
+                        return controlled
+                    tool_observation = controlled.value
                     tool_observations.append(tool_observation)
                     native_tool_results.append((tool_call, tool_observation))
                     messages.append(
@@ -449,6 +525,8 @@ def create_llm_step_function(
                     if _requests_step_boundary(tool_observation):
                         step_boundary_requested = True
                         break
+                if retry_invalid_tool_call:
+                    continue
                 messages.append(_native_tool_execution_transcript(native_tool_results))
                 if step_boundary_requested:
                     break
@@ -458,6 +536,19 @@ def create_llm_step_function(
             if enable_tool_calling:
                 json_tool_actions = _json_tool_actions(_parse_decision(final_response.content, trace_id), effective_tool_ids)
             if not json_tool_actions:
+                if step_policy.require_tool_call:
+                    if missing_tool_call_attempts >= step_policy.missing_tool_call_retries:
+                        return err(
+                            make_loom_error(
+                                step_policy.failure_code,
+                                "The model did not call a required tool",
+                                retryable=False,
+                            )
+                        )
+                    missing_tool_call_attempts += 1
+                    messages.append(LlmMessage("assistant", "" if final_response.content is None else final_response.content))
+                    messages.append(LlmMessage("user", step_policy.retry_prompt))
+                    continue
                 break
             json_tool_results = []
             for json_tool_action in json_tool_actions:
@@ -493,6 +584,10 @@ def create_llm_step_function(
                 else:
                     pending_required_tools.discard(json_tool_action.target or "")
                     tool_observation = observation.value
+                controlled = await _apply_observation_policy(observation_policy, context, tool_observation)
+                if not controlled.ok:
+                    return controlled
+                tool_observation = controlled.value
                 tool_observations.append(tool_observation)
                 json_tool_results.append((json_tool_action, tool_observation))
                 if _requests_step_boundary(tool_observation):
@@ -1309,6 +1404,68 @@ def _recoverable_tool_failure(error: LoomError | None) -> bool:
     return bool(error and error.code != "ABORTED" and (error.metadata or {}).get("failureDomain") == "tool")
 
 
+async def _resolve_step_policy(resolver: Any, context: Context) -> Result:
+    if resolver is None:
+        return ok(LlmStepPolicy())
+    try:
+        resolved = resolver(context)
+        if inspect.isawaitable(resolved):
+            resolved = await resolved
+        if isinstance(resolved, Result):
+            if not resolved.ok:
+                return resolved
+            resolved = resolved.value
+        if not isinstance(resolved, LlmStepPolicy):
+            return err(
+                make_loom_error(
+                    "LLM_STEP_POLICY_INVALID",
+                    "Step policy resolver must return LlmStepPolicy",
+                    retryable=False,
+                )
+            )
+        return ok(resolved)
+    except BaseException as exc:
+        return err(
+            make_loom_error(
+                "LLM_STEP_POLICY_FAILED",
+                "Failed to resolve LLM step policy",
+                retryable=False,
+                cause={"name": type(exc).__name__, "message": str(exc)},
+            )
+        )
+
+
+async def _apply_observation_policy(policy: Any, context: Context, observation: Observation) -> Result:
+    if policy is None:
+        return ok(observation)
+    try:
+        controlled = policy(context, observation)
+        if inspect.isawaitable(controlled):
+            controlled = await controlled
+        if isinstance(controlled, Result):
+            if not controlled.ok:
+                return controlled
+            controlled = controlled.value
+        if not isinstance(controlled, Observation):
+            return err(
+                make_loom_error(
+                    "LLM_OBSERVATION_POLICY_INVALID",
+                    "Observation policy must return Observation",
+                    retryable=False,
+                )
+            )
+        return ok(controlled)
+    except BaseException as exc:
+        return err(
+            make_loom_error(
+                "LLM_OBSERVATION_POLICY_FAILED",
+                "Failed to apply observation policy",
+                retryable=False,
+                cause={"name": type(exc).__name__, "message": str(exc)},
+            )
+        )
+
+
 def _requests_step_boundary(observation: Observation) -> bool:
     metadata = observation.metadata
     if not isinstance(metadata, Mapping):
@@ -1910,6 +2067,7 @@ def _first_env(env: dict[str, str], names: tuple[str, ...]) -> str | None:
 __all__ = [
     "LlmMessage",
     "LlmResponse",
+    "LlmStepPolicy",
     "LlmStreamEvent",
     "LlmToolCall",
     "EnvOpenAIConfig",

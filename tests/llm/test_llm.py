@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -28,9 +29,11 @@ from loom.core import (
 from loom.llm import (
     LlmMessage,
     LlmResponse,
+    LlmStepPolicy,
     LlmStreamEvent,
     LlmToolCall,
     TokenUsage,
+    ToolSelectionConfig,
     build_messages,
     build_system_prompt,
     build_user_prompt,
@@ -549,6 +552,268 @@ def test_llm_step_requests_required_tool_choice_until_required_tools_complete():
         assert result.ok
         assert provider.messages[0][2] == "required"
         assert provider.messages[1][2] is None
+
+    asyncio.run(scenario())
+
+
+def test_step_policy_requires_one_of_the_visible_tools_without_pending_both():
+    async def scenario():
+        provider = FakeProvider(
+            [
+                ok(
+                    LlmResponse(
+                        content=None,
+                        tool_calls=(LlmToolCall("call-route", "continue_react", '{"reason":"direct"}'),),
+                        finish_reason="tool_calls",
+                    )
+                )
+            ]
+        )
+        calls = []
+
+        async def call_tool(name, input_value, **_options):
+            calls.append((name, input_value))
+            return ok(
+                Observation(
+                    "route-observation",
+                    name,
+                    {"accepted": True},
+                    NOW,
+                    metadata={"controlFlow": {"stepBoundary": True, "reason": "routing"}},
+                )
+            )
+
+        context = make_context(
+            tools=(
+                ToolRef("enter_plan", "Enter planning"),
+                ToolRef("continue_react", "Continue directly"),
+            )
+        )
+        policy = LlmStepPolicy(
+            tool_choice="required",
+            preserve_all_tools=True,
+            require_tool_call=True,
+        )
+
+        result = await create_llm_step_function(
+            provider,
+            step_policy_resolver=lambda _context: policy,
+        )(context, make_runtime(call_tool=call_tool))
+
+        assert result.ok
+        assert provider.messages[0][2] == "required"
+        assert tuple(tool["function"]["name"] for tool in provider.messages[0][1]) == (
+            "enter_plan",
+            "continue_react",
+        )
+        assert calls == [("continue_react", {"reason": "direct"})]
+        assert len(provider.messages) == 1
+
+    asyncio.run(scenario())
+
+
+def test_step_policy_preserves_the_complete_alternative_tool_set():
+    async def scenario():
+        selector = FakeProvider(
+            [
+                ok(
+                    LlmResponse(
+                        content=json.dumps(
+                            {
+                                "selected_tools": ["enter_plan"],
+                                "reasoning": "Prefer planning",
+                                "confidence": 0.8,
+                            }
+                        )
+                    )
+                )
+            ]
+        )
+        provider = FakeProvider(
+            [
+                ok(
+                    LlmResponse(
+                        content=None,
+                        tool_calls=(LlmToolCall("call-route", "continue_react", '{"reason":"direct"}'),),
+                        finish_reason="tool_calls",
+                    )
+                )
+            ]
+        )
+
+        async def call_tool(name, _input_value, **_options):
+            return ok(
+                Observation(
+                    "route-observation",
+                    name,
+                    {"accepted": True},
+                    NOW,
+                    metadata={"controlFlow": {"stepBoundary": True}},
+                )
+            )
+
+        context = make_context(
+            tools=(
+                ToolRef("enter_plan", "Enter planning"),
+                ToolRef("continue_react", "Continue directly"),
+                ToolRef("route_help", "Explain routing"),
+            )
+        )
+        policy = LlmStepPolicy(tool_choice="required", preserve_all_tools=True, require_tool_call=True)
+
+        result = await create_llm_step_function(
+            provider,
+            step_policy_resolver=lambda _context: policy,
+            tool_selection=ToolSelectionConfig(provider=selector),
+        )(context, make_runtime(call_tool=call_tool))
+
+        assert result.ok
+        assert selector.messages == []
+        assert tuple(tool["function"]["name"] for tool in provider.messages[0][1]) == (
+            "enter_plan",
+            "continue_react",
+            "route_help",
+        )
+
+    asyncio.run(scenario())
+
+
+def test_required_step_policy_retries_once_then_fails_deterministically():
+    async def scenario():
+        response = LlmResponse(
+            content=json.dumps(
+                {
+                    "reasoning": "No route selected",
+                    "action": {"kind": "none", "description": "wait"},
+                    "alternatives": [],
+                    "confidence": 0.1,
+                }
+            )
+        )
+        provider = FakeProvider([ok(response), ok(response)])
+        policy = LlmStepPolicy(
+            tool_choice="required",
+            preserve_all_tools=True,
+            require_tool_call=True,
+            missing_tool_call_retries=1,
+            retry_prompt="Call exactly one workflow routing tool.",
+            failure_code="WORKFLOW_ROUTE_FAILED",
+        )
+
+        result = await create_llm_step_function(
+            provider,
+            step_policy_resolver=lambda _context: policy,
+        )(make_context(), make_runtime())
+
+        assert not result.ok
+        assert result.error.code == "WORKFLOW_ROUTE_FAILED"
+        assert len(provider.messages) == 2
+        assert provider.messages[1][0][-1].content == "Call exactly one workflow routing tool."
+
+    asyncio.run(scenario())
+
+
+def test_required_step_policy_retries_malformed_tool_arguments_once():
+    async def scenario():
+        provider = FakeProvider(
+            [
+                ok(
+                    LlmResponse(
+                        content=None,
+                        tool_calls=(LlmToolCall("call-invalid", "continue_react", "{"),),
+                        finish_reason="tool_calls",
+                    )
+                ),
+                ok(
+                    LlmResponse(
+                        content=None,
+                        tool_calls=(LlmToolCall("call-valid", "continue_react", '{"reason":"direct"}'),),
+                        finish_reason="tool_calls",
+                    )
+                ),
+            ]
+        )
+
+        async def call_tool(name, _input_value, **_options):
+            return ok(
+                Observation(
+                    "route-observation",
+                    name,
+                    {"accepted": True},
+                    NOW,
+                    metadata={"controlFlow": {"stepBoundary": True}},
+                )
+            )
+
+        policy = LlmStepPolicy(
+            tool_choice="required",
+            preserve_all_tools=True,
+            require_tool_call=True,
+            invalid_tool_call_retries=1,
+            retry_prompt="Call exactly one workflow routing tool with valid JSON arguments.",
+            failure_code="WORKFLOW_ROUTE_FAILED",
+        )
+        context = make_context(tools=(ToolRef("continue_react", "Continue directly"),))
+
+        result = await create_llm_step_function(
+            provider,
+            step_policy_resolver=lambda _context: policy,
+        )(context, make_runtime(call_tool=call_tool))
+
+        assert result.ok
+        assert len(provider.messages) == 2
+        assert provider.messages[1][0][-1].content == "Call exactly one workflow routing tool with valid JSON arguments."
+
+    asyncio.run(scenario())
+
+
+def test_observation_policy_sees_normalized_failure_and_can_end_native_batch():
+    async def scenario():
+        provider = FakeProvider(
+            [
+                ok(
+                    LlmResponse(
+                        content=None,
+                        tool_calls=(
+                            LlmToolCall("call-first", "first", "{}"),
+                            LlmToolCall("call-second", "second", "{}"),
+                        ),
+                        finish_reason="tool_calls",
+                    )
+                )
+            ]
+        )
+        executed = []
+        seen = []
+
+        async def call_tool(name, _input_value, **_options):
+            executed.append(name)
+            return err(
+                make_loom_error(
+                    "VALIDATION_FAILED",
+                    "bad input",
+                    retryable=False,
+                    metadata={"failureDomain": "tool"},
+                )
+            )
+
+        def observe(_context, observation):
+            seen.append(observation)
+            return replace(
+                observation,
+                metadata={"controlFlow": {"stepBoundary": True, "reason": "review"}},
+            )
+
+        context = make_context(tools=(ToolRef("first", "First"), ToolRef("second", "Second")))
+        result = await create_llm_step_function(provider, observation_policy=observe)(
+            context,
+            make_runtime(call_tool=call_tool),
+        )
+
+        assert result.ok
+        assert seen[0].value["ok"] is False
+        assert seen[0].value["error"]["code"] == "VALIDATION_FAILED"
+        assert executed == ["first"]
 
     asyncio.run(scenario())
 
