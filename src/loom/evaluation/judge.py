@@ -13,7 +13,7 @@ from loom.evaluation.assessments import Finding, StepAssessment
 from loom.evaluation.episodes import EpisodeGraph, LlmRoundEpisode, StepGraphEpisode, ToolCallEpisode
 from loom.evaluation.records import NormalizedEvent
 from loom.evaluation.token_usage import total_tokens_for_events
-from loom.llm import LlmMessage, TokenUsage
+from loom.llm import LlmMessage, TokenUsage, request_llm_response
 from loom.trace_analysis import EvidenceRef, evidence_ref_for_event
 
 JUDGE_DIMENSIONS = (
@@ -223,8 +223,9 @@ class StepJudgeAssessment:
 
 
 class LlmStepJudge:
-    def __init__(self, provider: Any):
+    def __init__(self, provider: Any, *, stream: bool = False):
         self.provider = provider
+        self.stream = stream
 
     async def judge(
         self,
@@ -261,7 +262,15 @@ class LlmStepJudge:
         if not requested.ok:
             return requested
 
-        response = await self.provider.chat(messages, tools=None)
+        response = await request_llm_response(
+            self.provider,
+            messages,
+            tools=None,
+            stream=self.stream,
+            emit_event=lambda event: _emit_event(event_sink, event),
+            event_metadata=event_base,
+            now=now_iso,
+        )
         if not response.ok:
             failed = await _emit_event(
                 event_sink,
@@ -295,8 +304,9 @@ class LlmStepJudge:
 
 
 class LlmRoundJudge:
-    def __init__(self, provider: Any):
+    def __init__(self, provider: Any, *, stream: bool = False):
         self.provider = provider
+        self.stream = stream
 
     async def judge(
         self,
@@ -333,7 +343,15 @@ class LlmRoundJudge:
         )
         if not requested.ok:
             return requested
-        response = await self.provider.chat(messages, tools=None)
+        response = await request_llm_response(
+            self.provider,
+            messages,
+            tools=None,
+            stream=self.stream,
+            emit_event=lambda event: _emit_event(event_sink, event),
+            event_metadata=event_base,
+            now=now_iso,
+        )
         if not response.ok:
             failed = await _emit_event(
                 event_sink,

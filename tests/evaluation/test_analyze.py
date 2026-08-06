@@ -7,7 +7,7 @@ from pathlib import Path
 from loom.core import ok
 from loom.evaluation.analyze import EvaluationConfig, analyze_trace, parse_args, parse_run_options, run_evaluation_trace_with_tui
 from loom.evaluation.judge import ROUND_JUDGE_DIMENSIONS
-from loom.llm import LlmResponse, TokenUsage
+from loom.llm import LlmResponse, LlmStreamEvent, TokenUsage
 
 
 class FakeJudgeProvider:
@@ -60,6 +60,25 @@ class FakeJudgeProvider:
                 usage=TokenUsage(2, 3, 5),
             )
         )
+
+
+class StreamingJudgeProvider:
+    model = "fake-judge-model"
+
+    def __init__(self):
+        self.chat_calls = 0
+        self.stream_calls = 0
+
+    async def chat(self, messages, tools=None, cancellation=None):
+        self.chat_calls += 1
+        return await FakeJudgeProvider().chat(messages, tools=tools, cancellation=cancellation)
+
+    async def stream_chat(self, messages, tools=None, cancellation=None):
+        self.stream_calls += 1
+        response = await FakeJudgeProvider().chat(messages, tools=tools, cancellation=cancellation)
+        yield LlmStreamEvent(kind="reasoning.delta", reasoning_delta="Assessing evidence.")
+        yield LlmStreamEvent(kind="content.delta", content_delta=response.value.content)
+        yield LlmStreamEvent(kind="completed", response=response.value)
 
 
 class StringFindingJudgeProvider(FakeJudgeProvider):
@@ -350,6 +369,54 @@ def test_analyze_trace_with_judge_emits_llm_events_for_tui(tmp_path):
         assert llm_request["model"] == "fake-judge-model"
         assert len(llm_request["messages"]) == 2
         assert llm_request["tools"] is None
+
+    asyncio.run(scenario())
+
+
+def test_analyze_trace_streams_round_and_step_judge_events(tmp_path):
+    async def scenario():
+        trace_path = tmp_path / "trace.jsonl"
+        out_dir = tmp_path / "evaluation"
+        _write_trace(trace_path)
+        sink = RecordingEventSink()
+        provider = StreamingJudgeProvider()
+
+        result = await analyze_trace(
+            EvaluationConfig(trace_path=trace_path, out_dir=out_dir, judge=True, stream=True),
+            judge_provider=provider,
+            event_sink=sink,
+        )
+
+        assert result.ok
+        assert provider.chat_calls == 0
+        assert provider.stream_calls == 2
+        event_types = [event["type"] for event in sink.events]
+        assert event_types.count("llm.stream.started") == 2
+        assert event_types.count("llm.reasoning.delta") == 2
+        assert event_types.count("llm.content.delta") == 2
+        assert event_types.count("llm.stream.completed") == 2
+        assert len(result.value.round_judge_assessments) == 1
+        assert len(result.value.judge_assessments) == 1
+
+    asyncio.run(scenario())
+
+
+def test_analyze_trace_stream_falls_back_for_chat_only_judge_provider(tmp_path):
+    async def scenario():
+        trace_path = tmp_path / "trace.jsonl"
+        out_dir = tmp_path / "evaluation"
+        _write_trace(trace_path)
+        provider = FakeJudgeProvider()
+
+        result = await analyze_trace(
+            EvaluationConfig(trace_path=trace_path, out_dir=out_dir, judge=True, stream=True),
+            judge_provider=provider,
+        )
+
+        assert result.ok
+        assert len(provider.messages) == 2
+        assert len(result.value.round_judge_assessments) == 1
+        assert len(result.value.judge_assessments) == 1
 
     asyncio.run(scenario())
 

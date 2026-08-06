@@ -112,7 +112,15 @@ async def analyze_trace(config: EvaluationConfig, *, judge_provider: Any | None 
         provider_result = ok(judge_provider) if judge_provider is not None else _create_judge_provider(config)
         if not provider_result.ok:
             return await _finish_analysis_error(event_sink, run_id, loop_id, started, provider_result.error, step_count=len(assessments))
-        judged = await _judge_steps(graph, assessments, provider_result.value, event_sink=event_sink, run_id=run_id, loop_id=loop_id)
+        judged = await _judge_steps(
+            graph,
+            assessments,
+            provider_result.value,
+            stream=config.stream,
+            event_sink=event_sink,
+            run_id=run_id,
+            loop_id=loop_id,
+        )
         if not judged.ok:
             return await _finish_analysis_error(event_sink, run_id, loop_id, started, judged.error, step_count=len(assessments))
         round_judge_assessments = judged.value.round_assessments
@@ -206,12 +214,13 @@ async def _judge_steps(
     assessments: tuple[StepAssessment, ...],
     provider: Any,
     *,
+    stream: bool = False,
     event_sink: Any | None = None,
     run_id: str | None = None,
     loop_id: str | None = None,
 ) -> Result:
-    round_judge = LlmRoundJudge(provider)
-    step_judge = LlmStepJudge(provider)
+    round_judge = LlmRoundJudge(provider, stream=stream)
+    step_judge = LlmStepJudge(provider, stream=stream)
     assessments_by_key = {(item.run_id, item.trace_id, item.step_number): item for item in assessments}
     round_judged: list[RoundJudgeAssessment] = []
     step_judged: list[StepJudgeAssessment] = []
