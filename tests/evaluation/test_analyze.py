@@ -231,6 +231,14 @@ def test_parse_run_options_accepts_tui_flag(tmp_path):
     assert options.tui is True
 
 
+def test_parse_run_options_supports_explicit_stream_flag(tmp_path):
+    trace_path = tmp_path / "trace.jsonl"
+
+    assert parse_run_options(("--trace-path", str(trace_path))).config.stream is False
+    assert parse_run_options(("--trace-path", str(trace_path), "--stream")).config.stream is True
+    assert parse_run_options(("--trace-path", str(trace_path), "--no-stream")).config.stream is False
+
+
 def test_analyze_trace_writes_evaluation_artifacts(tmp_path):
     async def scenario():
         trace_path = tmp_path / "trace.jsonl"

@@ -31,6 +31,7 @@ class EvaluationConfig:
     trace_path: Path
     out_dir: Path = Path(".loom/evaluation")
     judge: bool = False
+    stream: bool = False
     config_path: Path | None = None
     model_name: str | None = None
 
@@ -390,6 +391,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trace-path", required=True, type=Path)
     parser.add_argument("--out-dir", default=Path(".loom/evaluation"), type=Path)
     parser.add_argument("--judge", action="store_true", help="Run step-level LLM judge after deterministic evaluation.")
+    parser.add_argument(
+        "--stream",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Stream LLM judge reasoning and content deltas when supported.",
+    )
     parser.add_argument("--config", dest="config_path", type=Path, help="Task config YAML/TOML containing named judge models.")
     parser.add_argument("--model", dest="model_name", help="Named model from --config to use as the judge.")
     parser.add_argument("--tui", action="store_true", help="Show live TUI events while the analyzer runs.")
@@ -401,6 +408,7 @@ def _config_from_options(args: argparse.Namespace) -> EvaluationConfig:
         trace_path=args.trace_path,
         out_dir=args.out_dir,
         judge=args.judge,
+        stream=args.stream,
         config_path=args.config_path,
         model_name=args.model_name,
     )
