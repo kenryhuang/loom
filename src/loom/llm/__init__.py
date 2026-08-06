@@ -21,6 +21,7 @@ from loom.llm.api import (
     create_openai_provider,
     create_token_tracker,
     load_env_openai_config,
+    request_llm_response,
     to_llm_tool,
     to_llm_tools,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "create_openai_provider",
     "create_token_tracker",
     "load_env_openai_config",
+    "request_llm_response",
     "to_llm_tool",
     "to_llm_tools",
 ]

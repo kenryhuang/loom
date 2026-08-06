@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import loom.llm as llm_module
 from loom.core import (
     Action,
     Context,
@@ -1683,6 +1684,56 @@ def test_llm_step_streaming_provider_emits_delta_events_and_executes_tool_calls(
         assert event_types.count("llm.stream.completed") == 2
         assert events[event_types.index("llm.content.delta")]["delta"]
         assert result.value.trace.metadata["streaming"] is True
+
+    asyncio.run(scenario())
+
+
+def test_request_llm_response_emits_stream_deltas_and_returns_completed_response():
+    async def scenario():
+        content = '{"overall":0.8}'
+        provider = FakeStreamingProvider(
+            [
+                [
+                    LlmStreamEvent(kind="reasoning.delta", reasoning_delta="Inspect evidence."),
+                    LlmStreamEvent(kind="content.delta", content_delta=content[:8]),
+                    LlmStreamEvent(kind="content.delta", content_delta=content[8:]),
+                    LlmStreamEvent(kind="completed", response=LlmResponse(content=content, finish_reason="stop")),
+                ]
+            ]
+        )
+        events = []
+
+        async def emit(event):
+            events.append(event)
+            return ok(None)
+
+        result = await llm_module.request_llm_response(
+            provider,
+            (LlmMessage("user", "judge"),),
+            stream=True,
+            emit_event=emit,
+            event_metadata={
+                "run_id": "run-eval",
+                "loop_id": "loop-eval",
+                "trace_id": "trace-source",
+                "llm_call_id": "judge-1",
+                "step_number": 3,
+                "model": provider.model,
+            },
+            now=lambda: NOW,
+        )
+
+        assert result.ok
+        assert result.value.content == content
+        assert [event["type"] for event in events] == [
+            "llm.stream.started",
+            "llm.reasoning.delta",
+            "llm.content.delta",
+            "llm.content.delta",
+            "llm.stream.completed",
+        ]
+        assert all(event["llm_call_id"] == "judge-1" for event in events)
+        assert all(event["at"] == NOW for event in events)
 
     asyncio.run(scenario())
 

@@ -8,7 +8,7 @@ import os
 import re
 import urllib.error
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -30,6 +30,7 @@ from loom.core.models import (
     new_context_id,
     new_loop_version,
     new_trace_id,
+    now_iso,
     ok,
     thaw_json,
 )
@@ -414,17 +415,23 @@ def create_llm_step_function(
             )
             if not requested.ok:
                 return requested
-            response = await _chat_or_stream(
+            response = await request_llm_response(
                 provider,
                 messages,
                 tools,
                 getattr(runtime, "cancellation", None),
-                runtime=runtime,
-                context=context,
-                trace_id=trace_id,
-                llm_call_id=llm_call_id,
                 tool_choice=tool_choice,
                 stream=stream,
+                emit_event=lambda event: _emit_runtime_event(runtime, event),
+                event_metadata={
+                    "run_id": context.run_id,
+                    "loop_id": runtime.loop_id,
+                    "trace_id": trace_id,
+                    "llm_call_id": llm_call_id,
+                    "step_number": as_step_number(len(context.state.observations)),
+                    "model": provider.model,
+                },
+                now=runtime.now,
             )
             if not response.ok:
                 failed = await _emit_runtime_event(
@@ -726,48 +733,46 @@ def create_llm_step_function(
     return llm_step
 
 
-async def _chat_or_stream(
+async def request_llm_response(
     provider: Any,
-    messages: list[LlmMessage],
-    tools: tuple[dict[str, Any], ...] | None,
-    cancellation: Any,
+    messages: Sequence[LlmMessage],
+    tools: tuple[dict[str, Any], ...] | None = None,
+    cancellation: Any = None,
+    tool_choice: Any = None,
     *,
-    runtime: Any,
-    context: Context,
-    trace_id: str,
-    llm_call_id: str,
-    tool_choice: Any,
-    stream: bool,
+    stream: bool = False,
+    emit_event: Any = None,
+    event_metadata: Mapping[str, Any] | None = None,
+    now: Any = now_iso,
 ) -> Result:
+    message_list = list(messages)
     if not stream or not hasattr(provider, "stream_chat"):
         if tool_choice is not None and _accepts_keyword(provider.chat, "tool_choice"):
-            response = await provider.chat(messages, tools=tools, cancellation=cancellation, tool_choice=tool_choice)
+            response = await provider.chat(message_list, tools=tools, cancellation=cancellation, tool_choice=tool_choice)
             if response.ok or not _tool_choice_retryable(response.error):
                 return response
-        return await provider.chat(messages, tools, cancellation)
+        return await provider.chat(message_list, tools, cancellation)
     response = await _consume_streaming_chat(
         provider,
-        messages,
+        message_list,
         tools,
         cancellation,
-        runtime,
-        context,
-        trace_id,
-        llm_call_id,
         tool_choice,
+        emit_event,
+        event_metadata,
+        now,
     )
     if response.ok or tool_choice is None or not _tool_choice_retryable(response.error):
         return response
     return await _consume_streaming_chat(
         provider,
-        messages,
+        message_list,
         tools,
         cancellation,
-        runtime,
-        context,
-        trace_id,
-        llm_call_id,
         None,
+        emit_event,
+        event_metadata,
+        now,
     )
 
 
@@ -776,25 +781,16 @@ async def _consume_streaming_chat(
     messages: list[LlmMessage],
     tools: tuple[dict[str, Any], ...] | None,
     cancellation: Any,
-    runtime: Any,
-    context: Context,
-    trace_id: str,
-    llm_call_id: str,
     tool_choice: Any,
+    emit_event: Any,
+    event_metadata: Mapping[str, Any] | None,
+    now: Any,
 ) -> Result:
-    step_number = as_step_number(len(context.state.observations))
-    started = await _emit_runtime_event(
-        runtime,
-        {
-            "type": "llm.stream.started",
-            "run_id": context.run_id,
-            "loop_id": runtime.loop_id,
-            "trace_id": trace_id,
-            "llm_call_id": llm_call_id,
-            "step_number": step_number,
-            "model": provider.model,
-            "at": runtime.now(),
-        },
+    metadata = dict(event_metadata or {})
+    metadata.setdefault("model", provider.model)
+    started = await _emit_llm_call_event(
+        emit_event,
+        {**metadata, "type": "llm.stream.started", "at": now()},
     )
     if not started.ok:
         return started
@@ -808,7 +804,7 @@ async def _consume_streaming_chat(
             if event.kind == "completed":
                 final_response = event.response
                 continue
-            emitted = await _emit_stream_delta_event(runtime, event, context, trace_id, llm_call_id, provider.model, step_number)
+            emitted = await _emit_stream_delta_event(emit_event, event, metadata, now)
             if not emitted.ok:
                 return emitted
     except BaseException as exc:
@@ -829,18 +825,9 @@ async def _consume_streaming_chat(
     if final_response is None:
         return err(make_loom_error("LLM_FAILED", "Streaming provider returned no completed response", retryable=True))
 
-    completed = await _emit_runtime_event(
-        runtime,
-        {
-            "type": "llm.stream.completed",
-            "run_id": context.run_id,
-            "loop_id": runtime.loop_id,
-            "trace_id": trace_id,
-            "llm_call_id": llm_call_id,
-            "step_number": step_number,
-            "model": provider.model,
-            "at": runtime.now(),
-        },
+    completed = await _emit_llm_call_event(
+        emit_event,
+        {**metadata, "type": "llm.stream.completed", "at": now()},
     )
     if not completed.ok:
         return completed
@@ -848,13 +835,10 @@ async def _consume_streaming_chat(
 
 
 async def _emit_stream_delta_event(
-    runtime: Any,
+    emit_event: Any,
     event: LlmStreamEvent,
-    context: Context,
-    trace_id: str,
-    llm_call_id: str,
-    model: str,
-    step_number: int,
+    event_metadata: Mapping[str, Any],
+    now: Any,
 ) -> Result:
     event_type = {
         "content.delta": "llm.content.delta",
@@ -866,23 +850,27 @@ async def _emit_stream_delta_event(
     }.get(event.kind)
     if event_type is None:
         return ok(None)
-    return await _emit_runtime_event(
-        runtime,
+    return await _emit_llm_call_event(
+        emit_event,
         {
+            **event_metadata,
             "type": event_type,
-            "run_id": context.run_id,
-            "loop_id": runtime.loop_id,
-            "trace_id": trace_id,
-            "llm_call_id": llm_call_id,
-            "step_number": step_number,
-            "model": model,
             "delta": event.content_delta or event.reasoning_delta or event.reasoning_context_delta or event.tool_arguments_delta,
             "tool_call_id": event.tool_call_id,
             "tool_name": event.tool_name,
             "raw": event.raw,
-            "at": runtime.now(),
+            "at": now(),
         },
     )
+
+
+async def _emit_llm_call_event(emit_event: Any, event: dict[str, Any]) -> Result:
+    if emit_event is None:
+        return ok(None)
+    emitted = emit_event(event)
+    if inspect.isawaitable(emitted):
+        emitted = await emitted
+    return emitted if isinstance(emitted, Result) else ok(None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2122,6 +2110,7 @@ __all__ = [
     "create_openai_provider",
     "create_token_tracker",
     "load_env_openai_config",
+    "request_llm_response",
     "to_llm_tool",
     "to_llm_tools",
 ]
