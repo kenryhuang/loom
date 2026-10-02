@@ -34,8 +34,16 @@ class EvaluationConfig:
     stream: bool = False
     config_path: Path | None = None
     model_name: str | None = None
+    analysis_version: str = "v1"
+    task: str | None = None
+    judge_max_read_rounds: int = 6
+    judge_max_evidence_chars: int = 80000
+    judge_max_prompt_chars: int = 100000
+    judge_batch_rounds: int = 8
 
     def __post_init__(self) -> None:
+        if self.analysis_version not in {"v1", "v2"}:
+            raise ValueError("analysis_version must be v1 or v2")
         object.__setattr__(self, "trace_path", Path(self.trace_path))
         object.__setattr__(self, "out_dir", Path(self.out_dir))
         if self.config_path is not None:
@@ -66,6 +74,10 @@ class JudgeRunResult:
 
 
 async def analyze_trace(config: EvaluationConfig, *, judge_provider: Any | None = None, event_sink: Any | None = None) -> Result:
+    if config.analysis_version == "v2":
+        from loom.evaluation.effectiveness import analyze_effectiveness
+
+        return await analyze_effectiveness(config, judge_provider=judge_provider, event_sink=event_sink)
     run_id = new_run_id()
     loop_id = new_loop_id()
     started = time.monotonic()
@@ -221,11 +233,11 @@ async def _judge_steps(
 ) -> Result:
     round_judge = LlmRoundJudge(provider, stream=stream)
     step_judge = LlmStepJudge(provider, stream=stream)
-    assessments_by_key = {(item.run_id, item.trace_id, item.step_number): item for item in assessments}
+    assessments_by_key = {(item.run_id, item.loop_id, item.trace_id, item.step_number): item for item in assessments}
     round_judged: list[RoundJudgeAssessment] = []
     step_judged: list[StepJudgeAssessment] = []
     for step in graph.steps:
-        assessment = assessments_by_key.get((step.run_id, step.trace_id, step.step_number))
+        assessment = assessments_by_key.get((step.run_id, step.loop_id, step.trace_id, step.step_number))
         if assessment is None:
             continue
         step_round_judged: list[RoundJudgeAssessment] = []
@@ -261,7 +273,7 @@ async def _emit_step_events(
     graph: EpisodeGraph,
     assessments: tuple[StepAssessment, ...],
 ) -> Result:
-    assessments_by_key = {(item.run_id, item.trace_id, item.step_number): item for item in assessments}
+    assessments_by_key = {(item.run_id, item.loop_id, item.trace_id, item.step_number): item for item in assessments}
     for step in graph.steps:
         started = await _emit_event(
             event_sink,
@@ -279,7 +291,7 @@ async def _emit_step_events(
         )
         if not started.ok:
             return started
-        assessment = assessments_by_key.get((step.run_id, step.trace_id, step.step_number))
+        assessment = assessments_by_key.get((step.run_id, step.loop_id, step.trace_id, step.step_number))
         completed = await _emit_event(
             event_sink,
             {
@@ -396,10 +408,16 @@ async def run_evaluation_trace_with_tui(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Analyze Loom trace JSONL with deterministic metrics and optional step-level LLM judging.")
+    parser = argparse.ArgumentParser(description="Analyze Loom trace JSONL with evidence-backed effectiveness diagnostics or legacy v1 scoring.")
     parser.add_argument("--trace-path", required=True, type=Path)
     parser.add_argument("--out-dir", default=Path(".loom/evaluation"), type=Path)
-    parser.add_argument("--judge", action="store_true", help="Run step-level LLM judge after deterministic evaluation.")
+    parser.add_argument("--analysis-version", choices=("v1", "v2"), default="v2", help="v2: five-dimensional evidence analysis; v1: legacy scores.")
+    parser.add_argument("--task", help="Explicit task text for v2 analysis, recorded separately from trace-derived requirements.")
+    parser.add_argument("--judge-max-read-rounds", type=int, default=6, help="Maximum evidence expansion rounds per semantic batch.")
+    parser.add_argument("--judge-max-evidence-chars", type=int, default=80000, help="Total expanded evidence character budget.")
+    parser.add_argument("--judge-max-prompt-chars", type=int, default=100000, help="Maximum prompt characters per judge call.")
+    parser.add_argument("--judge-batch-rounds", type=int, default=8, help="Maximum source LLM rounds per semantic batch.")
+    parser.add_argument("--judge", action="store_true", help="Run semantic trace analysis (legacy step judge in v1).")
     parser.add_argument(
         "--stream",
         action=argparse.BooleanOptionalAction,
@@ -420,6 +438,12 @@ def _config_from_options(args: argparse.Namespace) -> EvaluationConfig:
         stream=args.stream,
         config_path=args.config_path,
         model_name=args.model_name,
+        analysis_version=args.analysis_version,
+        task=args.task,
+        judge_max_read_rounds=args.judge_max_read_rounds,
+        judge_max_evidence_chars=args.judge_max_evidence_chars,
+        judge_max_prompt_chars=args.judge_max_prompt_chars,
+        judge_batch_rounds=args.judge_batch_rounds,
     )
 
 

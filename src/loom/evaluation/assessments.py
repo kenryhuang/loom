@@ -107,6 +107,30 @@ def _assess_step(graph: EpisodeGraph, step: StepGraphEpisode) -> StepAssessment:
         )
         dimensions["llm_response"] = _dimension("llm_response", 0.25, "fail", "At least one LLM round is incomplete or failed.", hashes)
 
+    unmatched_llm_failures = tuple(
+        event for event in step_events if event.event_type == "llm.failed" and event.llm_call_id is None
+    )
+    if unmatched_llm_failures:
+        hashes = _hashes(unmatched_llm_failures)
+        findings.append(
+            _finding(
+                step,
+                "error",
+                "llm_failure_unmatched",
+                "LLM failure did not include a call ID and could not be matched to a round.",
+                "llm_response",
+                "llm_provider",
+                hashes,
+            )
+        )
+        dimensions["llm_response"] = _dimension(
+            "llm_response",
+            0.0,
+            "fail",
+            "An unmatched LLM failure was observed.",
+            hashes,
+        )
+
     failed_tools = tuple(item for item in tool_calls if item.status == "failed")
     partial_tools = tuple(item for item in tool_calls if item.status == "partial")
     if failed_tools:
@@ -176,7 +200,7 @@ def _assess_step(graph: EpisodeGraph, step: StepGraphEpisode) -> StepAssessment:
 
     aggregate = _aggregate_score(dimensions)
     return StepAssessment(
-        id=f"assessment:{step.run_id}:{step.trace_id}:{step.step_number}",
+        id=_step_subject_id(step, "assessment"),
         run_id=step.run_id,
         loop_id=step.loop_id,
         trace_id=step.trace_id,
@@ -222,7 +246,14 @@ def _assess_tool_result_handling(
 
 
 def _step_events(graph: EpisodeGraph, step: StepGraphEpisode) -> tuple[NormalizedEvent, ...]:
-    return tuple(event for event in graph.events if event.run_id == step.run_id and event.trace_id == step.trace_id and event.step_number == step.step_number)
+    return tuple(
+        event
+        for event in graph.events
+        if event.run_id == step.run_id
+        and event.loop_id == step.loop_id
+        and event.trace_id == step.trace_id
+        and event.step_number == step.step_number
+    )
 
 
 def _hashes(events: tuple[NormalizedEvent, ...]) -> tuple[str, ...]:
@@ -258,7 +289,7 @@ def _finding(
     hashes: tuple[str, ...],
 ) -> Finding:
     return Finding(
-        id=f"finding:{step.run_id}:{step.trace_id}:{step.step_number}:{category}",
+        id=f"{_step_subject_id(step, 'finding')}:{category}",
         severity=severity,
         category=category,
         message=message,
@@ -280,6 +311,11 @@ def _status(findings: tuple[Finding, ...] | list[Finding]) -> str:
     if findings:
         return "warn"
     return "pass"
+
+
+def _step_subject_id(step: StepGraphEpisode, prefix: str) -> str:
+    suffix = step.id.removeprefix("step:")
+    return f"{prefix}:{suffix}"
 
 
 def assessment_to_metric_value(assessment: StepAssessment) -> JsonValue:

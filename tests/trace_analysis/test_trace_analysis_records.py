@@ -57,3 +57,28 @@ def test_load_normalized_events_reads_jsonl(tmp_path):
     assert result.ok
     assert len(result.value.events) == 1
     assert result.value.events[0].event_type == "run.started"
+
+
+def test_normalize_record_reads_call_ids_from_metadata():
+    event = normalize_record(
+        {
+            "type": "event",
+            "eventType": "tool.completed",
+            "payload": {
+                "type": "tool.completed",
+                "run_id": "run-1",
+                "loop_id": "loop-1",
+                "trace_id": "trace-1",
+                "step_number": 0,
+                "metadata": {
+                    "llm_call_id": "llm-1",
+                    "tool_call_id": "call-1",
+                    "tool_name": "read_file",
+                },
+            },
+        }
+    )
+
+    assert event.llm_call_id == "llm-1"
+    assert event.tool_call_id == "call-1"
+    assert event.tool_id == "read_file"

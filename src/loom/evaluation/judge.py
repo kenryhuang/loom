@@ -15,6 +15,7 @@ from loom.evaluation.records import NormalizedEvent
 from loom.evaluation.token_usage import total_tokens_for_events
 from loom.llm import LlmMessage, TokenUsage, request_llm_response
 from loom.trace_analysis import EvidenceRef, evidence_ref_for_event
+from loom.trace_analysis.links import linked_tools_for_round, tool_output
 
 JUDGE_DIMENSIONS = (
     "task_progress",
@@ -148,6 +149,7 @@ class RoundJudgeSummary:
 
 @dataclass(frozen=True, slots=True)
 class StepEvidencePack:
+    id: str
     run_id: str
     loop_id: str
     trace_id: str
@@ -386,11 +388,9 @@ class LlmRoundJudge:
 
 def build_round_evidence_packs(graph: EpisodeGraph, step: StepGraphEpisode) -> tuple[RoundEvidencePack, ...]:
     llm_rounds = tuple(item for item in graph.llm_rounds if item.id in step.llm_round_ids)
-    tool_calls = tuple(item for item in graph.tool_calls if item.id in step.tool_call_ids)
-    tool_by_call_id = {item.tool_call_id: item for item in tool_calls if item.tool_call_id}
     packs: list[RoundEvidencePack] = []
     for index, round_item in enumerate(llm_rounds):
-        linked_tools = tuple(tool_by_call_id[call_id] for call_id in _tool_call_ids_from_round(round_item) if call_id in tool_by_call_id)
+        linked_tools = tuple(tool for tool, _basis in linked_tools_for_round(graph, round_item))
         packs.append(_round_evidence_pack(round_item, index, linked_tools))
     return tuple(packs)
 
@@ -406,6 +406,7 @@ def build_step_evidence_pack(
     llm_rounds = tuple(item for item in graph.llm_rounds if item.id in step.llm_round_ids)
     tool_calls = tuple(item for item in graph.tool_calls if item.id in step.tool_call_ids)
     return StepEvidencePack(
+        id=step.id,
         run_id=step.run_id,
         loop_id=step.loop_id,
         trace_id=step.trace_id,
@@ -493,7 +494,7 @@ def parse_step_judge_assessment(
     finding_items = findings.value
     return ok(
         StepJudgeAssessment(
-            id=f"judge:{pack.run_id}:{pack.trace_id}:{pack.step_number}",
+            id=_subject_id(pack.id, "step", "judge"),
             run_id=pack.run_id,
             loop_id=pack.loop_id,
             trace_id=pack.trace_id,
@@ -541,7 +542,7 @@ def parse_round_judge_assessment(
     finding_items = findings.value
     return ok(
         RoundJudgeAssessment(
-            id=f"round-judge:{pack.run_id}:{pack.trace_id}:{pack.step_number}:{pack.llm_call_id}",
+            id=_subject_id(pack.id, "llm", "round-judge"),
             run_id=pack.run_id,
             loop_id=pack.loop_id,
             trace_id=pack.trace_id,
@@ -636,8 +637,7 @@ def _llm_round_summary(round_item: LlmRoundEpisode) -> LlmRoundSummary:
 def _tool_call_summary(tool_call: ToolCallEpisode) -> ToolCallSummary:
     started = tool_call.started_event.payload if tool_call.started_event is not None else {}
     finished_event = tool_call.completed_event or tool_call.failed_event
-    finished = finished_event.payload if finished_event is not None else {}
-    output = finished.get("output") or finished.get("result") or finished.get("error") or finished
+    output, _field_path = tool_output(finished_event) if finished_event is not None else (None, None)
     return ToolCallSummary(
         id=tool_call.id,
         tool_id=tool_call.tool_id,
@@ -671,23 +671,6 @@ def _message_excerpts(messages: Any, *, max_messages: int = 8, max_chars: int = 
             content = getattr(item, "content", "")
         excerpts.append(MessageExcerpt(role=role, content_excerpt=_excerpt(content, max_chars=max_chars)))
     return tuple(excerpts)
-
-
-def _tool_call_ids_from_round(round_item: LlmRoundEpisode) -> tuple[str, ...]:
-    if round_item.completed_event is None:
-        return ()
-    response = round_item.completed_event.payload.get("response")
-    if not isinstance(response, Mapping):
-        return ()
-    tool_calls = response.get("tool_calls")
-    if not isinstance(tool_calls, list | tuple):
-        return ()
-    ids: list[str] = []
-    for item in tool_calls:
-        call_id = item.get("id") or item.get("tool_call_id") if isinstance(item, Mapping) else getattr(item, "id", None) or getattr(item, "tool_call_id", None)
-        if call_id is not None:
-            ids.append(str(call_id))
-    return tuple(ids)
 
 
 def _round_judge_summary(assessment: RoundJudgeAssessment) -> RoundJudgeSummary:
@@ -808,7 +791,14 @@ def _finding_summary(finding: Finding) -> Mapping[str, Any]:
 
 
 def _step_events(graph: EpisodeGraph, step: StepGraphEpisode) -> tuple[NormalizedEvent, ...]:
-    return tuple(event for event in graph.events if event.run_id == step.run_id and event.trace_id == step.trace_id and event.step_number == step.step_number)
+    return tuple(
+        event
+        for event in graph.events
+        if event.run_id == step.run_id
+        and event.loop_id == step.loop_id
+        and event.trace_id == step.trace_id
+        and event.step_number == step.step_number
+    )
 
 
 def _validate_dimensions(value: Any, pack: StepEvidencePack | RoundEvidencePack, dimensions: tuple[str, ...]) -> Result:
@@ -866,7 +856,7 @@ def _validate_findings(value: Any, pack: StepEvidencePack | RoundEvidencePack) -
         category = str(item.get("category") or "judge_finding")
         findings.append(
             JudgeFinding(
-                id=f"judge-finding:{pack.run_id}:{pack.trace_id}:{pack.step_number}:{index}:{category}",
+                id=f"{_judge_finding_subject_id(pack)}:{index}:{category}",
                 severity=str(item.get("severity") or "warning"),
                 category=category,
                 message=str(item.get("message") or ""),
@@ -890,6 +880,15 @@ def _validate_score(value: Any, name: str, pack: StepEvidencePack | RoundEvidenc
     if score < 0.0 or score > 1.0:
         return err(_parse_error(f"{name} must be a number from 0.0 to 1.0", pack))
     return ok(score)
+
+
+def _judge_finding_subject_id(pack: StepEvidencePack | RoundEvidencePack) -> str:
+    source_prefix = "llm" if isinstance(pack, RoundEvidencePack) else "step"
+    return _subject_id(pack.id, source_prefix, "judge-finding")
+
+
+def _subject_id(subject_id: str, source_prefix: str, target_prefix: str) -> str:
+    return f"{target_prefix}:{subject_id.removeprefix(f'{source_prefix}:')}"
 
 
 def _string_tuple(value: Any, name: str, pack: StepEvidencePack | RoundEvidencePack) -> Result:

@@ -226,6 +226,8 @@ def load_evaluation_bundle(path: str | os.PathLike[str]) -> Result:
     manifest_path = Path(path)
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if isinstance(payload, Mapping) and payload.get("schema_version") != SCHEMA_VERSION:
+            return err(_bundle_error("Unsupported evaluation bundle schema version", manifest_path, schema_version=payload.get("schema_version")))
         manifest = _bundle_from_plain(payload)
         if manifest.schema_version != SCHEMA_VERSION:
             return err(_bundle_error("Unsupported evaluation bundle schema version", manifest_path, schema_version=manifest.schema_version))

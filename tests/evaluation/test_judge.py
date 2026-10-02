@@ -205,6 +205,46 @@ def test_build_round_evidence_packs_compact_each_round_and_link_tools():
     assert "searchable text" in pack.tool_calls[0].result_excerpt
 
 
+def test_round_evidence_links_json_action_and_unwraps_observation_value():
+    graph = build_episode_graph(
+        (
+            _event("llm.requested", llm_call_id="trace-1-llm-1", hash="llm-request"),
+            _event(
+                "llm.completed",
+                llm_call_id="trace-1-llm-1",
+                payload={"response": {"content": '{"action":{"kind":"tool"}}', "tool_calls": []}},
+                hash="llm-complete",
+            ),
+            _event(
+                "tool.started",
+                tool_call_id="trace-1-llm-1-json-tool-1",
+                tool_id="read_file",
+                payload={"input": {"path": "README.md"}},
+                hash="tool-start",
+            ),
+            _event(
+                "tool.completed",
+                tool_call_id="trace-1-llm-1-json-tool-1",
+                tool_id="read_file",
+                payload={
+                    "output": {
+                        "at": "2026-01-01T00:00:00Z",
+                        "id": "observation-1",
+                        "source": "read_file",
+                        "value": {"content": "useful wrapped output"},
+                    }
+                },
+                hash="tool-complete",
+            ),
+        )
+    )
+
+    pack = build_round_evidence_packs(graph, graph.steps[0])[0]
+
+    assert pack.tool_calls[0].tool_call_id == "trace-1-llm-1-json-tool-1"
+    assert pack.tool_calls[0].result_excerpt == "useful wrapped output"
+
+
 def test_build_round_judge_messages_include_one_round_not_full_step_history():
     graph = _graph()
     pack = build_round_evidence_packs(graph, graph.steps[0])[0]
@@ -358,3 +398,62 @@ def test_llm_round_judge_calls_provider_with_round_pack():
         assert json.loads(provider.messages[1].content)["llm_call_id"] == "llm-1"
 
     asyncio.run(scenario())
+
+
+def test_judge_ids_follow_disambiguated_step_and_round_identity():
+    graph = build_episode_graph(
+        tuple(
+            event
+            for loop_id in ("loop-1", "loop-2")
+            for event in (
+                _event("step.started", loop_id=loop_id, hash=f"{loop_id}-step"),
+                _event("llm.requested", loop_id=loop_id, llm_call_id="llm-1", hash=f"{loop_id}-request"),
+                _event("llm.completed", loop_id=loop_id, llm_call_id="llm-1", hash=f"{loop_id}-complete"),
+            )
+        )
+    )
+    deterministic = assess_steps(graph)
+    step_results = []
+    round_results = []
+    for step, assessment in zip(graph.steps, deterministic, strict=True):
+        step_pack = build_step_evidence_pack(graph, step, assessment)
+        step_results.append(
+            parse_step_judge_assessment(
+                _judge_json(),
+                step_pack,
+                evaluator_model="fake-judge-model",
+                token_usage=TokenUsage(),
+            ).unwrap()
+        )
+        round_pack = build_round_evidence_packs(graph, step)[0]
+        round_results.append(
+            parse_round_judge_assessment(
+                _round_judge_json(),
+                round_pack,
+                evaluator_model="fake-judge-model",
+                token_usage=TokenUsage(),
+            ).unwrap()
+        )
+
+    assert len({item.id for item in step_results}) == 2
+    assert len({item.id for item in round_results}) == 2
+    assert len({finding.id for item in step_results for finding in item.findings}) == 2
+    assert len({finding.id for item in round_results for finding in item.findings}) == 2
+
+
+def test_round_judge_finding_ids_include_round_identity():
+    graph = _graph()
+    packs = build_round_evidence_packs(graph, graph.steps[0])
+
+    assessments = [
+        parse_round_judge_assessment(
+            _round_judge_json(),
+            pack,
+            evaluator_model="fake-judge-model",
+            token_usage=TokenUsage(),
+        ).unwrap()
+        for pack in packs
+    ]
+
+    assert len({item.id for item in assessments}) == 2
+    assert len({finding.id for item in assessments for finding in item.findings}) == 2

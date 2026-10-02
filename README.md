@@ -157,7 +157,7 @@ for supported thinking, generation, tool, and search parameters.
 ## Trace Evaluation
 
 Generic task runs write JSONL traces under `runs/` by default. Analyze a trace
-with deterministic evaluation metrics:
+with version-two evidence ledgers and coverage reporting:
 
 ```bash
 uv run python -m loom.evaluation.analyze \
@@ -165,9 +165,19 @@ uv run python -m loom.evaluation.analyze \
   --out-dir .loom/evaluation
 ```
 
-The first evaluation phase builds normalized events, episode summaries, metrics,
-and a markdown report. Later evolution phases consume these artifacts for
-proposal generation and low-risk auto-apply.
+Add `--judge --config config.yaml --model <named-model>` for semantic diagnosis
+of context effectiveness, tool effectiveness, loop progress, token efficiency,
+and task verification. The judge can expand original evidence by source digest,
+record line and field; missing or unreviewed evidence remains unknown. Reports
+separate measured facts, supported diagnoses, proposed checks and preserved
+behaviors, without a combined quality score.
+
+Use `--analysis-version v1` for the legacy scoring/bundle consumed by the current
+evolution pipeline. Existing Python `EvaluationConfig` callers retain the v1
+default; select `analysis_version="v2"` explicitly in Python. A v1 consumer rejects
+v2 bundles instead of silently interpreting their diagnoses as old scores.
+See [trace effectiveness analysis](docs/trace-effectiveness-analysis.md) for
+budgets, output files and verification limits.
 
 ## Governed Meta-Harness
 

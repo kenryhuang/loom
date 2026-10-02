@@ -50,6 +50,9 @@ def load_normalized_events(path: str | Path) -> Result:
 
 def normalize_record(raw: Mapping[str, Any], *, line_number: int | None = None) -> NormalizedEvent:
     payload = _payload(raw)
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        metadata = {}
     nested_trace = payload.get("trace")
     if not isinstance(nested_trace, Mapping):
         nested_trace = {}
@@ -67,9 +70,9 @@ def normalize_record(raw: Mapping[str, Any], *, line_number: int | None = None) 
         loop_id=loop_id,
         trace_id=trace_id,
         step_number=step_number,
-        llm_call_id=_first_str(payload.get("llm_call_id")),
-        tool_call_id=_first_str(payload.get("tool_call_id")),
-        tool_id=_first_str(payload.get("tool_id")),
+        llm_call_id=_first_str(payload.get("llm_call_id"), metadata.get("llm_call_id")),
+        tool_call_id=_first_str(payload.get("tool_call_id"), metadata.get("tool_call_id")),
+        tool_id=_first_str(payload.get("tool_id"), metadata.get("tool_id"), metadata.get("tool_name")),
         at=_first_str(payload.get("at")),
         payload=payload,
         hash=_first_str(raw.get("hash")),
