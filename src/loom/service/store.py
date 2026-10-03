@@ -43,7 +43,8 @@ class SessionStore:
                 db.execute("BEGIN IMMEDIATE")
                 yield db
                 db.commit()
-                self.changed.notify_all()
+                if db.total_changes:
+                    self.changed.notify_all()
             except BaseException:
                 db.rollback()
                 raise

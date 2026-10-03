@@ -50,7 +50,7 @@ def validate_create(payload: Any) -> dict:
     if not workspace.is_dir():
         raise ServiceError("workspace must be an existing directory")
     mode = payload.get("plan_mode", "auto")
-    if mode not in {"auto", "force", "off"}:
+    if not isinstance(mode, str) or mode not in {"auto", "force", "off"}:
         raise ServiceError("Invalid plan_mode")
     limits = {**LIMITS, **object_value(payload.get("limits", {}), "limits")}
     if set(limits) != set(LIMITS) or any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in limits.values()):

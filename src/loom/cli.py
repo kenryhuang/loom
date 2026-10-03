@@ -8,10 +8,14 @@ from collections.abc import Sequence
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="loom")
-    parser.add_argument("command", choices=("campaign", "candidate", "experiment", "task-set", "governance", "optimize", "task"))
+    parser.add_argument("command", choices=("campaign", "candidate", "experiment", "task-set", "governance", "optimize", "task", "serve", "session"))
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
-    if args.command == "task":
+    if args.command == "serve":
+        from loom.service.cli import main as command_main
+    elif args.command == "session":
+        from loom.client.cli import main as command_main
+    elif args.command == "task":
         from loom.tasks.cli import main as command_main
     elif args.command == "campaign":
         from loom.campaigns.cli import main as command_main

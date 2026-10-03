@@ -10,7 +10,7 @@ from pathlib import Path
 
 from loom.core import Observation, now_iso
 from loom.runtime.checkpoints import decode, encode, plain
-from loom.service.contracts import ServiceError, canonical, new_id
+from loom.service.contracts import ServiceError, canonical, new_id, validate_command
 from loom.service.scheduler import ready_sessions
 from loom.service.store import SessionStore
 from loom.service.workers import process_identity, reap_group, spawn_attempt
@@ -56,14 +56,16 @@ class LoomService:
         state.pop("control", None)
         state.pop("epoch", None)
         if state["run"]:
-            for key in ("checkpoint", "process", "attempt_id", "counters"):
+            for key in ("checkpoint", "process", "attempt_id", "counters", "stream_offsets", "current_operation"):
                 state["run"].pop(key, None)
+        state["messages"] = state["messages"][-200:]
         return state
 
     def events(self, sid, after=0, limit=200):
         return self.store.events(sid, after, limit)
 
     def submit(self, sid, command):
+        command = validate_command(command)
         with self.lock:
             state = self.store.snapshot(sid)
             request = state.get("input_request")
@@ -146,9 +148,24 @@ class LoomService:
             response = None
             if kind == "event":
                 event = plain(value)
+                if event["type"].endswith(".delta") and isinstance(event.get("delta"), str):
+                    offsets = run.setdefault("stream_offsets", {})
+                    key = f"{event.get('llm_call_id')}:{event['type']}:{event.get('tool_call_id', '')}"
+                    event["offset"] = offsets.get(key, 0)
+                    offsets[key] = event["offset"] + len(event["delta"])
                 if event["type"].startswith(("plan.", "workflow.")):
                     state["task"]["plan_revision"] += 1
                     state["plan_event"] = event
+                    for key in ("plan", "workflow_route"):
+                        if key in event:
+                            state[key] = event[key]
+                if len(canonical(event).encode()) > 32768:
+                    ref = self.store.artifact_in_transaction(db, sid, event, "event_detail")
+                    event = {
+                        **{k: event[k] for k in ("type", "trace_id", "llm_call_id", "tool_call_id", "tool_id", "at") if k in event},
+                        "artifact": ref,
+                        "summary": "Large execution detail; open artifact to read the full content",
+                    }
                 emit(event["type"], event)
             elif kind == "boundary":
                 run["checkpoint"] = self.store.artifact_in_transaction(db, sid, encode(value), "execution_checkpoint")
