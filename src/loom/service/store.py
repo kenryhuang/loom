@@ -149,6 +149,11 @@ class SessionStore:
             state = self._load(db, sid)
             task = state["task"]
             kind, payload = command["type"], command["payload"]
+            request = state.get("input_request")
+            if kind in {"pause", "stop_run", "resume", "complete_task"} and request and request["kind"] == "recovery" and request["state"] == "pending":
+                raise ServiceError("Verify the uncertain effects and answer the recovery question first", 409)
+            if kind in {"resume", "answer_input"} and state.get("workspace_blocked"):
+                raise ServiceError("Previous processes have not exited; workspace remains blocked", 409)
             expected = command["expected_task_revision"]
             if expected is not None and expected != task["revision"]:
                 raise ServiceError("Task revision conflict", 409)
@@ -162,6 +167,8 @@ class SessionStore:
                 if kind == "supersede_input" and request["kind"] == "recovery":
                     raise ServiceError("Recovery cannot be superseded", 409)
             elif kind == "resume":
+                if state["run"] and state["run"]["state"] == "running":
+                    raise ServiceError("Execution has not reached a suspension boundary", 409)
                 if task["state"] not in {"paused", "failed", "recovering"}:
                     raise ServiceError("Task cannot resume in this state", 409)
                 if state["input_request"] and state["input_request"]["state"] == "pending":
@@ -186,8 +193,14 @@ class SessionStore:
                 self.append(db, state, "input.answered" if kind == "answer_input" else "input.superseded", request, command_id=cid)
                 task["state"] = "queued"
             elif kind in {"pause", "stop_run"}:
-                state["control"] = {"kind": "paused" if kind == "pause" else "stopped", "command_id": cid, "reason": payload.get("reason", kind)}
-                task["state"] = "pausing" if task["state"] == "running" else "paused"
+                previous = state["control"] or {}
+                ids = previous.get("command_ids", [previous["command_id"]] if previous.get("command_id") else [])
+                control = {"kind": "paused" if kind == "pause" else "stopped", "command_id": cid, "reason": payload.get("reason", kind)}
+                if previous.get("kind") == "stopped":
+                    control = dict(previous)
+                control["command_ids"] = [*ids, cid]
+                state["control"] = control
+                task["state"] = "pausing" if state["run"] and state["run"]["state"] == "running" else "paused"
             elif kind == "resume":
                 state["control"] = None
                 task["state"] = "queued"
@@ -199,7 +212,7 @@ class SessionStore:
             elif kind == "reopen_task":
                 task["state"] = "idle"
             task["revision"] += 1
-            self.append(db, state, "task.state.changed", {"state": task["state"]})
+            self.append(db, state, "task.state.changed", {"state": task["state"], "revision": task["revision"]})
             receipt = {"session_id": sid, "command_id": cid, "state": "accepted"}
             db.execute("INSERT INTO commands VALUES(?,?,?,?,?)", (cid, sid, canonical(normalized), canonical(receipt), "accepted"))
             if kind in {"resume", "reopen_task", "complete_task"} or (kind in {"pause", "stop_run"} and task["state"] == "paused"):

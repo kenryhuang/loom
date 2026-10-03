@@ -136,6 +136,11 @@ Verify the workspace before answering the recovery question with JSON such as
 The alternatives are `not_applied` (permit retry after verifying no effect) and
 `stop` (end the uncertain run). Recovery questions cannot be redirected.
 Committed tool results are reused; uncertain effects are never blindly retried.
+Pause, stop and complete cannot bypass a pending recovery question. Process
+cleanup checks the entire recorded group, including children whose leader has
+exited. Until cleanup confirms exit, all sessions sharing that workspace remain
+blocked. Reconnecting during model output restores the saved text baseline and
+continues from its absolute offset.
 
 Use `LOOM_SERVICE_URL`, `LOOM_SERVICE_TOKEN_FILE`, or explicit `--url` and
 `--token-file` before the session subcommand when connecting from another
@@ -149,6 +154,9 @@ numbers. See the [design](docs/superpowers/specs/2026-10-03-persistent-service-s
 for the protocol and lifecycle. Keep the data directory between restarts.
 This release targets macOS/Linux, a single local user and a terminal frontend.
 Domain plugins and automatic workflow learning remain separate follow-up work.
+Verification uses deterministic providers and spawned processes; live-provider
+integration, prolonged load and storage-failure handling still require separate
+validation.
 
 ## One-shot Task Runner
 

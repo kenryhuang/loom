@@ -2,14 +2,15 @@
 
 from copy import deepcopy
 
-from loom.service.contracts import ServiceError
+from loom.service.contracts import ServiceError, stream_key
 
 
 class SessionProjection:
     def __init__(self, snapshot):
         self.snapshot = deepcopy(snapshot)
         self.cursor = snapshot["event_cursor"]
-        self.streams = {}
+        self.streams = deepcopy(snapshot.get("streams", {}))
+        self.stream_origins = deepcopy(snapshot.get("stream_origins", {}))
 
     def apply(self, event):
         if event["session_id"] != self.snapshot["session_id"] or event["seq"] <= self.cursor:
@@ -26,6 +27,8 @@ class SessionProjection:
                     message["state"] = "applied"
         elif kind == "task.state.changed":
             self.snapshot["task"]["state"] = data["state"]
+            if "revision" in data:
+                self.snapshot["task"]["revision"] = data["revision"]
         elif kind == "task.goal.revised":
             self.snapshot["task"].update(objective=data["objective"], goal_revision=data["goal_revision"])
         elif kind.startswith("input."):
@@ -35,12 +38,18 @@ class SessionProjection:
             if "plan" in data:
                 self.snapshot["plan"] = deepcopy(data["plan"])
         elif kind.startswith("llm.") and kind.endswith(".delta") and isinstance(data.get("delta"), str):
-            key = f"{data['llm_call_id']}:{kind.split('.')[1]}"
+            key = stream_key({**data, "type": kind})
             old = self.streams.get(key, "")
-            offset = data.get("offset", len(old))
-            if offset > len(old):
+            origin = self.stream_origins.get(key, 0)
+            end = origin + len(old)
+            offset = data.get("offset", end)
+            if offset > end:
                 raise ServiceError("Text gap; reload history", 409)
-            self.streams[key] = old + data["delta"][max(0, len(old) - offset) :]
+            text = old + data["delta"][max(0, end - offset) :]
+            limit = self.snapshot["task"].get("limits", {}).get("max_window_chars", 240000)
+            dropped = max(0, len(text) - limit)
+            self.streams[key] = text[dropped:]
+            self.stream_origins[key] = origin + dropped
         elif kind == "llm.completed":
             response = data.get("response", {})
             if "content" in response:

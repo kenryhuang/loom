@@ -61,6 +61,14 @@ class ManagedStep:
             cp["planning"] = self.planning.snapshot()
         return self.execution.boundary(cp)
 
+    def _terminal(self, cp, runtime):
+        directive = self._checkpoint(cp)
+        control = directive.get("control")
+        if control:
+            return self._result(cp, runtime, control["kind"], control.get("reason", ""))
+        terminal = cp["terminal"]
+        return self._result(cp, runtime, terminal["kind"], parsed=terminal["parsed"])
+
     def _context(self, cp, *, parsed=None):
         base = cp["context"]
         decisions = base.state.decisions
@@ -178,9 +186,7 @@ class ManagedStep:
         if restored and restored.get("terminal"):
             if self.planning and restored.get("planning"):
                 self.planning.restore(restored["planning"]).unwrap()
-            terminal = restored["terminal"]
-            self._checkpoint(restored)
-            return self._result(restored, runtime, terminal["kind"], parsed=terminal["parsed"])
+            return self._terminal(restored, runtime)
         if restored and restored.get("phase") != "step_done":
             cp = restored
             if self.planning and cp.get("planning"):
@@ -220,7 +226,9 @@ class ManagedStep:
                 policy = self.planning.step_policy(cp["context"]) if self.planning else None
                 cp["llm_calls"] += 1
                 llm_id = f"{cp['trace_id']}-llm-{cp['llm_calls']}"
-                self._checkpoint(cp)
+                suspended = await self._boundary(cp, runtime)
+                if suspended is not None:
+                    return suspended
                 await self._emit(runtime, "llm.requested", llm_call_id=llm_id, model=self.provider.model, messages=tuple(cp["messages"]), tools=tools)
                 request = asyncio.create_task(
                     request_llm_response(
@@ -299,8 +307,7 @@ class ManagedStep:
                 kind = "completed" if finished and not unfinished_plan else "continue"
                 cp["phase"] = "step_done"
                 cp["terminal"] = {"kind": kind, "parsed": parsed}
-                self._checkpoint(cp)
-                return self._result(cp, runtime, kind, parsed=parsed)
+                return self._terminal(cp, runtime)
             if cp["phase"] == "tool_batch":
                 if cp["tool_index"] >= len(cp["calls"]):
                     cp["phase"] = "before_llm"
@@ -318,8 +325,10 @@ class ManagedStep:
                     await self._emit(runtime, "tool.started", tool_call_id=call.id, tool_id=call.name, input=value)
                     request = self.execution.request_input(call, value)
                     cp["pending_input"] = {"call": call, "request_id": request["id"]}
-                    self._checkpoint(cp)
-                    return self._result(cp, runtime, "waiting_input", request_id=request["id"])
+                    suspended = await self._boundary(cp, runtime)
+                    if suspended is not None:
+                        return suspended
+                    continue
                 persisted = self.execution.operation_start(call)
                 if persisted and persisted.get("defer"):
                     continue
@@ -375,5 +384,4 @@ class ManagedStep:
                     parsed = _parse_decision(cp["response"].content, cp["trace_id"])
                     kind = "completed" if observation.source == "finish" else "continue"
                     cp["terminal"] = {"kind": kind, "parsed": parsed}
-                    self._checkpoint(cp)
-                    return self._result(cp, runtime, kind, parsed=parsed)
+                    return self._terminal(cp, runtime)

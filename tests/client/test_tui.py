@@ -101,3 +101,19 @@ async def test_pending_follow_callback_cannot_override_manual_scroll():
         await pilot.pause()
         assert feed.scroll_y == manual
         assert not feed.follow_tail
+
+
+@pytest.mark.asyncio
+async def test_midstream_snapshot_restores_visible_output_before_new_delta():
+    client = FakeClient()
+    client.states["one"].update(event_cursor=300, streams={"l:content": "saved prefix"}, stream_origins={"l:content": 0})
+    app = SessionTuiApp(client, "one")
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause()
+        await app.select_session("one")
+        assert "".join(app._llm_streams["l"].content_parts) == "saved prefix"
+        assert app.apply_session_event(
+            {"session_id": "one", "seq": 301, "type": "llm.content.delta", "payload": {"llm_call_id": "l", "offset": 12, "delta": " next"}},
+            app.subscription_generation,
+        )
+        assert "".join(app._llm_streams["l"].content_parts) == "saved prefix next"

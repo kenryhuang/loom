@@ -7,6 +7,7 @@ import multiprocessing
 import os
 import signal
 import subprocess
+import time
 from dataclasses import dataclass
 
 from loom.runtime.checkpoints import decode, encode
@@ -18,10 +19,40 @@ def process_identity(pid):
 
 
 def reap_group(pid, identity):
-    if not pid or not identity or process_identity(pid) != identity:
-        return
-    with contextlib.suppress(ProcessLookupError):
+    """Confirm a recorded group has no live members, including orphaned children."""
+    if not pid:
+        return True
+
+    def members():
+        result = subprocess.run(["ps", "-axo", "pid=,pgid=,uid=,stat="], capture_output=True, text=True, check=False)
+        if result.returncode:
+            return None
+        return [fields for line in result.stdout.splitlines() if len(fields := line.split()) == 4 and fields[1] == str(pid) and not fields[3].startswith("Z")]
+
+    current = process_identity(pid)
+    # A reused leader belongs to a new group. Never signal that process.
+    if current and identity and current != identity:
+        return True
+    live = members()
+    if live == []:
+        return True
+    if live is None or (current and not identity) or any(int(row[2]) != os.getuid() for row in live):
+        return False
+    try:
         os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        return False
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        live = members()
+        if live == []:
+            return True
+        if live is None:
+            return False
+        time.sleep(0.02)
+    return False
 
 
 class WorkerBridge:
@@ -69,9 +100,12 @@ class WorkerBridge:
         return self.rpc("poll_control", {})
 
     async def emit(self, event):
+        import asyncio
+
         from loom.core import ok
 
         self.rpc("event", event)
+        await asyncio.sleep(0)
         return ok(None)
 
 

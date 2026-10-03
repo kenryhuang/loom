@@ -212,3 +212,68 @@ def test_committed_final_checkpoint_finishes_without_another_model_call(tmp_path
         assert len(provider.calls) == 1
 
     asyncio.run(scenario())
+
+
+def test_terminal_checkpoint_honors_late_pause_then_reuses_final_response(tmp_path):
+    async def scenario():
+        class LatePause(Execution):
+            pause = True
+
+            def boundary(self, cp):
+                directive = super().boundary(cp)
+                if cp["phase"] == "step_done" and self.pause:
+                    directive["control"] = {"kind": "paused", "reason": "late pause"}
+                return directive
+
+        execution = LatePause()
+        provider = Provider([final("cached")])
+        first = await run_managed(tmp_path, provider, execution)
+        assert first.ok and first.value.control.kind == "paused"
+        execution.pause = False
+        resumed = await run_managed(tmp_path, provider, execution)
+        assert resumed.ok and resumed.value.control.kind == "completed"
+        assert len(provider.calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_request_reservation_honors_pause_before_calling_model(tmp_path):
+    async def scenario():
+        class PauseReservation(Execution):
+            def boundary(self, cp):
+                directive = super().boundary(cp)
+                if cp["llm_calls"]:
+                    directive["control"] = {"kind": "paused", "reason": "reserved"}
+                return directive
+
+        provider = Provider([final()])
+        result = await run_managed(tmp_path, provider, PauseReservation())
+        assert result.ok and result.value.control.kind == "paused"
+        assert provider.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_pause_at_question_checkpoint_preserves_pending_request(tmp_path):
+    async def scenario():
+        class PauseQuestion(Execution):
+            pause = True
+
+            def boundary(self, cp):
+                directive = super().boundary(cp)
+                if cp.get("pending_input") and self.pause:
+                    directive["control"] = {"kind": "paused"}
+                return directive
+
+        provider = Provider([LlmResponse("", (LlmToolCall("ask", "request_input", '{"question":"Which?"}'),)), final()])
+        execution = PauseQuestion()
+        first = await run_managed(tmp_path, provider, execution)
+        assert first.value.control.kind == "paused"
+        assert execution.checkpoint["pending_input"]["request_id"] == "question-1"
+        execution.pause = False
+        execution.answer = {"request_id": "question-1", "answer": "Payments"}
+        resumed = await run_managed(tmp_path, provider, execution)
+        assert resumed.value.control.kind == "completed"
+        assert execution.operations == ["ask"]
+
+    asyncio.run(scenario())

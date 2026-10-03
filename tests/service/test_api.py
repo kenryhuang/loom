@@ -5,6 +5,7 @@ import urllib.request
 
 import pytest
 
+from loom.client.projection import SessionProjection
 from loom.client.protocol import SessionClient
 from loom.runtime.checkpoints import encode
 from loom.service.api import ServiceHTTPServer, installation_token
@@ -115,6 +116,21 @@ def test_worker_stream_offsets_are_durable_and_large_detail_is_lazy(api):
         )
     deltas = [e for e in service.events(sid) if e["type"] == "llm.content.delta"]
     assert [e["payload"]["offset"] for e in deltas] == [0, 3]
+    snapshot = client.snapshot(sid)
+    projection = SessionProjection(snapshot)
+    assert projection.streams["l:content"] == "abcde"
+    service.worker_record(
+        sid,
+        {
+            "attempt_id": state["run"]["attempt_id"],
+            "epoch": state["epoch"],
+            "record_id": "next-delta",
+            "type": "event",
+            "payload": encode({"type": "llm.content.delta", "llm_call_id": "l", "delta": "f"}),
+        },
+    )
+    assert projection.apply(service.events(sid, snapshot["event_cursor"])[0])
+    assert projection.streams["l:content"] == "abcdef"
     service.worker_record(
         sid,
         {

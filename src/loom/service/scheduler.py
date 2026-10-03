@@ -3,6 +3,7 @@
 
 def ready_sessions(states, active, capacity):
     workspaces = {attempt.workspace for attempt in active.values()}
+    workspaces.update(state["task"]["workspace"] for state in states if state.get("workspace_blocked"))
     slots = capacity - len(active)
     for state in reversed(states):
         workspace = state["task"]["workspace"]

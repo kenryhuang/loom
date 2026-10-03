@@ -28,6 +28,12 @@ def canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def stream_key(event: dict) -> str:
+    channel = event["type"].removeprefix("llm.").removesuffix(".delta")
+    key = f"{event['llm_call_id']}:{channel}"
+    return f"{key}:{event['tool_call_id']}" if event.get("tool_call_id") else key
+
+
 def text(value: Any, name: str, *, max_length: int = 100_000) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > max_length:
         raise ServiceError(f"{name} must be non-empty text of at most {max_length} characters")

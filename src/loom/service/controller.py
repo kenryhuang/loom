@@ -11,7 +11,7 @@ from pathlib import Path
 
 from loom.core import Observation, now_iso
 from loom.runtime.checkpoints import decode, encode, plain
-from loom.service.contracts import ServiceError, canonical, new_id, validate_command
+from loom.service.contracts import ServiceError, canonical, new_id, stream_key, validate_command
 from loom.service.scheduler import ready_sessions
 from loom.service.store import SessionStore
 from loom.service.workers import process_identity, reap_group, spawn_attempt
@@ -37,6 +37,7 @@ class LoomService:
         self.stopping = threading.Event()
         self.thread = None
         self.closed = False
+        self.cleanup_checked = 0
         for state in self.store.list_sessions():
             if state["run"] and state["run"]["state"] == "running":
                 self.recover(state["session_id"], "Supervisor restarted")
@@ -57,6 +58,8 @@ class LoomService:
         state.pop("control", None)
         state.pop("epoch", None)
         if state["run"]:
+            state["streams"] = state["run"].pop("streams", {})
+            state["stream_origins"] = state["run"].pop("stream_origins", {})
             for key in ("checkpoint", "process", "attempt_id", "counters", "stream_offsets", "current_operation"):
                 state["run"].pop(key, None)
         state["messages"] = state["messages"][-200:]
@@ -70,7 +73,7 @@ class LoomService:
         with self.lock:
             state = self.store.snapshot(sid)
             request = state.get("input_request")
-            if command.get("type") == "answer_input" and request and request["kind"] == "recovery":
+            if command.get("type") == "answer_input" and request and request["kind"] == "recovery" and command["payload"]["request_id"] == request["id"]:
                 try:
                     answer = json.loads(command["payload"]["answer"])
                     if (
@@ -101,9 +104,35 @@ class LoomService:
             state["input_request"]["state"] = "cancelled"
             emit("input.cancelled", state["input_request"])
         cp = self._checkpoint_value(state)
-        if cp:
-            context = cp["context"]
-            context = replace(context, state=replace(context.state, observations=(*context.state.observations, *cp["observations"])))
+        context = cp["context"] if cp else decode(state.get("context"))
+        if context:
+            observations = list(context.state.observations) + (list(cp["observations"]) if cp else [])
+            seen = {o.id for o in observations}
+            run = state.get("run")
+            for row in db.execute("SELECT id,body FROM operations WHERE session_id=? ORDER BY rowid", (state["session_id"],)):
+                op = json.loads(row[1])
+                if not run or not row[0].startswith(run["id"] + ":") or op["status"] not in {"completed", "reconciled"}:
+                    continue
+                result = decode(op["result"])
+                if result["ok"]:
+                    observation = result["value"]
+                    if not isinstance(observation, Observation):
+                        observation = Observation(f"{op['call']['id']}-observation", op["call"]["name"], observation, op["at"])
+                else:
+                    from loom.llm.api import _tool_failure_observation
+
+                    observation = _tool_failure_observation(
+                        result["error"], observation_id=f"{op['call']['id']}-failure", source=op["call"]["name"], at=op["at"]
+                    ).unwrap()
+                if observation.id not in seen:
+                    observations.append(observation)
+                    seen.add(observation.id)
+            scratch = dict(context.state.scratch or {})
+            if run and state.get("plan_run_id") == run["id"]:
+                for source, target in (("plan", "plan"), ("workflow_route", "workflowRoute")):
+                    if source in state:
+                        scratch[target] = state[source]
+            context = replace(context, state=replace(context.state, observations=tuple(observations), scratch=scratch))
             state["context"] = encode(context)
         if state["run"]:
             state["run"]["checkpoint"] = None
@@ -112,6 +141,8 @@ class LoomService:
 
     def prepare_attempt(self, sid):
         def prepare(state, emit, db):
+            if state.get("workspace_blocked"):
+                raise ServiceError("Previous processes have not exited", 409)
             old = state["run"]
             if not old or old["state"] in {"completed", "stopped", "failed"}:
                 state["run"] = {"id": new_id("run"), "state": "queued", "steps": 0, "checkpoint": None, "active_seconds": 0, "counters": encode({})}
@@ -119,7 +150,9 @@ class LoomService:
             state["epoch"] += 1
             state["run"].update(state="running", attempt_id=new_id("attempt"), process=None)
             state["task"]["state"] = "running"
+            state["task"]["revision"] += 1
             emit("run.started", {"epoch": state["epoch"]})
+            emit("task.state.changed", {"state": "running", "revision": state["task"]["revision"]})
             descriptor = json.loads(canonical(state))
             descriptor["checkpoint_value"] = encode(self._checkpoint_value(state))
             return descriptor
@@ -145,6 +178,8 @@ class LoomService:
             ).fetchone()
             if previous:
                 return decode(json.loads(previous[0]))
+            if run["state"] != "running":
+                raise ServiceError("Executor already suspended or completed", 409)
             attempt = self.active.get(sid)
             if attempt:
                 current = time.monotonic()
@@ -157,10 +192,21 @@ class LoomService:
                 event = plain(value)
                 if event["type"].endswith(".delta") and isinstance(event.get("delta"), str):
                     offsets = run.setdefault("stream_offsets", {})
-                    key = f"{event.get('llm_call_id')}:{event['type']}:{event.get('tool_call_id', '')}"
+                    key = stream_key(event)
                     event["offset"] = offsets.get(key, 0)
                     offsets[key] = event["offset"] + len(event["delta"])
+                    streams = run.setdefault("streams", {})
+                    origins = run.setdefault("stream_origins", {})
+                    text = streams.get(key, "") + event["delta"]
+                    dropped = max(0, len(text) - state["task"]["limits"]["max_window_chars"])
+                    streams[key] = text[dropped:]
+                    origins[key] = origins.get(key, 0) + dropped
+                if event["type"] == "llm.completed":
+                    prefix = f"{event['llm_call_id']}:"
+                    for field in ("streams", "stream_origins", "stream_offsets"):
+                        run[field] = {k: v for k, v in run.get(field, {}).items() if not k.startswith(prefix)}
                 if event["type"].startswith(("plan.", "workflow.")):
+                    state["plan_run_id"] = run["id"]
                     state["task"]["plan_revision"] += 1
                     state["plan_event"] = event
                     for key in ("plan", "workflow_route"):
@@ -220,7 +266,7 @@ class LoomService:
                 if request and request["state"] in {"answered", "superseded"} and request["kind"] == "clarification":
                     answer = {"request_id": request["id"], "answer": request["answer"], "superseded": request["state"] == "superseded"}
                 control = state["control"]
-                if run["active_seconds"] > state["task"]["limits"]["max_duration_seconds"]:
+                if not control and run["active_seconds"] > state["task"]["limits"]["max_duration_seconds"]:
                     control = {"kind": "paused", "reason": "Active time budget exceeded"}
                 response = {"control": control, "inputs": inputs, "input_answer": answer}
             elif kind == "operation_start":
@@ -286,6 +332,18 @@ class LoomService:
             elif kind == "result":
                 state["context"] = encode(value.context)
                 control = value.control
+                pending_control = state["control"]
+                if pending_control and control.kind in {"continue", "completed", "waiting_input"}:
+                    control = replace(control, kind=pending_control["kind"], reason=pending_control.get("reason", ""))
+                    cp = self._checkpoint_value(state)
+                    if cp:
+                        base = cp["context"]
+                        state["context"] = encode(
+                            replace(
+                                base,
+                                state=replace(base.state, observations=(*base.state.observations, *cp["observations"]), scratch=value.context.state.scratch),
+                            )
+                        )
                 if control.kind in {"continue", "completed"}:
                     run["steps"] += 1
                     run["checkpoint"] = None
@@ -298,16 +356,20 @@ class LoomService:
                 elif control.kind != "continue":
                     run["state"] = "stopped" if control.kind == "stopped" else "suspended"
                     if control.kind == "stopped":
-                        run["checkpoint"] = None
+                        self._end_suspended(state, emit, db)
                     request = state["input_request"]
                     state["task"]["state"] = (
                         ("queued" if request and request["state"] != "pending" else "awaiting_input") if control.kind == "waiting_input" else "paused"
                     )
                     if state["control"]:
-                        self.store.applied(db, state, state["control"]["command_id"])
+                        for cid in state["control"].get("command_ids", [state["control"].get("command_id")]):
+                            self.store.applied(db, state, cid)
+                    if control.kind == "stopped" and request and request["state"] == "pending":
+                        request["state"] = "cancelled"
+                        emit("input.cancelled", request)
                 emit("run.state.changed", {"state": run["state"], "reason": control.reason})
-                emit("task.state.changed", {"state": state["task"]["state"]})
                 state["task"]["revision"] += 1
+                emit("task.state.changed", {"state": state["task"]["state"], "revision": state["task"]["revision"]})
                 response = {"continue": control.kind == "continue"}
             elif kind == "failure":
                 state["task"]["state"] = "failed"
@@ -325,16 +387,12 @@ class LoomService:
             run = state["run"]
             if not run:
                 return
-            processes = [run.get("process")]
             operations = []
             for row in db.execute("SELECT id,body FROM operations WHERE session_id=?", (sid,)):
                 op = json.loads(row[1])
-                processes.append(op.get("process"))
                 if row[0].startswith(run["id"] + ":") and op["status"] == "started" and op["effect_kind"] == "side_effecting":
                     operations.append(row[0])
-            for process in processes:
-                if process:
-                    reap_group(process["pid"], process["identity"])
+            self._cleanup_groups(state, emit, db)
             state["epoch"] += 1
             run["state"] = "suspended"
             if operations:
@@ -353,8 +411,20 @@ class LoomService:
             else:
                 state["task"]["state"] = "paused" if state["control"] else "failed"
             emit("run.recovery.required", {"reason": reason, "operations": operations})
+            state["task"]["revision"] += 1
+            emit("task.state.changed", {"state": state["task"]["state"], "revision": state["task"]["revision"]})
 
         self.store.update(sid, recovering)
+
+    def _cleanup_groups(self, state, emit, db):
+        run = state["run"]
+        processes = [run.get("process")]
+        for row in db.execute("SELECT id,body FROM operations WHERE session_id=?", (state["session_id"],)):
+            if row[0].startswith(run["id"] + ":"):
+                processes.append(json.loads(row[1]).get("process"))
+        state["workspace_blocked"] = [p for p in processes if p and not reap_group(p["pid"], p["identity"])]
+        if state["workspace_blocked"]:
+            emit("workspace.blocked", {"reason": "Previous processes have not exited"})
 
     def _reconcile(self, state, emit, db, answer):
         sid = state["session_id"]
@@ -385,6 +455,17 @@ class LoomService:
     def _schedule(self):
         while not self.stopping.wait(0.02):
             with self.lock:
+                if time.monotonic() - self.cleanup_checked >= 1:
+                    self.cleanup_checked = time.monotonic()
+                    for state in self.store.list_sessions():
+                        if state.get("workspace_blocked"):
+
+                            def cleanup(state, emit, db):
+                                state["workspace_blocked"] = [p for p in state["workspace_blocked"] if not reap_group(p["pid"], p["identity"])]
+                                if not state["workspace_blocked"]:
+                                    emit("workspace.released", {})
+
+                            self.store.update(state["session_id"], cleanup)
                 for sid, attempt in list(self.active.items()):
                     try:
                         while attempt.connection.poll():
@@ -404,10 +485,12 @@ class LoomService:
                     if not attempt.process.is_alive():
                         attempt.process.join()
                         attempt.connection.close()
-                        self.active.pop(sid)
                         state = self.store.snapshot(sid)
                         if state["run"]["state"] == "running":
                             self.recover(sid, f"Worker exited ({attempt.process.exitcode})")
+                        else:
+                            self.store.update(sid, self._cleanup_groups)
+                        self.active.pop(sid)
                 for sid in ready_sessions(self.store.list_sessions(), self.active, self.capacity):
                     try:
                         descriptor = self.prepare_attempt(sid)
@@ -449,6 +532,8 @@ class LoomService:
                 state = self.store.snapshot(sid)
                 if state["run"]["state"] == "running":
                     self.recover(sid, "Service shut down")
+                else:
+                    self.store.update(sid, self._cleanup_groups)
             self.active.clear()
         fcntl.flock(self.owner, fcntl.LOCK_UN)
         self.owner.close()

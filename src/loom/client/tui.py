@@ -108,11 +108,31 @@ class SessionTuiApp(LoomTuiApp):
             for event in history["events"]:
                 if event["seq"] <= snapshot["event_cursor"]:
                     self._render_event(event)
+            self._restore_streams()
             self._refresh_state()
             self._notice("")
             self.subscription = asyncio.create_task(self._follow(sid, generation, self.subscription_stop))
         except (ServiceError, OSError, URLError) as exc:
             self._notice(str(exc))
+
+    def _restore_streams(self):
+        feed = self.query_one(EventFeedWidget)
+        for key, text in self.projection.streams.items():
+            llm_id, channel = key.split(":", 1)
+            field = {"content": "content_parts", "reasoning": "reasoning_parts", "reasoning_context": "reasoning_context_parts"}.get(channel)
+            if not field:
+                continue
+            event = TuiEvent(time.monotonic(), f"llm.{channel}.delta", {"llm_call_id": llm_id}, llm_call_id=llm_id)
+            self._handle_event(event)
+            stream = self._llm_streams[llm_id]
+            setattr(stream, field, [text])
+            aggregate = stream.absorb(event)
+            index = self._llm_stream_indices.get(llm_id)
+            if index is None:
+                feed.add_event(aggregate)
+                self._llm_stream_indices[llm_id] = feed.event_count - 1
+            else:
+                feed.update_event(index, aggregate)
 
     async def _clear_feed(self):
         feed = self.query_one(EventFeedWidget)

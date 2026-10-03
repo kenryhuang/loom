@@ -183,8 +183,8 @@
 - [x] Run all existing and added tests from this worktree with the shared virtualenv.
 - [x] Run Ruff lint, format checks and `git diff --check` on changed files.
 - [x] Run an actual service/client/fake-provider process smoke including disconnect and reconnect.
-- [ ] Request the fresh whole-branch reviewer required by executing-plans; resolve material findings with failing tests first.
-- [ ] Preserve the feature branch and worktree for user review; do not merge or push without authorization.
+- [x] Request the fresh whole-branch reviewer required by executing-plans; resolve material findings with failing tests first.
+- [x] Preserve the feature branch and worktree for user review; do not merge or push without authorization.
 
 ## Execution Decision
 
@@ -192,7 +192,10 @@ The user explicitly requested a branch and implementation. Execute inline in thi
 
 ## Verification Evidence
 
-- Full suite: 923 passed, 4 skipped (live-model tests remain opt-in).
-- Ruff lint: entire src/tests pass; format check: all 43 changed Python files pass. The repository has 27 existing formatting differences outside this change.
+- Full suite: 935 passed, 4 skipped (live-model tests remain opt-in).
+- Ruff lint: entire src/tests pass; format check: all 44 changed Python files pass. The repository has 27 existing formatting differences outside this change.
 - Process smoke: an actual daemon with spawned workers survives frontend disconnect and service restart while awaiting input, then resumes the same Run.
 - Additional regressions: cancellation during model requests, active-time accounting, committed final response recovery, durable planning transition recovery, tool-process registration before effects, and delayed TUI scroll callbacks.
+- Independent review: six material findings repaired with reproductions and regressions: repeated-control races, recovery bypass, committed journal preservation, ignored checkpoint controls, orphan process cleanup, and midstream reconnection. The running-state display finding was also treated as material and fixed.
+- Review fix verification: the service/client/managed-step/tool suite passed 52 tests; full compatibility suite passed 935 tests with 4 opt-in skips.
+- Verification boundary: no live-provider, prolonged network/terminal load, power-loss, disk-full, corruption or cross-platform claims. Those remain targeted follow-up validation.
