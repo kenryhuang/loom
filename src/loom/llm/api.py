@@ -335,7 +335,11 @@ def create_llm_step_function(
     step_policy_resolver: Any = None,
     observation_policy: Any = None,
     stream: bool = False,
+    execution: Any = None,
 ):
+    if execution is not None:
+        return execution
+
     async def llm_step(context: Context, runtime: Any) -> Result:
         started_at = runtime.now()
         trace_id = getattr(runtime, "trace_id", None) or new_trace_id()
@@ -366,13 +370,7 @@ def create_llm_step_function(
         effective_tools = all_tools
         tool_selection_result: ToolSelectionResult | None = None
 
-        if (
-            enable_tool_calling
-            and all_tools
-            and tool_selection is not None
-            and tool_selection.enabled
-            and not step_policy.preserve_all_tools
-        ):
+        if enable_tool_calling and all_tools and tool_selection is not None and tool_selection.enabled and not step_policy.preserve_all_tools:
             selection_provider = tool_selection.provider or provider
             tool_selection_result = await _select_tools(prompt_context, selection_provider, tool_selection, runtime, trace_id)
 
