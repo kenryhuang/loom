@@ -92,7 +92,49 @@ to `.loom/service/credential`. Set `--max-active-runs` to change the default of
 two active workers. Sessions sharing the same canonical workspace execute
 serially.
 
-In another terminal, create and interact with a session:
+In another terminal, open a new interactive session:
+
+```bash
+uv run loom
+```
+
+The session is saved immediately and waits for a task. Type the first task in
+the input box and press Enter to start execution. The current directory is its
+workspace; use `uv run loom --workspace /path/to/project` to select another one.
+The interface displays the session ID and lets you switch between sessions.
+The repository's default uv dependency groups include the TUI dependencies, so
+`--extra tui` is optional. Other installations can use `pip install 'loom[tui]'`.
+
+Reconnect and resume an existing session with:
+
+```bash
+uv run loom --resume SESSION_ID
+```
+
+Paused and failed executions resume from their saved state. Running or queued
+executions are connected without starting another worker. A pending question
+or recovery verification is shown before execution can continue. Idle sessions
+wait for the next instruction; completed tasks reopen and also wait for a new
+instruction. Resume retains the run's existing execution budgets.
+
+The backend must already be running. When it uses another data directory,
+point the frontend at the credential file printed by `loom serve`:
+
+```bash
+export LOOM_SERVICE_TOKEN_FILE=/absolute/service/directory/credential
+uv run loom
+```
+
+The same `--url` and `--token-file` options work on the default interactive
+entry. Backend model configuration and `.env` belong to the service process;
+when starting it from another directory, specify the environment file as well:
+
+```bash
+LOOM_ENV_FILE=/path/to/project/.env uv run loom serve \
+  --data-dir /path/to/service/data --config /path/to/project/config.yaml
+```
+
+Existing session commands remain available for scripted interaction:
 
 ```bash
 uv run loom session create 'Maintain this project and fix regressions' --workspace .

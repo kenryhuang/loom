@@ -21,6 +21,9 @@ tui = ["textual>=1.0", "rich>=13.0"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.11"]
 tui = ["textual>=1.0", "rich>=13.0"]
 
+[tool.uv]
+default-groups = ["dev", "tui"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

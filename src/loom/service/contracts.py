@@ -51,7 +51,7 @@ def validate_create(payload: Any) -> dict:
     allowed = {"objective", "workspace", "title", "model", "plan_mode", "limits"}
     if set(payload) - allowed:
         raise ServiceError("Unknown session fields")
-    objective = text(payload.get("objective"), "objective")
+    objective = text(payload["objective"], "objective") if payload.get("objective") is not None else None
     workspace = Path(text(payload.get("workspace", str(Path.cwd())), "workspace", max_length=4096)).expanduser().resolve()
     if not workspace.is_dir():
         raise ServiceError("workspace must be an existing directory")
@@ -67,7 +67,7 @@ def validate_create(payload: Any) -> dict:
     return {
         "objective": objective,
         "workspace": str(workspace),
-        "title": text(payload.get("title", objective[:80]), "title", max_length=200),
+        "title": text(payload.get("title", objective[:80] if objective else "New Session"), "title", max_length=200),
         "model": model,
         "plan_mode": mode,
         "limits": limits,

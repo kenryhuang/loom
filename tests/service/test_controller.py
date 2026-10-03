@@ -141,3 +141,24 @@ def test_next_completed_run_selects_workflow_again_and_revises_goal(tmp_path):
         assert second["task"]["goal_revision"] > first["task"]["goal_revision"]
     finally:
         service.close()
+
+
+def test_empty_session_waits_across_restart_then_first_message_executes(tmp_path):
+    service = LoomService(tmp_path / "data", provider_factory=provider_factory).start()
+    sid = service.create("empty", {"workspace": str(tmp_path), "plan_mode": "off"})["session_id"]
+    try:
+        time.sleep(0.15)
+        assert service.snapshot(sid)["run"] is None
+        assert service.active == {}
+    finally:
+        service.close()
+    service = LoomService(tmp_path / "data", provider_factory=provider_factory).start()
+    try:
+        assert service.snapshot(sid)["run"] is None
+        command(service, sid, "submit_message", content="Maintain parser")
+        done = wait_state(service, sid, "idle")
+        assert done["run"]["state"] == "completed"
+        assert done["messages"][0]["content"] == "Maintain parser"
+        assert done["messages"][0]["state"] == "applied"
+    finally:
+        service.close()

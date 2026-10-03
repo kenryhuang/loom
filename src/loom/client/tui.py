@@ -72,6 +72,7 @@ class SessionTuiApp(LoomTuiApp):
         await self.action_refresh_sessions()
         if self.session_id or self.session_ids:
             await self.select_session(self.session_id or self.session_ids[0])
+        self.query_one("#message", Input).focus()
         self.set_interval(5, self.action_refresh_sessions)
 
     async def action_refresh_sessions(self):
@@ -110,7 +111,7 @@ class SessionTuiApp(LoomTuiApp):
                     self._render_event(event)
             self._restore_streams()
             self._refresh_state()
-            self._notice("")
+            self._notice(f"Session: {sid}" + (" — enter a task to begin" if not snapshot["task"]["objective"] else ""))
             self.subscription = asyncio.create_task(self._follow(sid, generation, self.subscription_stop))
         except (ServiceError, OSError, URLError) as exc:
             self._notice(str(exc))
@@ -243,10 +244,11 @@ class SessionTuiApp(LoomTuiApp):
     def _refresh_state(self):
         state = self.projection.snapshot
         task = state["task"]
-        self.query_one(StatusBar).status = task["state"]
+        waiting = not task["objective"]
+        self.query_one(StatusBar).status = "awaiting_task" if waiting else task["state"]
         header = self.query_one(LoopHeader)
         header.loop_role = escape(state["title"])
-        header.loop_goal = escape(task["objective"])
+        header.loop_goal = escape(task["objective"]) if not waiting else "Enter a task to begin"
         request = state.get("input_request")
         pending = request and request["state"] == "pending"
         question = ("Recovery: " if request["kind"] == "recovery" else "Question: ") + request["question"] if pending else ""
@@ -255,6 +257,10 @@ class SessionTuiApp(LoomTuiApp):
         lines = [f"{item['status']}: {item['content']}" for item in plan.get("items", [])]
         self.query_one("#plan", Static).update(Text("\n".join(lines)))
         self.query_one("#supersede", Button).disabled = not pending or request["kind"] == "recovery"
+        self.query_one("#message", Input).placeholder = "Enter a task and press Enter" if waiting else "Add guidance or answer the pending question"
+        self.query_one("#pause", Button).disabled = waiting or task["state"] not in {"running", "queued", "pausing"}
+        self.query_one("#resume", Button).disabled = waiting or bool(pending) or task["state"] not in {"paused", "failed"}
+        self.query_one("#stop_run", Button).disabled = waiting or task["state"] in {"idle", "completed", "recovering"}
 
     def _notice(self, content):
         self.query_one("#notice", Static).update(Text(content))

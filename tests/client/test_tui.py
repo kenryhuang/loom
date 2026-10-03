@@ -117,3 +117,34 @@ async def test_midstream_snapshot_restores_visible_output_before_new_delta():
             app.subscription_generation,
         )
         assert "".join(app._llm_streams["l"].content_parts) == "saved prefix next"
+
+
+@pytest.mark.asyncio
+async def test_empty_session_focuses_task_input_and_first_submission_sets_task():
+    from textual.widgets import Button, Input
+
+    from loom.tui.tui_app import LoopHeader
+
+    client = FakeClient()
+    client.states["one"]["task"]["objective"] = ""
+    client.states["one"]["title"] = "New Session"
+    app = SessionTuiApp(client, "one")
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause()
+        assert app.focused is app.query_one("#message", Input)
+        assert "task" in app.query_one("#message", Input).placeholder.lower()
+        assert app.query_one("#pause", Button).disabled
+        assert app.query_one("#resume", Button).disabled
+        assert client.commands == []
+        await app.submit_text("Investigate parser")
+        assert client.commands[-1]["payload"] == {"content": "Investigate parser"}
+        assert app.apply_session_event(
+            {
+                "session_id": "one",
+                "seq": 1,
+                "type": "task.goal.revised",
+                "payload": {"objective": "Investigate parser", "goal_revision": 1, "title": "Investigate parser"},
+            },
+            app.subscription_generation,
+        )
+        assert app.query_one(LoopHeader).loop_role == "Investigate parser"

@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Sequence
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    commands = ("campaign", "candidate", "experiment", "task-set", "governance", "optimize", "task", "serve", "session")
+    if not argv or argv[0] not in commands:
+        from loom.client.interactive import main as interactive_main
+
+        return interactive_main(argv)
     parser = argparse.ArgumentParser(prog="loom")
-    parser.add_argument("command", choices=("campaign", "candidate", "experiment", "task-set", "governance", "optimize", "task", "serve", "session"))
+    parser.add_argument("command", choices=commands)
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.command == "serve":

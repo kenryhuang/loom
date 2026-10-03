@@ -31,6 +31,8 @@ class SessionProjection:
                 self.snapshot["task"]["revision"] = data["revision"]
         elif kind == "task.goal.revised":
             self.snapshot["task"].update(objective=data["objective"], goal_revision=data["goal_revision"])
+            if "title" in data:
+                self.snapshot["title"] = self.snapshot["task"]["title"] = data["title"]
         elif kind.startswith("input."):
             self.snapshot["input_request"] = deepcopy(data)
         elif kind.startswith("plan."):

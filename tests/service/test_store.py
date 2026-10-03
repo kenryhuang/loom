@@ -73,3 +73,26 @@ def test_canonical_workspace_aliases_are_equal(tmp_path):
     store = SessionStore(tmp_path / "service")
     sid = store.create("c", {"objective": "Work", "workspace": str(alias)})["session_id"]
     assert store.snapshot(sid)["task"]["workspace"] == str(root.resolve())
+
+
+def test_empty_session_persists_without_run_until_first_task(tmp_path):
+    store = SessionStore(tmp_path / "service")
+    receipt = store.create("empty", {"workspace": str(tmp_path)})
+    sid = receipt["session_id"]
+    store = SessionStore(tmp_path / "service")
+    assert store.create("empty", receipt["input"]) == receipt
+    waiting = store.snapshot(sid)
+    assert waiting["task"]["state"] == "idle"
+    assert waiting["task"]["objective"] == ""
+    assert waiting["run"] is None
+    assert waiting["messages"] == []
+    first = {"command_id": "first", "type": "submit_message", "payload": {"content": "Investigate the parser"}}
+    store.submit(sid, first)
+    store.submit(sid, first)
+    started = store.snapshot(sid)
+    assert started["task"]["state"] == "queued"
+    assert started["task"]["objective"] == "Investigate the parser"
+    assert started["title"] == "Investigate the parser"
+    assert started["task"]["id"] == waiting["task"]["id"]
+    assert len(started["messages"]) == 1
+    assert any(e["type"] == "task.goal.revised" for e in store.events(sid))

@@ -108,9 +108,10 @@ class SessionStore:
                 "task": {
                     "id": new_id("task"),
                     **payload,
-                    "state": "queued",
+                    "objective": payload["objective"] or "",
+                    "state": "queued" if payload["objective"] else "idle",
                     "revision": 1,
-                    "goal_revision": 1,
+                    "goal_revision": 1 if payload["objective"] else 0,
                     "plan_revision": 0,
                     "task_kind": "coding",
                     "plugin_version_refs": [],
@@ -125,9 +126,12 @@ class SessionStore:
             }
             db.execute("INSERT INTO sessions VALUES(?,?)", (sid, canonical(state)))
             self.append(db, state, "command.accepted", {"type": "create"}, command_id=command_id)
-            self._message(db, state, command_id, payload["objective"])
+            if payload["objective"]:
+                self._message(db, state, command_id, payload["objective"])
             receipt = {"session_id": sid, "command_id": command_id, "state": "accepted", "input": payload}
             db.execute("INSERT INTO commands VALUES(?,?,?,?,?)", (command_id, sid, canonical(normalized), canonical(receipt), "accepted"))
+            if not payload["objective"]:
+                self.applied(db, state, command_id)
             self._save(db, state)
             return receipt
 
@@ -167,6 +171,8 @@ class SessionStore:
                 if kind == "supersede_input" and request["kind"] == "recovery":
                     raise ServiceError("Recovery cannot be superseded", 409)
             elif kind == "resume":
+                if not task["objective"]:
+                    raise ServiceError("Enter a task before starting execution", 409)
                 if state["run"] and state["run"]["state"] == "running":
                     raise ServiceError("Execution has not reached a suspension boundary", 409)
                 if task["state"] not in {"paused", "failed", "recovering"}:
@@ -182,6 +188,15 @@ class SessionStore:
             self.append(db, state, "command.accepted", {"type": kind}, command_id=cid)
             if kind == "submit_message":
                 self._message(db, state, cid, payload["content"])
+                if not task["objective"]:
+                    task["objective"] = payload["content"]
+                    task["goal_revision"] += 1
+                    if state["title"] == "New Session":
+                        state["title"] = task["title"] = payload["content"][:80]
+                    task["state"] = "queued"
+                    self.append(
+                        db, state, "task.goal.revised", {"objective": task["objective"], "goal_revision": task["goal_revision"], "title": state["title"]}
+                    )
                 if task["state"] == "idle":
                     task["state"] = "queued"
             elif kind in {"answer_input", "supersede_input"}:
