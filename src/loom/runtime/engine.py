@@ -166,10 +166,11 @@ async def step(
     timeout_ms: int | None = None,
     trace_sink: Any | None = None,
     metadata: Mapping[str, Any] | None = None,
+    trace_id: str | None = None,
 ) -> Result:
     state = _RUNTIME_STATE.get(id(loop)) or RuntimeState(InMemoryTraceStore(), create_in_memory_trace_sink(InMemoryTraceStore()), default_runtime_registry)
     token = cancellation or CancellationToken()
-    trace_id = new_trace_id()
+    trace_id = trace_id or new_trace_id()
     started_at = now_iso()
     started_ms = time.monotonic()
     step_number = as_step_number(len(context.state.observations))
@@ -214,6 +215,9 @@ async def step(
         return err(loom_error) if persisted.ok else persisted
 
     step_result = _normalize_step_result(result.value)
+    if step_result.control is not None and step_result.control.kind in {"paused", "waiting_input", "stopped"}:
+        suspended = await emit({"type": "step.suspended", "trace": step_result.trace, "control": step_result.control, "at": now_iso()})
+        return ok(step_result) if suspended.ok else suspended
     recorded = await _emit_trace_actions(emit, step_result.trace)
     if not recorded.ok:
         return recorded
@@ -423,6 +427,7 @@ def _normalize_step_result(value: Any) -> StepResult:
             trace=value["trace"],
             observation=value.get("observation"),
             output=value.get("output"),
+            control=value.get("control"),
         )
     raise TypeError("Step result must be StepResult or mapping")
 

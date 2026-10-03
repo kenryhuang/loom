@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import os
 import shlex
-import subprocess
+import signal
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -25,7 +28,7 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
         max_bytes = _positive_int(data.get("max_bytes"), 20000)
         path = resolved.value
         try:
-            raw = path.read_bytes()
+            raw = await asyncio.to_thread(path.read_bytes)
         except OSError as exc:
             return err(make_loom_error("TOOL_FAILED", f"Failed to read file: {exc}", retryable=False, metadata={"path": str(path)}))
         content = raw[:max_bytes].decode("utf-8", errors="replace")
@@ -62,7 +65,7 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
         edits = parse_text_edits(data.get("edits"), path=display_path)
         if not edits.ok:
             return edits
-        edited = apply_file_edits(resolved.value, edits.value, display_path=display_path)
+        edited = await asyncio.to_thread(apply_file_edits, resolved.value, edits.value, display_path=display_path)
         if not edited.ok:
             return edited
         value = edited.value
@@ -90,8 +93,8 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
         content = str(data.get("content", ""))
         path = resolved.value
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread(path.write_text, content, encoding="utf-8")
         except OSError as exc:
             return err(make_loom_error("TOOL_FAILED", f"Failed to write file: {exc}", retryable=False, metadata={"path": str(path)}))
         return ok(
@@ -113,34 +116,75 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
             return cwd_result
         timeout_seconds = _positive_int(data.get("timeout_seconds"), 120)
         started = time.monotonic()
+        options = _options or {}
+        max_output = _positive_int(options.get("max_output_bytes"), 20000)
+        process = None
+        buffers = {"stdout": bytearray(), "stderr": bytearray()}
+        truncated = False
+        timed_out = False
+        readers = []
+
+        async def read_pipe(pipe, name):
+            nonlocal truncated
+            while chunk := await pipe.read(8192):
+                remaining = max_output - len(buffers[name])
+                buffers[name].extend(chunk[:remaining])
+                truncated = truncated or len(chunk) > remaining
+
+        async def terminate():
+            if process is None:
+                return
+            # Reap the whole session even if the parent exited with live descendants.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(process.wait(), 1)
+            except TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                await process.wait()
+
+        async def wait_or_stop():
+            check = options.get("cancel_check")
+            while process.returncode is None:
+                if check is not None and check():
+                    await terminate()
+                    return
+                await asyncio.sleep(0.05)
+            await process.wait()
+
         try:
-            completed = subprocess.run(
-                command.value,
+            process = await asyncio.create_subprocess_exec(
+                *command.value,
                 cwd=cwd_result.value,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
+            callback = options.get("process_started")
+            if callback is not None:
+                callback(process.pid)
+            readers = [asyncio.create_task(read_pipe(process.stdout, "stdout")), asyncio.create_task(read_pipe(process.stderr, "stderr"))]
+            try:
+                await asyncio.wait_for(wait_or_stop(), timeout_seconds)
+                # Descendants holding a pipe cannot keep a finished command open forever.
+                await asyncio.wait_for(asyncio.gather(*readers), 1)
+            except TimeoutError:
+                timed_out = True
+                await terminate()
             value = {
                 "command": command.value,
                 "cwd": _relative_to_root(root, cwd_result.value),
-                "exit_code": completed.returncode,
-                "stdout": completed.stdout,
-                "stderr": completed.stderr,
+                "exit_code": 124 if timed_out else process.returncode,
+                "stdout": bytes(buffers["stdout"]).decode("utf-8", errors="replace"),
+                "stderr": bytes(buffers["stderr"]).decode("utf-8", errors="replace"),
                 "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
-                "timed_out": False,
+                "timed_out": timed_out,
+                "output_truncated": truncated,
             }
-        except subprocess.TimeoutExpired as exc:
-            value = {
-                "command": command.value,
-                "cwd": _relative_to_root(root, cwd_result.value),
-                "exit_code": 124,
-                "stdout": _text(exc.stdout),
-                "stderr": _text(exc.stderr) or f"Command timed out after {timeout_seconds}s",
-                "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
-                "timed_out": True,
-            }
+        except asyncio.CancelledError:
+            await terminate()
+            raise
         except OSError as exc:
             value = {
                 "command": command.value,
@@ -151,6 +195,12 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
                 "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
                 "timed_out": False,
             }
+        finally:
+            for reader in readers:
+                if not reader.done():
+                    reader.cancel()
+            if readers:
+                await asyncio.gather(*readers, return_exceptions=True)
         return ok(Observation(new_trace_id(), "shell_execute", value, now_iso()))
 
     async def finish(input_value: Any, _options: Mapping[str, Any] | None = None) -> Result:

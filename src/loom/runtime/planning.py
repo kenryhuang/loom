@@ -299,6 +299,43 @@ class PlanningRuntime:
     def route(self) -> WorkflowRouteController:
         return self._route
 
+    def snapshot(self) -> dict[str, Any]:
+        from loom.runtime.checkpoints import encode
+
+        return {
+            "schema_version": 1,
+            "mode": self.mode.value,
+            "plan": plan_state_dict(self._controller.state),
+            "route": workflow_route_state_dict(self._route.state),
+            "next_item_number": self._controller._next_item_number,
+            "invalid_attempts": self._route_invalid_attempts,
+            "normal_refs": encode(self._normal_refs),
+        }
+
+    def restore(self, value: Mapping[str, Any]) -> Result:
+        from loom.runtime.checkpoints import decode
+
+        try:
+            if value["schema_version"] != 1 or value["mode"] != self.mode.value:
+                raise ValueError("Incompatible planning checkpoint")
+            plan = plan_state_from_mapping(value["plan"])
+            route = workflow_route_state_from_mapping(value["route"])
+            refs = decode(value["normal_refs"])
+            next_number = int(value["next_item_number"])
+            invalid_attempts = int(value["invalid_attempts"])
+            if next_number < 1 or invalid_attempts < 0:
+                raise ValueError("Invalid planning counters")
+            self._controller.restore(plan)
+            self._controller._next_item_number = next_number
+            self._route.restore(route)
+            self._route_invalid_attempts = invalid_attempts
+            self._normal_refs = refs
+            self._controller._events.clear()
+            self._route._events.clear()
+            return ok(None)
+        except (KeyError, TypeError, ValueError) as exc:
+            return err(make_loom_error("VALIDATION_FAILED", str(exc), retryable=False))
+
     def tool_refs(self) -> tuple[ToolRef, ...]:
         if self.mode is PlanMode.OFF:
             return ()
@@ -624,9 +661,7 @@ class PlanningRuntime:
                 WorkflowRoutePhase.REVIEWING,
             }:
                 review = (
-                    "initial task routing"
-                    if route.phase is WorkflowRoutePhase.UNDECIDED
-                    else f"runtime review triggered by {route.trigger}: {route.reason}"
+                    "initial task routing" if route.phase is WorkflowRoutePhase.UNDECIDED else f"runtime review triggered by {route.trigger}: {route.reason}"
                 )
                 return (
                     f"Choose the workflow for {review}. Call exactly one routing tool. "

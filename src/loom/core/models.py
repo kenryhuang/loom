@@ -7,7 +7,10 @@ import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
+
+if TYPE_CHECKING:
+    from loom.runtime.control import StepControl
 
 JsonPrimitive = str | int | float | bool | None
 JsonValue = JsonPrimitive | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
@@ -584,6 +587,7 @@ class StepResult:
     trace: Trace
     observation: Observation | None = None
     output: JsonValue | None = None
+    control: StepControl | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "output", None if self.output is None else freeze_json(self.output))
