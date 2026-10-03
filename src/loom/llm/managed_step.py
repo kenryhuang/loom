@@ -6,6 +6,8 @@ prompt, decision and observation contracts, with explicit resumable phases.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from dataclasses import replace
 
@@ -173,6 +175,12 @@ class ManagedStep:
 
     async def __call__(self, context, runtime):
         restored = getattr(self.execution, "checkpoint", None)
+        if restored and restored.get("terminal"):
+            if self.planning and restored.get("planning"):
+                self.planning.restore(restored["planning"]).unwrap()
+            terminal = restored["terminal"]
+            self._checkpoint(restored)
+            return self._result(restored, runtime, terminal["kind"], parsed=terminal["parsed"])
         if restored and restored.get("phase") != "step_done":
             cp = restored
             if self.planning and cp.get("planning"):
@@ -214,16 +222,35 @@ class ManagedStep:
                 llm_id = f"{cp['trace_id']}-llm-{cp['llm_calls']}"
                 self._checkpoint(cp)
                 await self._emit(runtime, "llm.requested", llm_call_id=llm_id, model=self.provider.model, messages=tuple(cp["messages"]), tools=tools)
-                response = await request_llm_response(
-                    self.provider,
-                    cp["messages"],
-                    tools,
-                    runtime.cancellation,
-                    tool_choice=policy.tool_choice if policy else None,
-                    stream=self.stream,
-                    emit_event=runtime.trace_sink.emit,
-                    event_metadata={"run_id": runtime.run_id, "loop_id": runtime.loop_id, "trace_id": cp["trace_id"], "llm_call_id": llm_id},
+                request = asyncio.create_task(
+                    request_llm_response(
+                        self.provider,
+                        cp["messages"],
+                        tools,
+                        runtime.cancellation,
+                        tool_choice=policy.tool_choice if policy else None,
+                        stream=self.stream,
+                        emit_event=runtime.trace_sink.emit,
+                        event_metadata={"run_id": runtime.run_id, "loop_id": runtime.loop_id, "trace_id": cp["trace_id"], "llm_call_id": llm_id},
+                    )
                 )
+                poll = getattr(self.execution, "poll_control", None)
+                try:
+                    while poll and not request.done():
+                        done, _ = await asyncio.wait({request}, timeout=0.1)
+                        if done:
+                            break
+                        control = poll()
+                        if control:
+                            request.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await request
+                            self._checkpoint(cp)
+                            return self._result(cp, runtime, control["kind"], control.get("reason", ""))
+                    response = await request
+                finally:
+                    if not request.done():
+                        request.cancel()
                 if not response.ok:
                     await self._emit(runtime, "llm.failed", llm_call_id=llm_id, error=response.error)
                     return response
@@ -271,6 +298,7 @@ class ManagedStep:
                 finished = any(o.source == "finish" for o in cp["observations"]) or not parsed["parse_fallback"]
                 kind = "completed" if finished and not unfinished_plan else "continue"
                 cp["phase"] = "step_done"
+                cp["terminal"] = {"kind": kind, "parsed": parsed}
                 self._checkpoint(cp)
                 return self._result(cp, runtime, kind, parsed=parsed)
             if cp["phase"] == "tool_batch":
@@ -312,6 +340,16 @@ class ManagedStep:
                     observation = _tool_failure_observation(result.error, observation_id=f"{call.id}-failure", source=call.name, at=runtime.now()).unwrap()
                 else:
                     observation = result.value
+                if persisted and self.planning and isinstance(observation, Observation):
+                    recovered = thaw_json(observation.value)
+                    if isinstance(recovered, dict) and recovered.get("accepted"):
+                        participant = self.planning.snapshot()
+                        if recovered.get("plan"):
+                            participant["plan"] = recovered["plan"]
+                            participant["next_item_number"] = max(participant["next_item_number"], len(recovered["plan"]["items"]) + 1)
+                        if recovered.get("route"):
+                            participant["route"] = recovered["route"]
+                        self.planning.restore(participant).unwrap()
                 if not isinstance(observation, Observation):
                     observation = Observation(f"{call.id}-observation", call.name, observation, runtime.now())
                 controlled = await _apply_observation_policy(self.planning.observe_tool if self.planning else None, cp["context"], observation)
@@ -334,7 +372,8 @@ class ManagedStep:
                 if _requests_step_boundary(observation):
                     await self._interrupt_batch(cp, runtime, "Workflow phase changed")
                     cp["phase"] = "step_done"
-                    self._checkpoint(cp)
                     parsed = _parse_decision(cp["response"].content, cp["trace_id"])
                     kind = "completed" if observation.source == "finish" else "continue"
+                    cp["terminal"] = {"kind": kind, "parsed": parsed}
+                    self._checkpoint(cp)
                     return self._result(cp, runtime, kind, parsed=parsed)

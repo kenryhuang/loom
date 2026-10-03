@@ -199,3 +199,16 @@ def test_workflow_boundary_and_call_budget_are_explicit_controls(tmp_path):
         assert result.ok and result.value.control.kind == "paused"
 
     asyncio.run(scenario())
+
+
+def test_committed_final_checkpoint_finishes_without_another_model_call(tmp_path):
+    async def scenario():
+        provider = Provider([final("saved report")])
+        execution = Execution()
+        first = await run_managed(tmp_path, provider, execution)
+        assert first.ok
+        restored = await run_managed(tmp_path, provider, execution)
+        assert restored.ok and restored.value.output == first.value.output
+        assert len(provider.calls) == 1
+
+    asyncio.run(scenario())

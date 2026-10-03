@@ -1,3 +1,5 @@
+import os
+import signal
 import time
 
 import pytest
@@ -86,5 +88,30 @@ def test_lost_side_effect_never_replays_without_reconciliation(tmp_path):
         assert any(e["type"] == "tool.reconciled" for e in service.events(sid))
         context = decode(service.store.snapshot(sid)["context"])
         assert any(o.source == "shell_execute" and o.value.get("reconciled") for o in context.state.observations)
+    finally:
+        service.close()
+
+
+def test_committed_plan_transition_restores_before_context_writeback(tmp_path):
+    class CrashPlanService(LoomService):
+        crashed = False
+
+        def worker_record(self, sid, record):
+            response = super().worker_record(sid, record)
+            if record["type"] == "event" and decode(record["payload"])["type"] == "plan.submitted" and not self.crashed:
+                self.crashed = True
+                os.kill(self.active[sid].process.pid, signal.SIGKILL)
+            return response
+
+    service = CrashPlanService(tmp_path / "data", provider_factory=provider_factory).start()
+    try:
+        sid = service.create("plan", {"objective": "planned maintenance", "workspace": str(tmp_path), "plan_mode": "force"})["session_id"]
+        failed = wait_state(service, sid, "failed", timeout=5)
+        original_item = failed["plan"]["items"][0]["id"]
+        command(service, sid, "resume")
+        finished = wait_state(service, sid, "idle")
+        assert finished["plan"]["items"][0]["id"] == original_item
+        assert finished["plan"]["items"][0]["status"] == "completed"
+        assert sum(e["type"] == "plan.submitted" for e in service.events(sid, limit=1000)) == 1
     finally:
         service.close()

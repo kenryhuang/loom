@@ -51,3 +51,18 @@ def test_timeout_reaps_descendant_that_ignores_termination(tmp_path):
         assert not (tmp_path / "leaked").exists()
 
     asyncio.run(scenario())
+
+
+def test_managed_process_registration_precedes_side_effect(tmp_path):
+    async def scenario():
+        tool = make_task_tools(TaskRequest("Work", workspace=tmp_path))["shell_execute"]
+
+        def registered(_pid):
+            time.sleep(0.2)
+            assert not (tmp_path / "marker").exists()
+
+        result = await tool({"command": [sys.executable, "-c", "open('marker','w').write('ok')"]}, {"process_started": registered})
+        assert result.ok and result.value.value["exit_code"] == 0
+        assert (tmp_path / "marker").read_text() == "ok"
+
+    asyncio.run(scenario())

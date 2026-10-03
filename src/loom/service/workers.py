@@ -32,6 +32,8 @@ class WorkerBridge:
         self.checkpoint = decode(state.get("checkpoint_value"))
         self.counters = decode(state["run"].get("counters", encode({})))
         self.input_cursor = state["input_cursor"]
+        if state.get("context") is None and state["messages"]:
+            self.input_cursor = state["messages"][0]["seq"]
 
     def rpc(self, kind, payload):
         self.serial += 1
@@ -63,6 +65,9 @@ class WorkerBridge:
     def request_input(self, call, question):
         return self.rpc("request_input", {"call": call, "question": question})
 
+    def poll_control(self):
+        return self.rpc("poll_control", {})
+
     async def emit(self, event):
         from loom.core import ok
 
@@ -93,6 +98,8 @@ class Attempt:
     workspace: str
     epoch: int
     started: float
+    accounted: float
+    terminal_since: float | None = None
 
 
 def spawn_attempt(state, config_path, provider_factory):
@@ -103,4 +110,5 @@ def spawn_attempt(state, config_path, provider_factory):
     process = ctx.Process(target=worker_main, args=(child, state, config_path, provider_factory), daemon=False)
     process.start()
     child.close()
-    return Attempt(process, parent, state["task"]["workspace"], state["epoch"], time.monotonic())
+    started = time.monotonic()
+    return Attempt(process, parent, state["task"]["workspace"], state["epoch"], started, started)

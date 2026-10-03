@@ -98,3 +98,46 @@ def test_stopping_a_question_allows_a_new_run(tmp_path):
         assert resumed["run"]["id"] != pending["run"]["id"]
     finally:
         service.close()
+
+
+def test_pause_can_interrupt_active_model_request(tmp_path):
+    service = LoomService(tmp_path / "data", provider_factory=provider_factory).start()
+    try:
+        sid = create(service, tmp_path / "workspace", "slow-model")
+        wait_state(service, sid, "running")
+        deadline = time.monotonic() + 3
+        while not any(e["type"] == "llm.requested" for e in service.events(sid)):
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        command(service, sid, "pause")
+        paused = wait_state(service, sid, "paused", timeout=2)
+        assert paused["run"]["state"] == "suspended"
+    finally:
+        service.close()
+
+
+def test_active_time_budget_does_not_wait_for_model_response(tmp_path):
+    service = LoomService(tmp_path / "data", provider_factory=provider_factory).start()
+    try:
+        sid = service.create("budget", {"objective": "slow-model", "workspace": str(tmp_path), "plan_mode": "off", "limits": {"max_duration_seconds": 1}})[
+            "session_id"
+        ]
+        paused = wait_state(service, sid, "paused", timeout=3)
+        assert paused["run"]["active_seconds"] >= 1
+    finally:
+        service.close()
+
+
+def test_next_completed_run_selects_workflow_again_and_revises_goal(tmp_path):
+    service = LoomService(tmp_path / "data", provider_factory=provider_factory).start()
+    try:
+        sid = service.create("auto", {"objective": "Maintain", "workspace": str(tmp_path)})["session_id"]
+        first = wait_state(service, sid, "idle")
+        command(service, sid, "submit_message", content="Now investigate a new regression")
+        second = wait_state(service, sid, "idle")
+        assert "new regression" in second["task"]["objective"]
+        routes = [e for e in service.events(sid, limit=1000) if e["type"] == "workflow.route.selected"]
+        assert len(routes) == 2
+        assert second["task"]["goal_revision"] > first["task"]["goal_revision"]
+    finally:
+        service.close()

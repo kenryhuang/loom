@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -114,6 +115,7 @@ class LoomService:
             old = state["run"]
             if not old or old["state"] in {"completed", "stopped", "failed"}:
                 state["run"] = {"id": new_id("run"), "state": "queued", "steps": 0, "checkpoint": None, "active_seconds": 0, "counters": encode({})}
+                state["run"]["reset_planning"] = bool(old and old["state"] == "completed")
             state["epoch"] += 1
             state["run"].update(state="running", attempt_id=new_id("attempt"), process=None)
             state["task"]["state"] = "running"
@@ -143,6 +145,11 @@ class LoomService:
             ).fetchone()
             if previous:
                 return decode(json.loads(previous[0]))
+            attempt = self.active.get(sid)
+            if attempt:
+                current = time.monotonic()
+                run["active_seconds"] += current - attempt.accounted
+                attempt.accounted = current
             value = decode(record["payload"])
             kind = record["type"]
             response = None
@@ -159,6 +166,32 @@ class LoomService:
                     for key in ("plan", "workflow_route"):
                         if key in event:
                             state[key] = event[key]
+                    oid = run.get("current_operation")
+                    if oid:
+                        row = db.execute("SELECT body FROM operations WHERE id=?", (oid,)).fetchone()
+                        op = json.loads(row[0])
+                        terminal_event = {
+                            "enter_plan": "plan.entered",
+                            "submit_plan": "plan.submitted",
+                            "update_plan": "plan.updated",
+                            "continue_react": "workflow.route.selected",
+                        }.get(op["call"]["name"])
+                        if event["type"] == terminal_event:
+                            cp = self._checkpoint_value(state)
+                            participant = (cp or {}).get("planning", {})
+                            observation = Observation(
+                                new_id("obs"),
+                                op["call"]["name"],
+                                {
+                                    "accepted": True,
+                                    "plan": state.get("plan", participant.get("plan")),
+                                    "route": state.get("workflow_route", participant.get("route")),
+                                },
+                                now_iso(),
+                                metadata={"controlFlow": {"stepBoundary": True, "reason": "recovered_transition"}},
+                            )
+                            op.update(status="reconciled", result=encode({"ok": True, "value": observation}))
+                            self._save_operation(db, sid, oid, op)
                 if len(canonical(event).encode()) > 32768:
                     ref = self.store.artifact_in_transaction(db, sid, event, "event_detail")
                     event = {
@@ -173,7 +206,10 @@ class LoomService:
                 cursor = value["input_cursor"]
                 if cursor > state["input_cursor"]:
                     state["task"]["goal_revision"] += 1
+                    state["task"]["objective"] = value["context"].goal.objective
+                    state["task"]["revision"] += 1
                     state["input_cursor"] = cursor
+                    emit("task.goal.revised", {"objective": state["task"]["objective"], "goal_revision": state["task"]["goal_revision"]})
                     for message in state["messages"]:
                         if message["role"] == "user" and message["seq"] <= cursor:
                             self.store.applied(db, state, message["command_id"])
@@ -189,6 +225,8 @@ class LoomService:
                 response = {"control": control, "inputs": inputs, "input_answer": answer}
             elif kind == "operation_start":
                 oid, op = self._operation(db, state, value)
+                if op and op["call"] != plain(value):
+                    raise ServiceError("Tool call ID reused with different arguments", 409)
                 if op and op["status"] in {"completed", "reconciled"}:
                     response = decode(op["result"])
                 elif op and op["status"] == "started" and op["effect_kind"] == "side_effecting":
@@ -197,7 +235,12 @@ class LoomService:
                     response = {"defer": True}
                 else:
                     call = plain(value)
-                    op = {"call": call, "status": "started", "effect_kind": "read_only" if call["name"] == "read_file" else "side_effecting", "at": now_iso()}
+                    effect = (
+                        "service_control"
+                        if call["name"] in {"enter_plan", "submit_plan", "update_plan", "continue_react"}
+                        else ("read_only" if call["name"] in {"read_file", "finish"} else "side_effecting")
+                    )
+                    op = {"call": call, "status": "started", "effect_kind": effect, "at": now_iso()}
                     self._save_operation(db, sid, oid, op)
                     run["current_operation"] = oid
                     emit("operation.started", op)
@@ -231,7 +274,13 @@ class LoomService:
                     op["process"] = {"pid": value["pid"], "identity": process_identity(value["pid"])}
                     self._save_operation(db, sid, oid, op)
             elif kind == "check_control":
-                response = bool(state["control"] and state["control"]["kind"] == "stopped")
+                response = (
+                    bool(state["control"] and state["control"]["kind"] == "stopped") or run["active_seconds"] > state["task"]["limits"]["max_duration_seconds"]
+                )
+            elif kind == "poll_control":
+                response = state["control"]
+                if not response and run["active_seconds"] > state["task"]["limits"]["max_duration_seconds"]:
+                    response = {"kind": "paused", "reason": "Active time budget exceeded"}
             elif kind == "status":
                 response = {"input_cursor": state["input_cursor"]}
             elif kind == "result":
@@ -262,7 +311,7 @@ class LoomService:
                 response = {"continue": control.kind == "continue"}
             elif kind == "failure":
                 state["task"]["state"] = "failed"
-                run["state"] = "failed"
+                run["failure"] = value
                 emit("run.failed", value)
             else:
                 raise ServiceError("Unknown worker record")
@@ -347,6 +396,11 @@ class LoomService:
                                 attempt.connection.send({"error": str(exc)})
                     except (EOFError, BrokenPipeError, OSError):
                         pass
+                    state = self.store.snapshot(sid)
+                    if attempt.process.is_alive() and state["run"]["state"] != "running":
+                        attempt.terminal_since = attempt.terminal_since or time.monotonic()
+                        if time.monotonic() - attempt.terminal_since > 2:
+                            attempt.process.kill()
                     if not attempt.process.is_alive():
                         attempt.process.join()
                         attempt.connection.close()
@@ -368,6 +422,18 @@ class LoomService:
         if self.closed:
             return
         self.closed = True
+        if self.thread:
+            with self.lock:
+                for sid in self.active:
+
+                    def pause(state, emit, db):
+                        if state["run"]["state"] == "running" and not state["control"]:
+                            state["control"] = {"kind": "paused", "reason": "Service shutdown", "command_id": None}
+
+                    self.store.update(sid, pause)
+            deadline = time.monotonic() + 2
+            while self.active and time.monotonic() < deadline:
+                time.sleep(0.02)
         self.stopping.set()
         if self.thread:
             self.thread.join(timeout=3)

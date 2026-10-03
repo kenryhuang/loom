@@ -1393,14 +1393,19 @@ class EventFeedWidget(VerticalScroll):
         if selected and following:
             self._selected_index = len(self._event_items) - 1
         if following:
-            self.scroll_end(animate=False)
+            self.call_after_refresh(self._scroll_tail_if_following)
 
     def update_event(self, index: int, event: TuiEvent) -> None:
         """Update one existing event item in place."""
         if 0 <= index < len(self._event_items):
             self._event_items[index].set_event(event)
             if self._follow_tail:
-                self.scroll_end(animate=False)
+                self.call_after_refresh(self._scroll_tail_if_following)
+
+    def _scroll_tail_if_following(self) -> None:
+        # Layout callbacks can outlive a user's decision to inspect earlier events.
+        if self._follow_tail:
+            self.scroll_end(animate=False, immediate=True)
 
     @property
     def follow_tail(self) -> bool:

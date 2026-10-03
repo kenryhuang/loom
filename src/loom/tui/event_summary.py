@@ -44,6 +44,14 @@ class EventSummary:
 
 def summarize_event(event: TuiEvent) -> EventSummary | None:
     """Return a concise semantic summary, or ``None`` for non-semantic data."""
+    if event.event_type == "message.created":
+        title = "You" if event.data.get("role") == "user" else "Loom"
+        status = event.data.get("state", "accepted")
+        return EventSummary(f"{title} · {status}", _first_meaningful_line(_text(event.data.get("content"))), "text")
+    if event.event_type.startswith("input."):
+        return EventSummary("Input " + event.event_type.split(".")[1], _text(event.data.get("question")), "orange")
+    if event.data.get("artifact"):
+        return EventSummary("Execution detail", _text(event.data.get("summary")), "text")
     if event.event_type.startswith("workflow."):
         return _workflow_summary(event.event_type, event.data)
     if event.event_type == "decision.recorded":

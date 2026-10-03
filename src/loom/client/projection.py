@@ -26,10 +26,14 @@ class SessionProjection:
                     message["state"] = "applied"
         elif kind == "task.state.changed":
             self.snapshot["task"]["state"] = data["state"]
+        elif kind == "task.goal.revised":
+            self.snapshot["task"].update(objective=data["objective"], goal_revision=data["goal_revision"])
         elif kind.startswith("input."):
             self.snapshot["input_request"] = deepcopy(data)
         elif kind.startswith("plan."):
             self.snapshot["plan_event"] = deepcopy(data)
+            if "plan" in data:
+                self.snapshot["plan"] = deepcopy(data["plan"])
         elif kind.startswith("llm.") and kind.endswith(".delta") and isinstance(data.get("delta"), str):
             key = f"{data['llm_call_id']}:{kind.split('.')[1]}"
             old = self.streams.get(key, "")

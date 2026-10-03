@@ -53,6 +53,8 @@ def test_top_level_package_api_is_intentionally_thin():
         "tools",
         "trace_analysis",
         "tui",
+        "service",
+        "client",
     }
 
     assert public_names - submodule_names == set()

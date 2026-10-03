@@ -7,6 +7,7 @@ import contextlib
 import os
 import shlex
 import signal
+import sys
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -123,6 +124,7 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
         truncated = False
         timed_out = False
         readers = []
+        gate_read = gate_write = None
 
         async def read_pipe(pipe, name):
             nonlocal truncated
@@ -153,16 +155,31 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
             await process.wait()
 
         try:
+            callback = options.get("process_started")
+            argv = command.value
+            extra = {}
+            if callback is not None:
+                gate_read, gate_write = os.pipe()
+                launcher = "import os,sys; fd=int(sys.argv[1]); token=os.read(fd,1); os.close(fd); "
+                launcher += "sys.exit(125) if token!=b'1' else os.execvp(sys.argv[2],sys.argv[2:])"
+                argv = (sys.executable, "-c", launcher, str(gate_read), *argv)
+                extra["pass_fds"] = (gate_read,)
             process = await asyncio.create_subprocess_exec(
-                *command.value,
+                *argv,
                 cwd=cwd_result.value,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                **extra,
             )
-            callback = options.get("process_started")
+            if gate_read is not None:
+                os.close(gate_read)
+                gate_read = None
             if callback is not None:
                 callback(process.pid)
+                os.write(gate_write, b"1")
+                os.close(gate_write)
+                gate_write = None
             readers = [asyncio.create_task(read_pipe(process.stdout, "stdout")), asyncio.create_task(read_pipe(process.stderr, "stderr"))]
             try:
                 await asyncio.wait_for(wait_or_stop(), timeout_seconds)
@@ -195,6 +212,9 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
                 "timed_out": False,
             }
         finally:
+            for gate in (gate_read, gate_write):
+                if gate is not None:
+                    os.close(gate)
             if process is not None:
                 # A successful parent can also leave detached descendants in its group.
                 with contextlib.suppress(ProcessLookupError, PermissionError):

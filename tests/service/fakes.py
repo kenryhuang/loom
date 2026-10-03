@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 
 from loom.core import ok
 from loom.llm.api import LlmResponse, LlmToolCall
@@ -13,6 +14,19 @@ class FakeProvider:
 
     async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
         results = [m for m in messages if m.role == "tool"]
+        names = {t["function"]["name"] for t in tools or ()}
+        if "submit_plan" in names:
+            return ok(LlmResponse("", (LlmToolCall("submit", "submit_plan", '{"explanation":"Review","items":[{"content":"Review module"}]}'),)))
+        if "update_plan" in names and "planned" in self.objective:
+            if re.search(r"^- \[x\]", "\n".join(m.content for m in messages), re.MULTILINE):
+                return ok(LlmResponse("", (LlmToolCall("finish", "finish", '{"report":"Verified module"}'),)))
+            item_id = re.search(r"^- \[[^]]*\] (\S+):", "\n".join(m.content for m in messages), re.MULTILINE).group(1)
+            args = {"explanation": "Verified", "items": [{"id": item_id, "content": "Review module", "status": "completed"}]}
+            return ok(LlmResponse("", (LlmToolCall("update", "update_plan", json.dumps(args)),)))
+        if tools and {"enter_plan", "continue_react"}.issubset({t["function"]["name"] for t in tools}):
+            return ok(LlmResponse("", (LlmToolCall("route", "continue_react", '{"reason":"Direct maintenance"}'),)))
+        if "slow-model" in self.objective:
+            await asyncio.sleep(30)
         if "uncertain" in self.objective and not results:
             command = ["python3", "-c", "import os,signal; open('marker','a').write('once'); os.kill(os.getppid(),signal.SIGKILL)"]
             return ok(LlmResponse("", (LlmToolCall("side-effect", "shell_execute", json.dumps({"command": command})),)))

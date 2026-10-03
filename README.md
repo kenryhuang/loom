@@ -71,7 +71,86 @@ LOOM_LIVE_MAX_COMPLETION_TOKENS=512
 LOOM_LIVE_TEMPERATURE=0
 ```
 
-## Generic Task Runner
+## Persistent Task Sessions
+
+Loom can run as a local backend service. Each session keeps one task, its
+conversation, execution checkpoints, tool results and event history across
+frontend connections and service restarts. A completed execution returns the
+task to `idle`; the next message starts another run of the same task.
+
+Start the service from the directory containing your `.env`, or explicitly
+select a server-owned model configuration:
+
+```bash
+uv run loom serve --data-dir .loom/service --config config.yaml
+```
+
+Omit `--config` to use the environment provider described above. Model names in
+session requests refer to configuration entries; credentials remain on the
+backend. The service binds to `127.0.0.1:8765` and writes its private credential
+to `.loom/service/credential`. Set `--max-active-runs` to change the default of
+two active workers. Sessions sharing the same canonical workspace execute
+serially.
+
+In another terminal, create and interact with a session:
+
+```bash
+uv run loom session create 'Maintain this project and fix regressions' --workspace .
+uv run loom session list
+uv run loom session message SESSION_ID 'Prioritize the failing parser tests'
+uv run loom session snapshot SESSION_ID
+uv run --extra tui loom session connect SESSION_ID
+```
+
+The TUI lists sessions, shows the current plan and model/tool execution feed,
+and accepts additional guidance while work runs. Enter submits a message or
+answers the pending question. Redirect explicitly supersedes a clarification.
+History pages backward through stored events; Detail opens a selected large
+execution artifact. The feed retains up to 500 visible rows. `Ctrl+Q` disconnects
+the frontend; the backend keeps running.
+
+Commands can also be used without the TUI:
+
+```bash
+uv run loom session pause SESSION_ID
+uv run loom session resume SESSION_ID
+uv run loom session stop SESSION_ID
+uv run loom session answer SESSION_ID 'Payments module' --request-id INPUT_ID
+uv run loom session history SESSION_ID --limit 100
+uv run loom session events SESSION_ID --after 0
+uv run loom session artifact SESSION_ID DIGEST --output detail.json
+uv run loom session complete SESSION_ID
+uv run loom session reopen SESSION_ID
+```
+
+Pause preserves the current run and resumes at its saved boundary. Stop ends
+the run while retaining its observations; resuming starts a new run. Complete
+explicitly closes the task after execution is idle or paused. User input has
+separate `accepted` and `applied` states: guidance applies at a model/tool
+boundary, and cancels calls from an older response that have not executed.
+`request_input` releases the worker while the task awaits an answer.
+
+When a worker disappears during a side effect, the task enters `recovering`.
+Verify the workspace before answering the recovery question with JSON such as
+`{"resolution":"completed","evidence":"Verified the requested file contents"}`.
+The alternatives are `not_applied` (permit retry after verifying no effect) and
+`stop` (end the uncertain run). Recovery questions cannot be redirected.
+Committed tool results are reused; uncertain effects are never blindly retried.
+
+Use `LOOM_SERVICE_URL`, `LOOM_SERVICE_TOKEN_FILE`, or explicit `--url` and
+`--token-file` before the session subcommand when connecting from another
+working directory. `LOOM_SERVICE_TOKEN` is an optional environment override.
+Supplying `--command-id` on create/message/control commands makes retries
+idempotent; reusing the ID with different content returns a conflict.
+
+The HTTP API uses bearer credentials, JSON commands under `/v1/sessions`,
+consistent snapshots, paged history and SSE with persisted session sequence
+numbers. See the [design](docs/superpowers/specs/2026-10-03-persistent-service-sessions-design.md)
+for the protocol and lifecycle. Keep the data directory between restarts.
+This release targets macOS/Linux, a single local user and a terminal frontend.
+Domain plugins and automatic workflow learning remain separate follow-up work.
+
+## One-shot Task Runner
 
 Run an arbitrary task through the Loom LLM loop with workspace tools:
 

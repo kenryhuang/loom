@@ -3,7 +3,7 @@
 from dataclasses import replace
 
 from loom.llm.managed_step import ManagedStep
-from loom.runtime import PlanningRuntime, create, create_runtime_registry, step
+from loom.runtime import PlanningRuntime, create, create_runtime_registry, plan_state_dict, step, workflow_route_state_dict
 from loom.runtime.checkpoints import decode
 from loom.tasks.config import load_task_config
 from loom.tasks.request import TaskRequest
@@ -22,6 +22,15 @@ async def execute(state, bridge, config_path, provider_factory):
     initial = make_task_context(request, planning=planning).unwrap()
     context = decode(state["context"]) if state.get("context") else initial
     context = bridge.checkpoint["context"] if bridge.checkpoint else replace(context, run_id=state["run"]["id"])
+    if bridge.checkpoint and bridge.checkpoint.get("planning"):
+        planning.restore(bridge.checkpoint["planning"]).unwrap()
+        scratch = dict(context.state.scratch or {})
+        scratch.update(plan=plan_state_dict(planning.controller.state), workflowRoute=workflow_route_state_dict(planning.route.state))
+        context = replace(context, state=replace(context.state, scratch=scratch))
+    if state["run"].get("reset_planning") and not bridge.checkpoint and state["run"]["steps"] == 0:
+        scratch = dict(context.state.scratch or {})
+        scratch.update(plan=plan_state_dict(planning.controller.state), workflowRoute=workflow_route_state_dict(planning.route.state))
+        context = replace(context, state=replace(context.state, scratch=scratch))
     managed = ManagedStep(provider, bridge, planning=planning, limits=state["task"]["limits"], stream=True)
     definition = planning.wrap_loop(replace(make_task_loop(request, provider, planning=planning), step=managed))
     tools = make_task_tools(request)
