@@ -114,3 +114,35 @@ def test_question_arriving_during_resume_opens_session_for_answer(api, monkeypat
     assert main(["--resume", sid, "--url", client.url, "--token-file", str(credential)]) == 0
     assert apps[0].session_id == sid
     assert service.snapshot(sid)["task"]["state"] == "paused"
+
+
+def test_token_budget_options_create_query_update_and_resume(api, monkeypatch, capsys):
+    service, server, client, path = api
+    apps = stub_tui(monkeypatch)
+    credential = path / "token"
+    credential.write_text(client.token)
+    prefix = ["--url", client.url, "--token-file", str(credential)]
+    assert main([*prefix, "--workspace", str(path), "--token-budget", "2.5M"]) == 0
+    sid = apps[-1].session_id
+    assert service.snapshot(sid)["task"]["limits"]["max_tokens"] == 2_500_000
+    session = ["session", *prefix]
+    assert main([*session, "budget", sid, "20M", "--command-id", "update"]) == 0
+    capsys.readouterr()
+    assert main([*session, "budget", sid]) == 0
+    assert json.loads(capsys.readouterr().out)["limit"] == 20_000_000
+    assert main([*session, "create", "Work", "--workspace", str(path), "--token-budget", "500K"]) == 0
+    existing = json.loads(capsys.readouterr().out)["session_id"]
+    assert service.snapshot(existing)["task"]["limits"]["max_tokens"] == 500_000
+    service.store.update(existing, lambda state, emit, db: state["task"].update(state="paused"))
+    assert main([*prefix, "--resume", existing, "--token-budget", "10M"]) == 0
+    assert service.snapshot(existing)["task"]["limits"]["max_tokens"] == 10_000_000
+    assert service.snapshot(existing)["task"]["state"] == "queued"
+
+
+@pytest.mark.parametrize("value", ["0", "10MB", "1.5"])
+def test_invalid_token_budget_does_not_create_session(api, value):
+    service, server, client, path = api
+    with pytest.raises(SystemExit) as exc:
+        main(["--url", client.url, "--token-budget", value])
+    assert exc.value.code == 2
+    assert client.list_sessions() == []

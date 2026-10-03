@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Any
 
 EVENT_SCHEMA = "loom.session.event.v1"
-COMMAND_TYPES = frozenset({"submit_message", "answer_input", "supersede_input", "pause", "resume", "stop_run", "complete_task", "reopen_task"})
-LIMITS = {"max_steps": 100, "max_llm_calls": 200, "max_tokens": 100_000, "max_duration_seconds": 1800, "max_window_chars": 240_000}
+COMMAND_TYPES = frozenset(
+    {"submit_message", "answer_input", "supersede_input", "pause", "resume", "stop_run", "complete_task", "reopen_task", "set_token_budget"}
+)
+LIMITS = {"max_steps": 100, "max_llm_calls": 200, "max_tokens": 10_000_000, "max_duration_seconds": 1800, "max_window_chars": 240_000}
 
 
 class ServiceError(Exception):
@@ -87,6 +89,11 @@ def validate_command(command: Any) -> dict:
     if kind == "submit_message":
         allowed = {"content"}
         text(payload.get("content"), "content")
+    elif kind == "set_token_budget":
+        allowed = {"max_tokens"}
+        value = payload.get("max_tokens")
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ServiceError("max_tokens must be a positive integer")
     elif kind in {"answer_input", "supersede_input"}:
         allowed = {"request_id", "answer" if kind == "answer_input" else "content"}
         text(payload.get("request_id"), "request_id", max_length=200)

@@ -164,6 +164,9 @@ class SessionStore:
             if kind == "submit_message":
                 if task["state"] == "completed":
                     raise ServiceError("Reopen the completed task first", 409)
+            elif kind == "set_token_budget":
+                if task["state"] in {"running", "pausing", "queued"} or (state["run"] and state["run"]["state"] == "running"):
+                    raise ServiceError("Pause execution before changing the token budget", 409)
             elif kind in {"answer_input", "supersede_input"}:
                 request = state["input_request"]
                 if not request or request["id"] != payload["request_id"] or request["state"] != "pending":
@@ -226,11 +229,14 @@ class SessionStore:
                     state["run"]["state"] = "stopped"
             elif kind == "reopen_task":
                 task["state"] = "idle"
+            elif kind == "set_token_budget":
+                task["limits"]["max_tokens"] = payload["max_tokens"]
+                self.append(db, state, "task.budget.changed", {"max_tokens": payload["max_tokens"]}, command_id=cid)
             task["revision"] += 1
             self.append(db, state, "task.state.changed", {"state": task["state"], "revision": task["revision"]})
             receipt = {"session_id": sid, "command_id": cid, "state": "accepted"}
             db.execute("INSERT INTO commands VALUES(?,?,?,?,?)", (cid, sid, canonical(normalized), canonical(receipt), "accepted"))
-            if kind in {"resume", "reopen_task", "complete_task"} or (kind in {"pause", "stop_run"} and task["state"] == "paused"):
+            if kind in {"resume", "reopen_task", "complete_task", "set_token_budget"} or (kind in {"pause", "stop_run"} and task["state"] == "paused"):
                 self.applied(db, state, cid)
             if after is not None:
                 after(state, lambda kind, payload: self.append(db, state, kind, payload), db)

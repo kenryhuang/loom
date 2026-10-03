@@ -117,6 +117,31 @@ or recovery verification is shown before execution can continue. Idle sessions
 wait for the next instruction; completed tasks reopen and also wait for a new
 instruction. Resume retains the run's existing execution budgets.
 
+New sessions default to a **10M token budget** (10,000,000 tokens). Set a
+different total when creating or resuming a session:
+
+```bash
+uv run loom --token-budget 20M
+uv run loom --resume SESSION_ID --token-budget 20M
+uv run loom session create 'Maintain this project' --token-budget 500K
+```
+
+Inside the TUI, enter `/budget` to view usage or `/budget 20M` to change the
+limit. The interface also displays used tokens and the current limit. Pause
+active execution before changing its budget, then press Resume to continue.
+From another terminal, use:
+
+```bash
+uv run loom session budget SESSION_ID       # show limit, used and remaining
+uv run loom session budget SESSION_ID 20M   # change the saved limit
+```
+
+Counts accept integers, `K` (1,000), and `M` (1,000,000), including `2.5M`.
+This budget counts cumulative input and output tokens in the current run;
+it is not a byte count or the per-response `max_completion_tokens` limit.
+Changing the limit preserves usage and checkpoints, and a new run starts its
+own count. Existing sessions keep their saved limit until explicitly changed.
+
 The backend must already be running. When it uses another data directory,
 point the frontend at the credential file printed by `loom serve`:
 

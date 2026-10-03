@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from urllib.error import URLError
 
+from loom.client.budgets import parse_token_budget
 from loom.client.protocol import SessionClient
 from loom.service.contracts import ServiceError
 
@@ -42,6 +43,7 @@ def main(argv=None):
     parser.add_argument("--workspace", type=Path, default=Path.cwd(), help="Workspace for a new session (default: current directory)")
     parser.add_argument("--model", help="Server-owned model name for a new session")
     parser.add_argument("--plan-mode", choices=("auto", "force", "off"), default="auto")
+    parser.add_argument("--token-budget", type=parse_token_budget, metavar="TOKENS", help="Token budget, e.g. 10M or 500K (new-session default: 10M)")
     parser.add_argument("--url", default=os.environ.get("LOOM_SERVICE_URL", "http://127.0.0.1:8765"))
     parser.add_argument("--token-file", type=Path, default=Path(os.environ.get("LOOM_SERVICE_TOKEN_FILE", ".loom/service/credential")))
     args = parser.parse_args(argv)
@@ -54,11 +56,15 @@ def main(argv=None):
         client = SessionClient(args.url, token)
         if args.resume is not None:
             sid = args.resume
+            if args.token_budget is not None:
+                client.command(sid, "set_token_budget", {"max_tokens": args.token_budget})
             resume_session(client, sid)
         else:
             payload = {"workspace": str(args.workspace.resolve()), "plan_mode": args.plan_mode}
             if args.model is not None:
                 payload["model"] = args.model
+            if args.token_budget is not None:
+                payload["limits"] = {"max_tokens": args.token_budget}
             sid = client.create(payload)["session_id"]
         SessionTuiApp(client, sid).run()
         return 0

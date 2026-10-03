@@ -7,6 +7,7 @@ pytest.importorskip("textual")
 from loom.client.tui import SessionTuiApp
 from loom.tui.tui_app import EventFeedWidget, LoomTuiApp
 from loom.tui.tui_collector import TuiEvent, TuiEventCollector
+from tests.service.test_api import api as api
 
 
 class FakeClient:
@@ -148,3 +149,32 @@ async def test_empty_session_focuses_task_input_and_first_submission_sets_task()
             app.subscription_generation,
         )
         assert app.query_one(LoopHeader).loop_role == "Investigate parser"
+
+
+@pytest.mark.asyncio
+async def test_budget_slash_command_updates_paused_session_without_becoming_task_input(api):
+    from textual.widgets import Input
+
+    from loom.llm.api import TokenUsage
+    from loom.runtime.checkpoints import encode
+
+    service, server, client, path = api
+    sid = client.create({"objective": "Maintain", "workspace": str(path), "limits": {"max_tokens": 100000}})["session_id"]
+
+    def pause(state, emit, db):
+        state["task"]["state"] = "paused"
+        state["run"] = {"id": "run", "state": "suspended", "counters": encode({"usage": TokenUsage(100000, 20000, 120000)})}
+
+    service.store.update(sid, pause)
+    app = SessionTuiApp(client, sid)
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause()
+        app.query_one("#message", Input).value = "/budget 10M"
+        await pilot.press("enter")
+        await pilot.pause()
+        state = service.snapshot(sid)
+        assert state["task"]["limits"]["max_tokens"] == 10000000
+        assert state["task"]["state"] == "paused"
+        assert len(state["messages"]) == 1
+        assert app.projection.snapshot["token_budget"] == {"limit": 10000000, "used": 120000, "remaining": 9880000}
+        assert app.query_one("#message", Input).value == ""

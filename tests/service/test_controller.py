@@ -128,6 +128,25 @@ def test_active_time_budget_does_not_wait_for_model_response(tmp_path):
         service.close()
 
 
+def test_increased_token_budget_resumes_same_run_without_repeating_model_request(tmp_path):
+    service = LoomService(tmp_path / "data", provider_factory=provider_factory).start()
+    try:
+        sid = service.create("tokens", {"objective": "token-budget", "workspace": str(tmp_path), "plan_mode": "off", "limits": {"max_tokens": 5}})["session_id"]
+        paused = wait_state(service, sid, "paused")
+        assert paused["token_budget"] == {"limit": 5, "used": 10, "remaining": 0}
+        command(service, sid, "set_token_budget", max_tokens=20)
+        command(service, sid, "resume")
+        done = wait_state(service, sid, "idle")
+        assert done["run"]["id"] == paused["run"]["id"]
+        assert done["token_budget"] == {"limit": 20, "used": 10, "remaining": 10}
+        assert sum(e["type"] == "llm.requested" for e in service.events(sid)) == 1
+        usage = [e for e in service.events(sid) if e["type"] == "run.usage.changed"]
+        assert len(usage) == 1
+        assert usage[0]["payload"]["total_tokens"] == 10
+    finally:
+        service.close()
+
+
 def test_next_completed_run_selects_workflow_again_and_revises_goal(tmp_path):
     service = LoomService(tmp_path / "data", provider_factory=provider_factory).start()
     try:

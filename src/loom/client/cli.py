@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from urllib.error import URLError
 
+from loom.client.budgets import parse_token_budget
 from loom.client.protocol import SessionClient
 from loom.service.contracts import ServiceError
 
@@ -23,6 +24,11 @@ def main(argv=None):
     create.add_argument("--model")
     create.add_argument("--plan-mode", choices=("auto", "force", "off"), default="auto")
     create.add_argument("--command-id")
+    create.add_argument("--token-budget", type=parse_token_budget, metavar="TOKENS")
+    budget = commands.add_parser("budget", help="Show or change a paused session's token budget")
+    budget.add_argument("session_id")
+    budget.add_argument("tokens", nargs="?", type=parse_token_budget, help="New budget, e.g. 10M or 500K")
+    budget.add_argument("--command-id")
     for kind in ("message", "answer", "supersede", "pause", "resume", "stop", "complete", "reopen", "snapshot", "history", "events", "artifact", "connect"):
         sub = commands.add_parser(kind)
         sub.add_argument("session_id", nargs="?" if kind == "connect" else None)
@@ -49,7 +55,13 @@ def main(argv=None):
         elif args.command == "create":
             payload = {"objective": args.objective, "workspace": str(args.workspace.resolve()), "plan_mode": args.plan_mode}
             payload.update({k: getattr(args, k) for k in ("title", "model") if getattr(args, k) is not None})
+            if args.token_budget is not None:
+                payload["limits"] = {"max_tokens": args.token_budget}
             result = client.create(payload, command_id=args.command_id)
+        elif args.command == "budget":
+            if args.tokens is not None:
+                client.command(args.session_id, "set_token_budget", {"max_tokens": args.tokens}, command_id=args.command_id)
+            result = client.snapshot(args.session_id)["token_budget"]
         elif args.command == "connect":
             try:
                 from loom.client.tui import SessionTuiApp

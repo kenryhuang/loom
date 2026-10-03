@@ -15,8 +15,9 @@ from rich.text import Text
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Footer, Input, Label, ListItem, ListView, Static
 
+from loom.client.budgets import parse_token_budget
 from loom.client.projection import SessionProjection
-from loom.service.contracts import ServiceError
+from loom.service.contracts import LIMITS, ServiceError
 from loom.tui.tui_app import EventFeedWidget, LoomTuiApp, LoopHeader, StatusBar
 from loom.tui.tui_collector import TuiEvent
 
@@ -25,7 +26,7 @@ class SessionTuiApp(LoomTuiApp):
     CSS = """
     #sessions { width: 26; border-right: solid $accent; }
     #session_body { width: 1fr; }
-    #question, #plan, #notice { height: auto; max-height: 6; padding: 0 1; }
+    #question, #plan, #notice, #budget { height: auto; max-height: 6; padding: 0 1; }
     #controls { height: 3; }
     #controls Button { min-width: 7; padding: 0 1; }
     #message { height: 3; }
@@ -51,6 +52,7 @@ class SessionTuiApp(LoomTuiApp):
             yield ListView(id="sessions")
             with Vertical(id="session_body"):
                 yield Static("", id="question")
+                yield Static("", id="budget")
                 yield Static("", id="plan")
                 yield EventFeedWidget(id="event_feed")
                 yield Static("", id="notice")
@@ -261,12 +263,18 @@ class SessionTuiApp(LoomTuiApp):
         self.query_one("#pause", Button).disabled = waiting or task["state"] not in {"running", "queued", "pausing"}
         self.query_one("#resume", Button).disabled = waiting or bool(pending) or task["state"] not in {"paused", "failed"}
         self.query_one("#stop_run", Button).disabled = waiting or task["state"] in {"idle", "completed", "recovering"}
+        budget = state.get("token_budget", {})
+        limit = task.get("limits", {}).get("max_tokens", LIMITS["max_tokens"])
+        self.query_one("#budget", Static).update(Text(f"Tokens: {budget.get('used', 0):,} / {limit:,} — /budget 20M to change"))
 
     def _notice(self, content):
         self.query_one("#notice", Static).update(Text(content))
 
     async def submit_text(self, content, *, supersede=False):
         if not self.projection or not content.strip():
+            return
+        if not supersede and content.strip().split(maxsplit=1)[0] == "/budget":
+            await self._budget_command(content)
             return
         request = self.projection.snapshot.get("input_request")
         if request and request["state"] == "pending":
@@ -280,6 +288,26 @@ class SessionTuiApp(LoomTuiApp):
             self._notice("Accepted; waiting for the execution boundary")
         except (ServiceError, OSError, URLError) as exc:
             self._notice(str(exc))
+
+    async def _budget_command(self, content):
+        sid, generation = self.session_id, self.subscription_generation
+        args = content.strip().split(maxsplit=1)
+        try:
+            if len(args) == 2:
+                count = parse_token_budget(args[1])
+                await asyncio.to_thread(self.client.command, sid, "set_token_budget", {"max_tokens": count})
+            snapshot = await asyncio.to_thread(self.client.snapshot, sid)
+            if generation != self.subscription_generation:
+                return
+            budget = snapshot["token_budget"]
+            self.projection.snapshot["token_budget"] = budget
+            self.projection.snapshot["task"].setdefault("limits", {})["max_tokens"] = budget["limit"]
+            self._refresh_state()
+            self.query_one("#message", Input).value = ""
+            self._notice(f"Token budget: {budget['used']:,} used / {budget['limit']:,} total. Press Resume to continue a paused task.")
+        except (ValueError, ServiceError, OSError, URLError) as exc:
+            if generation == self.subscription_generation:
+                self._notice(str(exc))
 
     async def send_control(self, kind):
         if self.session_id:

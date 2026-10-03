@@ -53,6 +53,10 @@ class LoomService:
 
     def snapshot(self, sid):
         state = self.store.snapshot(sid)
+        counters = decode((state["run"] or {}).get("counters", encode({})))
+        used = getattr(counters.get("usage"), "total_tokens", 0)
+        limit = state["task"]["limits"]["max_tokens"]
+        state["token_budget"] = {"limit": limit, "used": used, "remaining": max(0, limit - used)}
         # Checkpoints/model prompts are internal. Artifacts remain separately accessible.
         state.pop("context", None)
         state.pop("control", None)
@@ -247,8 +251,12 @@ class LoomService:
                     }
                 emit(event["type"], event)
             elif kind == "boundary":
+                previous = decode(run.get("counters", encode({})))
+                used = getattr(previous.get("usage"), "total_tokens", 0)
                 run["checkpoint"] = self.store.artifact_in_transaction(db, sid, encode(value), "execution_checkpoint")
                 run["counters"] = encode({"llm_calls": value["llm_calls"], "usage": value["usage"]})
+                if value["usage"].total_tokens != used:
+                    emit("run.usage.changed", {"total_tokens": value["usage"].total_tokens})
                 cursor = value["input_cursor"]
                 if cursor > state["input_cursor"]:
                     state["task"]["goal_revision"] += 1

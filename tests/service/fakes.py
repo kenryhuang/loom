@@ -3,7 +3,7 @@ import json
 import re
 
 from loom.core import ok
-from loom.llm.api import LlmResponse, LlmToolCall
+from loom.llm.api import LlmResponse, LlmToolCall, TokenUsage
 
 
 class FakeProvider:
@@ -43,7 +43,10 @@ class FakeProvider:
 
             os._exit(7)
         await asyncio.sleep(0.03)
-        return ok(LlmResponse(json.dumps({"reasoning": "verified", "action": {"kind": "none", "description": "Complete", "input": {"report": "done"}}})))
+        usage = TokenUsage(6, 4, 10) if "token-budget" in self.objective else TokenUsage()
+        return ok(
+            LlmResponse(json.dumps({"reasoning": "verified", "action": {"kind": "none", "description": "Complete", "input": {"report": "done"}}}), usage=usage)
+        )
 
 
 def provider_factory(state):

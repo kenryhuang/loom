@@ -27,3 +27,38 @@ def test_stream_offsets_merge_replays_and_final_response():
     assert projection.streams["l:content"] == "abcde"
     projection.apply(event(3, "llm.completed", {"llm_call_id": "l", "response": {"content": "abcdef"}}))
     assert projection.streams["l:content"] == "abcdef"
+
+
+def test_budget_changes_and_usage_are_projected_without_resetting_run():
+    projection = SessionProjection(
+        {
+            "session_id": "s",
+            "event_cursor": 0,
+            "messages": [],
+            "task": {"limits": {"max_tokens": 100000}},
+            "token_budget": {"limit": 100000, "used": 120000, "remaining": 0},
+        }
+    )
+    projection.apply(event(1, "task.budget.changed", {"max_tokens": 10000000}))
+    assert projection.snapshot["task"]["limits"]["max_tokens"] == 10000000
+    assert projection.snapshot["token_budget"] == {"limit": 10000000, "used": 120000, "remaining": 9880000}
+    projection.apply(event(2, "run.usage.changed", {"total_tokens": 130000}))
+    assert projection.snapshot["token_budget"]["used"] == 130000
+
+
+def test_resume_keeps_usage_but_a_new_run_resets_it():
+    projection = SessionProjection(
+        {
+            "session_id": "s",
+            "event_cursor": 0,
+            "messages": [],
+            "task": {"limits": {"max_tokens": 1000}},
+            "run": {"id": "first", "state": "suspended", "active_seconds": 30},
+            "token_budget": {"limit": 1000, "used": 100, "remaining": 900},
+        }
+    )
+    projection.apply({**event(1, "run.started", {}), "run_id": "first"})
+    assert projection.snapshot["token_budget"]["used"] == 100
+    assert projection.snapshot["run"]["active_seconds"] == 30
+    projection.apply({**event(2, "run.started", {}), "run_id": "second"})
+    assert projection.snapshot["token_budget"] == {"limit": 1000, "used": 0, "remaining": 1000}
