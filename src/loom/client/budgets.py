@@ -12,15 +12,3 @@ def parse_token_budget(value):
     if count <= 0 or remainder:
         raise ValueError("Token budget must resolve to a positive whole number of tokens")
     return count
-
-
-def snapshot_token_budget(snapshot):
-    """Keep old backends readable without inventing unavailable usage."""
-    if "token_budget" in snapshot:
-        return snapshot["token_budget"]
-    return {
-        "limit": snapshot["task"].get("limits", {}).get("max_tokens"),
-        "used": None,
-        "remaining": None,
-        "notice": "Backend does not report token usage. Restart loom serve with the same --data-dir to enable token budget support.",
-    }

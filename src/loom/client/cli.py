@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from urllib.error import URLError
 
-from loom.client.budgets import parse_token_budget, snapshot_token_budget
+from loom.client.budgets import parse_token_budget
 from loom.client.protocol import SessionClient
 from loom.service.contracts import ServiceError
 
@@ -61,7 +61,7 @@ def main(argv=None):
         elif args.command == "budget":
             if args.tokens is not None:
                 client.command(args.session_id, "set_token_budget", {"max_tokens": args.tokens}, command_id=args.command_id)
-            result = snapshot_token_budget(client.snapshot(args.session_id))
+            result = client.snapshot(args.session_id)["token_budget"]
         elif args.command == "connect":
             try:
                 from loom.client.tui import SessionTuiApp

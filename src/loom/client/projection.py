@@ -2,24 +2,22 @@
 
 from copy import deepcopy
 
-from loom.client.budgets import snapshot_token_budget
-from loom.service.contracts import ServiceError, stream_key
+from loom.service.contracts import LIMITS, ServiceError, stream_key
 
 
 class SessionProjection:
     def __init__(self, snapshot):
         self.snapshot = deepcopy(snapshot)
-        self.snapshot["token_budget"] = snapshot_token_budget(self.snapshot)
         self.cursor = snapshot["event_cursor"]
         self.streams = deepcopy(snapshot.get("streams", {}))
         self.stream_origins = deepcopy(snapshot.get("stream_origins", {}))
 
     def _budget(self, *, used=None):
-        budget = self.snapshot["token_budget"]
-        budget["limit"] = self.snapshot["task"].get("limits", {}).get("max_tokens", budget["limit"])
+        budget = self.snapshot.setdefault("token_budget", {"used": 0})
+        budget["limit"] = self.snapshot["task"].get("limits", {}).get("max_tokens", LIMITS["max_tokens"])
         if used is not None:
             budget["used"] = used
-        budget["remaining"] = max(0, budget["limit"] - budget["used"]) if budget["used"] is not None and budget["limit"] is not None else None
+        budget["remaining"] = max(0, budget["limit"] - budget["used"])
 
     def apply(self, event):
         if event["session_id"] != self.snapshot["session_id"] or event["seq"] <= self.cursor:
@@ -47,11 +45,10 @@ class SessionProjection:
             self._budget()
         elif kind == "run.usage.changed":
             self._budget(used=data["total_tokens"])
-            self.snapshot["token_budget"].pop("notice", None)
         elif kind == "run.started":
             run = self.snapshot.get("run") or {}
             if run.get("id") != event.get("run_id"):
-                self._budget(used=None if "notice" in self.snapshot["token_budget"] else 0)
+                self._budget(used=0)
                 run = {}
             self.snapshot["run"] = {**run, "id": event.get("run_id"), "state": "running"}
         elif kind.startswith("input."):

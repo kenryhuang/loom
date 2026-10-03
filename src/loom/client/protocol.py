@@ -53,12 +53,7 @@ class SessionClient:
         value = {"command_id": command_id or uuid.uuid4().hex, "type": kind, "payload": payload or {}}
         if expected_task_revision is not None:
             value["expected_task_revision"] = expected_task_revision
-        try:
-            return self._json(self._path(sid, "commands"), value)
-        except ServiceError as exc:
-            if kind == "set_token_budget" and exc.status == 400 and str(exc) == "Unknown command type":
-                raise ServiceError("Backend does not support token budget changes. Restart loom serve with the same --data-dir.", exc.status, exc.code) from exc
-            raise
+        return self._json(self._path(sid, "commands"), value)
 
     def snapshot(self, sid):
         return self._json(self._path(sid, "snapshot"))

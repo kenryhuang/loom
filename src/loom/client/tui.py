@@ -15,9 +15,9 @@ from rich.text import Text
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Footer, Input, Label, ListItem, ListView, Static
 
-from loom.client.budgets import parse_token_budget, snapshot_token_budget
+from loom.client.budgets import parse_token_budget
 from loom.client.projection import SessionProjection
-from loom.service.contracts import ServiceError
+from loom.service.contracts import LIMITS, ServiceError
 from loom.tui.tui_app import EventFeedWidget, LoomTuiApp, LoopHeader, StatusBar
 from loom.tui.tui_collector import TuiEvent
 
@@ -263,10 +263,9 @@ class SessionTuiApp(LoomTuiApp):
         self.query_one("#pause", Button).disabled = waiting or task["state"] not in {"running", "queued", "pausing"}
         self.query_one("#resume", Button).disabled = waiting or bool(pending) or task["state"] not in {"paused", "failed"}
         self.query_one("#stop_run", Button).disabled = waiting or task["state"] in {"idle", "completed", "recovering"}
-        budget = snapshot_token_budget(state)
-        used = f"{budget['used']:,}" if budget["used"] is not None else "unknown"
-        limit = f"{budget['limit']:,}" if budget["limit"] is not None else "unknown"
-        self.query_one("#budget", Static).update(Text(f"Tokens: {used} / {limit} — /budget 20M to change"))
+        budget = state.get("token_budget", {})
+        limit = task.get("limits", {}).get("max_tokens", LIMITS["max_tokens"])
+        self.query_one("#budget", Static).update(Text(f"Tokens: {budget.get('used', 0):,} / {limit:,} — /budget 20M to change"))
 
     def _notice(self, content):
         self.query_one("#notice", Static).update(Text(content))
@@ -300,17 +299,12 @@ class SessionTuiApp(LoomTuiApp):
             snapshot = await asyncio.to_thread(self.client.snapshot, sid)
             if generation != self.subscription_generation:
                 return
-            budget = snapshot_token_budget(snapshot)
+            budget = snapshot["token_budget"]
             self.projection.snapshot["token_budget"] = budget
-            if budget["limit"] is not None:
-                self.projection.snapshot["task"].setdefault("limits", {})["max_tokens"] = budget["limit"]
+            self.projection.snapshot["task"].setdefault("limits", {})["max_tokens"] = budget["limit"]
             self._refresh_state()
             self.query_one("#message", Input).value = ""
-            self._notice(
-                budget["notice"]
-                if "notice" in budget
-                else f"Token budget: {budget['used']:,} used / {budget['limit']:,} total. Press Resume to continue a paused task."
-            )
+            self._notice(f"Token budget: {budget['used']:,} used / {budget['limit']:,} total. Press Resume to continue a paused task.")
         except (ValueError, ServiceError, OSError, URLError) as exc:
             if generation == self.subscription_generation:
                 self._notice(str(exc))

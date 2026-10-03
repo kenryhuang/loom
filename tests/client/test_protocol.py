@@ -62,12 +62,3 @@ def test_resume_keeps_usage_but_a_new_run_resets_it():
     assert projection.snapshot["run"]["active_seconds"] == 30
     projection.apply({**event(2, "run.started", {}), "run_id": "second"})
     assert projection.snapshot["token_budget"] == {"limit": 1000, "used": 0, "remaining": 1000}
-
-
-def test_legacy_usage_stays_unknown_until_backend_reports_it():
-    projection = SessionProjection({"session_id": "s", "event_cursor": 0, "messages": [], "task": {"limits": {"max_tokens": 1000}}})
-    projection.apply({**event(1, "run.started", {}), "run_id": "new"})
-    assert projection.snapshot["token_budget"]["used"] is None
-    assert projection.snapshot["token_budget"]["remaining"] is None
-    projection.apply(event(2, "run.usage.changed", {"total_tokens": 100}))
-    assert projection.snapshot["token_budget"] == {"limit": 1000, "used": 100, "remaining": 900}
