@@ -141,6 +141,9 @@ This budget counts cumulative input and output tokens in the current run;
 it is not a byte count or the per-response `max_completion_tokens` limit.
 Changing the limit preserves usage and checkpoints, and a new run starts its
 own count. Existing sessions keep their saved limit until explicitly changed.
+After updating Loom, restart `loom serve` with the same data directory to load
+budget support. A frontend connected to an older backend displays the saved
+limit, marks usage as unknown, and prompts for a backend restart.
 
 The backend must already be running. When it uses another data directory,
 point the frontend at the credential file printed by `loom serve`:

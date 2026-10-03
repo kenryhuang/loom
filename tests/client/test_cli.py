@@ -146,3 +146,41 @@ def test_invalid_token_budget_does_not_create_session(api, value):
         main(["--url", client.url, "--token-budget", value])
     assert exc.value.code == 2
     assert client.list_sessions() == []
+
+
+def test_budget_query_handles_backend_without_usage_field(api, monkeypatch, capsys):
+    service, server, client, path = api
+    sid = client.create({"workspace": str(path), "limits": {"max_tokens": 100000}})["session_id"]
+    original = service.snapshot
+
+    def legacy_snapshot(sid):
+        state = original(sid)
+        state.pop("token_budget")
+        return state
+
+    monkeypatch.setattr(service, "snapshot", legacy_snapshot)
+    credential = path / "token"
+    credential.write_text(client.token)
+    assert main(["session", "--url", client.url, "--token-file", str(credential), "budget", sid]) == 0
+    budget = json.loads(capsys.readouterr().out)
+    assert budget["limit"] == 100000
+    assert budget["used"] is None
+    assert budget["remaining"] is None
+    assert "Restart loom serve" in budget["notice"]
+
+
+def test_unsupported_budget_update_prompts_backend_restart(api, monkeypatch, capsys):
+    from loom.service.contracts import ServiceError
+
+    service, server, client, path = api
+    sid = client.create({"workspace": str(path), "limits": {"max_tokens": 100000}})["session_id"]
+
+    def legacy_submit(sid, command):
+        raise ServiceError("Unknown command type")
+
+    monkeypatch.setattr(service, "submit", legacy_submit)
+    credential = path / "token"
+    credential.write_text(client.token)
+    assert main(["session", "--url", client.url, "--token-file", str(credential), "budget", sid, "10M"]) == 1
+    assert "Restart loom serve" in capsys.readouterr().out
+    assert service.store.snapshot(sid)["task"]["limits"]["max_tokens"] == 100000
