@@ -137,7 +137,7 @@ class SessionStore:
         state["messages"].append(message)
         return message
 
-    def submit(self, sid, command):
+    def submit(self, sid, command, *, after=None):
         command = validate_command(command)
         cid = command["command_id"]
         normalized = {"session_id": sid, **command}
@@ -203,6 +203,8 @@ class SessionStore:
             db.execute("INSERT INTO commands VALUES(?,?,?,?,?)", (cid, sid, canonical(normalized), canonical(receipt), "accepted"))
             if kind in {"resume", "reopen_task", "complete_task"} or (kind in {"pause", "stop_run"} and task["state"] == "paused"):
                 self.applied(db, state, cid)
+            if after is not None:
+                after(state, lambda kind, payload: self.append(db, state, kind, payload), db)
             self._save(db, state)
             return receipt
 

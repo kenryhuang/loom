@@ -34,3 +34,20 @@ def test_shell_cancellation_reaps_child_and_bounds_output(tmp_path):
         assert output.value.value["output_truncated"]
 
     asyncio.run(scenario())
+
+
+def test_timeout_reaps_descendant_that_ignores_termination(tmp_path):
+    async def scenario():
+        tool = make_task_tools(TaskRequest("Work", workspace=tmp_path))["shell_execute"]
+        code = (
+            "import subprocess,time; subprocess.Popen(['"
+            + sys.executable
+            + "','-c',\"import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(2); "
+            "open('leaked','w').write('bad')\"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); time.sleep(30)"
+        )
+        result = await tool({"command": [sys.executable, "-c", code], "timeout_seconds": 1}, {})
+        assert result.value.value["timed_out"]
+        await asyncio.sleep(1.5)
+        assert not (tmp_path / "leaked").exists()
+
+    asyncio.run(scenario())

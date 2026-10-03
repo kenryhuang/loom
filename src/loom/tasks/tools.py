@@ -137,12 +137,11 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
             # Reap the whole session even if the parent exited with live descendants.
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGTERM)
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(process.wait(), 1)
-            except TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
-                await process.wait()
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()
 
         async def wait_or_stop():
             check = options.get("cancel_check")
@@ -196,6 +195,10 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
                 "timed_out": False,
             }
         finally:
+            if process is not None:
+                # A successful parent can also leave detached descendants in its group.
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(process.pid, signal.SIGKILL)
             for reader in readers:
                 if not reader.done():
                     reader.cancel()

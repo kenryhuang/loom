@@ -293,6 +293,8 @@ class ManagedStep:
                     self._checkpoint(cp)
                     return self._result(cp, runtime, "waiting_input", request_id=request["id"])
                 persisted = self.execution.operation_start(call)
+                if persisted and persisted.get("defer"):
+                    continue
                 if persisted is not None:
                     result = ok(persisted["value"]) if persisted["ok"] else err(persisted["error"])
                 elif call.name not in {t.id for t in cp["context"].affordances.tools}:
