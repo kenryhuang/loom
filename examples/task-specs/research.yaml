@@ -1,0 +1,21 @@
+schema_version: 1
+session_environment:
+  plugin: session
+context:
+  plugin: research_context
+  max_window_chars: 24000
+execution_runtime:
+  plugin: native_os
+tools:
+  collections: [web_research, document_outputs, task_control]
+workflow:
+  plugin: dynamic
+  limits:
+    max_nodes: 30
+    max_revisions: 20
+    max_depth: 20
+outputs:
+  - kind: report
+    format: markdown
+    require_evidence_refs: true
+    require_verified_sources: true

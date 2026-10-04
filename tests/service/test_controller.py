@@ -3,6 +3,7 @@ import uuid
 
 import pytest
 
+from loom.runtime.checkpoints import encode
 from loom.service.controller import LoomService
 from tests.service.fakes import provider_factory
 
@@ -24,6 +25,13 @@ def command(service, sid, kind, **payload):
 def create(service, path, objective="Maintain"):
     path.mkdir(exist_ok=True)
     return service.create(uuid.uuid4().hex, {"objective": objective, "workspace": str(path), "plan_mode": "off"})["session_id"]
+
+
+def resume_provider_factory(state):
+    provider = provider_factory(state)
+    if state["run"].get("time_budget_start_seconds", 0):
+        provider.objective = "Maintain"
+    return provider
 
 
 def test_continuous_task_has_multiple_runs_and_persistent_history(tmp_path):
@@ -116,14 +124,49 @@ def test_pause_can_interrupt_active_model_request(tmp_path):
         service.close()
 
 
-def test_active_time_budget_does_not_wait_for_model_response(tmp_path):
-    service = LoomService(tmp_path / "data", provider_factory=provider_factory).start()
+def test_active_time_budget_interrupts_model_and_resume_grants_another_allowance(tmp_path):
+    service = LoomService(tmp_path / "data", provider_factory=resume_provider_factory).start()
     try:
         sid = service.create("budget", {"objective": "slow-model", "workspace": str(tmp_path), "plan_mode": "off", "limits": {"max_duration_seconds": 1}})[
             "session_id"
         ]
         paused = wait_state(service, sid, "paused", timeout=3)
         assert paused["run"]["active_seconds"] >= 1
+        command(service, sid, "resume")
+        done = wait_state(service, sid, "idle")
+        assert done["run"]["id"] == paused["run"]["id"]
+        assert done["run"]["time_budget_start_seconds"] == paused["run"]["active_seconds"]
+        assert done["run"]["active_seconds"] > paused["run"]["active_seconds"]
+        assert done["task"]["limits"]["max_duration_seconds"] == 1
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("kind", ["poll_control", "check_control"])
+def test_renewed_time_budget_still_interrupts_at_the_next_limit(tmp_path, kind):
+    service = LoomService(tmp_path / "data", provider_factory=provider_factory)
+    try:
+        sid = create(service, tmp_path / "workspace")
+        state = service.prepare_attempt(sid)
+
+        def elapsed(state, emit, db):
+            state["run"].update(active_seconds=3600, time_budget_start_seconds=1800)
+
+        service.store.update(sid, elapsed)
+
+        def poll(record_id):
+            return service.worker_record(
+                sid,
+                {"attempt_id": state["run"]["attempt_id"], "epoch": state["epoch"], "record_id": record_id, "type": kind, "payload": encode({})},
+            )
+
+        assert poll("before-limit") in (None, False)
+        service.store.update(sid, lambda state, emit, db: state["run"].update(active_seconds=3601))
+        result = poll("after-limit")
+        if kind == "check_control":
+            assert result is True
+        else:
+            assert result == {"kind": "paused", "reason": "Active time budget exceeded"}
     finally:
         service.close()
 

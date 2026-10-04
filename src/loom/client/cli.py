@@ -9,6 +9,7 @@ from urllib.error import URLError
 from loom.client.budgets import parse_token_budget
 from loom.client.protocol import SessionClient
 from loom.service.contracts import ServiceError
+from loom.tasks.assembly import load_task_spec
 
 
 def main(argv=None):
@@ -19,7 +20,8 @@ def main(argv=None):
     commands.add_parser("list")
     create = commands.add_parser("create")
     create.add_argument("objective")
-    create.add_argument("--workspace", type=Path, default=Path.cwd())
+    create.add_argument("--workspace", type=Path)
+    create.add_argument("--task-spec", type=Path, help="JSON/YAML/TOML task plugin specification; a workspace is optional")
     create.add_argument("--title")
     create.add_argument("--model")
     create.add_argument("--plan-mode", choices=("auto", "force", "off"), default="auto")
@@ -53,7 +55,11 @@ def main(argv=None):
         if args.command == "list":
             result = client.list_sessions()
         elif args.command == "create":
-            payload = {"objective": args.objective, "workspace": str(args.workspace.resolve()), "plan_mode": args.plan_mode}
+            payload = {"objective": args.objective, "plan_mode": args.plan_mode}
+            if args.workspace:
+                payload["workspace"] = str(args.workspace.resolve())
+            if args.task_spec:
+                payload["task_spec"] = load_task_spec(args.task_spec)
             payload.update({k: getattr(args, k) for k in ("title", "model") if getattr(args, k) is not None})
             if args.token_budget is not None:
                 payload["limits"] = {"max_tokens": args.token_budget}
@@ -103,6 +109,6 @@ def main(argv=None):
         return 0
     except KeyboardInterrupt:
         return 0
-    except (ServiceError, OSError, URLError) as exc:
+    except (ServiceError, OSError, URLError, ValueError) as exc:
         print(f"Session command failed: {exc}")
         return 1

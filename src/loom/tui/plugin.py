@@ -17,8 +17,10 @@ class TuiPlugin:
         *,
         app_factory: Callable[[TuiEventCollector], Any] | None = None,
         auto_exit_timeout_seconds: float = 30.0,
+        result_formatter: Callable[[Any], str] | None = None,
     ) -> None:
         self._app_factory = app_factory
+        self._result_formatter = result_formatter
         # Retained for constructor compatibility; TUI now exits only by user action.
         self._auto_exit_timeout_seconds = auto_exit_timeout_seconds
         self.collector: TuiEventCollector | None = None
@@ -38,8 +40,12 @@ class TuiPlugin:
     def trace_sink(self) -> TuiEventCollector | None:
         return self.collector
 
-    async def stop(self, _result: Result | None) -> Result:
+    async def stop(self, result: Result | None) -> Result:
         if self.collector is not None:
+            if result is not None and result.ok and self._result_formatter is not None:
+                content = self._result_formatter(result.value)
+                if content.strip():
+                    await self.collector.emit({"type": "run.result", "run_id": result.value.context.run_id, "content": content})
             await self.collector.put_sentinel()
         if self._app_task is not None:
             await self._app_task
@@ -48,9 +54,9 @@ class TuiPlugin:
     def _make_app(self, collector: TuiEventCollector) -> Any:
         if self._app_factory is not None:
             return self._app_factory(collector)
-        from loom.tui.tui_app import LoomTuiApp
+        from loom.tui.compact import CompactLoomTuiApp
 
-        return LoomTuiApp(collector)
+        return CompactLoomTuiApp(collector)
 
 
 __all__ = ["TuiPlugin"]

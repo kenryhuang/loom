@@ -1,11 +1,39 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from loom.core import ok
 from loom.runtime import PlanMode
 from loom.tasks.cli import TaskCliOptions, parse_task_cli_args
 from loom.tasks.config import ModelConfig, TaskRunnerConfig
 from loom.tasks.request import TaskRequest, TaskRunOptions
+
+
+def test_explicit_research_spec_ignores_project_task_defaults(tmp_path, monkeypatch):
+    import loom.tasks.cli as cli
+
+    spec = Path("examples/task-specs/research.yaml").resolve()
+    config = tmp_path / "config.toml"
+    config.write_text(
+        'default_model = "main"\n[task]\nworkspace = "yakDB"\nprofile = "project_audit"\nexpected_outputs = ["project audit"]\n'
+        '[run]\ntui = true\n[models.main]\nprovider = "openai"\nmodel = "test"\nbase_url = "https://example.test/v1"\napi_key_env = "TEST_KEY"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    options = parse_task_cli_args(["读取 https://www.python.org/about/ 并总结", "--task-spec", str(spec), "--config", str(config)])
+    assert options.request.workspace is None
+    assert options.request.profile == "auto" and not options.request.expected_outputs
+    assert options.options.tui and options.model_name == "main"
+    displayed = cli._format_task_configuration(options)
+    assert "web_research" in displayed and f"task_spec: {spec}" in displayed
+    assert "yakDB" not in displayed and "project audit" not in displayed
+
+
+def test_repeated_task_spec_is_rejected(capsys):
+    with pytest.raises(SystemExit) as exc:
+        parse_task_cli_args(["Research", "--task-spec", "research.yaml", "--task-spec", "general.yaml"])
+    assert exc.value.code == 2
+    assert "--task-spec may be provided only once" in capsys.readouterr().err
 
 
 def test_parse_task_cli_defaults_plan_mode_to_auto(tmp_path, monkeypatch):

@@ -18,11 +18,18 @@ from loom.service.workers import process_identity, reap_group, spawn_attempt
 from loom.tasks.runner import _report_from_run_result
 
 
+def _time_budget_exceeded(state):
+    run = state["run"]
+    elapsed = run["active_seconds"] - run.get("time_budget_start_seconds", 0)
+    return elapsed > state["task"]["limits"]["max_duration_seconds"]
+
+
 class LoomService:
-    def __init__(self, directory, *, config_path=None, max_active_runs=2, provider_factory=None):
+    def __init__(self, directory, *, config_path=None, max_active_runs=2, provider_factory=None, plugin_registry_factory=None):
         if isinstance(max_active_runs, bool) or not isinstance(max_active_runs, int) or max_active_runs < 1:
             raise ServiceError("max_active_runs must be positive")
-        self.store = SessionStore(directory)
+        self.store = SessionStore(directory, plugin_registry_factory=plugin_registry_factory)
+        self.plugin_registry_factory = plugin_registry_factory
         self.owner = (self.store.directory / "supervisor.lock").open("a+")
         try:
             fcntl.flock(self.owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -213,7 +220,7 @@ class LoomService:
                     state["plan_run_id"] = run["id"]
                     state["task"]["plan_revision"] += 1
                     state["plan_event"] = event
-                    for key in ("plan", "workflow_route"):
+                    for key in ("plan", "workflow_route", "workflow"):
                         if key in event:
                             state[key] = event[key]
                     oid = run.get("current_operation")
@@ -225,6 +232,9 @@ class LoomService:
                             "submit_plan": "plan.submitted",
                             "update_plan": "plan.updated",
                             "continue_react": "workflow.route.selected",
+                            "revise_workflow": "workflow.revised",
+                            "complete_node": "workflow.node.completed",
+                            "finish": "workflow.node.completed",
                         }.get(op["call"]["name"])
                         if event["type"] == terminal_event:
                             cp = self._checkpoint_value(state)
@@ -236,6 +246,12 @@ class LoomService:
                                     "accepted": True,
                                     "plan": state.get("plan", participant.get("plan")),
                                     "route": state.get("workflow_route", participant.get("route")),
+                                    **({"workflow": state["workflow"]} if "workflow" in state else {}),
+                                    **(
+                                        {"completed": True, "report": json.loads(op["call"]["arguments"]).get("report", "")}
+                                        if op["call"]["name"] == "finish"
+                                        else {}
+                                    ),
                                 },
                                 now_iso(),
                                 metadata={"controlFlow": {"stepBoundary": True, "reason": "recovered_transition"}},
@@ -274,10 +290,12 @@ class LoomService:
                 if request and request["state"] in {"answered", "superseded"} and request["kind"] == "clarification":
                     answer = {"request_id": request["id"], "answer": request["answer"], "superseded": request["state"] == "superseded"}
                 control = state["control"]
-                if not control and run["active_seconds"] > state["task"]["limits"]["max_duration_seconds"]:
+                if not control and _time_budget_exceeded(state):
                     control = {"kind": "paused", "reason": "Active time budget exceeded"}
-                response = {"control": control, "inputs": inputs, "input_answer": answer}
+                response = {"control": control, "inputs": inputs, "input_answer": answer, "goal_revision": state["task"]["goal_revision"]}
             elif kind == "operation_start":
+                effect_kind = value.get("effect_kind") if isinstance(value, dict) else None
+                value = value["call"] if isinstance(value, dict) and "call" in value else value
                 oid, op = self._operation(db, state, value)
                 if op and op["call"] != plain(value):
                     raise ServiceError("Tool call ID reused with different arguments", 409)
@@ -289,11 +307,13 @@ class LoomService:
                     response = {"defer": True}
                 else:
                     call = plain(value)
-                    effect = (
+                    effect = effect_kind or (
                         "service_control"
                         if call["name"] in {"enter_plan", "submit_plan", "update_plan", "continue_react"}
                         else ("read_only" if call["name"] in {"read_file", "finish"} else "side_effecting")
                     )
+                    if effect not in {"read_only", "side_effecting", "service_control"}:
+                        raise ServiceError("Invalid operation effect declaration")
                     op = {"call": call, "status": "started", "effect_kind": effect, "at": now_iso()}
                     self._save_operation(db, sid, oid, op)
                     run["current_operation"] = oid
@@ -301,10 +321,38 @@ class LoomService:
             elif kind == "operation_finish":
                 oid, op = self._operation(db, state, value["call"])
                 op = op or {"call": plain(value["call"]), "effect_kind": "service_control"}
+                result = value["result"]
+                if not result["ok"] and result["error"].code == "EXECUTION_UNKNOWN":
+                    op.update(status="started", uncertainty=encode(result["error"]))
+                    self._save_operation(db, sid, oid, op)
+                    run["state"] = "suspended"
+                    state["task"]["state"] = "recovering"
+                    state["input_request"] = {
+                        "id": new_id("input"),
+                        "kind": "recovery",
+                        "state": "pending",
+                        "operations": [oid],
+                        "question": "Tool termination or effects are uncertain. Verify them, then answer with JSON resolution "
+                        "(completed/not_applied/stop) and evidence.",
+                    }
+                    emit("operation.uncertain", {"operation_id": oid})
+                    emit("input.requested", state["input_request"])
+                    emit("run.recovery.required", {"reason": "Tool execution is uncertain", "operations": [oid]})
+                    emit("task.state.changed", {"state": "recovering"})
+                    db.execute("INSERT INTO worker_records VALUES(?,?,?)", (record["attempt_id"], record["record_id"], "null"))
+                    return None
                 op.update(status="completed", result=encode(value["result"]))
                 self._save_operation(db, sid, oid, op)
                 run["current_operation"] = None
                 emit("operation.completed", {"operation_id": oid})
+            elif kind == "publish_artifact":
+                response = self.store.artifact_in_transaction(db, sid, value["value"], value["kind"])
+                emit("artifact.created", {"artifact": response})
+            elif kind == "read_artifact":
+                digest = value["digest"]
+                if not db.execute("SELECT 1 FROM artifacts WHERE session_id=? AND digest=?", (sid, digest)).fetchone():
+                    raise ServiceError("Artifact does not belong to this session", 404)
+                response = json.loads(self.store.artifacts.read(digest))
             elif kind == "request_input":
                 existing = state["input_request"]
                 call = plain(value["call"])
@@ -328,17 +376,19 @@ class LoomService:
                     op["process"] = {"pid": value["pid"], "identity": process_identity(value["pid"])}
                     self._save_operation(db, sid, oid, op)
             elif kind == "check_control":
-                response = (
-                    bool(state["control"] and state["control"]["kind"] == "stopped") or run["active_seconds"] > state["task"]["limits"]["max_duration_seconds"]
-                )
+                response = bool(state["control"] and state["control"]["kind"] == "stopped") or _time_budget_exceeded(state)
             elif kind == "poll_control":
                 response = state["control"]
-                if not response and run["active_seconds"] > state["task"]["limits"]["max_duration_seconds"]:
+                if not response and _time_budget_exceeded(state):
                     response = {"kind": "paused", "reason": "Active time budget exceeded"}
             elif kind == "status":
                 response = {"input_cursor": state["input_cursor"]}
             elif kind == "result":
                 state["context"] = encode(value.context)
+                outputs = (value.context.state.scratch or {}).get("output_artifacts")
+                if outputs:
+                    state["output_artifacts"] = plain(outputs)
+                    emit("task.outputs.changed", {"artifacts": state["output_artifacts"]})
                 control = value.control
                 pending_control = state["control"]
                 if pending_control and control.kind in {"continue", "completed", "waiting_input"}:
@@ -502,7 +552,7 @@ class LoomService:
                 for sid in ready_sessions(self.store.list_sessions(), self.active, self.capacity):
                     try:
                         descriptor = self.prepare_attempt(sid)
-                        attempt = spawn_attempt(descriptor, self.config_path, self.provider_factory)
+                        attempt = spawn_attempt(descriptor, self.config_path, self.provider_factory, self.plugin_registry_factory)
                         self.active[sid] = attempt
                         process = {"pid": attempt.process.pid, "identity": process_identity(attempt.process.pid)}
                         self.store.update(sid, lambda state, emit, db, process=process: state["run"].update(process=process))

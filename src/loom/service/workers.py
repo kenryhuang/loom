@@ -85,10 +85,15 @@ class WorkerBridge:
     def boundary(self, checkpoint):
         self.checkpoint = checkpoint
         self.counters = {"llm_calls": checkpoint["llm_calls"], "usage": checkpoint["usage"]}
-        return self.rpc("boundary", checkpoint)
+        result = self.rpc("boundary", checkpoint)
+        self.goal_revision = result.get("goal_revision", 0)
+        return result
 
     def operation_start(self, call):
-        return self.rpc("operation_start", call)
+        effects = getattr(self, "binding_effects", {})
+        return self.rpc(
+            "operation_start", {"call": call, "effect_kind": effects.get(call.name, "read_only" if call.name == "read_artifact" else "side_effecting")}
+        )
 
     def operation_finish(self, call, result):
         return self.rpc("operation_finish", {"call": call, "result": result})
@@ -109,7 +114,7 @@ class WorkerBridge:
         return ok(None)
 
 
-def worker_main(connection, state, config_path, provider_factory):
+def worker_main(connection, state, config_path, provider_factory, plugin_registry_factory=None):
     import asyncio
 
     from loom.service.agent import execute
@@ -117,7 +122,7 @@ def worker_main(connection, state, config_path, provider_factory):
     os.setsid()
     bridge = WorkerBridge(connection, state)
     try:
-        asyncio.run(execute(state, bridge, config_path, provider_factory))
+        asyncio.run(execute(state, bridge, config_path, provider_factory, plugin_registry_factory))
     except Exception as exc:
         with contextlib.suppress(EOFError, BrokenPipeError, OSError):
             bridge.rpc("failure", {"message": str(exc), "type": type(exc).__name__})
@@ -134,15 +139,18 @@ class Attempt:
     started: float
     accounted: float
     terminal_since: float | None = None
+    resource_claims: tuple = ()
 
 
-def spawn_attempt(state, config_path, provider_factory):
+def spawn_attempt(state, config_path, provider_factory, plugin_registry_factory=None):
     import time
 
     ctx = multiprocessing.get_context("spawn")
     parent, child = ctx.Pipe()
-    process = ctx.Process(target=worker_main, args=(child, state, config_path, provider_factory), daemon=False)
+    process = ctx.Process(target=worker_main, args=(child, state, config_path, provider_factory, plugin_registry_factory), daemon=False)
     process.start()
     child.close()
     started = time.monotonic()
-    return Attempt(process, parent, state["task"]["workspace"], state["epoch"], started, started)
+    return Attempt(
+        process, parent, state["task"]["workspace"], state["epoch"], started, started, resource_claims=tuple(state["task"].get("resource_claims", ()))
+    )

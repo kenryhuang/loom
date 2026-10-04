@@ -15,6 +15,7 @@ from loom.core import Result
 from loom.llm import load_env_openai_config
 from loom.llm.request_options import materialize_request_options
 from loom.runtime import PlanMode
+from loom.tasks.assembly import load_task_spec
 from loom.tasks.config import RunDefaults, TaskDefaults, TaskRunnerConfig, load_task_config
 from loom.tasks.request import TaskRequest, TaskRunOptions
 from loom.tasks.runner import run_generic_task
@@ -27,6 +28,7 @@ class TaskCliOptions:
     config_path: Path | None = None
     config: TaskRunnerConfig | None = None
     model_name: str | None = None
+    task_spec_path: Path | None = None
 
 
 def parse_task_cli_args(argv: tuple[str, ...] | list[str] | None = None) -> TaskCliOptions:
@@ -35,14 +37,26 @@ def parse_task_cli_args(argv: tuple[str, ...] | list[str] | None = None) -> Task
     config_path = args.config or _discover_default_config_path()
     config = _load_cli_config(config_path, parser)
     config_dir = config_path.expanduser().resolve().parent if config_path is not None else None
-    task_defaults = config.task if config is not None else TaskDefaults()
+    task_defaults = config.task if config is not None and args.task_spec is None else TaskDefaults()
     run_defaults = config.run if config is not None else RunDefaults()
 
     objective = " ".join(args.objective).strip() or task_defaults.objective or ""
     if not objective:
         parser.error("task objective is required; pass it on the command line or set task.objective in config.yaml/--config")
 
-    workspace = _resolve_configurable_path(args.workspace if args.workspace is not None else task_defaults.workspace, config_dir) or Path.cwd()
+    task_spec = None
+    if args.task_spec:
+        try:
+            task_spec = load_task_spec(args.task_spec)
+        except (OSError, ValueError) as exc:
+            parser.error(f"Cannot load task plugin specification: {exc}")
+    workspace = _resolve_configurable_path(args.workspace if args.workspace is not None else task_defaults.workspace, config_dir)
+    if workspace is None and task_spec is not None:
+        workspace = next(
+            (Path(resource["uri"]) for resource in task_spec.get("session_environment", {}).get("resources", []) if resource.get("kind") == "directory"), None
+        )
+    if workspace is None and task_spec is None:
+        workspace = Path.cwd()
     profile = args.profile if args.profile is not None else task_defaults.profile or "auto"
     expected_outputs = tuple(args.expected_outputs) if args.expected_outputs is not None else task_defaults.expected_outputs
     model_name = args.model if args.model is not None else (config.default_model if config is not None else None)
@@ -65,6 +79,7 @@ def parse_task_cli_args(argv: tuple[str, ...] | list[str] | None = None) -> Task
             constraints=tuple(args.constraints or ()),
             expected_outputs=expected_outputs,
             risk_level=args.risk_level or "auto",
+            task_spec=task_spec,
         ),
         options=TaskRunOptions(
             tui=tui,
@@ -77,6 +92,7 @@ def parse_task_cli_args(argv: tuple[str, ...] | list[str] | None = None) -> Task
         config_path=config_path,
         config=config,
         model_name=model_name,
+        task_spec_path=args.task_spec,
     )
 
 
@@ -111,7 +127,7 @@ def _format_task_configuration(options: TaskCliOptions) -> str:
     lines = [
         "Task configuration:",
         f"  objective: {request.objective}",
-        f"  workspace: {(request.workspace or Path.cwd()).expanduser().resolve()}",
+        f"  workspace: {request.workspace.expanduser().resolve() if request.workspace else '—'}",
         f"  profile: {request.profile}",
         f"  risk_level: {request.risk_level}",
     ]
@@ -120,6 +136,9 @@ def _format_task_configuration(options: TaskCliOptions) -> str:
     if request.expected_outputs:
         lines.append(f"  expected_outputs: {_format_json(request.expected_outputs)}")
     lines.append(f"  config: {options.config_path.expanduser().resolve() if options.config_path is not None else '<environment>'}")
+    if request.task_spec is not None:
+        lines.append(f"  task_spec: {options.task_spec_path.expanduser().resolve() if options.task_spec_path else '<inline>'}")
+        lines.append(f"  tool_collections: {_format_json(request.task_spec.get('tools', {}).get('collections', []))}")
     lines.extend(_model_configuration_lines(options))
     lines.extend(
         (
@@ -195,6 +214,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a generic Loom LLM task.")
     parser.add_argument("objective", nargs="*", help="Task objective. Quote it when passing a multi-word objective.")
     parser.add_argument("--workspace", type=Path, help="Workspace root for file and shell tools.")
+    parser.add_argument(
+        "--task-spec", type=Path, action=_SingleTaskSpec,
+        help="JSON/YAML/TOML task plugin specification; a workspace is optional. Overrides task defaults from config.",
+    )
     parser.add_argument("--profile", help="Task profile, such as auto, general, or project_audit.")
     parser.add_argument("--risk-level", help="Optional risk label stored in task context metadata.")
     parser.add_argument("--constraint", dest="constraints", action="append", help="Additional task constraint. Repeatable.")
@@ -212,6 +235,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Planning behavior: auto lets the model decide, force requires a plan, off uses the legacy ReAct loop.",
     )
     return parser
+
+
+class _SingleTaskSpec(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        if getattr(namespace, self.dest, None) is not None:
+            parser.error("--task-spec may be provided only once; choose a single task specification")
+        setattr(namespace, self.dest, values)
 
 
 def _load_cli_config(config_path: Path | None, parser: argparse.ArgumentParser) -> TaskRunnerConfig | None:

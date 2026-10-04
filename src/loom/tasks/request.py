@@ -43,6 +43,7 @@ class TaskRequest:
     expected_outputs: tuple[str, ...] = ()
     risk_level: str = "auto"
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    task_spec: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.workspace is not None:
@@ -50,6 +51,10 @@ class TaskRequest:
         object.__setattr__(self, "constraints", tuple(self.constraints))
         object.__setattr__(self, "expected_outputs", tuple(self.expected_outputs))
         object.__setattr__(self, "metadata", dict(self.metadata))
+        if self.task_spec is not None:
+            from loom.runtime.plugin_contracts import json_value
+
+            object.__setattr__(self, "task_spec", json_value(self.task_spec))
 
 
 @dataclass(frozen=True, slots=True)

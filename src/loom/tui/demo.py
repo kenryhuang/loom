@@ -25,7 +25,7 @@ from loom.examples.factories import (
     make_minimal_counter_loop,
 )
 from loom.runtime.engine import create, create_runtime_registry, run
-from loom.tui.tui_app import LoomTuiApp
+from loom.tui.compact import CompactLoomTuiApp
 from loom.tui.tui_collector import TuiEventCollector
 
 
@@ -45,7 +45,7 @@ async def demo_counter_loop() -> None:
     handle = handle_result.value
     context = make_initial_counter_context(max_steps=5)
 
-    app = LoomTuiApp(collector)
+    app = CompactLoomTuiApp(collector)
     app.set_loop_info(role=loop_def.identity.role, goal=loop_def.goal.objective)
 
     result_holder: list = []
@@ -120,7 +120,7 @@ async def demo_llm_loop() -> None:
     handle = handle_result.value
     context = make_initial_llm_context()
 
-    app = LoomTuiApp(collector)
+    app = CompactLoomTuiApp(collector)
     app.set_loop_info(role=loop_def.identity.role, goal=loop_def.goal.objective)
 
     result_holder: list = []

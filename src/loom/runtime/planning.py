@@ -731,7 +731,13 @@ class PlanningRuntime:
                     )
 
             result = await _invoke_handler(handler, input_value, options)
-            if result.ok and phase is PlanPhase.EXECUTING and tool_id == self.finish_tool_id:
+            rejected = (
+                result.ok
+                and isinstance(result.value, Observation)
+                and isinstance(result.value.value, Mapping)
+                and (result.value.value.get("accepted") is False or result.value.value.get("completed") is False)
+            )
+            if result.ok and not rejected and phase is PlanPhase.EXECUTING and tool_id == self.finish_tool_id:
                 completed = self._controller.complete(trigger="finish_tool")
                 if not completed.ok:
                     return self._rejected(completed.error.code, completed.error.message)

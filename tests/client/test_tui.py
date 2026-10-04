@@ -5,7 +5,7 @@ import pytest
 pytest.importorskip("textual")
 
 from loom.client.tui import SessionTuiApp
-from loom.tui.tui_app import EventFeedWidget, LoomTuiApp
+from loom.tui.tui_app import EventFeedWidget, LoomTuiApp, _format_event_detail_plain, _format_event_line_plain
 from loom.tui.tui_collector import TuiEvent, TuiEventCollector
 from tests.service.test_api import api as api
 
@@ -41,6 +41,26 @@ class FakeClient:
     def command(self, sid, kind, payload=None, **kwargs):
         self.commands.append({"session_id": sid, "type": kind, "payload": payload or {}, **kwargs})
         return {"state": "accepted"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("focus", ["#message", "#pause", "#event_feed"])
+async def test_ctrl_c_disconnects_with_any_focus_and_cleans_subscription(focus):
+    client = FakeClient()
+    client.states["one"]["task"]["state"] = "running"
+    app = SessionTuiApp(client, "one")
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause()
+        app.query_one(focus).focus()
+        await pilot.pause()
+        assert app.focused is app.query_one(focus)
+        subscription = app.subscription
+        stop = app.subscription_stop
+        await pilot.press("ctrl+c")
+        assert app._exit
+    assert stop.is_set()
+    assert subscription.done()
+    assert client.commands == []
 
 
 @pytest.mark.asyncio
@@ -105,19 +125,40 @@ async def test_pending_follow_callback_cannot_override_manual_scroll():
 
 
 @pytest.mark.asyncio
-async def test_midstream_snapshot_restores_visible_output_before_new_delta():
+@pytest.mark.parametrize("channel", ["content", "reasoning", "reasoning_context"])
+async def test_midstream_snapshot_restores_visible_output_before_new_delta(channel):
     client = FakeClient()
-    client.states["one"].update(event_cursor=300, streams={"l:content": "saved prefix"}, stream_origins={"l:content": 0})
+    client.states["one"].update(event_cursor=300, streams={f"l:{channel}": "saved prefix"}, stream_origins={f"l:{channel}": 0})
     app = SessionTuiApp(client, "one")
     async with app.run_test(size=(120, 36)) as pilot:
         await pilot.pause()
         await app.select_session("one")
-        assert "".join(app._llm_streams["l"].content_parts) == "saved prefix"
+        feed = app.query_one(EventFeedWidget)
+        assert feed.event_count == 1
+        group = feed.get_item(0)
+        assert not group.is_expanded
+        restored = group.records[0].event
+        assert restored.event_type == "llm.stream.started"
+        assert _format_event_line_plain(restored).startswith("Thought for ")
+        assert "saved prefix" in _format_event_detail_plain(restored)
+        assert "model: unknown" not in _format_event_detail_plain(restored)
         assert app.apply_session_event(
-            {"session_id": "one", "seq": 301, "type": "llm.content.delta", "payload": {"llm_call_id": "l", "offset": 12, "delta": " next"}},
+            {"session_id": "one", "seq": 301, "type": f"llm.{channel}.delta", "payload": {"llm_call_id": "l", "offset": 12, "delta": " next"}},
             app.subscription_generation,
         )
-        assert "".join(app._llm_streams["l"].content_parts) == "saved prefix next"
+        assert feed.event_count == 1
+        assert group.records[0].event.data[channel] == "saved prefix next"
+
+
+@pytest.mark.asyncio
+async def test_resume_snapshot_does_not_add_empty_stream_rows():
+    client = FakeClient()
+    client.states["one"].update(event_cursor=300, streams={"l:content": "", "l:reasoning": ""})
+    app = SessionTuiApp(client, "one")
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause()
+        await app.select_session("one")
+        assert app.query_one(EventFeedWidget).event_count == 0
 
 
 @pytest.mark.asyncio

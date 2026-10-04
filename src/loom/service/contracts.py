@@ -48,14 +48,15 @@ def object_value(value: Any, name: str = "payload") -> dict:
     return dict(value)
 
 
-def validate_create(payload: Any) -> dict:
+def validate_create(payload: Any, *, plugin_registry=None) -> dict:
     payload = object_value(payload)
-    allowed = {"objective", "workspace", "title", "model", "plan_mode", "limits"}
+    allowed = {"objective", "workspace", "title", "model", "plan_mode", "limits", "task_spec", "resource_claims", "plugin_version_refs"}
     if set(payload) - allowed:
         raise ServiceError("Unknown session fields")
     objective = text(payload["objective"], "objective") if payload.get("objective") is not None else None
-    workspace = Path(text(payload.get("workspace", str(Path.cwd())), "workspace", max_length=4096)).expanduser().resolve()
-    if not workspace.is_dir():
+    raw_workspace = payload.get("workspace", None if "task_spec" in payload else str(Path.cwd()))
+    workspace = None if raw_workspace is None else Path(text(raw_workspace, "workspace", max_length=4096)).expanduser().resolve()
+    if workspace is not None and not workspace.is_dir():
         raise ServiceError("workspace must be an existing directory")
     mode = payload.get("plan_mode", "auto")
     if not isinstance(mode, str) or mode not in {"auto", "force", "off"}:
@@ -66,9 +67,30 @@ def validate_create(payload: Any) -> dict:
     model = payload.get("model")
     if model is not None:
         text(model, "model", max_length=200)
+    from loom.tasks.assembly import TaskAssembly
+    from loom.tasks.request import TaskRequest
+
+    try:
+        assembly = TaskAssembly(
+            TaskRequest(objective or "New session", workspace=workspace, task_spec=payload.get("task_spec")), plan_mode=mode, registry=plugin_registry
+        )
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ServiceError(str(exc)) from exc
+    directory = assembly.tool_request.workspace
+    claims = [{"resource_id": claim.resource_id, "access_mode": claim.access_mode} for claim in assembly.environment.claims()]
+    if "resource_claims" in payload and payload["resource_claims"] != claims:
+        raise ServiceError("Resource claims must match the configured session resources")
+    from loom.runtime.plugin_contracts import json_value
+
+    manifests = json_value(assembly.manifests)
+    if "plugin_version_refs" in payload and payload["plugin_version_refs"] != manifests:
+        raise ServiceError("Plugin manifests must match the registered task plugins")
     return {
         "objective": objective,
-        "workspace": str(workspace),
+        "workspace": str(directory) if directory else None,
+        "task_spec": assembly.spec,
+        "resource_claims": claims,
+        "plugin_version_refs": manifests,
         "title": text(payload.get("title", objective[:80] if objective else "New Session"), "title", max_length=200),
         "model": model,
         "plan_mode": mode,

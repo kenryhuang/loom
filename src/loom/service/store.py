@@ -14,7 +14,8 @@ from loom.service.contracts import EVENT_SCHEMA, ServiceError, canonical, new_id
 
 
 class SessionStore:
-    def __init__(self, directory):
+    def __init__(self, directory, *, plugin_registry_factory=None):
+        self.plugin_registry_factory = plugin_registry_factory
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "service.sqlite"
@@ -92,7 +93,7 @@ class SessionStore:
 
     def create(self, command_id, payload):
         text(command_id, "command_id", max_length=200)
-        payload = validate_create(payload)
+        payload = validate_create(payload, plugin_registry=self.plugin_registry_factory() if self.plugin_registry_factory else None)
         normalized = {"type": "create", "payload": payload}
         with self.transaction() as db:
             replay = self._replay(db, command_id, normalized)
@@ -113,8 +114,8 @@ class SessionStore:
                     "revision": 1,
                     "goal_revision": 1 if payload["objective"] else 0,
                     "plan_revision": 0,
-                    "task_kind": "coding",
-                    "plugin_version_refs": [],
+                    "task_kind": "coding" if payload["workspace"] else "general",
+                    "plugin_version_refs": payload["plugin_version_refs"],
                     "method_version_refs": [],
                 },
                 "messages": [],
@@ -221,6 +222,16 @@ class SessionStore:
                 task["state"] = "pausing" if state["run"] and state["run"]["state"] == "running" else "paused"
             elif kind == "resume":
                 state["control"] = None
+                run = state["run"]
+                if run and run["state"] == "suspended":
+                    run["time_budget_start_seconds"] = run.get("active_seconds", 0)
+                    self.append(
+                        db,
+                        state,
+                        "run.time_budget.renewed",
+                        {"active_seconds": run["time_budget_start_seconds"], "max_duration_seconds": task["limits"]["max_duration_seconds"]},
+                        command_id=cid,
+                    )
                 task["state"] = "queued"
             elif kind == "complete_task":
                 task["state"] = "completed"

@@ -1,0 +1,12 @@
+schema_version: 1
+session_environment:
+  plugin: session
+context:
+  plugin: bounded_context
+  max_window_chars: 24000
+execution_runtime:
+  plugin: native_os
+tools:
+  collections: [task_control]
+workflow:
+  plugin: dynamic

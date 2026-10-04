@@ -36,6 +36,7 @@ from loom.core import (
 from loom.llm import create_env_openai_provider, create_llm_step_function
 from loom.llm.request_options import materialize_request_options
 from loom.observability import EventRecordingPolicy, JsonlTraceStore
+from loom.observability.result_format import extract_report_content, format_result_text
 from loom.runtime import (
     PlanMode,
     PlanningRuntime,
@@ -47,7 +48,6 @@ from loom.runtime import (
 from loom.tasks.config import TaskRunnerConfig, create_provider_from_task_config
 from loom.tasks.profiles import TaskProfile, get_task_profile, select_task_profile
 from loom.tasks.request import TaskHarness, TaskRequest, TaskRunOptions, TaskRunResult
-from loom.tasks.tools import make_task_tools
 
 STREAM_DELTA_TRACE_EVENTS = (
     "llm.content.delta",
@@ -63,13 +63,21 @@ def make_task_context(
     *,
     plan_mode: PlanMode | str = PlanMode.AUTO,
     planning: PlanningRuntime | None = None,
+    assembly: Any = None,
 ) -> Result:
+    if assembly is None and request.task_spec is not None:
+        from loom.tasks.assembly import TaskAssembly
+
+        try:
+            assembly = TaskAssembly(request, plan_mode=plan_mode, harness=harness)
+        except (ValueError, TypeError, KeyError) as exc:
+            return err(make_loom_error("VALIDATION_FAILED", str(exc), retryable=False))
     task_harness = harness or TaskHarness()
-    plan_runtime = planning or PlanningRuntime(plan_mode)
+    plan_runtime = assembly.workflow if assembly is not None else planning or PlanningRuntime(plan_mode)
     validation = _validate_request(request)
     if not validation.ok:
         return validation
-    tool_validation = _validate_harness_tools(task_harness)
+    tool_validation = ok(None) if assembly is not None else _validate_harness_tools(task_harness)
     if not tool_validation.ok:
         return tool_validation
 
@@ -78,13 +86,16 @@ def make_task_context(
         return profile_result
     profile = profile_result.value
 
-    workspace = request.workspace.resolve() if request.workspace is not None else None
+    effective_request = assembly.tool_request if assembly is not None else request
+    workspace = effective_request.workspace.resolve() if effective_request.workspace is not None else None
     constraints = _constraints_for_request(profile, request, workspace, task_harness)
     criteria = _criteria_for_request(profile, request)
-    normal_tools = _filter_tools(_task_tool_refs(), task_harness.allowed_tools)
+    normal_tools = assembly.context_tools() if assembly is not None else _filter_tools(_task_tool_refs(), task_harness.allowed_tools)
     plan_runtime.configure_normal_tool_refs(normal_tools)
     tools = plan_runtime.visible_tool_refs(normal_tools)
-    resources = () if workspace is None else (ResourceRef("workspace", "directory", str(workspace), "read-write"),)
+    resources = (
+        assembly.resources if assembly is not None else (() if workspace is None else (ResourceRef("workspace", "directory", str(workspace), "read-write"),))
+    )
 
     return ok(
         freeze_context(
@@ -95,7 +106,7 @@ def make_task_context(
                 identity=IdentityLayer(
                     role=profile.role,
                     capabilities=(
-                        Capability("workspace_inspection", "Inspect files and command output through registered tools."),
+                        *((Capability("workspace_inspection", "Inspect files and command output through registered tools."),) if workspace else ()),
                         Capability("evidence_synthesis", "Synthesize observations into a final task report."),
                     ),
                     constraints=constraints,
@@ -129,6 +140,8 @@ def make_task_loop(
     stream: bool = False,
     harness: TaskHarness | None = None,
     planning: PlanningRuntime | None = None,
+    context_manager: Any = None,
+    tool_resolver: Any = None,
 ) -> MinimalLoopDefinition:
     task_harness = harness or TaskHarness()
     profile = select_task_profile(request)
@@ -144,6 +157,8 @@ def make_task_loop(
             prompt_options={"max_history_steps": task_harness.max_history_steps},
             step_policy_resolver=planning.step_policy if planning is not None else None,
             observation_policy=planning.observe_tool if planning is not None else None,
+            context_manager=context_manager,
+            tool_resolver=tool_resolver,
         ),
         done=_task_done,
         metadata={"task_kind": "generic_task", "profile": profile.id, "blueprint": profile.blueprint},
@@ -151,7 +166,13 @@ def make_task_loop(
 
 
 def _task_done(context: Context, _runtime: Any) -> Result:
-    if any(observation.source == "finish" for observation in context.state.observations):
+    if any(
+        observation.source == "finish"
+        and isinstance(observation.value, Mapping)
+        and observation.value.get("completed", True)
+        and observation.value.get("accepted", True)
+        for observation in context.state.observations
+    ):
         return ok(True)
     if not context.state.decisions:
         return ok(False)
@@ -169,6 +190,8 @@ async def run_generic_task(
     harness: TaskHarness | None = None,
     trace_sink: Any | None = None,
     cancellation: Any | None = None,
+    plugin_registry: Any = None,
+    loops: Mapping[str, Any] | None = None,
 ) -> Result:
     run_options = options or TaskRunOptions()
     task_harness = harness or TaskHarness()
@@ -183,29 +206,44 @@ async def run_generic_task(
         return provider_result
     provider = provider_result.value
 
-    planning = PlanningRuntime(run_options.plan_mode)
+    from loom.tasks.assembly import TaskAssembly
+
+    try:
+        assembly = TaskAssembly(request, plan_mode=run_options.plan_mode, harness=task_harness, registry=plugin_registry, loops=loops)
+    except (ValueError, KeyError, TypeError) as exc:
+        return err(make_loom_error("VALIDATION_FAILED", str(exc), retryable=False))
+    try:
+        return await _run_assembled_task(request, provider, run_options, task_harness, assembly, trace_sink, cancellation)
+    finally:
+        await assembly.close()
+
+
+async def _run_assembled_task(request, provider, run_options, task_harness, assembly, trace_sink, cancellation):
+    planning = assembly.workflow
     context = make_task_context(
         request,
         harness=task_harness,
         plan_mode=run_options.plan_mode,
         planning=planning,
+        assembly=assembly,
     )
     if not context.ok:
         return context
 
-    normal_handlers = _filter_tool_handlers(make_task_tools(request), task_harness.allowed_tools)
-    definition = planning.wrap_loop(
+    definition = assembly.wrap_loop(
         make_task_loop(
             request,
             provider,
             stream=run_options.stream,
             harness=task_harness,
             planning=planning,
+            context_manager=assembly.context_manager,
+            tool_resolver=assembly.resolve_tools,
         )
     )
     handle = create(
         definition,
-        registry=create_runtime_registry(tools=planning.wrap_tools(normal_handlers)),
+        registry=create_runtime_registry(tools=assembly.handlers(), loops=assembly.loops),
         trace_store=JsonlTraceStore(run_options.trace_path) if run_options.trace_path is not None else None,
         event_policy=_task_trace_event_policy() if run_options.trace_path is not None else None,
     )
@@ -220,7 +258,7 @@ async def run_generic_task(
             context.value,
             max_steps=run_options.max_steps,
             timeout_ms=run_options.timeout_ms,
-            plugins=(TuiPlugin(),),
+            plugins=(TuiPlugin(result_formatter=_report_from_run_result),),
             trace_sink=trace_sink,
             cancellation=cancellation,
         )
@@ -493,7 +531,7 @@ def _report_from_run_result(run_result: Any) -> str:
         value = thaw_json(observation.value)
         if isinstance(value, Mapping) and isinstance(value.get("report"), str):
             return value["report"]
-    return "" if output is None else str(output)
+    return format_result_text(output)
 
 
 def _is_empty_llm_decision_output(output: Any) -> bool:
@@ -507,16 +545,10 @@ def _is_empty_llm_decision_output(output: Any) -> bool:
 
 
 def _report_from_decision_output(output: Any) -> str:
-    if not isinstance(output, Mapping):
-        return ""
-    action = output.get("action", {})
-    if not isinstance(action, Mapping):
-        return ""
-    input_value = action.get("input", {})
-    if not isinstance(input_value, Mapping):
-        return ""
-    report = input_value.get("report") or input_value.get("content")
-    return report if isinstance(report, str) else ""
+    if isinstance(output, str):
+        return format_result_text(output)
+    report = extract_report_content(output)
+    return "" if report is None else format_result_text(report)
 
 
 __all__ = ["make_task_context", "make_task_loop", "run_generic_task"]

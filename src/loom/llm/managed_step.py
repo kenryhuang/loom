@@ -42,12 +42,13 @@ INPUT_TOOL = ToolRef(
 
 
 class ManagedStep:
-    def __init__(self, provider, execution, *, planning=None, limits=None, stream=False):
+    def __init__(self, provider, execution, *, planning=None, limits=None, stream=False, assembly=None):
         self.provider = provider
         self.execution = execution
         self.planning = planning
         self.limits = {**LIMITS, **(limits or {})}
         self.stream = stream
+        self.assembly = assembly
 
     async def _emit(self, runtime, kind, **payload):
         result = await runtime.trace_sink.emit(
@@ -59,6 +60,8 @@ class ManagedStep:
     def _checkpoint(self, cp):
         if self.planning:
             cp["planning"] = self.planning.snapshot()
+        if self.assembly:
+            cp["plugin_states"] = self.assembly.snapshot()
         return self.execution.boundary(cp)
 
     def _terminal(self, cp, runtime):
@@ -92,12 +95,15 @@ class ManagedStep:
             replace(base, id=new_context_id(), state=replace(base.state, observations=(*base.state.observations, *observations), decisions=decisions))
         )
         if self.planning:
-            from loom.runtime.planning import plan_state_dict
-            from loom.runtime.workflow_routing import workflow_route_state_dict
+            if hasattr(self.planning, "project_state"):
+                context = self.planning.project_state(context)
+            else:
+                from loom.runtime.planning import plan_state_dict
+                from loom.runtime.workflow_routing import workflow_route_state_dict
 
-            scratch = dict(context.state.scratch or {})
-            scratch.update(plan=plan_state_dict(self.planning.controller.state), workflowRoute=workflow_route_state_dict(self.planning.route.state))
-            context = replace(context, state=replace(context.state, scratch=scratch))
+                scratch = dict(context.state.scratch or {})
+                scratch.update(plan=plan_state_dict(self.planning.controller.state), workflowRoute=workflow_route_state_dict(self.planning.route.state))
+                context = replace(context, state=replace(context.state, scratch=scratch))
         return context
 
     def _result(self, cp, runtime, kind, reason="", request_id=None, *, parsed=None):
@@ -170,6 +176,8 @@ class ManagedStep:
             guidance = "\n".join(item["content"] for item in inputs)
             base = cp["context"]
             cp["context"] = replace(base, goal=replace(base.goal, objective=f"{base.goal.objective}\n\nUser guidance:\n{guidance}"))
+            if self.assembly:
+                cp["messages"][0] = self.assembly.context_manager.project(cp["context"])[0]
             # Persist the input projection and cursor before taking a new action.
             directive = self._checkpoint(cp)
         control = directive.get("control")
@@ -201,7 +209,7 @@ class ManagedStep:
                 "trace_id": runtime.trace_id,
                 "started_at": now_iso(),
                 "phase": "before_llm",
-                "messages": list(build_messages(context, max_history_steps=5)),
+                "messages": self.assembly.context_manager.project(context) if self.assembly else list(build_messages(context, max_history_steps=5)),
                 "observations": [],
                 "response": None,
                 "calls": [],
@@ -220,9 +228,21 @@ class ManagedStep:
             if cp["phase"] == "before_llm":
                 if cp["llm_calls"] >= self.limits["max_llm_calls"]:
                     return self._result(cp, runtime, "paused", "LLM call budget exceeded")
-                if sum(len(m.content or "") + sum(len(t.arguments) for t in m.tool_calls) for m in cp["messages"]) > self.limits["max_window_chars"]:
+                refs = self.assembly.resolve_tools(cp["context"]) if self.assembly else cp["context"].affordances.tools
+                tools = to_llm_tools((*refs, INPUT_TOOL))
+                if self.assembly:
+                    try:
+                        window, compacted = self.assembly.context_manager.compact(
+                            cp["messages"], self.limits["max_window_chars"], schema_chars=len(json.dumps(tools))
+                        )
+                    except ValueError as exc:
+                        return self._result(cp, runtime, "paused", str(exc))
+                    cp["messages"] = window
+                    if compacted:
+                        await self._emit(runtime, "context.compacted", **compacted)
+                        self._checkpoint(cp)
+                elif sum(len(m.content or "") + sum(len(t.arguments) for t in m.tool_calls) for m in cp["messages"]) > self.limits["max_window_chars"]:
                     return self._result(cp, runtime, "paused", "Model context window limit exceeded")
-                tools = to_llm_tools((*cp["context"].affordances.tools, INPUT_TOOL))
                 policy = self.planning.step_policy(cp["context"]) if self.planning else None
                 cp["llm_calls"] += 1
                 llm_id = f"{cp['trace_id']}-llm-{cp['llm_calls']}"
@@ -302,8 +322,30 @@ class ManagedStep:
                     cp["phase"] = "before_llm"
                     continue
                 parsed = _parse_decision(response.content, cp["trace_id"])
-                unfinished_plan = self.planning and self.planning.controller.state.phase.value in {"planning", "executing"}
-                finished = any(o.source == "finish" for o in cp["observations"]) or not parsed["parse_fallback"]
+                unfinished_plan = self.planning and (
+                    self.planning.unfinished()
+                    if hasattr(self.planning, "unfinished")
+                    else self.planning.controller.state.phase.value in {"planning", "executing"}
+                )
+                finished = any(o.source == "finish" and thaw_json(o.value).get("completed") for o in cp["observations"]) or not parsed["parse_fallback"]
+                completion_due = not hasattr(self.planning, "is_final_node") or self.planning.is_final_node()
+                if finished and completion_due and self.assembly and self.assembly.completion_error():
+                    cp["messages"].extend(
+                        [
+                            LlmMessage("assistant", response.content or ""),
+                            LlmMessage("user", self.assembly.completion_error() + ". Gather source evidence before finishing."),
+                        ]
+                    )
+                    cp["phase"] = "before_llm"
+                    cp["output_retries"] = cp.get("output_retries", 0) + 1
+                    if cp["output_retries"] > 1:
+                        return self._result(cp, runtime, "paused", self.assembly.completion_error())
+                    continue
+                if finished and hasattr(self.planning, "complete_active"):
+                    running = any(node["status"] == "running" for node in self.planning.controller.nodes)
+                    if running:
+                        await self.planning.complete_active(str(parsed["output"]))
+                    unfinished_plan = self.planning.unfinished()
                 kind = "completed" if finished and not unfinished_plan else "continue"
                 cp["phase"] = "step_done"
                 cp["terminal"] = {"kind": kind, "parsed": parsed}
@@ -339,7 +381,7 @@ class ManagedStep:
                         make_loom_error("TOOL_FAILED", "Tool is not available in the current phase", retryable=False, metadata={"failureDomain": "tool"})
                     )
                 else:
-                    result = await runtime.call_tool(call.name, value, metadata={"tool_call_id": call.id})
+                    result = await runtime.call_tool(call.name, value, metadata={"tool_call_id": call.id, "operation_journaled": True})
                 self.execution.operation_finish(
                     call, {"ok": result.ok, "value": result.value if result.ok else None, "error": result.error if not result.ok else None}
                 )
@@ -352,6 +394,9 @@ class ManagedStep:
                 if persisted and self.planning and isinstance(observation, Observation):
                     recovered = thaw_json(observation.value)
                     if isinstance(recovered, dict) and recovered.get("accepted"):
+                        if recovered.get("workflow") and hasattr(self.planning, "restore_plugin"):
+                            self.planning.restore(recovered["workflow"]).unwrap()
+                            recovered = {}
                         participant = self.planning.snapshot()
                         if recovered.get("plan"):
                             participant["plan"] = recovered["plan"]
@@ -361,6 +406,9 @@ class ManagedStep:
                         self.planning.restore(participant).unwrap()
                 if not isinstance(observation, Observation):
                     observation = Observation(f"{call.id}-observation", call.name, observation, runtime.now())
+                if persisted and result.ok and self.assembly:
+                    self.assembly.ingest_tool_result(call.name, observation)
+                    observation = self.assembly.project_tool_result(call.name, observation)
                 controlled = await _apply_observation_policy(self.planning.observe_tool if self.planning else None, cp["context"], observation)
                 if not controlled.ok:
                     return controlled

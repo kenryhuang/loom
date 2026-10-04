@@ -39,6 +39,18 @@ The project uses a `src` layout. Subpackage `__init__.py` files are export
 shims only; implementation lives in named modules such as `core/models.py`,
 `runtime/engine.py`, `llm/api.py`, and `observability/traces.py`.
 
+## General Task Execution Design
+
+The [general task plugin runtime design](docs/superpowers/specs/2026-10-04-general-task-plugin-runtime-design.md)
+defines separate plugins for `SessionEnvironment`, context management, tool
+collections, `ToolExecutionRuntime`, and dynamic workflows. The native OS phase
+is implemented for both one-shot tasks and durable sessions, including tasks
+without a workspace, bounded context compaction, versioned plugin recovery,
+resource claims, and sequential workflow revisions. See the
+[configuration and plugin guide](docs/general-task-runtime.md) for runnable
+examples. Docker and VM backends remain future extensions; unavailable backends
+fail explicitly without falling back to native execution.
+
 ## LLM Configuration
 
 LLM examples use the existing OpenAI-compatible provider. If no `api_key` is
@@ -115,7 +127,11 @@ Paused and failed executions resume from their saved state. Running or queued
 executions are connected without starting another worker. A pending question
 or recovery verification is shown before execution can continue. Idle sessions
 wait for the next instruction; completed tasks reopen and also wait for a new
-instruction. Resume retains the run's existing execution budgets.
+instruction. Each explicit Resume grants a fresh active-time allowance (30
+minutes by default), measured from the run's current accumulated active time.
+Cumulative elapsed time is retained for reporting; it does not cap the total
+time across resumes. Token, step, and model-call usage retain their existing
+limits and counts.
 
 New sessions default to a **10M token budget** (10,000,000 tokens). Set a
 different total when creating or resuming a session:
@@ -173,7 +189,7 @@ The TUI lists sessions, shows the current plan and model/tool execution feed,
 and accepts additional guidance while work runs. Enter submits a message or
 answers the pending question. Redirect explicitly supersedes a clarification.
 History pages backward through stored events; Detail opens a selected large
-execution artifact. The feed retains up to 500 visible rows. `Ctrl+Q` disconnects
+execution artifact. The feed retains up to 500 visible rows. `Ctrl+C` or `Ctrl+Q` disconnects
 the frontend; the backend keeps running.
 
 Commands can also be used without the TUI:

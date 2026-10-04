@@ -1,0 +1,19 @@
+schema_version: 1
+session_environment:
+  plugin: session
+  resources:
+    - id: project
+      kind: directory
+      # Relative to this file, so this example uses the repository root.
+      uri: ../..
+      access: read-write
+context:
+  plugin: bounded_context
+execution_runtime:
+  plugin: native_os
+  workspace_resource: project
+tools:
+  collections: [filesystem, shell, task_control]
+workflow:
+  plugin: legacy_planning
+  mode: auto

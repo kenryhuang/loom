@@ -55,6 +55,10 @@ def test_top_level_package_api_is_intentionally_thin():
         "tui",
         "service",
         "client",
+        "contexts",
+        "execution",
+        "session_environments",
+        "workflows",
     }
 
     assert public_names - submodule_names == set()

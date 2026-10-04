@@ -82,9 +82,9 @@ async def run_job_with_tui(
 def _make_app(collector: TuiEventCollector, app_factory: Callable[[TuiEventCollector], Any] | None) -> Any:
     if app_factory is not None:
         return app_factory(collector)
-    from loom.tui.tui_app import LoomTuiApp
+    from loom.tui.compact import CompactLoomTuiApp
 
-    return LoomTuiApp(collector)
+    return CompactLoomTuiApp(collector)
 
 
 __all__ = ["run_job_with_tui", "run_with_tui"]

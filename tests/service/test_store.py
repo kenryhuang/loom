@@ -144,3 +144,34 @@ def test_budget_requires_suspended_executor_even_if_task_already_shows_paused(tm
     store.update(sid, lambda state, emit, db: state.update(run={"state": "running"}))
     with pytest.raises(ServiceError, match="Pause"):
         store.submit(sid, {"command_id": "budget", "type": "set_token_budget", "payload": {"max_tokens": 20_000_000}})
+
+
+def test_resume_renews_time_allowance_durably_without_resetting_usage_or_checkpoint(tmp_path):
+    store = SessionStore(tmp_path / "data")
+    sid = store.create("new", {"objective": "Work", "workspace": str(tmp_path)})["session_id"]
+
+    def pause(state, emit, db):
+        state["task"]["state"] = "paused"
+        state["run"] = {
+            "id": "run", "state": "suspended", "active_seconds": 1800.84, "checkpoint": "saved", "steps": 9, "counters": {"used": 898895}
+        }
+
+    store.update(sid, pause)
+    before = store.snapshot(sid)
+    command = {"command_id": "resume", "type": "resume", "payload": {}}
+    receipt = store.submit(sid, command)
+    store = SessionStore(tmp_path / "data")
+    assert store.submit(sid, command) == receipt
+    after = store.snapshot(sid)
+    assert after["run"] == {**before["run"], "time_budget_start_seconds": 1800.84}
+    assert after["task"]["limits"] == before["task"]["limits"]
+    assert after["task"]["state"] == "queued"
+    assert sum(event["type"] == "run.time_budget.renewed" for event in store.events(sid)) == 1
+
+    def pause_again(state, emit, db):
+        state["task"]["state"] = "paused"
+        state["run"]["active_seconds"] += 60
+
+    store.update(sid, pause_again)
+    store.submit(sid, {**command, "command_id": "resume-again"})
+    assert store.snapshot(sid)["run"]["time_budget_start_seconds"] == 1860.84

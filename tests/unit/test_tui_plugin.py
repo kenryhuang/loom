@@ -116,3 +116,17 @@ async def test_tui_plugin_keeps_tui_open_until_user_quits_after_run_done() -> No
     app_holder[0].user_quit()
     stopped = await asyncio.wait_for(stop_task, timeout=0.5)
     assert stopped.ok
+
+
+@pytest.mark.asyncio
+async def test_tui_plugin_emits_final_output_before_done_sentinel() -> None:
+    loop = make_minimal_counter_loop()
+    handle = create(loop, registry=create_runtime_registry()).unwrap()
+    plugin = TuiPlugin(app_factory=ImmediateApp, result_formatter=lambda result: f"# Counter\n\n{result.output}")
+    result = await run_with_plugins(handle, make_initial_counter_context(max_steps=1), plugins=(plugin,), max_steps=1)
+    assert result.ok
+    queued = list(plugin.collector.queue._queue)
+    assert queued[-2].event_type == "run.result"
+    assert queued[-2].run_id == result.value.context.run_id
+    assert queued[-2].data["content"] == f"# Counter\n\n{result.value.output}"
+    assert queued[-1].event_type == "_tui_done"

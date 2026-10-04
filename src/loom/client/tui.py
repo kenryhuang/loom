@@ -12,26 +12,44 @@ from urllib.error import URLError
 
 from rich.markup import escape
 from rich.text import Text
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Footer, Input, Label, ListItem, ListView, Static
 
 from loom.client.budgets import parse_token_budget
 from loom.client.projection import SessionProjection
 from loom.service.contracts import LIMITS, ServiceError
-from loom.tui.tui_app import EventFeedWidget, LoomTuiApp, LoopHeader, StatusBar
+from loom.tui.compact import CompactEventFeedWidget, CompactEventItem
+from loom.tui.tui_app import COLORS, EventFeedWidget, LoomTuiApp, LoopHeader, StatusBar
 from loom.tui.tui_collector import TuiEvent
 
 
 class SessionTuiApp(LoomTuiApp):
-    CSS = """
-    #sessions { width: 26; border-right: solid $accent; }
-    #session_body { width: 1fr; }
-    #question, #plan, #notice, #budget { height: auto; max-height: 6; padding: 0 1; }
-    #controls { height: 3; }
-    #controls Button { min-width: 7; padding: 0 1; }
-    #message { height: 3; }
+    CSS = f"""
+    #sessions {{ width: 26; border-right: solid $accent; }}
+    #sessions > ListItem {{
+        height: auto;
+        margin: 0 1 1 1;
+        padding: 0 1;
+        border: round $accent 40%;
+    }}
+    #sessions > ListItem.-highlight {{ border: round $accent; }}
+    #sessions > ListItem > Label {{
+        width: 1fr; height: 1; text-wrap: nowrap; text-overflow: ellipsis;
+        background: {COLORS["bg_panel"]};
+    }}
+    #sessions > ListItem > Label.session-workspace {{ background: {COLORS["bg_dark"]}; }}
+    #session_body {{ width: 1fr; }}
+    #question, #plan, #notice, #budget {{ height: auto; max-height: 6; padding: 0 1; }}
+    #controls {{ height: 3; }}
+    #controls Button {{ min-width: 7; padding: 0 1; }}
+    #message {{ height: 3; }}
     """
-    BINDINGS = [("ctrl+q", "quit", "Disconnect"), ("ctrl+r", "refresh_sessions", "Refresh sessions")]
+    BINDINGS = [
+        Binding("ctrl+c", "quit", "Disconnect", priority=True),
+        ("ctrl+q", "quit", "Disconnect"),
+        ("ctrl+r", "refresh_sessions", "Refresh sessions"),
+    ]
 
     def __init__(self, client, session_id=None):
         super().__init__(SimpleNamespace(queue=asyncio.Queue()))
@@ -54,7 +72,7 @@ class SessionTuiApp(LoomTuiApp):
                 yield Static("", id="question")
                 yield Static("", id="budget")
                 yield Static("", id="plan")
-                yield EventFeedWidget(id="event_feed")
+                yield CompactEventFeedWidget(id="event_feed")
                 yield Static("", id="notice")
                 yield Input(placeholder="Add guidance or answer the pending question", id="message")
                 with Horizontal(id="controls"):
@@ -83,7 +101,20 @@ class SessionTuiApp(LoomTuiApp):
             self.session_ids = [s["session_id"] for s in sessions]
             view = self.query_one("#sessions", ListView)
             await view.clear()
-            await view.extend([ListItem(Label(Text(f"{s['title']}\n{s['task']['state']}")), id=f"session_{i}") for i, s in enumerate(sessions)])
+            items = []
+            for i, session in enumerate(sessions):
+                workspace = session["task"].get("workspace") or "—"
+                workspace_label = Label(Text(workspace), classes="session-workspace")
+                workspace_label.tooltip = workspace
+                items.append(
+                    ListItem(
+                        Label(Text(session["title"])),
+                        workspace_label,
+                        Label(Text(session["task"]["state"])),
+                        id=f"session_{i}",
+                    )
+                )
+            await view.extend(items)
         except (OSError, ServiceError, URLError) as exc:
             self._notice(str(exc))
 
@@ -101,7 +132,7 @@ class SessionTuiApp(LoomTuiApp):
         self.subscription_stop = threading.Event()
         try:
             snapshot = await asyncio.to_thread(self.client.snapshot, sid)
-            history = await asyncio.to_thread(self.client.history, sid, limit=200)
+            history = await self._current_run_history(sid, snapshot, generation)
             if generation != self.subscription_generation:
                 return
             self.session_id = sid
@@ -118,24 +149,24 @@ class SessionTuiApp(LoomTuiApp):
         except (ServiceError, OSError, URLError) as exc:
             self._notice(str(exc))
 
+    async def _current_run_history(self, sid, snapshot, generation):
+        history = await asyncio.to_thread(self.client.history, sid, limit=200)
+        run_id = (snapshot.get("run") or {}).get("id")
+        # File edits may precede the latest page; replay the current run completely.
+        while run_id and history["next_before"] and generation == self.subscription_generation:
+            events = history["events"]
+            if any(event.get("run_id") != run_id or event["type"] == "run.started" for event in events):
+                break
+            before = history["next_before"]
+            older = await asyncio.to_thread(self.client.history, sid, before=before, limit=200)
+            if not older["events"] or older["next_before"] == before:
+                break
+            history = {"events": [*older["events"], *events], "next_before": older["next_before"]}
+        return history
+
     def _restore_streams(self):
-        feed = self.query_one(EventFeedWidget)
-        for key, text in self.projection.streams.items():
-            llm_id, channel = key.split(":", 1)
-            field = {"content": "content_parts", "reasoning": "reasoning_parts", "reasoning_context": "reasoning_context_parts"}.get(channel)
-            if not field:
-                continue
-            event = TuiEvent(time.monotonic(), f"llm.{channel}.delta", {"llm_call_id": llm_id}, llm_call_id=llm_id)
-            self._handle_event(event)
-            stream = self._llm_streams[llm_id]
-            setattr(stream, field, [text])
-            aggregate = stream.absorb(event)
-            index = self._llm_stream_indices.get(llm_id)
-            if index is None:
-                feed.add_event(aggregate)
-                self._llm_stream_indices[llm_id] = feed.event_count - 1
-            else:
-                feed.update_event(index, aggregate)
+        run_id = (self.projection.snapshot.get("run") or {}).get("id", "")
+        self.query_one(CompactEventFeedWidget).restore_streams(self.projection.streams, run_id)
 
     async def _clear_feed(self):
         feed = self.query_one(EventFeedWidget)
@@ -143,6 +174,7 @@ class SessionTuiApp(LoomTuiApp):
             await item.remove()
         feed._event_items.clear()
         feed._selected_index = -1
+        feed.reset_presentation()
         for mapping in (
             self._llm_streams,
             self._llm_stream_indices,
@@ -190,7 +222,7 @@ class SessionTuiApp(LoomTuiApp):
     def _render_event(self, envelope):
         kind, data = envelope["type"], envelope["payload"]
         event = TuiEvent(
-            time.monotonic(),
+            time.time(),
             kind,
             data,
             trace_id=envelope.get("trace_id"),
@@ -202,50 +234,46 @@ class SessionTuiApp(LoomTuiApp):
         )
         feed = self.query_one(EventFeedWidget)
         if kind == "message.created":
-            self.message_indices[data["id"]] = feed.event_count
             feed.add_event(event)
+            self.message_indices[data["id"]] = feed._event_items[-1]
         elif kind == "command.applied":
             cid = envelope.get("command_id")
-            for index in self.message_indices.values():
-                old = feed.get_event(index)
+            for item in self.message_indices.values():
+                old = item.event
                 if old and old.data.get("command_id") == cid:
                     from dataclasses import replace
 
-                    feed.update_event(index, replace(old, data={**old.data, "state": "applied"}))
-        elif "artifact" in data or kind.startswith("input."):
-            feed.add_event(event)
-        elif not kind.startswith(("command.", "operation.", "task.")):
+                    item.set_event(replace(old, data={**old.data, "state": "applied"}))
+        else:
             self._handle_event(event)
-        if feed.event_count > 500 and not self.pruning:
+        if feed.record_count > 500 and not self.pruning:
             self.pruning = True
             self.call_later(self._prune_feed)
 
+    def _handle_event(self, event):
+        self._update_runtime_metrics(event)
+        self.query_one(CompactEventFeedWidget).present(event)
+
     async def _prune_feed(self):
-        feed = self.query_one(EventFeedWidget)
-        count = max(0, feed.event_count - 500)
-        for item in feed._event_items[:count]:
-            await item.remove()
-        del feed._event_items[:count]
-        feed._selected_index = max(-1, feed._selected_index - count)
-        for mapping in (self._llm_stream_indices, self._tool_execution_indices, self.message_indices):
-            remaining = {k: i - count for k, i in mapping.items() if i >= count}
-            mapping.clear()
-            mapping.update(remaining)
-        for mapping, indices in (
-            (self._llm_streams, self._llm_stream_indices),
-            (self._llm_rounds, self._llm_stream_indices),
-            (self._tool_executions, self._tool_execution_indices),
-        ):
-            for key in list(mapping):
-                if key not in indices:
-                    del mapping[key]
+        feed = self.query_one(CompactEventFeedWidget)
+        await feed.prune_oldest(500)
+        self.message_indices = {key: item for key, item in self.message_indices.items() if item in feed._event_items}
         self._decision_trace_ids.clear()
         self._presented_issue_keys.clear()
+        feed.prune_presentation()
         self.pruning = False
 
     def _refresh_state(self):
         state = self.projection.snapshot
         task = state["task"]
+        run = state.get("run") or {}
+        group = self.query_one(CompactEventFeedWidget).process_groups.get(run.get("id", ""))
+        if group and task["state"] in {"paused", "failed", "awaiting_input"}:
+            reason = next((row.event.data.get("reason") for row in reversed(group.records) if row.event.data.get("reason")), "")
+            label = {"paused": "已暂停", "failed": "执行失败", "awaiting_input": "等待回答"}[task["state"]]
+            group.set_preview(label + (" · " + reason if reason else ""))
+        elif group and run.get("state") == "completed":
+            group.set_preview("已完成")
         waiting = not task["objective"]
         self.query_one(StatusBar).status = "awaiting_task" if waiting else task["state"]
         header = self.query_one(LoopHeader)
@@ -256,8 +284,9 @@ class SessionTuiApp(LoomTuiApp):
         question = ("Recovery: " if request["kind"] == "recovery" else "Question: ") + request["question"] if pending else ""
         self.query_one("#question", Static).update(Text(question))
         plan = state.get("plan") or state.get("plan_event", {}).get("plan", {})
-        lines = [f"{item['status']}: {item['content']}" for item in plan.get("items", [])]
-        self.query_one("#plan", Static).update(Text("\n".join(lines)))
+        items = plan.get("items", [])
+        terminal = sum(item.get("status") in {"completed", "skipped"} for item in items)
+        self.query_one("#plan", Static).update(Text(f"Plan · {terminal}/{len(items)} complete" if items else ""))
         self.query_one("#supersede", Button).disabled = not pending or request["kind"] == "recovery"
         self.query_one("#message", Input).placeholder = "Enter a task and press Enter" if waiting else "Add guidance or answer the pending question"
         self.query_one("#pause", Button).disabled = waiting or task["state"] not in {"running", "queued", "pausing"}
@@ -319,6 +348,35 @@ class SessionTuiApp(LoomTuiApp):
     async def on_input_submitted(self, event):
         await self.submit_text(event.value)
 
+    async def on_compact_event_item_details_requested(self, event: CompactEventItem.DetailsRequested):
+        item = event.item
+        generation, sid = self.subscription_generation, self.session_id
+        digest = item.event.data["artifact"]["sha256"]
+        try:
+            raw = await asyncio.to_thread(self.client.artifact, sid, digest)
+            value = json.loads(raw)
+            feed = self.query_one(CompactEventFeedWidget)
+            if generation != self.subscription_generation or item not in feed.all_items():
+                return
+            item.detail_loading = False
+            item.loaded_artifact = digest
+            feed.load_event_details(
+                item,
+                TuiEvent(
+                    time.time(),
+                    value["type"],
+                    value,
+                    run_id=item.event.run_id,
+                    llm_call_id=value.get("llm_call_id"),
+                    tool_call_id=value.get("tool_call_id"),
+                ),
+            )
+        except (OSError, ServiceError, URLError, ValueError) as exc:
+            if generation == self.subscription_generation:
+                item.detail_loading = False
+                item.detail_error = f"Could not load full details: {exc}. Collapse and expand to retry."
+                item._refresh()
+
     async def on_button_pressed(self, event):
         kind = event.button.id
         if kind == "supersede":
@@ -332,14 +390,29 @@ class SessionTuiApp(LoomTuiApp):
                     self._render_event(envelope)
                 self._notice("Earlier history; live execution continues")
         elif kind == "artifact":
-            selected = self.query_one(EventFeedWidget).get_selected_event()
-            if selected and selected.data.get("artifact"):
+            feed = self.query_one(EventFeedWidget)
+            item = feed.get_item(feed.get_selected_index())
+            selected = feed.get_selected_event()
+            if item and item.kind not in {"message", "result"}:
+                item.toggle_expanded()
+            elif selected and selected.data.get("artifact"):
                 try:
                     raw = await asyncio.to_thread(self.client.artifact, self.session_id, selected.data["artifact"]["sha256"])
                     value = json.loads(raw)
-                    self.query_one(EventFeedWidget).add_event(TuiEvent(time.monotonic(), value["type"], value), pinned_expanded=True)
+                    self.query_one(EventFeedWidget).add_event(
+                        TuiEvent(
+                            time.time(),
+                            value["type"],
+                            value,
+                            run_id=selected.run_id,
+                            llm_call_id=value.get("llm_call_id"),
+                            tool_call_id=value.get("tool_call_id"),
+                        )
+                    )
                 except (OSError, ServiceError, URLError) as exc:
                     self._notice(str(exc))
+            else:
+                self.query_one(EventFeedWidget).toggle_selected_detail()
         else:
             await self.send_control(kind)
 

@@ -13,6 +13,7 @@ from typing import Any
 from rich.errors import MarkupError
 from rich.text import Text
 from textual.app import App, ComposeResult, ScreenStackError
+from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import Footer, Label, RichLog, Static
@@ -1552,6 +1553,7 @@ class LoomTuiApp(App[None]):
     """
 
     BINDINGS = [
+        Binding("ctrl+c", "quit", "Quit", priority=True),
         ("q", "quit", "Quit"),
         ("j", "cursor_down", "Down"),
         ("k", "cursor_up", "Up"),

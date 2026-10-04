@@ -336,6 +336,7 @@ def create_llm_step_function(
     observation_policy: Any = None,
     stream: bool = False,
     execution: Any = None,
+    context_manager: Any = None,
 ):
     if execution is not None:
         return execution
@@ -381,7 +382,7 @@ def create_llm_step_function(
         tools = to_llm_tools(effective_tools) if enable_tool_calling and effective_tools else None
         effective_tool_ids = frozenset(tool.id for tool in effective_tools)
         pending_required_tools = {tool_id for tool_id in required_tools if tool_id in effective_tool_ids}
-        messages = list(build_messages(prompt_context, **(prompt_options or {})))
+        messages = context_manager.project(prompt_context) if context_manager else list(build_messages(prompt_context, **(prompt_options or {})))
         final_response: LlmResponse | None = None
         llm_call_count = 0
         tool_call_count = 0
@@ -390,6 +391,19 @@ def create_llm_step_function(
         invalid_tool_call_attempts = 0
 
         while True:
+            if context_manager:
+                try:
+                    messages, compaction = context_manager.compact(
+                        messages, context_manager.config.get("max_window_chars", 240_000), schema_chars=len(json.dumps(tools or ()))
+                    )
+                except ValueError as exc:
+                    return err(make_loom_error("CONTEXT_WINDOW_EXCEEDED", str(exc), retryable=False))
+                if compaction:
+                    recorded = await _emit_runtime_event(
+                        runtime, {"type": "context.compacted", "run_id": context.run_id, "trace_id": trace_id, "at": runtime.now(), **compaction}
+                    )
+                    if not recorded.ok:
+                        return recorded
             llm_call_count += 1
             llm_call_id = f"{trace_id}-llm-{llm_call_count}"
             tool_choice = step_policy.tool_choice if tools else None
@@ -556,7 +570,7 @@ def create_llm_step_function(
                     messages.append(
                         LlmMessage(
                             "tool",
-                            json.dumps(thaw_json(tool_observation.value), separators=(",", ":")),
+                            json.dumps(thaw_json(tool_observation.value), ensure_ascii=False, separators=(",", ":")),
                             name=tool_call.name,
                             tool_call_id=tool_call.id,
                         )
@@ -1425,7 +1439,7 @@ def _parse_tool_arguments(tool_call: LlmToolCall) -> Result:
 
 
 def _recoverable_tool_failure(error: LoomError | None) -> bool:
-    return bool(error and error.code != "ABORTED" and (error.metadata or {}).get("failureDomain") == "tool")
+    return bool(error and error.code not in {"ABORTED", "EXECUTION_UNKNOWN"} and (error.metadata or {}).get("failureDomain") == "tool")
 
 
 async def _resolve_step_policy(resolver: Any, context: Context) -> Result:

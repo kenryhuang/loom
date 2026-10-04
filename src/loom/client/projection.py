@@ -43,6 +43,8 @@ class SessionProjection:
         elif kind == "task.budget.changed":
             self.snapshot["task"].setdefault("limits", {})["max_tokens"] = data["max_tokens"]
             self._budget()
+        elif kind == "task.outputs.changed":
+            self.snapshot["output_artifacts"] = deepcopy(data["artifacts"])
         elif kind == "run.usage.changed":
             self._budget(used=data["total_tokens"])
         elif kind == "run.started":
@@ -53,10 +55,12 @@ class SessionProjection:
             self.snapshot["run"] = {**run, "id": event.get("run_id"), "state": "running"}
         elif kind.startswith("input."):
             self.snapshot["input_request"] = deepcopy(data)
-        elif kind.startswith("plan."):
+        elif kind.startswith(("plan.", "workflow.")):
             self.snapshot["plan_event"] = deepcopy(data)
             if "plan" in data:
                 self.snapshot["plan"] = deepcopy(data["plan"])
+            if "workflow" in data:
+                self.snapshot["workflow"] = deepcopy(data["workflow"])
         elif kind.startswith("llm.") and kind.endswith(".delta") and isinstance(data.get("delta"), str):
             key = stream_key({**data, "type": kind})
             old = self.streams.get(key, "")
