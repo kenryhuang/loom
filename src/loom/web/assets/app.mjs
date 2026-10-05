@@ -5,11 +5,18 @@ import { reportContent } from "./renderers.mjs";
 import { FeedView } from "./views/feed.mjs";
 import { builtinPanels, PanelsView } from "./views/panels.mjs";
 import { SessionListView } from "./views/sessions.mjs";
+import { TrajectoryView } from "./views/trajectory.mjs";
 
 const $ = (id) => document.getElementById(id);
 let controller,
   catalog,
+  analysisMode = false,
   sending = false;
+const trajectory = new TrajectoryView($("trajectory-page"), {
+  onError: (error) => {
+    if (error.status === 401) showError(error);
+  },
+});
 const list = new SessionListView(
   $("session-list"),
   $("session-search"),
@@ -54,14 +61,52 @@ function connection(value) {
 }
 function currentId() {
   try {
-    return decodeURIComponent(location.hash.replace(/^#\/sessions\//, ""));
+    return decodeURIComponent(
+      /^#\/sessions\/([^/]+)(?:\/trajectory)?$/.exec(location.hash)?.[1] || "",
+    );
   } catch {
     return "";
   }
 }
-async function select(id) {
+function navigateTrajectory(analysis) {
+  if (!controller?.selectedId || analysisMode === analysis) return;
+  const id = controller.selectedId;
+  history.pushState(
+    null,
+    "",
+    `#/sessions/${encodeURIComponent(id)}${analysis ? "/trajectory" : ""}`,
+  );
+  select(id, { analysis, fromHistory: true });
+}
+function setSessionTab(analysis) {
+  analysisMode = analysis;
+  $("conversation-page").hidden = analysis;
+  $("trajectory-page").hidden = !analysis;
+  for (const [id, active] of [
+    ["session-conversation", !analysis],
+    ["session-trajectory", analysis],
+  ]) {
+    $(id).setAttribute("aria-selected", String(active));
+    $(id).tabIndex = active ? 0 : -1;
+  }
+}
+async function select(id, { analysis = false, fromHistory = false } = {}) {
   if (!controller || !id) return;
-  if (controller.selectedId === id && controller.projection) return;
+  if (trajectory.sessionId !== id) trajectory.close();
+  setSessionTab(analysis);
+  if (!fromHistory)
+    history.replaceState(
+      null,
+      "",
+      `#/sessions/${encodeURIComponent(id)}${analysis ? "/trajectory" : ""}`,
+    );
+  if (controller.selectedId === id && controller.projection) {
+    if (analysis && trajectory.sessionId !== id)
+      trajectory.open(controller.api, id, controller.projection.cursor);
+    return;
+  }
+  $("session-conversation").disabled = true;
+  $("session-trajectory").disabled = true;
   notice("");
   feed.snapshot = null;
   feed.reset();
@@ -73,9 +118,10 @@ async function select(id) {
   $("message").disabled = true;
   $("controls").replaceChildren();
   list.update(controller.sessions, id);
-  history.replaceState(null, "", `#/sessions/${encodeURIComponent(id)}`);
   try {
     await controller.select(id);
+    if (controller?.selectedId === id && analysisMode)
+      trajectory.open(controller.api, id, controller.projection.cursor);
   } catch (error) {
     showError(error);
   }
@@ -93,6 +139,9 @@ function renderState(state) {
     : state.run?.reason ||
       "Task execution failed. Resume or send new guidance to retry.";
   panels.update(state);
+  $("session-conversation").disabled = false;
+  $("session-trajectory").disabled = false;
+  trajectory.updateState(state);
   feed.snapshot = state;
   feed.syncMessages(state.messages || []);
   $("history").disabled = !controller.nextBefore;
@@ -174,10 +223,17 @@ async function login(token) {
     chosen =
       next.sessions.find((session) => session.session_id === requested) ||
       next.sessions[0];
-  if (chosen) await select(chosen.session_id);
+  if (chosen)
+    await select(chosen.session_id, {
+      analysis: location.hash.endsWith("/trajectory"),
+    });
 }
 
 function disconnect() {
+  trajectory.close();
+  setSessionTab(false);
+  $("session-conversation").disabled = true;
+  $("session-trajectory").disabled = true;
   if (controller) {
     controller.disconnect();
     controller.api.token = "";
@@ -359,6 +415,26 @@ $("history").addEventListener("click", async () => {
     $("history").disabled = !controller?.nextBefore;
   }
 });
-window.addEventListener("hashchange", () => select(currentId()));
-window.addEventListener("pagehide", () => controller?.disconnect());
+const sessionTabs = [$("session-conversation"), $("session-trajectory")];
+for (const [index, tab] of sessionTabs.entries()) {
+  tab.addEventListener("click", () => navigateTrajectory(index === 1));
+  tab.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === "Home" ? 0 : event.key === "End" ? 1 : 1 - index;
+    if (sessionTabs[next].disabled) return;
+    sessionTabs[next].focus();
+    navigateTrajectory(next === 1);
+  });
+}
+window.addEventListener("hashchange", () =>
+  select(currentId(), {
+    analysis: location.hash.endsWith("/trajectory"),
+    fromHistory: true,
+  }),
+);
+window.addEventListener("pagehide", () => {
+  trajectory.close();
+  controller?.disconnect();
+});
 $("auth-dialog").showModal();

@@ -113,6 +113,13 @@ same `/v1/sessions` commands, snapshots, history, SSE and session-scoped artifac
 as the terminal client. `/v1/web/catalog` adds UI descriptors, not an execution
 API. The unauthenticated routes expose only static assets.
 
+The session header's **Trajectory** button opens a factual analysis page in the
+same authenticated tab. It shows a cursor-pinned model/tool timeline, measured
+tokens, context changes and paginated source evidence. Background jobs and
+completed snapshots are owned by the service; live tasks continue independently.
+See [session trajectory analysis](session-trajectory-analysis.md) for the reuse
+of evaluation v2, API contract and semantic-analysis limitations.
+
 The lifecycle controller loads a snapshot and history, filters history against
 the snapshot cursor, then subscribes after that cursor. Duplicate events are
 ignored. Missing sequence numbers or text offsets trigger a fresh snapshot.

@@ -16,6 +16,166 @@
     "Segoe UI",
     sans-serif;
 }
+.trajectory-page {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px 8px 0 0;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+.trajectory-heading,
+.trajectory-filters,
+.trajectory-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.trajectory-heading h2 {
+  margin: 0;
+}
+.trajectory-heading p {
+  margin: 4px 0 0;
+}
+.trajectory-heading > div {
+  flex: 1;
+}
+.trajectory-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 20px 0;
+}
+.trajectory-metric {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+}
+.trajectory-metric strong {
+  display: block;
+  font-size: 24px;
+  overflow-wrap: anywhere;
+}
+.trajectory-section {
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.trajectory-section summary {
+  cursor: pointer;
+}
+.trajectory-filters {
+  margin: 20px 0 12px;
+}
+.trajectory-filters > * {
+  width: auto;
+  flex: 1;
+  min-width: 120px;
+}
+.trajectory-round {
+  margin: 10px 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.trajectory-round > summary {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 16px;
+  cursor: pointer;
+}
+.trajectory-call-title {
+  min-width: 0;
+  flex: 1;
+}
+.trajectory-call-title > * {
+  display: block;
+}
+.trajectory-call-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.trajectory-call-stats {
+  width: 155px;
+  flex-shrink: 0;
+}
+.trajectory-call-stats meter {
+  display: block;
+  width: 100%;
+  accent-color: var(--accent);
+}
+.trajectory-round-detail {
+  padding: 0 16px 16px;
+  border-top: 1px solid var(--line);
+}
+.trajectory-round-detail > p {
+  overflow-wrap: anywhere;
+}
+.trajectory-tool,
+.trajectory-error {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.trajectory-page pre,
+.trajectory-evidence pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 420px;
+  overflow: auto;
+}
+.trajectory-evidence {
+  width: min(900px, 90vw);
+}
+.evidence-content {
+  margin-top: 14px;
+  max-height: 65vh;
+  overflow: auto;
+}
+.evidence-fields {
+  margin: 0;
+  min-width: 0;
+}
+.evidence-field {
+  padding: 10px 0 10px 12px;
+  border-left: 2px solid var(--line);
+}
+.evidence-field + .evidence-field {
+  border-top: 1px solid var(--line);
+}
+.evidence-field dt {
+  color: var(--accent);
+  font-family: ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
+.evidence-field dd {
+  margin: 6px 0 0;
+  min-width: 0;
+}
+.evidence-text {
+  margin: 0;
+  tab-size: 2;
+  line-height: 1.65;
+}
+.trajectory-evidence > button:first-child {
+  float: right;
+}
+@media (max-width: 900px) {
+  .trajectory-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .trajectory-round > summary {
+    flex-wrap: wrap;
+  }
+  .trajectory-call-title {
+    flex-basis: 100%;
+  }
+}
 * {
   box-sizing: border-box;
 }
@@ -286,6 +446,44 @@ pre {
   display: flex;
   flex: 1;
   min-height: 0;
+}
+.session-tabs {
+  display: flex;
+  flex-shrink: 0;
+  gap: 24px;
+  border-bottom: 1px solid var(--line);
+}
+.session-tabs [role="tab"] {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 12px 2px;
+  color: var(--muted);
+}
+.session-tabs [aria-selected="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.session-tab-panel {
+  min-width: 0;
+}
+.conversation-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  gap: 10px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+.conversation-toolbar .controls {
+  padding: 0;
+  min-height: 0;
+}
+.conversation-toolbar .feed-actions {
+  margin-left: auto;
 }
 .conversation {
   min-width: 0;

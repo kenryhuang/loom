@@ -92,6 +92,29 @@ test("browser app connects to real service, answers input, creates sessions, con
     assert.equal($("event-feed").querySelector(".process-group").open, false);
     assert.equal($("session-objective"), null);
     assert.ok($("event-feed").querySelector(".task-block .result"));
+    $("session-trajectory").click();
+    await until(() =>
+      $("trajectory-page").querySelector(".trajectory-metrics"),
+    );
+    assert.equal(location.hash, `#/sessions/${questionId}/trajectory`);
+    assert.equal($("conversation-page").hidden, true);
+    assert.match(
+      $("trajectory-page").textContent,
+      /Semantic evaluation has not run/,
+    );
+    history.back();
+    await until(() => !$("conversation-page").hidden);
+    assert.equal($("trajectory-page").hidden, true);
+    history.forward();
+    await until(() => !$("trajectory-page").hidden);
+    assert.equal($("session-trajectory").getAttribute("aria-selected"), "true");
+    assert.equal($("trajectory-page").getAttribute("role"), "tabpanel");
+    $("session-conversation").click();
+    await until(() => !$("conversation-page").hidden);
+    assert.equal(location.hash, `#/sessions/${questionId}`);
+    assert.equal($("session-conversation").getAttribute("aria-selected"), "true");
+    assert.equal($("session-trajectory").tabIndex, -1);
+    assert.ok($("event-feed").querySelector(".task-block .result"));
     assert.equal($("toggle-details").textContent, "Expand all");
     $("toggle-details").click();
     assert.equal(

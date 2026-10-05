@@ -62,23 +62,38 @@
             role="alert"
             hidden
           ></section>
-          <section
-            id="controls"
-            class="controls"
-            aria-label="Task controls"
-          ></section>
         </div>
-        <div class="workspace-body">
+        <div class="session-tabs" role="tablist" aria-label="Session views">
+          <button
+            id="session-conversation"
+            role="tab"
+            aria-selected="true"
+            aria-controls="conversation-page"
+            tabindex="0"
+            disabled
+          >Conversation</button>
+          <button
+            id="session-trajectory"
+            role="tab"
+            aria-selected="false"
+            aria-controls="trajectory-page"
+            tabindex="-1"
+            disabled
+          >Trajectory</button>
+        </div>
+        <div
+          id="conversation-page"
+          class="workspace-body session-tab-panel"
+          role="tabpanel"
+          aria-labelledby="session-conversation"
+          tabindex="0"
+        >
           <section class="conversation" aria-label="Session conversation">
-            <div class="feed-heading">
-              <h2>Conversation</h2>
+            <div class="conversation-toolbar">
+              <section id="controls" class="controls" aria-label="Task controls"></section>
               <div class="feed-actions">
-                <button id="toggle-details" class="quiet" disabled>
-                  Expand all
-                </button>
-                <button id="history" class="quiet" disabled>
-                  Earlier events
-                </button>
+                <button id="toggle-details" class="quiet" disabled>Expand all</button>
+                <button id="history" class="quiet" disabled>Earlier events</button>
               </div>
             </div>
             <div id="event-feed" class="event-feed">
@@ -118,6 +133,14 @@
             </form>
           </section>
         </div>
+        <section
+          id="trajectory-page"
+          class="trajectory-page session-tab-panel"
+          role="tabpanel"
+          aria-labelledby="session-trajectory"
+          tabindex="0"
+          hidden
+        ></section>
       </main>
       <aside class="session-details" aria-label="Session information">
         <header class="details-header">

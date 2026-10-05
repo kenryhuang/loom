@@ -48,6 +48,18 @@ def linked_tools_for_round(
         legacy_owners = {item.id for item in rounds if _is_legacy_json_tool_id(call_id, item.llm_call_id)}
         if tool_id_counts.get(call_id) == 1 and legacy_owners == {round_item.id}:
             linked.append((tool, "legacy_id_convention"))
+    # A checkpoint can preserve a managed call across an executor restart.
+    # The resumed tool has a new loop ID, but its trace/call identity is stable.
+    for tool in graph.tool_calls:
+        if _same_step(tool, round_item) or not _same_trace(tool, round_item):
+            continue
+        if not tool.tool_call_id or not _is_managed_json_tool_id(tool.tool_call_id, round_item.llm_call_id):
+            continue
+        owners = [item for item in graph.llm_rounds if _same_trace(item, tool)
+                  and _is_managed_json_tool_id(tool.tool_call_id, item.llm_call_id)]
+        calls = [item for item in graph.tool_calls if _same_trace(item, tool) and item.tool_call_id == tool.tool_call_id]
+        if len(owners) == len(calls) == 1 and not (_explicit_parent_ids(tool) - {round_item.llm_call_id}):
+            linked.append((tool, "managed_resume_id_convention"))
     return tuple(linked)
 
 
@@ -69,6 +81,10 @@ def _same_step(left: LlmRoundEpisode | ToolCallEpisode, right: LlmRoundEpisode) 
         and left.trace_id == right.trace_id
         and left.step_number == right.step_number
     )
+
+
+def _same_trace(left, right) -> bool:
+    return (left.run_id, left.trace_id, left.step_number) == (right.run_id, right.trace_id, right.step_number)
 
 
 def _explicit_parent_ids(tool: ToolCallEpisode) -> set[str]:
@@ -117,7 +133,15 @@ def _native_tool_call_ids(round_item: LlmRoundEpisode) -> tuple[str, ...]:
 
 
 def _is_legacy_json_tool_id(tool_call_id: str, llm_call_id: str) -> bool:
-    return re.fullmatch(rf"{re.escape(llm_call_id)}-json-tool-[0-9]+", tool_call_id) is not None
+    if re.fullmatch(rf"{re.escape(llm_call_id)}-json-tool-[0-9]+", tool_call_id):
+        return True
+    return _is_managed_json_tool_id(tool_call_id, llm_call_id)
+
+
+def _is_managed_json_tool_id(tool_call_id: str, llm_call_id: str) -> bool:
+    # ManagedStep emits <trace>-llm-<call> and <trace>-json-<action>-<call>.
+    managed = re.fullmatch(r"(.+)-llm-([0-9]+)", llm_call_id)
+    return managed is not None and re.fullmatch(rf"{re.escape(managed[1])}-json-[0-9]+-{managed[2]}", tool_call_id) is not None
 
 
 __all__ = ["linked_tools_for_round", "tool_output"]

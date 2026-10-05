@@ -48,9 +48,14 @@ class ServiceHTTPServer(ThreadingHTTPServer):
         self.web_frontend = web_frontend or None
         self.closing = threading.Event()
         super().__init__(address, SessionHandler)
+        from loom.service.trajectory import SessionTrajectory
+
+        self.trajectory = SessionTrajectory(service.store)
 
     def server_close(self):
         self.closing.set()
+        if hasattr(self, "trajectory"):
+            self.trajectory.close()
         super().server_close()
 
 
@@ -171,6 +176,27 @@ class SessionHandler(BaseHTTPRequestHandler):
             sid, route = parts[2:4]
             if method == "POST" and route == "commands" and len(parts) == 4:
                 self._json(202, service.submit(sid, self._body()))
+            elif route == "trajectory":
+                analysis = self.server.trajectory
+                if method == "POST" and len(parts) == 4:
+                    if self._body() != {}:
+                        raise ServiceError("Trajectory analysis accepts an empty object")
+                    self._json(202, analysis.start(sid))
+                elif method == "GET" and len(parts) == 5:
+                    self._json(200, analysis.get(sid, parts[4]))
+                elif method == "GET" and len(parts) == 6 and parts[5] == "round":
+                    values = query.get("round_id", [])
+                    if len(values) != 1 or not values[0]:
+                        raise ServiceError("A single round_id is required")
+                    self._json(200, analysis.round(sid, parts[4], values[0]))
+                elif method == "GET" and len(parts) == 6 and parts[5] == "evidence":
+                    field = query.get("field", [None])
+                    if len(field) != 1 or field[0] == "":
+                        raise ServiceError("Invalid evidence field")
+                    self._json(200, analysis.evidence(sid, parts[4], self._number(query, "line", 0, 1), field[0],
+                                                     self._number(query, "start", 0), self._number(query, "limit", 8000, 1, 32000)))
+                else:
+                    raise ServiceError("Route not found", 404)
             elif method == "GET" and route == "snapshot" and len(parts) == 4:
                 self._json(200, service.snapshot(sid))
             elif method == "GET" and route == "processes" and len(parts) == 4:

@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from loom.trace_analysis.graph import build_episode_graph
 from loom.trace_analysis.links import linked_tools_for_round, tool_output
 from loom.trace_analysis.schemas import NormalizedEvent
@@ -62,6 +64,19 @@ def test_linked_tools_uses_unique_native_tool_call_id():
     linked = linked_tools_for_round(graph, graph.llm_rounds[0])
 
     assert [(tool.tool_call_id, basis) for tool, basis in linked] == [("native-call", "native_tool_call_id")]
+
+
+def test_managed_call_can_resume_in_another_loop_only_with_unambiguous_trace_identity():
+    requested = _event("llm.requested", hash="request", llm_call_id="trace-1-llm-9")
+    completed = _event("llm.completed", hash="response", llm_call_id="trace-1-llm-9", payload={"response": {"tool_calls": []}})
+    tool = replace(_event("tool.completed", hash="tool", tool_call_id="trace-1-json-0-9"), loop_id="resumed")
+    graph = build_episode_graph((requested, completed, tool))
+    assert [(item.tool_call_id, basis) for item, basis in linked_tools_for_round(graph, graph.llm_rounds[0])] == [
+        ("trace-1-json-0-9", "managed_resume_id_convention")]
+    ambiguous = build_episode_graph((requested, completed, replace(requested, loop_id="another"), tool))
+    assert all(linked_tools_for_round(ambiguous, item) == () for item in ambiguous.llm_rounds)
+    other_run = build_episode_graph((requested, completed, replace(tool, run_id="other")))
+    assert linked_tools_for_round(other_run, other_run.llm_rounds[0]) == ()
 
 
 def test_linked_tools_uses_unique_legacy_json_action_id_and_leaves_ambiguity_unlinked():

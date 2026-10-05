@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -42,7 +43,7 @@ def test_browser_assets_are_public_but_session_data_and_catalog_are_private(api)
             assert response.status == 200 and response.headers["Content-Type"].startswith(mime)
             assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
             assert "private-test-token" not in body
-    for route in ("/v1/sessions", "/v1/web/catalog", "/v1/sessions/private/processes"):
+    for route in ("/v1/sessions", "/v1/web/catalog", "/v1/sessions/private/processes", "/v1/sessions/private/trajectory/job"):
         with pytest.raises(urllib.error.HTTPError) as denied:
             urllib.request.urlopen(client.url + route)
         assert denied.value.code == 401
@@ -244,3 +245,35 @@ def test_worker_stream_offsets_are_durable_and_large_detail_is_lazy(api):
     detail = service.events(sid)[-1]["payload"]
     assert len(json.dumps(detail)) < 2000
     assert json.loads(client.artifact(sid, detail["artifact"]["sha256"]))["output"] == "x" * 40000
+
+
+def test_trajectory_http_jobs_and_evidence_are_scoped_and_validated(api):
+    service, _server, client, path = api
+    sid, other = new(client, path), new(client, path, "other")
+    route = f"/v1/sessions/{sid}/trajectory"
+    with pytest.raises(ServiceError) as rejected:
+        client._json(route, {"trace_path": "/etc/passwd"})
+    assert rejected.value.status == 400
+    job = client._json(route, {})
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        result = client._json(route + "/" + job["id"])
+        if result["state"] == "completed":
+            break
+        assert result["state"] != "failed", result
+        time.sleep(.02)
+    assert result["state"] == "completed"
+    assert result["analysis"]["semantic_status"] == "not_evaluated"
+    assert client._json(route, {})["id"] == job["id"]
+    detail = client._json(route + "/" + job["id"] + "/evidence?line=1&limit=20")
+    assert detail["seq"] == 1
+    assert detail["returned_chars"] <= 20
+    for suffix in ("/evidence?line=0", "/evidence?line=1&limit=32001", "/evidence?line=1&field=missing",
+                   "/round", "/round?round_id=x&round_id=y"):
+        with pytest.raises(ServiceError) as invalid:
+            client._json(route + "/" + job["id"] + suffix)
+        assert invalid.value.status == 400
+    with pytest.raises(ServiceError) as denied:
+        client._json(f"/v1/sessions/{other}/trajectory/{job['id']}/evidence?line=1")
+    assert denied.value.status == 404
+    assert service.snapshot(sid)["event_cursor"] == job["source_cursor"]

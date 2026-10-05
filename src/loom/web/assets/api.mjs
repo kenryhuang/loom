@@ -93,6 +93,29 @@ export class SessionApi {
   processes(id, signal) {
     return this.json(this.path(id, "processes"), { signal });
   }
+  startTrajectory(id, signal) {
+    return this.json(this.path(id, "trajectory"), { body: {}, signal });
+  }
+  trajectory(id, analysisId, signal) {
+    return this.json(
+      this.path(id, `trajectory/${encodeURIComponent(analysisId)}`),
+      { signal },
+    );
+  }
+  trajectoryRound(id, analysisId, roundId, signal) {
+    return this.json(
+      `${this.path(id, `trajectory/${encodeURIComponent(analysisId)}/round`)}?${new URLSearchParams({ round_id: roundId })}`,
+      { signal },
+    );
+  }
+  trajectoryEvidence(id, analysisId, ref, start = 0, signal) {
+    const query = new URLSearchParams({ line: ref.line_number, start });
+    if (ref.field_path) query.set("field", ref.field_path);
+    return this.json(
+      `${this.path(id, `trajectory/${encodeURIComponent(analysisId)}/evidence`)}?${query}`,
+      { signal },
+    );
+  }
   history(id, { before, after, runId, view, limit = 200, signal } = {}) {
     const query = new URLSearchParams({ limit });
     if (before != null) query.set("before", before);
