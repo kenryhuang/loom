@@ -9,6 +9,7 @@ venv/
 env/
 ENV/
 .uv-cache/
+node_modules/
 
 # Python bytecode and caches
 __pycache__/

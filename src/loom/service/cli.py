@@ -16,9 +16,10 @@ def main(argv=None):
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--max-active-runs", type=int, default=2)
+    parser.add_argument("--no-web", action="store_true", help="Disable the bundled browser frontend.")
     args = parser.parse_args(argv)
     service = LoomService(args.data_dir, config_path=args.config, max_active_runs=args.max_active_runs)
-    server = ServiceHTTPServer((args.host, args.port), service, installation_token(args.data_dir / "credential"))
+    server = ServiceHTTPServer((args.host, args.port), service, installation_token(args.data_dir / "credential"), web_frontend=not args.no_web)
     service.start()
     previous = {}
 
@@ -28,6 +29,8 @@ def main(argv=None):
     for signum in (signal.SIGINT, signal.SIGTERM):
         previous[signum] = signal.signal(signum, shutdown)
     print(f"Loom service: http://{args.host}:{server.server_port}; credential file: {(args.data_dir / 'credential').resolve()}", flush=True)
+    if not args.no_web:
+        print(f"Web frontend: http://{args.host}:{server.server_port}/web/", flush=True)
     try:
         server.serve_forever()
     finally:

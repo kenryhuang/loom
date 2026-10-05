@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Loom · Sessions</title>
+    <link rel="stylesheet" href="/web/assets/styles.css" />
+    <script type="module" src="/web/assets/app.mjs"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <header class="brand">
+          <span class="brand-mark">L</span>
+          <div><strong>Loom</strong><small>Session workspace</small></div>
+        </header>
+        <button id="new-session" class="primary" disabled>New session</button>
+        <div class="section-heading">
+          <h2>Sessions</h2>
+          <button
+            id="refresh-sessions"
+            class="quiet"
+            aria-label="Refresh sessions"
+          >
+            ↻
+          </button>
+        </div>
+        <input
+          id="session-search"
+          type="search"
+          placeholder="Find a session…"
+          aria-label="Find a session"
+        />
+        <nav id="session-list" aria-label="Sessions">
+          <p class="muted">Connect to load sessions.</p>
+        </nav>
+        <footer class="sidebar-footer">
+          <span id="connection" class="connection" role="status"
+            >Disconnected</span
+          ><button id="disconnect" class="quiet">Disconnect</button>
+        </footer>
+      </aside>
+      <main class="workspace">
+        <div class="workspace-top">
+          <header class="workspace-header">
+            <div>
+              <small class="eyebrow">LOOM SERVICE</small>
+              <h1 id="session-title">Your work, in progress.</h1>
+              <p id="session-objective" class="muted">
+                Connect to a session to follow its work and keep the
+                conversation going.
+              </p>
+            </div>
+            <span id="task-status" class="status">Ready</span>
+          </header>
+          <div
+            id="notice"
+            class="notice"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></div>
+          <section
+            id="run-failure"
+            class="notice error"
+            role="alert"
+            hidden
+          ></section>
+          <section
+            id="controls"
+            class="controls"
+            aria-label="Task controls"
+          ></section>
+        </div>
+        <div class="workspace-body">
+          <section class="conversation" aria-label="Session conversation">
+            <div class="feed-heading">
+              <h2>Conversation</h2>
+              <button id="history" class="quiet" disabled>
+                Earlier events
+              </button>
+            </div>
+            <div id="event-feed" class="event-feed">
+              <div class="empty-state">
+                <span class="empty-mark">L</span>
+                <h2>A place for ongoing work.</h2>
+                <p>
+                  Choose a session or start a new one.<br />Progress and results
+                  will appear here.
+                </p>
+              </div>
+            </div>
+            <section
+              id="pending-input"
+              class="pending-input"
+              aria-label="Pending question"
+              hidden
+            ></section>
+            <form id="composer" class="composer">
+              <label id="composer-label" for="message">Message</label>
+              <textarea
+                id="message"
+                rows="3"
+                placeholder="Give the task a direction…"
+                disabled
+              ></textarea>
+              <div class="composer-footer">
+                <small id="composer-hint">Ctrl / ⌘ + Enter to send</small>
+                <div>
+                  <button id="redirect" type="button" hidden>
+                    Redirect task</button
+                  ><button id="send" class="primary" disabled>
+                    Send message
+                  </button>
+                </div>
+              </div>
+            </form>
+          </section>
+        </div>
+      </main>
+      <aside class="session-details" aria-label="Session information">
+        <header class="details-header">
+          <h2>Session info</h2>
+          <p class="muted small">Context, workflow and outputs</p>
+        </header>
+        <div id="session-panels" class="session-panels"></div>
+      </aside>
+    </div>
+    <dialog id="auth-dialog" class="auth-dialog">
+      <form id="auth-form">
+        <span class="brand-mark">L</span>
+        <h1>Connect to Loom</h1>
+        <p class="muted">
+          Use the credential file printed by <code>loom serve</code>.
+        </p>
+        <label for="credential">Service credential</label
+        ><input
+          id="credential"
+          type="password"
+          required
+          autocomplete="off"
+          placeholder="Paste your service credential"
+        />
+        <label class="file-label" for="credential-file"
+          >Or load the credential file</label
+        ><input id="credential-file" type="file" />
+        <p class="muted small">
+          The credential is kept in memory for this tab.
+        </p>
+        <p id="auth-error" class="error" role="alert"></p>
+        <button class="primary" id="connect">Connect</button>
+      </form>
+    </dialog>
+    <dialog id="create-dialog">
+      <form id="create-form">
+        <div class="dialog-heading">
+          <h2>New session</h2>
+          <button
+            class="quiet"
+            type="button"
+            data-close="create-dialog"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+        <label for="create-template">Task type</label
+        ><select id="create-template"></select>
+        <p id="template-description" class="muted small"></p>
+        <label for="create-objective"
+          >Initial task <span class="muted">(optional)</span></label
+        ><textarea
+          id="create-objective"
+          rows="3"
+          placeholder="What should Loom work on?"
+        ></textarea>
+        <label for="create-title"
+          >Session title <span class="muted">(optional)</span></label
+        ><input id="create-title" placeholder="A name for this work" />
+        <div id="workspace-field" hidden>
+          <label for="create-workspace">Workspace path</label
+          ><input
+            id="create-workspace"
+            placeholder="/absolute/path/to/project"
+          />
+        </div>
+        <label for="create-model">Model</label
+        ><select id="create-model"></select>
+        <div id="spec-field" hidden>
+          <label for="create-spec">Task specification (JSON)</label
+          ><textarea id="create-spec" rows="8" spellcheck="false"></textarea>
+        </div>
+        <p id="create-error" class="error" role="alert"></p>
+        <button class="primary" id="create-submit">Create session</button>
+      </form>
+    </dialog>
+  </body>
+</html>

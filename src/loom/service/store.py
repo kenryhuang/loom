@@ -203,6 +203,13 @@ class SessionStore:
                     )
                 if task["state"] == "idle":
                     task["state"] = "queued"
+                elif task["state"] == "failed" and not state.get("workspace_blocked") and not (request and request["state"] == "pending"):
+                    run = state["run"]
+                    if run and run["state"] == "running":
+                        # Wait for the failing worker's cleanup before retrying.
+                        run["retry_requested"] = cid
+                    else:
+                        self.queue_resume(db, state, cid)
             elif kind in {"answer_input", "supersede_input"}:
                 request = state["input_request"]
                 request["state"] = "answered" if kind == "answer_input" else "superseded"
@@ -221,18 +228,7 @@ class SessionStore:
                 state["control"] = control
                 task["state"] = "pausing" if state["run"] and state["run"]["state"] == "running" else "paused"
             elif kind == "resume":
-                state["control"] = None
-                run = state["run"]
-                if run and run["state"] == "suspended":
-                    run["time_budget_start_seconds"] = run.get("active_seconds", 0)
-                    self.append(
-                        db,
-                        state,
-                        "run.time_budget.renewed",
-                        {"active_seconds": run["time_budget_start_seconds"], "max_duration_seconds": task["limits"]["max_duration_seconds"]},
-                        command_id=cid,
-                    )
-                task["state"] = "queued"
+                self.queue_resume(db, state, cid)
             elif kind == "complete_task":
                 task["state"] = "completed"
                 state["control"] = None
@@ -253,6 +249,18 @@ class SessionStore:
                 after(state, lambda kind, payload: self.append(db, state, kind, payload), db)
             self._save(db, state)
             return receipt
+
+    def queue_resume(self, db, state, command_id):
+        state["control"] = None
+        run = state["run"]
+        if run and run["state"] == "suspended":
+            run["time_budget_start_seconds"] = run.get("active_seconds", 0)
+            self.append(
+                db, state, "run.time_budget.renewed",
+                {"active_seconds": run["time_budget_start_seconds"], "max_duration_seconds": state["task"]["limits"]["max_duration_seconds"]},
+                command_id=command_id,
+            )
+        state["task"]["state"] = "queued"
 
     def applied(self, db, state, cid):
         row = db.execute("SELECT state FROM commands WHERE id=?", (cid,)).fetchone()

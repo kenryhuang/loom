@@ -277,3 +277,49 @@ def test_pause_at_question_checkpoint_preserves_pending_request(tmp_path):
         assert execution.operations == ["ask"]
 
     asyncio.run(scenario())
+
+
+def test_resume_exhausted_workflow_response_requests_model_again_and_preserves_usage(tmp_path):
+    async def scenario():
+        execution = Execution()
+        invalid = LlmResponse(final("old answer").content, usage=TokenUsage(2, 1, 3))
+        failed = await run_managed(tmp_path, Provider([invalid, invalid]), execution, planning=PlanningRuntime("auto"))
+        assert not failed.ok and failed.error.code == "WORKFLOW_ROUTE_FAILED"
+        assert execution.checkpoint["phase"] == "after_llm"
+        assert execution.checkpoint["missing_retries"] == 1
+        execution.inputs = [{"seq": 10, "content": "Now run the query sample"}]
+        provider = Provider([LlmResponse("", (LlmToolCall("route", "continue_react", '{"reason":"Run query"}'),))])
+        resumed = await run_managed(tmp_path, provider, execution, planning=PlanningRuntime("auto"))
+        assert resumed.ok and resumed.value.control.kind == "continue"
+        assert len(provider.calls) == 1
+        assert any(message.role == "user" and "Now run the query sample" in message.content for message in provider.calls[0])
+        assert execution.checkpoint["llm_calls"] == 3
+        assert execution.checkpoint["usage"].total_tokens == 6
+        assert execution.operations == ["route"]
+
+    asyncio.run(scenario())
+
+
+def test_resume_keeps_valid_route_response_after_a_missing_tool_retry(tmp_path):
+    async def scenario():
+        class PauseValidResponse(Execution):
+            pause = True
+
+            def boundary(self, checkpoint):
+                directive = super().boundary(checkpoint)
+                if checkpoint["phase"] == "after_llm" and checkpoint["response"].tool_calls and self.pause:
+                    directive["control"] = {"kind": "paused"}
+                return directive
+
+        execution = PauseValidResponse()
+        provider = Provider([final(), LlmResponse("", (LlmToolCall("route", "continue_react", '{"reason":"Direct"}'),))])
+        paused = await run_managed(tmp_path, provider, execution, planning=PlanningRuntime("auto"))
+        assert paused.ok and paused.value.control.kind == "paused"
+        assert execution.checkpoint["missing_retries"] == 1
+        execution.pause = False
+        resumed = await run_managed(tmp_path, provider, execution, planning=PlanningRuntime("auto"))
+        assert resumed.ok and resumed.value.control.kind == "continue"
+        assert len(provider.calls) == 2
+        assert execution.operations == ["route"]
+
+    asyncio.run(scenario())

@@ -51,3 +51,14 @@ class FakeProvider:
 
 def provider_factory(state):
     return FakeProvider(state)
+
+
+class MissingRouteProvider:
+    model = "missing-route-test"
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        return ok(LlmResponse('{"action":{"kind":"none","input":{"report":"Old task finished"}}}', usage=TokenUsage(2, 1, 3)))
+
+
+def routing_failure_provider_factory(state):
+    return FakeProvider(state) if state["run"].get("failure") else MissingRouteProvider()

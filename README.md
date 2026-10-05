@@ -192,6 +192,17 @@ History pages backward through stored events; Detail opens a selected large
 execution artifact. The feed retains up to 500 visible rows. `Ctrl+C` or `Ctrl+Q` disconnects
 the frontend; the backend keeps running.
 
+`loom serve` also hosts a bundled browser frontend at
+`http://127.0.0.1:8765/web/` (the actual URL is printed on startup).
+Open it and paste the service credential, or load the printed credential file.
+The browser supports session creation and switching, messages and input answers,
+task controls, live events, Markdown/JSON results, workflow and artifact views.
+It shares the same service and sessions with the TUI. Credentials stay in tab
+memory, so reload requires reconnecting; closing the tab leaves tasks running.
+No Node installation or separate frontend server is needed. Use `loom serve
+--no-web` to serve only the API. See [Web frontend](docs/web-frontend.md) for
+architecture, extension points and frontend verification.
+
 Commands can also be used without the TUI:
 
 ```bash
@@ -212,6 +223,9 @@ explicitly closes the task after execution is idle or paused. User input has
 separate `accepted` and `applied` states: guidance applies at a model/tool
 boundary, and cancels calls from an older response that have not executed.
 `request_input` releases the worker while the task awaits an answer.
+Sending new guidance to a failed execution retries it after worker cleanup;
+paused executions still require Resume. Recovery questions and blocked
+workspaces retain their verification requirements.
 
 When a worker disappears during a side effect, the task enters `recovering`.
 Verify the workspace before answering the recovery question with JSON such as
@@ -235,7 +249,7 @@ The HTTP API uses bearer credentials, JSON commands under `/v1/sessions`,
 consistent snapshots, paged history and SSE with persisted session sequence
 numbers. See the [design](docs/superpowers/specs/2026-10-03-persistent-service-sessions-design.md)
 for the protocol and lifecycle. Keep the data directory between restarts.
-This release targets macOS/Linux, a single local user and a terminal frontend.
+This release targets macOS/Linux, a single local user, and terminal/browser frontends.
 Domain plugins and automatic workflow learning remain separate follow-up work.
 Verification uses deterministic providers and spawned processes; live-provider
 integration, prolonged load and storage-failure handling still require separate

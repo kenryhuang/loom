@@ -71,7 +71,7 @@ class LoomService:
         if state["run"]:
             state["streams"] = state["run"].pop("streams", {})
             state["stream_origins"] = state["run"].pop("stream_origins", {})
-            for key in ("checkpoint", "process", "attempt_id", "counters", "stream_offsets", "current_operation"):
+            for key in ("checkpoint", "process", "attempt_id", "counters", "stream_offsets", "current_operation", "retry_requested"):
                 state["run"].pop(key, None)
         state["messages"] = state["messages"][-200:]
         return state
@@ -384,6 +384,7 @@ class LoomService:
             elif kind == "status":
                 response = {"input_cursor": state["input_cursor"]}
             elif kind == "result":
+                run.pop("failure", None)
                 state["context"] = encode(value.context)
                 outputs = (value.context.state.scratch or {}).get("output_artifacts")
                 if outputs:
@@ -453,6 +454,7 @@ class LoomService:
             self._cleanup_groups(state, emit, db)
             state["epoch"] += 1
             run["state"] = "suspended"
+            retry_requested = run.pop("retry_requested", None)
             if operations:
                 state["task"]["state"] = "recovering"
                 state["input_request"] = {
@@ -466,6 +468,8 @@ class LoomService:
                 emit("input.requested", state["input_request"])
             elif state["input_request"] and state["input_request"]["state"] == "pending":
                 state["task"]["state"] = "awaiting_input"
+            elif retry_requested and not state.get("workspace_blocked") and not state["control"]:
+                self.store.queue_resume(db, state, retry_requested)
             else:
                 state["task"]["state"] = "paused" if state["control"] else "failed"
             emit("run.recovery.required", {"reason": reason, "operations": operations})

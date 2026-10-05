@@ -221,6 +221,17 @@ class ManagedStep:
                 "input_cursor": getattr(self.execution, "input_cursor", 0),
                 "missing_retries": 0,
             }
+        if restored and cp["phase"] == "after_llm" and self.planning:
+            policy = self.planning.step_policy(cp["context"])
+            response = cp["response"]
+            if policy and policy.require_tool_call and cp["missing_retries"] >= policy.missing_tool_call_retries and not response.tool_calls:
+                parsed = _parse_decision(response.content, cp["trace_id"])
+                actions = _json_tool_actions(parsed, frozenset(t.id for t in cp["context"].affordances.tools))
+                if not actions:
+                    # An exhausted routing response cannot make progress by being
+                    # replayed. Retry the model, retaining observations and usage.
+                    cp["messages"].extend([LlmMessage("assistant", response.content or ""), LlmMessage("user", policy.retry_prompt)])
+                    cp.update(phase="before_llm", response=None, missing_retries=0)
         while True:
             suspended = await self._boundary(cp, runtime)
             if suspended is not None:

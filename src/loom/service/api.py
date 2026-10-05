@@ -36,11 +36,16 @@ def installation_token(path):
 class ServiceHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, service, token):
+    def __init__(self, address, service, token, *, web_frontend=True):
         if not token or not all(ipaddress.ip_address(info[4][0]).is_loopback for info in socket.getaddrinfo(address[0], address[1])):
             raise ServiceError("Service requires a token and loopback address")
         self.service = service
         self.token = token
+        if web_frontend is True:
+            from loom.web.frontend import WebFrontend
+
+            web_frontend = WebFrontend()
+        self.web_frontend = web_frontend or None
         self.closing = threading.Event()
         super().__init__(address, SessionHandler)
 
@@ -115,15 +120,36 @@ class SessionHandler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method):
         try:
-            if not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + self.server.token):
-                self.close_connection = True
-                raise ServiceError("Service credential required", 401, "UNAUTHORIZED")
             parsed = urlsplit(self.path)
             query = parse_qs(parsed.query, keep_blank_values=True)
             if "token" in query:
                 raise ServiceError("Credentials must use Authorization header")
+            if method == "GET" and self.server.web_frontend:
+                asset = self.server.web_frontend.asset(parsed.path)
+                if asset:
+                    body, content_type = asset
+                    self.send_response(200)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.send_header("Referrer-Policy", "no-referrer")
+                    self.send_header(
+                        "Content-Security-Policy",
+                        "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+                        "img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+                    )
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+            if not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + self.server.token):
+                self.close_connection = True
+                raise ServiceError("Service credential required", 401, "UNAUTHORIZED")
             parts = parsed.path.strip("/").split("/")
             service = self.server.service
+            if method == "GET" and parts == ["v1", "web", "catalog"] and self.server.web_frontend:
+                self._json(200, self.server.web_frontend.catalog(service))
+                return
             if parts == ["v1", "sessions"]:
                 if method == "POST":
                     body = self._body()

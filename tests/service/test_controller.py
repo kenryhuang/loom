@@ -5,7 +5,7 @@ import pytest
 
 from loom.runtime.checkpoints import encode
 from loom.service.controller import LoomService
-from tests.service.fakes import provider_factory
+from tests.service.fakes import provider_factory, routing_failure_provider_factory
 
 
 def wait_state(service, sid, wanted, timeout=10):
@@ -222,5 +222,59 @@ def test_empty_session_waits_across_restart_then_first_message_executes(tmp_path
         assert done["run"]["state"] == "completed"
         assert done["messages"][0]["content"] == "Maintain parser"
         assert done["messages"][0]["state"] == "applied"
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("command_type", ["resume", "submit_message"])
+def test_route_failure_can_retry_and_new_guidance_is_applied(tmp_path, command_type):
+    service = LoomService(tmp_path / "data", provider_factory=routing_failure_provider_factory).start()
+    try:
+        sid = service.create("route", {"objective": "Maintain", "workspace": str(tmp_path)})["session_id"]
+        failed = wait_state(service, sid, "failed")
+        deadline = time.monotonic() + 3
+        while sid in service.active:
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        assert failed["run"]["failure"]["code"] == "WORKFLOW_ROUTE_FAILED"
+        assert failed["token_budget"]["used"] == 6
+        payload = {"content": "Run the new query sample"} if command_type == "submit_message" else {}
+        receipt = command(service, sid, command_type, **payload)
+        done = wait_state(service, sid, "idle")
+        assert done["run"]["id"] == failed["run"]["id"]
+        assert "failure" not in done["run"]
+        assert done["token_budget"]["used"] == 6
+        events = service.events(sid, limit=1000)
+        assert sum(event["type"] == "llm.requested" for event in events) == 4
+        if command_type == "submit_message":
+            message = next(message for message in done["messages"] if message["command_id"] == receipt["command_id"])
+            assert message["state"] == "applied"
+            assert "Run the new query sample" in done["task"]["objective"]
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("guard", [None, "recovery", "blocked", "pause"])
+def test_guidance_at_worker_failure_waits_for_cleanup_and_preserves_guards(tmp_path, guard):
+    service = LoomService(tmp_path / "data")
+    try:
+        sid = create(service, tmp_path / "workspace")
+        service.prepare_attempt(sid)
+        service.store.update(sid, lambda state, emit, db: state["task"].update(state="failed"))
+        command(service, sid, "submit_message", content="Retry with this new guidance")
+        assert service.snapshot(sid)["task"]["state"] == "failed"
+
+        def block(state, emit, db):
+            if guard == "recovery":
+                state["input_request"] = {"id": "verify", "kind": "recovery", "state": "pending"}
+            if guard == "pause":
+                state["control"] = {"kind": "paused", "reason": "User pause"}
+
+        service.store.update(sid, block)
+        if guard == "blocked":
+            service._cleanup_groups = lambda state, emit, db: state.update(workspace_blocked=[{"pid": 999}])
+        service.recover(sid, "Worker exited after failure")
+        assert service.snapshot(sid)["task"]["state"] == {None: "queued", "recovery": "awaiting_input", "blocked": "failed", "pause": "paused"}[guard]
+        assert "retry_requested" not in service.snapshot(sid)["run"]
     finally:
         service.close()
