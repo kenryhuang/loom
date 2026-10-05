@@ -33,6 +33,7 @@ export class FeedView {
       this.detailMode = null;
       this.processes = [];
       this.processPages = new Map();
+      this.latestSummaries = new Map();
     }
     this.groups = new Map();
     this.messages = new Map();
@@ -221,13 +222,15 @@ export class FeedView {
         process?.start_seq || event.seq || this.snapshot?.event_cursor || 0;
       node.open = this.detailMode === true;
       const rows = element("div", "process-records");
+      const latest = this.latestSummaries.get(`group:${key}`);
       node.append(summary, rows);
       this.groups.set(key, {
         node,
         summary,
         rows,
         process,
-        failures: new Set(),
+        latest: latest?.text,
+        latestSeq: latest?.seq,
         records: new Map(),
       });
       this.layout();
@@ -316,9 +319,7 @@ export class FeedView {
     }
   }
   processSummary(group) {
-    const errors = group.failures.size;
-    group.summary.textContent = `Process · ${group.records.size} events${errors ? ` · ${errors} failures` : ""}${group.state ? ` · ${group.state}` : ""}${group.latest ? ` · ${group.latest}` : ""}`;
-    group.summary.classList.toggle("has-failures", errors > 0);
+    group.summary.textContent = `Process${group.latest ? ` · ${group.latest}` : ""}`;
   }
   orderRecords(group) {
     for (const current of group ? [group] : this.groups.values()) {
@@ -459,7 +460,6 @@ export class FeedView {
     record.descriptor = descriptor;
     record.node.className = `event-row ${descriptor.status || ""}`;
     record.summary.textContent = descriptor.summary;
-    if (descriptor.status === "failed") group.failures.add(descriptor.key);
     if (!record.loaded)
       record.pre.textContent =
         typeof descriptor.details === "string"
@@ -468,6 +468,10 @@ export class FeedView {
     if (!group.latestSeq || descriptor.seq >= group.latestSeq) {
       group.latestSeq = descriptor.seq;
       group.latest = descriptor.summary;
+      this.latestSummaries.set(group.node.dataset.key, {
+        seq: descriptor.seq,
+        text: descriptor.summary,
+      });
     }
     this.processSummary(group);
     this.detail(record);

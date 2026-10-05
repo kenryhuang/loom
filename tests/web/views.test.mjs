@@ -232,7 +232,10 @@ test("historical tasks retain their processes and failures outside the recent ev
       ["message-card user", "process-group", "message-card result"],
     );
   const group = root.querySelector('[data-key="group:old:2"]');
-  assert.match(group.querySelector("summary").textContent, /1 failures/);
+  assert.doesNotMatch(
+    group.querySelector("summary").textContent,
+    /\d+ failures/,
+  );
   assert.match(
     group.querySelector(".failed").textContent,
     /WORKFLOW_ROUTE_FAILED/,
@@ -347,7 +350,10 @@ test("live execution rounds keep failure and retry milestones when detailed even
   assert.equal(root.querySelectorAll(".process-group").length, 2);
   const first = root.querySelector('[data-key="group:run:1"]');
   assert.match(first.textContent, /WORKFLOW_ROUTE_FAILED/);
-  assert.match(first.querySelector("summary").textContent, /completed/);
+  assert.equal(
+    first.querySelector("summary").textContent,
+    "Process · Tool call (read_file) · Done",
+  );
   assert.equal(first.querySelectorAll(".event-row").length, 1);
   dom.window.close();
 });
@@ -528,10 +534,7 @@ test("bounded feed retains restored text and snapshot results after compaction",
   assert.equal(feed.events.length, 2);
   assert.equal(root.querySelectorAll(".result").length, 1);
   assert.match(root.textContent, /全部思考/);
-  assert.match(
-    root.querySelector(".process-group > summary").textContent,
-    /3 events/,
-  );
+  assert.equal(root.querySelectorAll(".event-row").length, 3);
   dom.window.close();
 });
 
@@ -565,7 +568,7 @@ test("process counts logical rows, preserving tool details during a long delta s
   }
   assert.match(
     root.querySelector(".process-group > summary").textContent,
-    /2 events/,
+    /Thought: 思/,
   );
   assert.equal(root.querySelectorAll(".event-row").length, 2);
   assert.match(root.textContent, /Verified source/);
@@ -580,15 +583,9 @@ test("process counts logical rows, preserving tool details during a long delta s
     snapshot: { ...state(), streams: { "call:reasoning": "思".repeat(150) } },
     events: feed.events,
   });
-  assert.match(
-    root.querySelector(".process-group > summary").textContent,
-    /2 events/,
-  );
+  assert.equal(root.querySelectorAll(".event-row").length, 2);
   feed.restore({ snapshot: state(), events: chunks });
-  assert.match(
-    root.querySelector(".process-group > summary").textContent,
-    /1 events/,
-  );
+  assert.equal(root.querySelectorAll(".event-row").length, 1);
   assert.equal(feed.events.length, 1);
   assert.equal(
     JSON.parse(root.querySelector('[data-key="thought:call"] pre').textContent)
@@ -693,13 +690,18 @@ test("hidden bookkeeping cannot evict model failures and uncertain operations st
   assert.equal(root.querySelectorAll(".failed").length, 2);
   assert.match(root.textContent, /Connection dropped/);
   assert.match(root.textContent, /Recovery required/);
-  assert.match(
+  assert.equal(
     root.querySelector(".process-group > summary").textContent,
-    /2 failures/,
+    "Process · Recovery required · Operation effects are uncertain",
   );
   feed.older(
     [event(0, "llm.stream.started", { llm_call_id: "failed" })],
     state(),
+  );
+  assert.equal(root.querySelector(".process-group > summary").className, "");
+  assert.doesNotMatch(
+    root.querySelector(".process-group > summary").textContent,
+    /Connection dropped|failures/,
   );
   assert.match(
     root.querySelector('[data-key="thought:failed"] summary').textContent,
@@ -735,7 +737,7 @@ test("status and usage events update progress without adding rows or consuming t
   assert.equal(root.querySelectorAll(".event-row").length, 1);
   assert.match(
     root.querySelector(".process-group > summary").textContent,
-    /paused/,
+    /Tool call \(read_file\) · Done/,
   );
   for (let seq = 6; seq < 15; seq++)
     apply(seq, "run.usage.changed", { total_tokens: seq });
@@ -749,7 +751,10 @@ test("status and usage events update progress without adding rows or consuming t
   const group = feed.groups.get("run:1");
   assert.equal(group.state, "completed");
   assert.equal(Number(group.node.dataset.endSeq), 15);
-  assert.match(group.summary.textContent, /completed/);
+  assert.equal(
+    group.summary.textContent,
+    "Process · Tool call (read_file) · Done",
+  );
   for (const summary of root.querySelectorAll(".event-row > summary"))
     assert.doesNotMatch(summary.textContent, /usage.changed|state.changed/);
   feed.older(

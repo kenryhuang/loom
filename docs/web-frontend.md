@@ -51,8 +51,9 @@ session title and status; guidance appears only in the conversation rather than
 repeating the accumulated objective above it. Expand all / Fold all controls
 processes, event details and results together, retaining the setting for new
 events and through history loading or reconnects within the selected session.
-The process is collapsed by default, with its latest event in the summary.
-Its event count represents the expandable rows: streaming chunks update a
+The process is collapsed by default, with only its latest visible event in the
+sticky summary. Older failures remain in the details without a persistent
+failure count or warning color in the summary. Streaming chunks update a
 single model row per call, and tool start/completion update a single tool row.
 Model requests, stream boundaries, reasoning, output and completion/failure
 update the same row; its details retain the request and response. Model-generated
