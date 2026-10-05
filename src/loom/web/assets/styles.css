@@ -257,11 +257,6 @@ pre {
 .workspace-header h1 {
   margin: 9px 0;
 }
-#session-objective {
-  max-width: 900px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
 .status {
   display: inline-block;
   border: 1px solid var(--line);
@@ -303,6 +298,24 @@ pre {
   border-bottom: 1px solid var(--line);
   padding: 0 0 12px;
   flex-shrink: 0;
+}
+.feed-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.task-block {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 0;
+}
+.task-block:first-child {
+  padding-top: 0;
+}
+.task-block + .task-block {
+  border-top: 1px solid var(--line);
 }
 .event-feed {
   flex: 1;
@@ -359,7 +372,7 @@ pre {
   font-weight: 500;
 }
 .process-group {
-  margin: 6px 0 20px;
+  margin: 0;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: #131923;
@@ -373,6 +386,13 @@ summary {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--muted);
+}
+.process-group[open] > summary {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #131923;
+  border-radius: 9px 9px 0 0;
 }
 .process-records {
   padding: 5px 14px 12px;
@@ -413,7 +433,7 @@ pre {
   margin: 10px 0 0;
 }
 .message-card {
-  margin: 0 0 20px;
+  margin: 0;
   border-radius: 10px;
   padding: 16px 19px;
   background: var(--panel);

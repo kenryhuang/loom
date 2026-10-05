@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
-import shlex
 import signal
 import sys
 import time
@@ -109,9 +109,32 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
 
     async def shell_execute(input_value: Any, _options: Mapping[str, Any] | None = None) -> Result:
         data = _tool_input(input_value)
-        command = _command_from_input(data.get("command"))
-        if not command.ok:
-            return command
+        script = data.get("command")
+        if not isinstance(script, str) or not script.strip():
+            return _invalid_process_input(
+                'shell_execute requires command as a shell script string, e.g. {"command":"git fetch && git status"}. '
+                "Use process_execute with argv for argument arrays."
+            )
+        try:
+            encoded = json.loads(script)
+        except ValueError:
+            encoded = None
+        if isinstance(encoded, list):
+            return _invalid_process_input('Do not JSON-encode argv into command. Use process_execute: {"argv":["git","status"]}.')
+        shell = tuple((_options or {}).get("shell_argv", ("/bin/bash", "-o", "pipefail", "-c")))
+        return await execute_process("shell_execute", data, (*shell, script), _options)
+
+    async def process_execute(input_value: Any, _options: Mapping[str, Any] | None = None) -> Result:
+        data = _tool_input(input_value)
+        argv = data.get("argv")
+        if not isinstance(argv, list) or not argv or not all(isinstance(part, str) for part in argv) or not argv[0].strip():
+            return _invalid_process_input(
+                'process_execute requires a non-empty string array argv, e.g. {"argv":["git","status"]}. '
+                "Use shell_execute for pipes, &&, redirects or expansion."
+            )
+        return await execute_process("process_execute", data, tuple(argv), _options)
+
+    async def execute_process(source, data, command, _options):
         cwd_result = _resolve_workspace_path(root, data.get("cwd") or ".")
         if not cwd_result.ok:
             return cwd_result
@@ -156,12 +179,15 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
 
         try:
             callback = options.get("process_started")
-            argv = command.value
+            argv = command
             extra = {}
             if callback is not None:
                 gate_read, gate_write = os.pipe()
                 launcher = "import os,sys; fd=int(sys.argv[1]); token=os.read(fd,1); os.close(fd); "
-                launcher += "sys.exit(125) if token!=b'1' else os.execvp(sys.argv[2],sys.argv[2:])"
+                launcher += (
+                    "\nif token!=b'1': sys.exit(125)\ntry: os.execvp(sys.argv[2],sys.argv[2:])"
+                    "\nexcept OSError as e: print('LOOM_PROCESS_LAUNCH_ERROR: '+str(e),file=sys.stderr); sys.exit(127)"
+                )
                 argv = (sys.executable, "-c", launcher, str(gate_read), *argv)
                 extra["pass_fds"] = (gate_read,)
             process = await asyncio.create_subprocess_exec(
@@ -189,7 +215,8 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
                 timed_out = True
                 await terminate()
             value = {
-                "command": command.value,
+                "argv": command,
+                **({"command": data["command"]} if source == "shell_execute" else {}),
                 "cwd": _relative_to_root(root, cwd_result.value),
                 "exit_code": 124 if timed_out else process.returncode,
                 "stdout": bytes(buffers["stdout"]).decode("utf-8", errors="replace"),
@@ -203,7 +230,8 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
             raise
         except OSError as exc:
             value = {
-                "command": command.value,
+                "argv": command,
+                **({"command": data["command"]} if source == "shell_execute" else {}),
                 "cwd": _relative_to_root(root, cwd_result.value),
                 "exit_code": 127,
                 "stdout": "",
@@ -224,18 +252,43 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
                     reader.cancel()
             if readers:
                 await asyncio.gather(*readers, return_exceptions=True)
-        return ok(Observation(new_trace_id(), "shell_execute", value, now_iso()))
+        launch_failed = value["exit_code"] == 127 and (process is None or value["stderr"].startswith("LOOM_PROCESS_LAUNCH_ERROR: "))
+        no_match = source == "process_execute" and Path(command[0]).name in {"grep", "rg"} and value["exit_code"] == 1 and not timed_out
+        status = (
+            "launch_failed"
+            if launch_failed
+            else "timed_out"
+            if timed_out
+            else "no_match"
+            if no_match
+            else "succeeded"
+            if value["exit_code"] == 0
+            else "nonzero_exit"
+        )
+        value.update(ok=status in {"succeeded", "no_match"}, status=status)
+        if no_match:
+            value["matched"] = False
+        return ok(Observation(new_trace_id(), source, value, now_iso()))
 
     async def finish(input_value: Any, _options: Mapping[str, Any] | None = None) -> Result:
         data = _tool_input(input_value)
         report = str(data.get("report") or data.get("content") or "")
-        return ok(Observation(new_trace_id(), "finish", {"report": report, "completed": bool(report.strip())}, now_iso()))
+        return ok(
+            Observation(
+                new_trace_id(),
+                "finish",
+                {"report": report, "completed": bool(report.strip())},
+                now_iso(),
+                metadata={"controlFlow": {"stepBoundary": bool(report.strip()), "reason": "task_completed"}},
+            )
+        )
 
     return {
         "read_file": read_file,
         "edit_file": edit_file,
         "write_file": write_file,
         "shell_execute": shell_execute,
+        "process_execute": process_execute,
         "finish": finish,
     }
 
@@ -296,17 +349,8 @@ def _positive_int(value: Any, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
-def _command_from_input(value: Any) -> Result:
-    raw = thaw_json(value)
-    if isinstance(raw, str):
-        command = tuple(shlex.split(raw))
-    elif isinstance(raw, (list, tuple)):
-        command = tuple(str(part) for part in raw)
-    else:
-        command = ()
-    if not command:
-        return err(make_loom_error("VALIDATION_FAILED", "Tool command is required", retryable=False))
-    return ok(command)
+def _invalid_process_input(message: str) -> Result:
+    return err(make_loom_error("VALIDATION_FAILED", message, retryable=False, metadata={"failureDomain": "tool", "error_kind": "invalid_input"}))
 
 
 def _text(value: Any) -> str:

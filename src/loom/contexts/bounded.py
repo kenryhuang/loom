@@ -27,7 +27,7 @@ class BoundedContextManager:
         window = list(build_messages(context, max_history_steps=self.config.get("max_history_steps", 5)))
         if context.state.observations or context.state.decisions or context.knowledge.facts or context.knowledge.heuristics:
             pinned = list(build_messages(context, include_history=False, include_knowledge=False))
-            return pinned + [LlmMessage("user", window[1].content, name="context_evidence")]
+            return pinned[:2] + [LlmMessage("user", window[1].content, name="context_evidence")] + pinned[2:]
         return window
 
     @staticmethod

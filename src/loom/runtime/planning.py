@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -20,6 +22,7 @@ from loom.core import (
     make_loom_error,
     now_iso,
     ok,
+    thaw_json,
 )
 from loom.llm import LlmStepPolicy
 from loom.runtime.workflow_routing import (
@@ -290,6 +293,7 @@ class PlanningRuntime:
         self._bound_runtime: Any | None = None
         self._bound_context: Any | None = None
         self._normal_refs: tuple[ToolRef, ...] | None = None
+        self._progress: list[dict[str, Any]] = []
 
     @property
     def controller(self) -> PlanController:
@@ -310,6 +314,7 @@ class PlanningRuntime:
             "next_item_number": self._controller._next_item_number,
             "invalid_attempts": self._route_invalid_attempts,
             "normal_refs": encode(self._normal_refs),
+            "progress": self._progress,
         }
 
     def restore(self, value: Mapping[str, Any]) -> Result:
@@ -330,6 +335,7 @@ class PlanningRuntime:
             self._route.restore(route)
             self._route_invalid_attempts = invalid_attempts
             self._normal_refs = refs
+            self._progress = list(value.get("progress", []))[-12:]
             self._controller._events.clear()
             self._route._events.clear()
             return ok(None)
@@ -372,11 +378,15 @@ class PlanningRuntime:
             ),
             ToolRef(
                 "continue_react",
-                "Continue with the normal ReAct workflow when the task can be completed directly.",
+                "Continue direct execution. During progress review, name the missing evidence and the next action needed to obtain it.",
                 input_schema={
                     "type": "object",
-                    "properties": {"reason": {"type": "string", "minLength": 1}},
-                    "required": ["reason"],
+                    "properties": {
+                        "reason": {"type": "string", "minLength": 1},
+                        "evidence_gap": {"type": "string", "minLength": 1},
+                        "next_action": {"type": "string", "minLength": 1},
+                    },
+                    "required": ["reason", "evidence_gap", "next_action"] if self._route.state.phase is WorkflowRoutePhase.REVIEWING else ["reason"],
                     "additionalProperties": False,
                 },
             ),
@@ -435,7 +445,16 @@ class PlanningRuntime:
             )
 
         async def continue_react(input_value: Mapping[str, Any], _options: Any = None) -> Result:
-            route = self._route.select_react(str(input_value.get("reason", "")))
+            if self._route.state.phase is WorkflowRoutePhase.REVIEWING:
+                if any(not isinstance(input_value.get(key), str) or not input_value[key].strip() for key in ("reason", "evidence_gap", "next_action")):
+                    return self._route_rejected(
+                        "PROGRESS_EVIDENCE_REQUIRED",
+                        "If the goal is fulfilled, call finish. Otherwise provide evidence_gap and next_action explaining why more work is necessary.",
+                    )
+                reason = f"{input_value.get('reason', '')}; missing evidence: {input_value['evidence_gap']}; next action: {input_value['next_action']}"
+            else:
+                reason = str(input_value.get("reason", ""))
+            route = self._route.select_react(reason)
             if not route.ok:
                 return self._routing_attempt_rejected(route.error.code, route.error.message)
             self._route_invalid_attempts = 0
@@ -488,8 +507,13 @@ class PlanningRuntime:
         state = self._controller.state
         route = self._route.state
         if self.mode is PlanMode.AUTO and state.phase is PlanPhase.INACTIVE:
-            if route.phase in {WorkflowRoutePhase.UNDECIDED, WorkflowRoutePhase.REVIEWING}:
+            if route.phase is WorkflowRoutePhase.UNDECIDED:
                 return (refs["enter_plan"], refs["continue_react"])
+            if route.phase is WorkflowRoutePhase.REVIEWING:
+                finish = tuple(tool for tool in normal_refs if tool.id == self.finish_tool_id)
+                return (refs["enter_plan"], refs["continue_react"], *finish)
+            if route.phase is WorkflowRoutePhase.COMPLETED:
+                return ()
             if route.phase is WorkflowRoutePhase.REACT:
                 return (*normal_refs, refs["enter_plan"])
         if state.phase is PlanPhase.INACTIVE:
@@ -516,7 +540,18 @@ class PlanningRuntime:
                 require_tool_call=True,
                 missing_tool_call_retries=1,
                 invalid_tool_call_retries=1,
-                retry_prompt="Call exactly one of enter_plan or continue_react with a concise reason.",
+                retry_prompt=(
+                    "Review current-request progress: call finish if fulfilled; otherwise continue_react with reason, "
+                    "evidence_gap and next_action, or enter_plan for a revised workflow. "
+                    "Task tools are unavailable until a route is selected. Make an actual tool call, not just a description or top-level fields. "
+                    'If returning JSON, use {"reasoning":"Why more evidence is necessary","action":{"kind":"tool",'
+                    '"target":"continue_react","input":{"reason":"Why direct execution is sufficient",'
+                    '"evidence_gap":"Specific missing evidence","next_action":"Specific action to obtain it"}}}. '
+                    "Replace example values with the current request's evidence."
+                    if route.phase is WorkflowRoutePhase.REVIEWING
+                    else "Call exactly one of enter_plan or continue_react with a concise reason. "
+                    'If returning JSON, put the tool ID in action.target and its arguments in action.input.'
+                ),
                 failure_code="WORKFLOW_ROUTE_FAILED",
             )
         return LlmStepPolicy()
@@ -529,9 +564,20 @@ class PlanningRuntime:
             or observation.source == self.finish_tool_id
         ):
             return observation
-        value = observation.value
-        failed = isinstance(value, Mapping) and value.get("ok") is False
-        if not self._route.observe_tool(failed=failed):
+        value = thaw_json(observation.value)
+        failed = isinstance(value, Mapping) and (value.get("ok") is False or (value.get("exit_code", 0) != 0 and value.get("status") != "no_match"))
+        stable = {k: v for k, v in value.items() if k not in {"duration_ms"}} if isinstance(value, Mapping) else value
+        digest = hashlib.sha256(json.dumps([observation.source, stable], sort_keys=True, default=str).encode()).hexdigest()
+        preview = json.dumps(value, ensure_ascii=False, default=str)
+        preview = preview if len(preview) <= 1200 else preview[:800] + " ... " + preview[-400:]
+        self._progress.append({"tool": observation.source, "fingerprint": digest, "outcome": "failed" if failed else "succeeded", "evidence": preview})
+        self._progress = self._progress[-12:]
+        review = self._route.observe_tool(failed=failed)
+        if not review and sum(item["fingerprint"] == digest for item in self._progress) >= 3:
+            review = self._route.request_review(
+                "repeated_work", "The same operation produced the same evidence at least three times; check whether the current goal is already fulfilled"
+            ).unwrap()
+        if not review:
             return observation
         metadata = dict(observation.metadata or {})
         metadata["controlFlow"] = {
@@ -640,12 +686,22 @@ class PlanningRuntime:
         value = scratch.get("workflowRoute")
         return workflow_route_state_from_mapping(value) if isinstance(value, Mapping) else None
 
+    def project_context(self, context: Any) -> Any:
+        """Refresh current tools and progress instructions, including after resume."""
+        return self._project_context(context)
+
     def _project_context(self, context: Any) -> Any:
         state = self._controller.state
         normal_refs = self._normal_refs or ()
         visible = self.visible_tool_refs(normal_refs)
 
-        workflow = Constraint("runtime-plan-workflow", self._workflow_description(state))
+        description = self._workflow_description(state)
+        if self._route.state.phase is WorkflowRoutePhase.REVIEWING:
+            description += "\nCurrent request: " + context.goal.objective
+            description += "\nRecent operations and evidence (oldest first):\n" + "\n".join(
+                f"- {item['tool']} [{item['outcome']}]: {item['evidence']}" for item in self._progress
+            )
+        workflow = Constraint("runtime-plan-workflow", description)
         constraints = tuple(constraint for constraint in context.identity.constraints if constraint.id != workflow.id)
         return replace(
             context,
@@ -656,10 +712,25 @@ class PlanningRuntime:
     def _workflow_description(self, state: PlanState) -> str:
         if state.phase is PlanPhase.INACTIVE:
             route = self._route.state
+            if route.phase is WorkflowRoutePhase.COMPLETED:
+                return "The current request is fulfilled; return the committed final report without further tool calls."
             if self.mode is PlanMode.AUTO and route.phase in {
                 WorkflowRoutePhase.UNDECIDED,
                 WorkflowRoutePhase.REVIEWING,
             }:
+                if route.phase is WorkflowRoutePhase.REVIEWING:
+                    return (
+                        f"Review progress for the current request, triggered by {route.trigger}: {route.reason}. "
+                        "Compare existing evidence against the actual requested outcome. Choose exactly one: "
+                        "finish with the final report if the goal is fulfilled; continue_react only with a concrete "
+                        "evidence_gap, next_action and reason why they are necessary; enter_plan to revise the workflow "
+                        "if dependencies or failures require replanning. Do not repeat successful operations or expand "
+                        "into unrelated audits. Missing capabilities or unverified source claims do not count as success. "
+                        "Make an actual tool call: in JSON, action.kind must be tool, action.target must name the selected "
+                        "available tool, and action.input must contain its arguments. Put evidence_gap and next_action inside "
+                        "continue_react's action.input, not at the top level. Task tools become available in the next step "
+                        "after continue_react is accepted."
+                    )
                 review = (
                     "initial task routing" if route.phase is WorkflowRoutePhase.UNDECIDED else f"runtime review triggered by {route.trigger}: {route.reason}"
                 )
@@ -670,7 +741,10 @@ class PlanningRuntime:
                     "progress tracking. Use continue_react for a one-shot query, read-only lookup, single local edit, "
                     "or a few independent actions. Give a concise reason; do not execute task tools in this step."
                 )
-            return "Use enter_plan when the task requires multiple dependent steps; otherwise continue with the normal ReAct workflow."
+            return (
+                "Execute only what the current request needs. Reuse evidence from successful operations, avoid repeating them, "
+                "and finish once the requested outcome is supported. Use enter_plan if dependent steps require a revised workflow."
+            )
         if state.phase is PlanPhase.PLANNING:
             return "Planning is active. Submit an ordered checklist with submit_plan before executing task tools."
         checklist = "\n".join(f"- [{_status_mark(item.status)}] {item.id}: {item.content}" + (f" — {item.note}" if item.note else "") for item in state.items)
@@ -698,10 +772,17 @@ class PlanningRuntime:
     def _guard_handler(self, tool_id: str, handler: Any) -> Callable[..., Any]:
         async def guarded(input_value: Any, options: Any = None) -> Result:
             phase = self._controller.state.phase
-            if self.mode is PlanMode.AUTO and self._route.state.phase in {
-                WorkflowRoutePhase.UNDECIDED,
-                WorkflowRoutePhase.REVIEWING,
-            }:
+            if self._route.state.phase is WorkflowRoutePhase.COMPLETED:
+                return self._route_rejected("WORKFLOW_ROUTE_PHASE_INVALID", "The current request is complete; no further task tools may be used")
+            if (
+                self.mode is PlanMode.AUTO
+                and self._route.state.phase
+                in {
+                    WorkflowRoutePhase.UNDECIDED,
+                    WorkflowRoutePhase.REVIEWING,
+                }
+                and not (self._route.state.phase is WorkflowRoutePhase.REVIEWING and tool_id == self.finish_tool_id)
+            ):
                 return self._route_rejected(
                     "WORKFLOW_ROUTE_PHASE_INVALID",
                     "Choose enter_plan or continue_react before using task tools",
@@ -741,6 +822,19 @@ class PlanningRuntime:
                 completed = self._controller.complete(trigger="finish_tool")
                 if not completed.ok:
                     return self._rejected(completed.error.code, completed.error.message)
+                emitted = await self._emit_pending_events()
+                if not emitted.ok:
+                    return emitted
+                return ok(_with_plan_transition_boundary(result.value))
+            if (
+                result.ok
+                and not rejected
+                and tool_id == self.finish_tool_id
+                and isinstance(result.value, Observation)
+                and isinstance(result.value.value, Mapping)
+                and result.value.value.get("completed")
+            ):
+                self._route.complete()
                 emitted = await self._emit_pending_events()
                 if not emitted.ok:
                     return emitted

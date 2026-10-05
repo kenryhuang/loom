@@ -18,6 +18,11 @@ const list = new SessionListView(
 const feed = new FeedView($("event-feed"), {
   loadArtifact: (digest) =>
     controller.api.artifact(controller.selectedId, digest),
+  onDetailsChange: ({ available, expanded }) => {
+    $("toggle-details").disabled = !available;
+    $("toggle-details").textContent = expanded ? "Fold all" : "Expand all";
+    $("toggle-details").setAttribute("aria-expanded", String(expanded));
+  },
 });
 const panels = new PanelsView($("session-panels"), builtinPanels(), {
   command: (kind, payload) => controller.command(kind, payload),
@@ -53,7 +58,6 @@ async function select(id) {
   feed.snapshot = null;
   feed.reset();
   $("session-title").textContent = "Loading session…";
-  $("session-objective").textContent = "";
   $("task-status").textContent = "Loading";
   $("run-failure").hidden = true;
   $("session-panels").hidden = true;
@@ -72,8 +76,6 @@ async function select(id) {
 function renderState(state) {
   $("session-panels").hidden = false;
   $("session-title").textContent = state.title || "New session";
-  $("session-objective").textContent =
-    state.task.objective || "Enter a task to begin.";
   $("task-status").textContent = state.task.state;
   $("task-status").className = `status ${state.task.state}`;
   const failure = state.run?.failure;
@@ -185,8 +187,6 @@ function disconnect() {
   $("pending-input").hidden = true;
   $("run-failure").hidden = true;
   $("session-title").textContent = "Connect to Loom";
-  $("session-objective").textContent =
-    "Your sessions keep running while this frontend is disconnected.";
   $("session-panels").hidden = true;
   if (!$("auth-dialog").open) $("auth-dialog").showModal();
 }
@@ -340,6 +340,7 @@ $("message").addEventListener("keydown", (event) => {
   }
 });
 $("redirect").addEventListener("click", () => send(true));
+$("toggle-details").addEventListener("click", () => feed.toggleAll());
 $("history").addEventListener("click", async () => {
   $("history").disabled = true;
   try {

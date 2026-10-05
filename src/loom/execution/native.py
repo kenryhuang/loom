@@ -18,8 +18,11 @@ class NativeToolExecutionRuntime:
     manifest = PluginManifest("native_os", "execution_runtime", capabilities=("python_tools", "processes"))
 
     def __init__(self, config, *, entrypoints, execution=None, cancellable=()):
-        if set(config) - {"workspace_resource"}:
+        if set(config) - {"workspace_resource", "shell"}:
             raise ValueError("Unknown native runtime configuration")
+        shell = config.get("shell", ["/bin/bash", "-o", "pipefail", "-c"])
+        if not isinstance(shell, list) or not shell or not all(isinstance(part, str) and part for part in shell):
+            raise ValueError("Native runtime shell must be a non-empty argv prefix ending in the shell command option")
         self.config = json_value(config)
         self.entrypoints = dict(entrypoints)
         self.execution = execution
@@ -58,6 +61,7 @@ class NativeToolExecutionRuntime:
 
         async def invoke():
             opts = dict(options or {})
+            opts["shell_argv"] = self.config.get("shell", ["/bin/bash", "-o", "pipefail", "-c"])
             if self.execution is not None:
                 opts.update(
                     process_started=lambda pid: self.execution.rpc("process_started", {"pid": pid}),

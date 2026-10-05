@@ -33,6 +33,24 @@ An exhausted response that omitted a required routing tool is retried with a
 fresh model request, retaining tool observations and token usage. Paused tasks
 still require Resume; pending recovery questions remain gated by verification.
 
+After a completed round, a new message becomes the next round's objective.
+The worker consumes queued initial messages before assembling tools, completion
+checks and workflow nodes. Each round starts with fresh execution observations,
+decisions and workflow state. Recent user/assistant exchanges provide bounded
+background for follow-up references; the full earlier conversation is retained
+as a session history artifact and can be read on demand. Historical requests
+are marked as already answered, and final replies focus on the current request.
+Guidance received during execution still updates the unfinished current round.
+Pause/resume and failed-run retries preserve the current checkpoint. Result
+fallback and completion checks exclude decisions and finish observations from
+previous runs.
+
+The conversation groups each task, its execution process and its result into
+one block, with horizontal separators between blocks. The header shows the
+session title and status; guidance appears only in the conversation rather than
+repeating the accumulated objective above it. Expand all / Fold all controls
+processes, event details and results together, retaining the setting for new
+events and through history loading or reconnects within the selected session.
 The process is collapsed by default, with its latest event in the summary.
 Its event count represents the expandable rows: streaming chunks update a
 single Thought/output row, and tool start/completion update a single tool row.

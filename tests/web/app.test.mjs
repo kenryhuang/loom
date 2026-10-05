@@ -90,6 +90,18 @@ test("browser app connects to real service, answers input, creates sessions, con
     );
     assert.equal($("event-feed").querySelector(".result").open, true);
     assert.equal($("event-feed").querySelector(".process-group").open, false);
+    assert.equal($("session-objective"), null);
+    assert.ok($("event-feed").querySelector(".task-block .result"));
+    assert.equal($("toggle-details").textContent, "Expand all");
+    $("toggle-details").click();
+    assert.equal(
+      $("event-feed").querySelectorAll("details:not([open])").length,
+      0,
+    );
+    assert.equal($("toggle-details").textContent, "Fold all");
+    $("toggle-details").click();
+    assert.equal($("event-feed").querySelectorAll("details[open]").length, 0);
+    assert.equal($("toggle-details").textContent, "Expand all");
     await until(() => document.querySelector('[data-panel="outputs"] button'));
     document.querySelector('[data-panel="outputs"] button').click();
     await until(() => document.querySelector("dialog:not([id])[open] h1"));
@@ -147,6 +159,7 @@ test("browser app connects to real service, answers input, creates sessions, con
     assert.equal($("auth-dialog").open, true);
     assert.equal($("connection").textContent, "Disconnected");
     assert.equal($("credential").value, "");
+    assert.equal($("toggle-details").disabled, true);
   } catch (error) {
     error.message += `\nService stderr: ${stderr}`;
     throw error;

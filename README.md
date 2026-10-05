@@ -51,6 +51,10 @@ resource claims, and sequential workflow revisions. See the
 examples. Docker and VM backends remain future extensions; unavailable backends
 fail explicitly without falling back to native execution.
 
+See [tool execution and progress review](docs/tool-execution-and-progress-review.md)
+for shell scripts versus literal argv, runtime shell configuration, and automatic
+reviews that can finish, continue with a concrete evidence gap, or replan.
+
 ## LLM Configuration
 
 LLM examples use the existing OpenAI-compatible provider. If no `api_key` is

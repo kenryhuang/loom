@@ -350,7 +350,7 @@ class ForcedPlanTaskProvider:
         if self.calls == 5:
             return _response(
                 content="",
-                tool_calls=(LlmToolCall("call-shell", "shell_execute", json.dumps({"command": ["pwd"]})),),
+                tool_calls=(LlmToolCall("call-shell", "shell_execute", json.dumps({"command": "pwd"})),),
                 finish_reason="tool_calls",
             )
         if self.calls == 6:
@@ -439,7 +439,7 @@ class AutoBoundaryPlanProvider:
                 ),
             )
         if self.calls == 6:
-            return self._tool("call-shell", "shell_execute", {"command": ["pwd"]})
+            return self._tool("call-shell", "shell_execute", {"command": "pwd"})
         if self.calls == 7:
             return self._update(
                 "call-complete",
@@ -654,7 +654,7 @@ class OneToolPerResponsePlanProvider:
         if self.calls == 4:
             return self._tool("call-read-config", "read_file", {"path": "pyproject.toml"})
         if self.calls == 5:
-            return self._tool("call-inspect-shell", "shell_execute", {"command": ["pwd"]})
+            return self._tool("call-inspect-shell", "shell_execute", {"command": "pwd"})
         if self.calls == 6:
             return self._update(
                 "call-start-verification",
@@ -665,7 +665,7 @@ class OneToolPerResponsePlanProvider:
                 ),
             )
         if self.calls == 7:
-            return self._tool("call-verify-shell", "shell_execute", {"command": ["pwd"]})
+            return self._tool("call-verify-shell", "shell_execute", {"command": "pwd"})
         if self.calls == 8:
             return self._update(
                 "call-complete-verification",
@@ -854,8 +854,8 @@ def test_run_generic_task_executes_llm_tool_loop_and_returns_finish_report(tmp_p
 
     assert result.ok
     assert "Demo audit" in result.value.output
-    assert provider.calls >= 2
-    assert any(message.role == "tool" for message in provider.messages_seen[-1])
+    assert provider.calls == 1
+    assert any(observation.source == "read_file" for observation in result.value.run_result.context.state.observations)
 
 
 def test_run_generic_task_does_not_finish_on_parse_fallback(tmp_path):
@@ -950,9 +950,9 @@ def test_auto_continue_react_crosses_boundary_before_task_execution(tmp_path):
     assert provider.tool_sets[0] == ("enter_plan", "continue_react")
     assert {"read_file", "finish", "enter_plan"} <= set(provider.tool_sets[1])
     assert provider.tool_choices[0] == "auto"
-    assert provider.calls == 3
+    assert provider.calls == 2
     route = result.value.run_result.context.state.scratch["workflowRoute"]
-    assert route["phase"] == "react"
+    assert route["phase"] == "completed"
     assert route["task_execution_started"] is True
 
 
@@ -991,7 +991,7 @@ def test_auto_react_reviews_route_after_two_recoverable_failures(tmp_path):
 
     assert result.ok
     assert result.value.output == "reviewed and completed"
-    assert provider.tool_sets[3] == ("enter_plan", "continue_react")
+    assert provider.tool_sets[3] == ("enter_plan", "continue_react", "finish")
     route = result.value.run_result.context.state.scratch["workflowRoute"]
     assert route["phase"] == "plan"
     assert route["review_count"] == 1
@@ -1116,7 +1116,7 @@ def test_run_generic_task_forwards_runtime_events_to_additional_trace_sink(tmp_p
         run_generic_task(
             TaskRequest("Audit this project", workspace=tmp_path, profile="project_audit"),
             provider=FakeTaskProvider(),
-                options=TaskRunOptions(plan_mode=PlanMode.OFF, trace_path=trace_path),
+            options=TaskRunOptions(plan_mode=PlanMode.OFF, trace_path=trace_path),
             trace_sink=sink,
         )
     )
@@ -1139,7 +1139,7 @@ def test_run_generic_task_executes_edit_file_and_traces_observation(tmp_path):
         run_generic_task(
             TaskRequest("Edit the second repeated string", workspace=tmp_path),
             provider=FakeEditTaskProvider(),
-                options=TaskRunOptions(plan_mode=PlanMode.OFF, trace_path=trace_path),
+            options=TaskRunOptions(plan_mode=PlanMode.OFF, trace_path=trace_path),
         )
     )
 
@@ -1159,7 +1159,7 @@ def test_run_generic_task_trace_omits_stream_token_deltas(tmp_path):
         run_generic_task(
             TaskRequest("Audit this project briefly", workspace=tmp_path, profile="project_audit"),
             provider=StreamingTaskProvider(),
-                options=TaskRunOptions(plan_mode=PlanMode.OFF, stream=True, trace_path=trace_path),
+            options=TaskRunOptions(plan_mode=PlanMode.OFF, stream=True, trace_path=trace_path),
         )
     )
 

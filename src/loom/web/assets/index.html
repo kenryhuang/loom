@@ -46,10 +46,6 @@
             <div>
               <small class="eyebrow">LOOM SERVICE</small>
               <h1 id="session-title">Your work, in progress.</h1>
-              <p id="session-objective" class="muted">
-                Connect to a session to follow its work and keep the
-                conversation going.
-              </p>
             </div>
             <span id="task-status" class="status">Ready</span>
           </header>
@@ -76,9 +72,14 @@
           <section class="conversation" aria-label="Session conversation">
             <div class="feed-heading">
               <h2>Conversation</h2>
-              <button id="history" class="quiet" disabled>
-                Earlier events
-              </button>
+              <div class="feed-actions">
+                <button id="toggle-details" class="quiet" disabled>
+                  Expand all
+                </button>
+                <button id="history" class="quiet" disabled>
+                  Earlier events
+                </button>
+              </div>
             </div>
             <div id="event-feed" class="event-feed">
               <div class="empty-state">

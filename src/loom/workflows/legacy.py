@@ -4,16 +4,17 @@ from dataclasses import replace
 
 from loom.runtime import PlanningRuntime, plan_state_dict, workflow_route_state_dict
 from loom.runtime.plugin_contracts import PluginManifest
+from loom.runtime.workflow_routing import WorkflowRoutePolicy
 
 
 class LegacyPlanningWorkflow(PlanningRuntime):
     manifest = PluginManifest("legacy_planning", "workflow")
 
     def __init__(self, config):
-        if set(config) - {"mode"}:
+        if set(config) - {"mode", "progress_review"}:
             raise ValueError("Unknown legacy workflow configuration")
         self.config = dict(config)
-        super().__init__(config.get("mode", "auto"))
+        super().__init__(config.get("mode", "auto"), route_policy=WorkflowRoutePolicy(**config.get("progress_review", {})))
 
     def plugin_snapshot(self):
         return self.manifest.state(self.config, self.snapshot())

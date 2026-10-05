@@ -271,6 +271,7 @@ class TaskAssembly:
         self.context_manager.restore(snapshot["context"])
         self.runtime.restore(snapshot["execution_runtime"])
         self.workflow.restore_plugin(snapshot["workflow"])
+        self.workflow.configure_normal_tool_refs(self.normal_refs)
         if set(snapshot["tools"]) != {c.manifest.plugin_id for c in self.collections}:
             raise ValueError("Checkpoint tool collection set changed")
         for collection in self.collections:
@@ -291,6 +292,13 @@ class TaskAssembly:
         catalog = ToolCatalog(atomic=tuple(CatalogTool(ref, ToolLifecycle("atomic")) for ref in refs))
         return ToolResolver(required_atomic_ids=required).resolve(catalog, AffordanceBudget(**budget_config)).tools
 
+    def update_goal(self, goal):
+        self.required_source_urls = (
+            requested_source_urls(goal.objective)
+            if self.request.task_spec is not None and not any(resource.kind == "directory" for resource in self.resources)
+            else ()
+        )
+
     def handlers(self):
         handlers = {}
         for name, binding in self.bindings.items():
@@ -300,7 +308,15 @@ class TaskAssembly:
                 try:
                     validate_tool_input(binding.ref.input_schema, value)
                 except ValueError as exc:
-                    return err(make_loom_error("VALIDATION_FAILED", str(exc), retryable=False))
+                    hint = {
+                        "shell_execute": 'Use {"command":"git fetch && git status"}; command must be a script string. For argv arrays use process_execute.',
+                        "process_execute": 'Use {"argv":["git","status"]}; argv must be a string array. For shell syntax use shell_execute.',
+                    }.get(name, "")
+                    return err(
+                        make_loom_error(
+                            "VALIDATION_FAILED", f"{exc}. {hint}".strip(), retryable=False, metadata={"failureDomain": "tool", "error_kind": "invalid_input"}
+                        )
+                    )
                 if name == "finish":
                     report = value.get("report") or value.get("content")
                     if not isinstance(report, str) or not report.strip():

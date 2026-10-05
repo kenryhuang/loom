@@ -215,6 +215,7 @@ class DynamicWorkflowPolicy:
                     "dynamic-workflow",
                     f"Current node: {node['id']}: {node['objective']}. "
                     f"Workflow revision {self.controller.revision}: {json_value(self.controller.nodes)}. "
+                    "Apply current user guidance to unfinished work; earlier node wording does not override newer user requirements. "
                     "Use complete_node when this node is done, revise_workflow to change future work, and finish for the final report.",
                 )
                 prompt = replace(

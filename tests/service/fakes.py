@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import shlex
 
 from loom.core import ok
 from loom.llm.api import LlmResponse, LlmToolCall, TokenUsage
@@ -29,13 +30,18 @@ class FakeProvider:
             await asyncio.sleep(30)
         if "uncertain" in self.objective and not results:
             command = ["python3", "-c", "import os,signal; open('marker','a').write('once'); os.kill(os.getppid(),signal.SIGKILL)"]
-            return ok(LlmResponse("", (LlmToolCall("side-effect", "shell_execute", json.dumps({"command": command})),)))
+            return ok(LlmResponse("", (LlmToolCall("side-effect", "process_execute", json.dumps({"argv": command})),)))
         if "question" in self.objective and not results:
             return ok(LlmResponse("", (LlmToolCall("ask", "request_input", '{"question":"Which module?"}'),)))
         if "slow" in self.objective and not results:
             return ok(
                 LlmResponse(
-                    "", (LlmToolCall("shell", "shell_execute", json.dumps({"command": ["python3", "-c", "import time; time.sleep(.5); print('ok')"]})),)
+                    "",
+                    (
+                        LlmToolCall(
+                            "shell", "shell_execute", json.dumps({"command": shlex.join(["python3", "-c", "import time; time.sleep(.5); print('ok')"])})
+                        ),
+                    ),
                 )
             )
         if "crash" in self.objective and not results:
@@ -62,3 +68,33 @@ class MissingRouteProvider:
 
 def routing_failure_provider_factory(state):
     return FakeProvider(state) if state["run"].get("failure") else MissingRouteProvider()
+
+
+class TurnPromptProvider:
+    """Echo the actual projected request and transcript, rather than task state."""
+
+    model = "turn-prompt-test"
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        system = messages[0].content
+        objective = system.split("- Objective: ", 1)[1].split("\nSuccess criteria:", 1)[0]
+        transcript = []
+        background = False
+        for message in messages:
+            if message.name == "session_background":
+                background = True
+            elif message.name == "current_request":
+                background = False
+            elif background:
+                transcript.append({"role": message.role, "content": message.content})
+        report = json.dumps({"objective": objective, "history": transcript}, ensure_ascii=False)
+        names = {tool["function"]["name"] for tool in tools or ()}
+        if "continue_react" in names:
+            return ok(LlmResponse("", (LlmToolCall("route", "continue_react", '{"reason":"Follow current request"}'),)))
+        if "finish" in names and not any(message.role == "tool" and message.name == "finish" for message in messages):
+            return ok(LlmResponse("", (LlmToolCall("finish", "finish", json.dumps({"report": report})),)))
+        return ok(LlmResponse(json.dumps({"action": {"kind": "none", "input": {"report": report}}})))
+
+
+def turn_prompt_provider_factory(state):
+    return TurnPromptProvider()

@@ -5,49 +5,76 @@ import { element, renderResult } from "../markdown.mjs";
 export class FeedView {
   constructor(
     root,
-    { renderers = builtinRenderers(), loadArtifact, maxEvents = 1000 } = {},
+    {
+      renderers = builtinRenderers(),
+      loadArtifact,
+      maxEvents = 1000,
+      onDetailsChange = () => {},
+    } = {},
   ) {
     this.root = root;
     this.renderers = renderers;
     this.loadArtifact = loadArtifact;
     this.maxEvents = maxEvents;
+    this.onDetailsChange = onDetailsChange;
     this.events = [];
     this.emptyState = root.querySelector(".empty-state");
+    root.addEventListener("toggle", () => this.detailsChanged(), true);
     this.reset();
   }
-  reset() {
+  reset({ preserveDetails = false } = {}) {
+    if (!preserveDetails) this.detailMode = null;
     this.groups = new Map();
     this.messages = new Map();
+    this.blocks = new Map();
     this.streams = {};
     this.origins = {};
     this.root.replaceChildren(...(this.emptyState ? [this.emptyState] : []));
+    this.detailsChanged();
   }
   restore({ snapshot, events }) {
-    const opened = this.opened();
+    const opened = this.detailStates();
     this.snapshot = snapshot;
     this.events = [];
     for (const event of events) this.retain(event);
     this.events = this.events.slice(-this.maxEvents);
-    this.reset();
+    this.reset({ preserveDetails: true });
     for (const event of this.events) this.present(event);
     this.seedStreams(snapshot);
     this.syncMessages(snapshot.messages || []);
     this.reopen(opened);
     this.root.scrollTop = this.root.scrollHeight;
   }
-  opened() {
-    return new Set(
-      [...this.root.querySelectorAll("details[open]")].map(
-        (node) => node.dataset.key,
-      ),
+  detailStates() {
+    return new Map(
+      [...this.root.querySelectorAll("details")].map((node) => [
+        node.dataset.key,
+        node.open,
+      ]),
     );
   }
   reopen(keys) {
     for (const node of this.root.querySelectorAll("details"))
-      if (keys.has(node.dataset.key)) node.open = true;
+      if (keys.has(node.dataset.key)) node.open = keys.get(node.dataset.key);
+    this.detailsChanged();
+  }
+  detailsChanged() {
+    const details = [...this.root.querySelectorAll("details")];
+    this.onDetailsChange({
+      available: details.length > 0,
+      expanded: details.length > 0 && details.every((node) => node.open),
+    });
+  }
+  toggleAll() {
+    const details = [...this.root.querySelectorAll("details")];
+    this.detailMode = !details.every((node) => node.open);
+    for (const node of details) node.open = this.detailMode;
+    for (const group of this.groups.values())
+      for (const record of group.records.values()) this.detail(record);
+    this.detailsChanged();
   }
   older(events, snapshot) {
-    const opened = this.opened(),
+    const opened = this.detailStates(),
       height = this.root.scrollHeight,
       top = this.root.scrollTop;
     const unique = new Map(
@@ -57,7 +84,7 @@ export class FeedView {
     for (const event of [...unique.values()].sort((a, b) => a.seq - b.seq))
       this.retain(event);
     this.events = this.events.slice(0, this.maxEvents);
-    this.reset();
+    this.reset({ preserveDetails: true });
     for (const event of this.events) this.present(event);
     this.seedStreams(snapshot);
     this.syncMessages(snapshot.messages || []);
@@ -71,9 +98,9 @@ export class FeedView {
     this.retain(event);
     this.present(event);
     if (this.events.length > this.maxEvents) {
-      const opened = this.opened();
+      const opened = this.detailStates();
       this.events = this.events.slice(-this.maxEvents);
-      this.reset();
+      this.reset({ preserveDetails: true });
       for (const retained of this.events) this.present(retained);
       if (this.snapshot) {
         this.seedStreams(this.snapshot);
@@ -126,20 +153,27 @@ export class FeedView {
   group(event) {
     this.emptyState?.remove();
     const key = event.run_id || "session";
+    if (event.run_id && !this.groups.has(key) && this.groups.has("session")) {
+      const pending = this.groups.get("session");
+      this.groups.delete("session");
+      pending.node.dataset.key = `group:${key}`;
+      this.groups.set(key, pending);
+    }
     if (!this.groups.has(key)) {
       const node = element("details", "process-group"),
         summary = element("summary", "", "Process");
       node.dataset.key = `group:${key}`;
       node.dataset.seq = event.seq || this.snapshot?.event_cursor || 0;
+      node.open = this.detailMode === true;
       const rows = element("div", "process-records");
       node.append(summary, rows);
-      this.root.append(node);
       this.groups.set(key, {
         node,
         summary,
         rows,
         records: new Map(),
       });
+      this.layout();
     }
     return this.groups.get(key);
   }
@@ -168,7 +202,14 @@ export class FeedView {
       context = { streamKey: key, streamText: this.streams[key] };
     }
     const descriptor = this.renderers.describe(event, context);
-    this.record(this.group(event), descriptor);
+    const group = this.group(event);
+    if (
+      ["run.failed", "run.stopped"].includes(event.type) ||
+      (event.type === "run.state.changed" &&
+        ["completed", "failed", "stopped"].includes(event.payload.state))
+    )
+      group.node.dataset.endSeq = event.seq;
+    this.record(group, descriptor);
   }
   record(group, descriptor) {
     let record = group.records.get(descriptor.key);
@@ -178,12 +219,14 @@ export class FeedView {
         body = element("div", "event-detail"),
         pre = element("pre");
       node.dataset.key = descriptor.key;
+      node.open = this.detailMode === true;
       body.append(pre);
       node.append(summary, body);
       group.rows.append(node);
       record = { node, summary, body, pre, descriptor };
       group.records.set(descriptor.key, record);
       node.addEventListener("toggle", () => this.detail(record));
+      this.detailsChanged();
     }
     const previous = record.descriptor;
     if (descriptor.kind === "tool")
@@ -263,18 +306,78 @@ export class FeedView {
       );
     node.dataset.key = `message:${message.id}`;
     if (result) {
-      node.open = true;
+      node.open = this.detailMode !== false;
       node.append(element("summary", "", "Result"));
       node.append(renderResult(reportContent(message.content)));
     } else {
-      node.append(element("small", "", "You"));
+      node.append(element("small", "", "Task · You"));
       node.append(element("p", "", message.content));
     }
     node.dataset.seq = message.seq || 0;
     this.messages.set(message.id, node);
-    const following = [...this.root.children].find(
-      (child) => Number(child.dataset.seq) > message.seq,
-    );
-    this.root.insertBefore(node, following || null);
+    this.layout();
+  }
+  layout() {
+    // Snapshot messages and retained process groups arrive independently.
+    // Reconcile them by sequence rather than assuming replay order or run_id
+    // on user messages (a new task's message still carries the previous run).
+    const timeline = [
+      ...this.messages.values(),
+      ...[...this.groups.values()].map((group) => group.node),
+    ].sort((a, b) => Number(a.dataset.seq) - Number(b.dataset.seq));
+    const blocks = [];
+    let block;
+    for (const node of timeline) {
+      const process = node.classList.contains("process-group");
+      if (!block || block.finished || (process && block.hasProcess)) {
+        const pending =
+          process && block?.endSeq
+            ? block.nodes.filter(
+                (item) =>
+                  item.classList.contains("user") &&
+                  Number(item.dataset.seq) > block.endSeq,
+              )
+            : [];
+        if (pending.length)
+          block.nodes = block.nodes.filter((item) => !pending.includes(item));
+        block = {
+          key: pending[0]?.dataset.key || node.dataset.key,
+          nodes: pending,
+          hasProcess: false,
+          finished: false,
+        };
+        blocks.push(block);
+      }
+      block.nodes.push(node);
+      block.hasProcess ||= process;
+      if (process) block.endSeq = Number(node.dataset.endSeq) || 0;
+      block.finished = node.classList.contains("result");
+    }
+    const next = new Map();
+    for (const block of blocks) {
+      const section =
+        this.blocks.get(block.key) || element("section", "task-block");
+      section.dataset.key = `block:${block.key}`;
+      section.setAttribute("aria-label", "Task execution and result");
+      // Move only nodes whose position changed, keeping expanded details and
+      // focused controls intact during streaming updates.
+      const ordered = [
+        ...block.nodes.filter((node) => node.classList.contains("user")),
+        ...block.nodes.filter((node) => !node.classList.contains("user")),
+      ];
+      ordered.forEach((node, index) => {
+        if (section.children[index] !== node)
+          section.insertBefore(node, section.children[index] || null);
+      });
+      next.set(block.key, section);
+    }
+    for (const section of this.blocks.values())
+      if (![...next.values()].includes(section)) section.remove();
+    [...next.values()].forEach((section, index) => {
+      if (this.root.children[index] !== section)
+        this.root.insertBefore(section, this.root.children[index] || null);
+    });
+    this.blocks = next;
+    this.detailsChanged();
   }
 }

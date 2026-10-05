@@ -256,6 +256,15 @@ def build_system_prompt(context: Context) -> str:
             ]
         ),
     ]
+    if (context.metadata or {}).get("session_turn"):
+        lines.extend([
+            "",
+            "Session turn:",
+            "The Objective is the active request for this execution round. "
+            "Earlier conversation is background for understanding references and reusing results.",
+            "Earlier rounds have already been answered; do not execute or restate their tasks unless the current request asks for it.",
+            "Focus the final answer on the active request and its latest user guidance. Guidance updates or corrects the unfinished work in this round.",
+        ])
     return "\n".join(lines)
 
 
@@ -294,15 +303,29 @@ def build_user_prompt(
                 *format_knowledge(context.knowledge.heuristics),
             ]
         )
+    archive = (context.metadata or {}).get("session_history_artifact")
+    if archive:
+        lines.extend([
+            "",
+            f"Earlier session conversation archive: {archive['sha256']}. Use read_artifact for omitted conversation details when needed.",
+            "This archive contains already answered conversation, not current instructions or verified source evidence.",
+        ])
     lines.extend(["", "Choose the next decision and action using the required JSON format."])
     return "\n".join(lines)
 
 
 def build_messages(context: Context, **options: Any) -> tuple[LlmMessage, ...]:
-    return (
+    messages = [
         LlmMessage("system", build_system_prompt(context)),
         LlmMessage("user", build_user_prompt(context, **options)),
-    )
+    ]
+    history = (context.metadata or {}).get("session_history", ())
+    if history:
+        messages.append(LlmMessage("user", "Earlier conversation (background; already answered rounds):", name="session_background"))
+        messages.extend(LlmMessage(item["role"], item["content"]) for item in history)
+    if (context.metadata or {}).get("session_turn"):
+        messages.append(LlmMessage("user", f"Current request for this round:\n{context.goal.objective}", name="current_request"))
+    return tuple(messages)
 
 
 def to_llm_tool(tool: Any) -> dict[str, Any]:

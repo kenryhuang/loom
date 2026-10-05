@@ -55,7 +55,7 @@ def builtin_collection(plugin_id, request):
     from loom.tasks.runner import _task_tool_refs
     from loom.tasks.tools import make_task_tools
 
-    groups = {"filesystem": ("read_file", "edit_file", "write_file"), "shell": ("shell_execute",), "task_control": ("finish",)}
+    groups = {"filesystem": ("read_file", "edit_file", "write_file"), "shell": ("shell_execute", "process_execute"), "task_control": ("finish",)}
     names = groups[plugin_id]
     refs = tuple(ref for ref in _task_tool_refs() if ref.id in names)
     handlers = {name: handler for name, handler in make_task_tools(request).items() if name in names}
@@ -64,6 +64,7 @@ def builtin_collection(plugin_id, request):
         "edit_file": "side_effecting",
         "write_file": "side_effecting",
         "shell_execute": "side_effecting",
+        "process_execute": "side_effecting",
         "finish": "service_control",
     }
     return ToolCollection(plugin_id, refs, handlers, effects, control=plugin_id == "task_control")

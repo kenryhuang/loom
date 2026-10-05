@@ -12,6 +12,17 @@ from loom.tasks.runner import _create_provider, make_task_context, make_task_loo
 
 
 async def execute(state, bridge, config_path, provider_factory, plugin_registry_factory=None):
+    # Consume the initial input before assembling capabilities and workflow.
+    # A completed run's follow-up is a new goal, not more text on its old goal.
+    fresh_turn = not bridge.checkpoint and not state["run"]["steps"] and (
+        not state.get("context") or state["run"].get("reset_planning", False)
+    )
+    inputs = [m for m in state["messages"] if m["role"] == "user" and m["seq"] > state["input_cursor"]] if fresh_turn else []
+    if inputs:
+        state = {**state, "task": {**state["task"], "objective": "\n\n".join(m["content"] for m in inputs)}}
+        bridge.input_cursor = inputs[-1]["seq"]
+    bridge.fresh_turn = fresh_turn
+    bridge.turn_messages = [m for m in state["messages"] if not inputs or m["seq"] < inputs[0]["seq"]]
     provider = (
         provider_factory(state)
         if provider_factory
@@ -37,8 +48,28 @@ async def execute(state, bridge, config_path, provider_factory, plugin_registry_
 async def _execute_assembled(state, bridge, provider, request, assembly):
     planning = assembly.workflow
     initial = make_task_context(request, planning=planning, assembly=assembly).unwrap()
-    context = decode(state["context"]) if state.get("context") else initial
+    previous = decode(state["context"]) if state.get("context") else None
+    if bridge.fresh_turn:
+        context = replace(initial, knowledge=previous.knowledge) if previous else initial
+        archive = assembly.publish_artifact({"messages": bridge.turn_messages}, "session_history") if bridge.turn_messages else None
+        context = replace(context, metadata={
+            **(context.metadata or {}),
+            "session_history": _history(bridge.turn_messages, state["task"]["limits"]["max_window_chars"]),
+            "session_history_artifact": archive,
+        })
+    else:
+        context = previous or initial
     same_run = context.run_id == state["run"]["id"]
+    if not bridge.checkpoint and not same_run:
+        context = replace(context, metadata={
+            **(context.metadata or {}),
+            "session_turn": True,
+            "result_scope": {
+                "run_id": state["run"]["id"],
+                "observation_start": len(context.state.observations),
+                "decision_start": len(context.state.decisions),
+            },
+        })
     context = bridge.checkpoint["context"] if bridge.checkpoint else replace(context, run_id=state["run"]["id"])
     if bridge.checkpoint and bridge.checkpoint.get("plugin_states"):
         assembly.restore(bridge.checkpoint["plugin_states"])
@@ -53,6 +84,7 @@ async def _execute_assembled(state, bridge, provider, request, assembly):
             context = planning.project_state(context)
     if state["run"].get("reset_planning") and not bridge.checkpoint and state["run"]["steps"] == 0:
         context = planning.project_state(context)
+    assembly.update_goal(context.goal)
     managed = ManagedStep(provider, bridge, planning=planning, limits=state["task"]["limits"], stream=True, assembly=assembly)
     definition = assembly.wrap_loop(replace(make_task_loop(request, provider, planning=planning), step=managed))
     handle = create(definition, registry=create_runtime_registry(tools=assembly.handlers())).unwrap()
@@ -69,3 +101,22 @@ async def _execute_assembled(state, bridge, provider, request, assembly):
         bridge.counters = {"llm_calls": bridge.checkpoint["llm_calls"], "usage": bridge.checkpoint["usage"]} if bridge.checkpoint else bridge.counters
         bridge.checkpoint = None
         bridge.input_cursor = bridge.rpc("status", {})["input_cursor"]
+
+
+def _history(messages, window_chars):
+    """Bound transcript background separately from the current execution state."""
+    remaining = min(8000, max(256, window_chars // 3))
+    history = []
+    for message in reversed(messages[-8:]):
+        if message["role"] not in {"user", "assistant"} or remaining <= 0:
+            continue
+        content = message["content"]
+        limit = min(2000, remaining)
+        if len(content) > limit:
+            marker = "\n[Earlier message shortened]\n"[:limit]
+            head = (limit - len(marker)) // 2
+            tail = limit - len(marker) - head
+            content = content[:head] + marker + (content[-tail:] if tail else "")
+        history.append({"role": message["role"], "content": content})
+        remaining -= len(content)
+    return list(reversed(history))

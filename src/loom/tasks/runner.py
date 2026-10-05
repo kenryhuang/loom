@@ -166,17 +166,22 @@ def make_task_loop(
 
 
 def _task_done(context: Context, _runtime: Any) -> Result:
+    scope = (context.metadata or {}).get("result_scope", {})
+    if scope.get("run_id") != context.run_id:
+        scope = {}
+    observations = context.state.observations[scope.get("observation_start", 0) :]
+    decisions = context.state.decisions[scope.get("decision_start", 0) :]
     if any(
         observation.source == "finish"
         and isinstance(observation.value, Mapping)
         and observation.value.get("completed", True)
         and observation.value.get("accepted", True)
-        for observation in context.state.observations
+        for observation in observations
     ):
         return ok(True)
-    if not context.state.decisions:
+    if not decisions:
         return ok(False)
-    latest = context.state.decisions[-1]
+    latest = decisions[-1]
     return ok(not bool((latest.metadata or {}).get("parseFallback")))
 
 
@@ -377,21 +382,33 @@ def _task_tool_refs() -> tuple[ToolRef, ...]:
         ),
         ToolRef(
             "shell_execute",
-            "Execute a command in the workspace without shell expansion and return stdout, stderr, and exit code.",
+            'Execute a shell script in the workspace. Supports &&, pipes, redirects and expansion. '
+            'Example: {"command":"git fetch && git status","cwd":"."}. '
+            'The native default is bash with pipefail, without login startup files. Use process_execute for literal argv.',
             input_schema={
                 "type": "object",
                 "properties": {
-                    "command": {
-                        "oneOf": [
-                            {"type": "string"},
-                            {"type": "array", "items": {"type": "string"}},
-                        ],
-                        "description": "Command string or argv list.",
-                    },
+                    "command": {"type": "string", "minLength": 1, "description": "Shell script text; never an argv array or JSON-encoded array."},
                     "cwd": {"type": "string", "description": "Workspace-relative working directory."},
-                    "timeout_seconds": {"type": "integer", "description": "Positive command timeout in seconds."},
+                    "timeout_seconds": {"type": "integer", "minimum": 1},
                 },
                 "required": ["command"],
+                "additionalProperties": False,
+            },
+        ),
+        ToolRef(
+            "process_execute",
+            'Execute a program directly with literal arguments, without shell parsing. Example: {"argv":["git","log","-5","--oneline"]}. '
+            'Spaces stay inside each argument. Use shell_execute for &&, pipes, redirects or expansion. '
+            'grep/rg exit 1 means no_match, not execution failure.',
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "argv": {"type": "array", "minItems": 1, "items": {"type": "string"}, "description": "Program name followed by literal arguments."},
+                    "cwd": {"type": "string", "description": "Workspace-relative working directory."},
+                    "timeout_seconds": {"type": "integer", "minimum": 1},
+                },
+                "required": ["argv"],
                 "additionalProperties": False,
             },
         ),
@@ -513,7 +530,11 @@ def _report_from_run_result(run_result: Any) -> str:
     if report and not _is_empty_llm_decision_output(output):
         return report
 
-    latest = run_result.context.state.decisions[-1] if run_result.context.state.decisions else None
+    scope = (getattr(run_result.context, "metadata", None) or {}).get("result_scope", {})
+    if scope.get("run_id") != getattr(run_result.context, "run_id", None):
+        scope = {}
+    decisions = run_result.context.state.decisions[scope.get("decision_start", 0) :]
+    latest = decisions[-1] if decisions else None
     if latest is not None:
         latest_output = {
             "action": {
@@ -525,7 +546,7 @@ def _report_from_run_result(run_result: Any) -> str:
         if report and not _is_empty_llm_decision_output(latest_output):
             return report
 
-    for observation in reversed(run_result.context.state.observations):
+    for observation in reversed(run_result.context.state.observations[scope.get("observation_start", 0) :]):
         if observation.source != "finish":
             continue
         value = thaw_json(observation.value)

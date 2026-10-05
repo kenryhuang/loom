@@ -15,6 +15,7 @@ class WorkflowRoutePhase(StrEnum):
     REACT = "react"
     REVIEWING = "reviewing"
     PLAN = "plan"
+    COMPLETED = "completed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,7 +23,7 @@ class WorkflowRoutePolicy:
     failure_threshold: int = 2
     tool_call_threshold: int = 12
     cooldown_calls: int = 6
-    max_reviews: int = 3
+    max_reviews: int | None = None
 
     def __post_init__(self) -> None:
         if self.failure_threshold <= 0:
@@ -31,7 +32,7 @@ class WorkflowRoutePolicy:
             raise ValueError("tool_call_threshold must be positive")
         if self.cooldown_calls < 0:
             raise ValueError("cooldown_calls must be non-negative")
-        if self.max_reviews < 0:
+        if self.max_reviews is not None and self.max_reviews < 0:
             raise ValueError("max_reviews must be non-negative")
 
 
@@ -142,6 +143,19 @@ class WorkflowRouteController:
         self._emit_selected(trigger, clean_reason, WorkflowRoutePhase.PLAN)
         return ok(self._state)
 
+    def complete(self) -> None:
+        if self._state.phase not in {WorkflowRoutePhase.REACT, WorkflowRoutePhase.REVIEWING}:
+            raise ValueError("Completion requires an executing or reviewing route")
+        self._state = replace(
+            self._state,
+            phase=WorkflowRoutePhase.COMPLETED,
+            revision=self._state.revision + 1,
+            reason="Current request fulfilled",
+            trigger="completion",
+            cooldown_remaining=0,
+        )
+        self._emit_selected("completion", "Current request fulfilled", WorkflowRoutePhase.COMPLETED)
+
     def mark_task_execution_started(self) -> WorkflowRouteState:
         if self._state.phase is WorkflowRoutePhase.REACT and not self._state.task_execution_started:
             self._state = replace(self._state, task_execution_started=True)
@@ -159,7 +173,7 @@ class WorkflowRouteController:
             consecutive_failures=failures,
             cooldown_remaining=cooldown,
         )
-        if cooldown > 0 or self._state.review_count >= self.policy.max_reviews:
+        if cooldown > 0 or (self.policy.max_reviews is not None and self._state.review_count >= self.policy.max_reviews):
             return False
         if failures >= self.policy.failure_threshold:
             return self._enter_review("tool_failures", f"{failures} consecutive tool failures")
@@ -177,7 +191,7 @@ class WorkflowRouteController:
             and self._state.phase is WorkflowRoutePhase.REACT
             and self._state.task_execution_started
             and self._state.cooldown_remaining == 0
-            and self._state.review_count < self.policy.max_reviews
+            and (self.policy.max_reviews is None or self._state.review_count < self.policy.max_reviews)
         )
         return ok(self._enter_review(clean_trigger, clean_reason) if eligible else False)
 

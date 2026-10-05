@@ -64,6 +64,35 @@ class ManagedStep:
             cp["plugin_states"] = self.assembly.snapshot()
         return self.execution.boundary(cp)
 
+    def _response_calls(self, cp):
+        response = cp["response"]
+        visible = frozenset(cp.get("visible_tool_ids", (t.id for t in cp["context"].affordances.tools)))
+        if response.tool_calls:
+            unavailable = tuple(call.name for call in response.tool_calls if call.name not in visible and call.name != INPUT_TOOL.id)
+            return ([] if unavailable else list(response.tool_calls)), True, unavailable
+        parsed = _parse_decision(response.content, cp["trace_id"])
+        actions = _json_tool_actions(parsed, visible)
+        calls = [LlmToolCall(f"{cp['trace_id']}-json-{i}-{cp['llm_calls']}", a.target, canonical(thaw_json(a.input) or {})) for i, a in enumerate(actions)]
+        target = parsed["action"].target
+        unavailable = (target,) if target and target not in visible else ()
+        return calls, False, unavailable
+
+    def _required_tool_feedback(self, cp, policy, unavailable):
+        visible = list(cp.get("visible_tool_ids", (t.id for t in cp["context"].affordances.tools)))
+        detail = (
+            f"Tool selection rejected: {', '.join(unavailable)} is unavailable in this workflow phase."
+            if unavailable
+            else "No executable tool call was found. Reasoning, evidence_gap and next_action alone do not select a tool."
+        )
+        response = cp["response"]
+        cp["messages"].append(LlmMessage("assistant", response.content or "", tool_calls=response.tool_calls))
+        for call in response.tool_calls:
+            cp["messages"].append(LlmMessage("tool", canonical({"ok": False, "error": detail}), name=call.name, tool_call_id=call.id))
+        cp["messages"].append(
+            LlmMessage("user", f"{detail} Available tools: {', '.join(visible)}. {policy.retry_prompt}", name="workflow_tool_required")
+        )
+        return {"available_tools": visible, "unavailable_tools": list(unavailable), "reason": detail}
+
     def _terminal(self, cp, runtime):
         directive = self._checkpoint(cp)
         control = directive.get("control")
@@ -71,6 +100,14 @@ class ManagedStep:
             return self._result(cp, runtime, control["kind"], control.get("reason", ""))
         terminal = cp["terminal"]
         return self._result(cp, runtime, terminal["kind"], parsed=terminal["parsed"])
+
+    async def _finish(self, cp, runtime, value):
+        await self._interrupt_batch(cp, runtime, "Task completed")
+        cp["phase"] = "step_done"
+        parsed = _parse_decision(cp["response"].content if cp.get("response") else "", cp["trace_id"])
+        parsed.update(output=value.get("report", ""), parse_fallback=False)
+        cp["terminal"] = {"kind": "completed", "parsed": parsed}
+        return self._terminal(cp, runtime)
 
     def _context(self, cp, *, parsed=None):
         base = cp["context"]
@@ -177,7 +214,10 @@ class ManagedStep:
             base = cp["context"]
             cp["context"] = replace(base, goal=replace(base.goal, objective=f"{base.goal.objective}\n\nUser guidance:\n{guidance}"))
             if self.assembly:
+                self.assembly.update_goal(cp["context"].goal)
                 cp["messages"][0] = self.assembly.context_manager.project(cp["context"])[0]
+            else:
+                cp["messages"][0] = build_messages(cp["context"])[0]
             # Persist the input projection and cursor before taking a new action.
             directive = self._checkpoint(cp)
         control = directive.get("control")
@@ -221,16 +261,26 @@ class ManagedStep:
                 "input_cursor": getattr(self.execution, "input_cursor", 0),
                 "missing_retries": 0,
             }
+        if restored and self.planning and hasattr(self.planning, "project_context"):
+            if self.assembly:
+                self.planning.configure_normal_tool_refs(self.assembly.context_tools())
+            cp["context"] = self.planning.project_context(cp["context"])
+            projected = self.assembly.context_manager.project(cp["context"]) if self.assembly else list(build_messages(cp["context"], max_history_steps=5))
+            cp["messages"] = [projected[0], *cp["messages"][1:]]
+        # Older checkpoints could have committed finish but continued requesting
+        # the model. Its accepted report is already terminal; never execute more.
+        for observation in cp["observations"]:
+            value = thaw_json(observation.value)
+            if observation.source == "finish" and isinstance(value, dict) and value.get("completed") and value.get("accepted", True):
+                return await self._finish(cp, runtime, value)
         if restored and cp["phase"] == "after_llm" and self.planning:
             policy = self.planning.step_policy(cp["context"])
-            response = cp["response"]
-            if policy and policy.require_tool_call and cp["missing_retries"] >= policy.missing_tool_call_retries and not response.tool_calls:
-                parsed = _parse_decision(response.content, cp["trace_id"])
-                actions = _json_tool_actions(parsed, frozenset(t.id for t in cp["context"].affordances.tools))
-                if not actions:
+            if policy and policy.require_tool_call and cp["missing_retries"] >= policy.missing_tool_call_retries:
+                calls, _, unavailable = self._response_calls(cp)
+                if not calls:
                     # An exhausted routing response cannot make progress by being
                     # replayed. Retry the model, retaining observations and usage.
-                    cp["messages"].extend([LlmMessage("assistant", response.content or ""), LlmMessage("user", policy.retry_prompt)])
+                    self._required_tool_feedback(cp, policy, unavailable)
                     cp.update(phase="before_llm", response=None, missing_retries=0)
         while True:
             suspended = await self._boundary(cp, runtime)
@@ -241,6 +291,10 @@ class ManagedStep:
                     return self._result(cp, runtime, "paused", "LLM call budget exceeded")
                 refs = self.assembly.resolve_tools(cp["context"]) if self.assembly else cp["context"].affordances.tools
                 tools = to_llm_tools((*refs, INPUT_TOOL))
+                cp["visible_tool_ids"] = [ref.id for ref in refs]
+                policy = self.planning.step_policy(cp["context"]) if self.planning else None
+                if policy and policy.require_tool_call and cp["messages"][-1].name != "workflow_tool_required":
+                    cp["messages"].append(LlmMessage("user", policy.retry_prompt, name="workflow_tool_required"))
                 if self.assembly:
                     try:
                         window, compacted = self.assembly.context_manager.compact(
@@ -260,7 +314,10 @@ class ManagedStep:
                 suspended = await self._boundary(cp, runtime)
                 if suspended is not None:
                     return suspended
-                await self._emit(runtime, "llm.requested", llm_call_id=llm_id, model=self.provider.model, messages=tuple(cp["messages"]), tools=tools)
+                await self._emit(
+                    runtime, "llm.requested", llm_call_id=llm_id, model=self.provider.model,
+                    messages=tuple(cp["messages"]), tools=tools, tool_choice=policy.tool_choice if policy else None,
+                )
                 request = asyncio.create_task(
                     request_llm_response(
                         self.provider,
@@ -309,27 +366,28 @@ class ManagedStep:
                 continue
             if cp["phase"] == "after_llm":
                 response = cp["response"]
-                calls = list(response.tool_calls)
-                cp["native"] = bool(calls)
-                if not calls:
-                    parsed = _parse_decision(response.content, cp["trace_id"])
-                    actions = _json_tool_actions(parsed, frozenset(t.id for t in cp["context"].affordances.tools))
-                    calls = [
-                        LlmToolCall(f"{cp['trace_id']}-json-{i}-{cp['llm_calls']}", a.target, canonical(thaw_json(a.input) or {}))
-                        for i, a in enumerate(actions)
-                    ]
+                policy = self.planning.step_policy(cp["context"]) if self.planning else None
+                if policy and policy.require_tool_call:
+                    calls, cp["native"], unavailable = self._response_calls(cp)
+                else:
+                    calls = list(response.tool_calls)
+                    cp["native"] = bool(calls)
+                    if not calls:
+                        calls, _, _ = self._response_calls(cp)
                 if calls:
                     cp["calls"] = calls
                     cp["tool_index"] = 0
                     cp["messages"].append(LlmMessage("assistant", response.content or "", tool_calls=tuple(calls) if cp["native"] else ()))
                     cp["phase"] = "tool_batch"
                     continue
-                policy = self.planning.step_policy(cp["context"]) if self.planning else None
                 if policy and policy.require_tool_call:
                     if cp["missing_retries"] >= policy.missing_tool_call_retries:
-                        return err(make_loom_error(policy.failure_code, "Model did not select the required workflow tool", retryable=False))
+                        return err(make_loom_error(
+                            policy.failure_code, "Model did not select the required workflow tool", retryable=False,
+                            cause={"available_tools": cp.get("visible_tool_ids", []), "unavailable_tools": list(unavailable)},
+                        ))
                     cp["missing_retries"] += 1
-                    cp["messages"].extend([LlmMessage("assistant", response.content or ""), LlmMessage("user", policy.retry_prompt)])
+                    self._required_tool_feedback(cp, policy, unavailable)
                     cp["phase"] = "before_llm"
                     continue
                 parsed = _parse_decision(response.content, cp["trace_id"])
@@ -434,6 +492,15 @@ class ManagedStep:
                     )
                 )
                 cp["tool_index"] += 1
+                finish_value = thaw_json(observation.value)
+                if (
+                    call.name == "finish"
+                    and observation.source == "finish"
+                    and isinstance(finish_value, dict)
+                    and finish_value.get("completed")
+                    and finish_value.get("accepted", True)
+                ):
+                    return await self._finish(cp, runtime, finish_value)
                 suspended = await self._boundary(cp, runtime)
                 if suspended is not None:
                     return suspended

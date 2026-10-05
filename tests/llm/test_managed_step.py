@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import pytest
+
 from loom.core import Observation, ok
 from loom.llm.api import LlmResponse, LlmToolCall, TokenUsage
 from loom.llm.managed_step import ManagedStep
@@ -51,9 +53,9 @@ class Execution:
         return {"id": "question-1", "question": question["question"]}
 
 
-async def run_managed(tmp_path, provider, execution, tools=None, planning=None, limits=None):
+async def run_managed(tmp_path, provider, execution, tools=None, planning=None, limits=None, context=None):
     request = TaskRequest("Maintain", workspace=tmp_path)
-    context = make_task_context(request, plan_mode="off").unwrap()
+    context = context or make_task_context(request, plan_mode="off").unwrap()
     managed = ManagedStep(provider, execution, planning=planning, limits=limits)
     definition = make_task_loop(request, provider)
     from dataclasses import replace
@@ -129,6 +131,8 @@ def test_steering_interrupts_unexecuted_native_tool_batch(tmp_path):
         messages = provider.calls[-1]
         assert {m.tool_call_id for m in messages if m.role == "tool"} == {"one", "two"}
         assert any(m.role == "user" and "Do not read" in m.content for m in messages)
+        assert "User guidance:\nDo not read the second file" in messages[0].content
+        assert "Maintain" in messages[0].content
 
     asyncio.run(scenario())
 
@@ -210,6 +214,74 @@ def test_committed_final_checkpoint_finishes_without_another_model_call(tmp_path
         restored = await run_managed(tmp_path, provider, execution)
         assert restored.ok and restored.value.output == first.value.output
         assert len(provider.calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_native_finish_stops_batch_and_resume_without_another_call(tmp_path):
+    async def scenario():
+        from loom.tasks.tools import make_task_tools
+
+        provider = Provider(
+            [
+                LlmResponse(
+                    "",
+                    (
+                        LlmToolCall("finish", "finish", '{"report":"Committed answer"}'),
+                        LlmToolCall("stale", "shell_execute", '{"command":"touch stale"}'),
+                    ),
+                ),
+            ]
+        )
+        execution = Execution()
+        tools = make_task_tools(TaskRequest("Answer", workspace=tmp_path))
+
+        async def finish(_value, _options):
+            # Custom native tools need not know Loom's step-boundary metadata.
+            return ok(Observation("finished", "finish", {"completed": True, "report": "Committed answer"}, "now"))
+
+        tools["finish"] = finish
+        first = await run_managed(tmp_path, provider, execution, tools)
+        assert first.ok and first.value.control.kind == "completed"
+        assert first.value.output == "Committed answer"
+        assert not (tmp_path / "stale").exists()
+        restored = await run_managed(tmp_path, provider, execution)
+        assert restored.ok and restored.value.output == "Committed answer"
+        assert execution.operations == ["finish"] and len(provider.calls) == 1
+        execution.checkpoint.pop("terminal")
+        execution.checkpoint["phase"] = "before_llm"
+        legacy = await run_managed(tmp_path, provider, execution)
+        assert legacy.ok and legacy.value.output == "Committed answer" and len(provider.calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_managed_progress_review_can_finish_from_committed_evidence(tmp_path):
+    async def scenario():
+        from loom.runtime.workflow_routing import WorkflowRoutePolicy
+        from loom.tasks.tools import make_task_tools
+
+        (tmp_path / "evidence").write_text("Already up to date; verified changes")
+        planning = PlanningRuntime("auto", route_policy=WorkflowRoutePolicy(tool_call_threshold=1))
+        planning.route.select_react("Inspect and summarize").unwrap()
+        provider = Provider(
+            [
+                LlmResponse("", (LlmToolCall("read", "read_file", '{"path":"evidence"}'),)),
+                LlmResponse("", (LlmToolCall("finish", "finish", '{"report":"Verified changes"}'),)),
+            ]
+        )
+        execution = Execution()
+        tools = make_task_tools(TaskRequest("Summarize changes", workspace=tmp_path))
+        first = await run_managed(tmp_path, provider, execution, tools, planning)
+        assert first.ok and first.value.control.kind == "continue"
+        assert planning.route.state.phase.value == "reviewing"
+        # The service commits this completed step before starting the next one.
+        execution.checkpoint = None
+        second = await run_managed(tmp_path, provider, execution, tools, planning, context=first.value.context)
+        assert second.ok and second.value.control.kind == "completed"
+        assert second.value.output == "Verified changes"
+        assert "Already up to date" in str(provider.calls[-1])
+        assert planning.route.state.phase.value == "completed" and len(provider.calls) == 2
 
     asyncio.run(scenario())
 
@@ -320,6 +392,76 @@ def test_resume_keeps_valid_route_response_after_a_missing_tool_retry(tmp_path):
         resumed = await run_managed(tmp_path, provider, execution, planning=PlanningRuntime("auto"))
         assert resumed.ok and resumed.value.control.kind == "continue"
         assert len(provider.calls) == 2
+        assert execution.operations == ["route"]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_progress_review_rejects_task_call_and_explains_required_action(tmp_path, native):
+    async def scenario():
+        planning = PlanningRuntime("auto")
+        planning.route.select_react("Inspect changes").unwrap()
+        planning.route.mark_task_execution_started()
+        planning.request_route_review("tool_budget", "12 task tool calls").unwrap()
+        invalid = (
+            LlmResponse("", (LlmToolCall("wrong", "shell_execute", '{"command":"touch wrong"}'),))
+            if native
+            else LlmResponse(json.dumps({"reasoning": "Missing commit history", "action": {
+                "kind": "tool", "target": "shell_execute", "input": {"command": "touch wrong"},
+            }}))
+        )
+        selected = LlmResponse(json.dumps({"reasoning": "One history query remains", "action": {
+            "kind": "tool", "target": "continue_react", "input": {
+                "reason": "A read-only query closes the gap", "evidence_gap": "Three commits unidentified", "next_action": "Read full git log",
+            },
+        }}))
+        provider = Provider([invalid, selected])
+        execution = Execution()
+        result = await run_managed(tmp_path, provider, execution, planning=planning)
+        assert result.ok and result.value.control.kind == "continue"
+        assert planning.route.state.phase.value == "react"
+        assert len(execution.operations) == 1
+        assert not (tmp_path / "wrong").exists()
+        feedback = provider.calls[1][-1].content
+        assert "shell_execute is unavailable" in feedback
+        assert '"target":"continue_react"' in feedback
+        assert '"input":{' in feedback
+        assert "Three commits unidentified" in planning.route.state.reason
+        if native:
+            assert provider.calls[1][-2].tool_call_id == "wrong"
+            assert "unavailable" in provider.calls[1][-2].content
+
+    asyncio.run(scenario())
+
+
+def test_yakdb_progress_review_failure_is_bounded_and_resume_corrects_field_only_response(tmp_path):
+    async def scenario():
+        planning = PlanningRuntime("auto")
+        planning.route.select_react("Inspect changes").unwrap()
+        planning.route.mark_task_execution_started()
+        planning.request_route_review("tool_budget", "12 task tool calls").unwrap()
+        execution = Execution()
+        wrong_action = LlmResponse(json.dumps({"reasoning": "One cheap read closes the gap", "action": {
+            "kind": "tool", "target": "shell_execute", "input": {"command": "git log"},
+        }}), usage=TokenUsage(2, 1, 3))
+        fields_only = LlmResponse(json.dumps({
+            "reasoning": "Update verified, history incomplete", "evidence_gap": "Three commits unidentified", "next_action": "Read full git log",
+        }), usage=TokenUsage(2, 1, 3))
+        provider = Provider([wrong_action, fields_only])
+        failed = await run_managed(tmp_path, provider, execution, planning=planning)
+        assert not failed.ok and failed.error.code == "WORKFLOW_ROUTE_FAILED"
+        assert len(provider.calls) == 2 and execution.operations == []
+        assert tuple(failed.error.cause["available_tools"]) == ("enter_plan", "continue_react", "finish")
+        selected = LlmResponse("", (LlmToolCall("route", "continue_react", json.dumps({
+            "reason": "Read-only lookup", "evidence_gap": "Three commits unidentified", "next_action": "Read full git log",
+        })),))
+        retry_provider = Provider([selected])
+        resumed = await run_managed(tmp_path, retry_provider, execution, planning=PlanningRuntime("auto"))
+        assert resumed.ok and resumed.value.control.kind == "continue"
+        assert "No executable tool call was found" in retry_provider.calls[0][-1].content
+        assert execution.checkpoint["llm_calls"] == 3
+        assert execution.checkpoint["usage"].total_tokens == 6
         assert execution.operations == ["route"]
 
     asyncio.run(scenario())

@@ -90,7 +90,7 @@ def test_lost_side_effect_never_replays_without_reconciliation(tmp_path):
         assert (tmp_path / "workspace" / "marker").read_text() == "once"
         assert any(e["type"] == "tool.reconciled" for e in service.events(sid))
         context = decode(service.store.snapshot(sid)["context"])
-        assert any(o.source == "shell_execute" and o.value.get("reconciled") for o in context.state.observations)
+        assert any(o.source == "process_execute" and o.value.get("reconciled") for o in context.state.observations)
     finally:
         service.close()
 

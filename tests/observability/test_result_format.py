@@ -57,3 +57,24 @@ def test_complete_markdown_wrapper_is_rendered_as_a_document():
 def test_task_reports_preserve_json_instead_of_python_dict_representations(value):
     result = SimpleNamespace(output=value, context=SimpleNamespace(state=SimpleNamespace(decisions=(), observations=())))
     assert json.loads(_report_from_run_result(result)) == {"适用场景": ["异步业务"]}
+
+
+def test_report_fallback_and_completion_ignore_previous_run_results():
+    from dataclasses import replace
+
+    from loom.core import Action, Decision, Observation
+    from loom.tasks.request import TaskRequest
+    from loom.tasks.runner import _task_done, make_task_context
+
+    context = make_task_context(TaskRequest("New request"), plan_mode="off").unwrap()
+    context = replace(context, state=replace(context.state,
+        observations=(Observation("old", "finish", {"completed": True, "report": "Old reply"}, "now"),),
+        decisions=(Decision("old", Action("old", "none", "Done", {"report": "Old decision"}), "done", (), 1, "now"),),
+    ), metadata={"result_scope": {"run_id": context.run_id, "observation_start": 1, "decision_start": 1}})
+    result = SimpleNamespace(output=None, context=context)
+    assert "Old" not in _report_from_run_result(result)
+    assert _task_done(context, None).unwrap() is False
+    current = Observation("current", "finish", {"completed": True, "report": "Current reply"}, "now")
+    context = replace(context, state=replace(context.state, observations=(*context.state.observations, current)))
+    assert _report_from_run_result(SimpleNamespace(output=None, context=context)) == "Current reply"
+    assert _task_done(context, None).unwrap() is True
