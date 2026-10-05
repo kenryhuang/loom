@@ -53,15 +53,30 @@ processes, event details and results together, retaining the setting for new
 events and through history loading or reconnects within the selected session.
 The process is collapsed by default, with its latest event in the summary.
 Its event count represents the expandable rows: streaming chunks update a
-single Thought/output row, and tool start/completion update a single tool row.
+single model row per call, and tool start/completion update a single tool row.
+Model requests, stream boundaries, reasoning, output and completion/failure
+update the same row; its details retain the request and response. Model-generated
+tool-call names and argument chunks do not add execution rows: actual execution
+is shown by tool events, while proposed calls remain in the model response.
+Normal operation start/completion bookkeeping is hidden; uncertain effects
+remain visible as recovery warnings. These display rules apply to both live
+events and restored history; original records remain in the raw history API.
+Task/session changes, run and step lifecycle events, token/time budgets and
+command receipts update the sidebar and controls without adding detail rows.
+Session information shows task/run state, the current objective, reasons and
+the time limit; the budget and outputs panels update as changes arrive. Run
+transitions still maintain round boundaries and survive history loading;
+errors and recovery warnings remain visible separately. Resuming the same run
+retains its token usage and renewed time window.
 Consecutive text deltas are also coalesced in the display history window.
 An execution-round index restores Process sections for older tasks even when
 their detailed events fall outside the recent history page. Historical failures
-and retries remain visible after recovery or completion. Expanding a Process
+remain visible after recovery or completion. Expanding a Process
 loads its own paginated execution history; the button inside that section loads
 earlier records for that round. These pages omit individual token chunks and
 retain model requests/replies, tool calls and lifecycle records. Raw events are
-still available through Earlier events. Completed rounds that reused a run ID
+still retained by the raw history API; Earlier events uses the same compact
+renderers as live events. Completed rounds that reused a run ID
 have separate Process sections, while pause/resume attempts stay in one round.
 Thought and tool rows can be expanded to see their full detail; large tool
 artifacts load on demand. Final assistant results are expanded by default.

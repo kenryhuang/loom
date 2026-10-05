@@ -65,17 +65,106 @@ export function firstLine(value) {
     .split(/\n|(?<=[。！？])|(?<=[.!?])\s/)[0]
     .trim();
 }
+export function modelSummary(details, status, stage) {
+  if (status === "failed") {
+    const error = details.error || {};
+    return `Model failed · ${error.code || "LLM_FAILED"} · ${error.message || "Request failed"}`;
+  }
+  let content = details.response?.content || details.content || "",
+    reasoning;
+  try {
+    reasoning = JSON.parse(
+      content.replace(/^\s*```(?:json)?\s*\n|\n```\s*$/g, ""),
+    ).reasoning;
+  } catch {}
+  const text = reasoning || details.reasoning || content;
+  return `${text ? `Thought: ${firstLine(text).slice(0, 200)}` : "Model"} · ${stage}`;
+}
 export function builtinRenderers() {
   return new RendererRegistry()
     .register(
+      "internal-lifecycle",
+      (event) =>
+        ["operation.started", "operation.completed"].includes(event.type) ||
+        event.type.startsWith("llm.tool_call.") ||
+        (["task.", "run.", "session.", "budget.", "command.", "step."].some(
+          (prefix) => event.type.startsWith(prefix),
+        ) &&
+          !event.type.endsWith(".failed") &&
+          event.type !== "run.recovery.required"),
+      (event) => ({
+        hidden: true,
+        affectsProcess: [
+          "run.started",
+          "run.state.changed",
+          "run.completed",
+          "run.stopped",
+        ].includes(event.type),
+      }),
+    )
+    .register(
+      "model",
+      (event) =>
+        [
+          "llm.requested",
+          "llm.stream.started",
+          "llm.stream.completed",
+          "llm.completed",
+          "llm.failed",
+          "llm.reasoning.delta",
+          "llm.reasoning_context.delta",
+          "llm.content.delta",
+        ].includes(event.type),
+      (event, context) => {
+        const data = event.payload,
+          details = {};
+        let stage = "Streaming",
+          status = "running";
+        if (event.type === "llm.requested") {
+          details.request = data;
+          stage = "Waiting";
+        } else if (event.type === "llm.completed") {
+          details.response = data.response;
+          stage = "Done";
+          status = "";
+        } else if (event.type === "llm.failed") {
+          details.error = data.error || data;
+          stage = "Failed";
+          status = "failed";
+        } else if (event.type === "llm.stream.completed")
+          stage = "Response received";
+        else if (event.type.endsWith(".delta"))
+          details[event.type.slice(4, -6)] =
+            context.streamText ?? data.delta ?? "";
+        return {
+          key: `thought:${data.llm_call_id || event.seq}`,
+          kind: "model",
+          details,
+          stage,
+          status,
+          summary: modelSummary(details, status, stage),
+          artifact: data.artifact,
+        };
+      },
+    )
+    .register(
       "execution-failure",
-      (event) => ["run.failed", "llm.failed"].includes(event.type),
+      (event) =>
+        [
+          "run.failed",
+          "task.failed",
+          "step.failed",
+          "operation.uncertain",
+        ].includes(event.type),
       (event) => {
         const error = event.payload.error || event.payload;
         return {
           key: `event:${event.seq}`,
           status: "failed",
-          summary: `Failed · ${error.code || event.type} · ${error.message || "Execution failed"}`,
+          summary:
+            event.type === "operation.uncertain"
+              ? "Recovery required · Operation effects are uncertain"
+              : `Failed · ${error.code || event.type} · ${error.message || "Execution failed"}`,
           details: event.payload,
         };
       },
@@ -108,9 +197,7 @@ export function builtinRenderers() {
     )
     .register(
       "thought",
-      (event) =>
-        event.type === "llm.reasoning.delta" ||
-        event.type === "decision.recorded",
+      (event) => event.type === "decision.recorded",
       (event, context) => {
         const data = event.payload;
         const text =

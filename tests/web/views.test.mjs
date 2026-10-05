@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
 import { FeedView } from "../../src/loom/web/assets/views/feed.mjs";
+import { SessionProjection } from "../../src/loom/web/assets/state.mjs";
 import {
   builtinPanels,
   PanelsView,
@@ -347,7 +348,7 @@ test("live execution rounds keep failure and retry milestones when detailed even
   const first = root.querySelector('[data-key="group:run:1"]');
   assert.match(first.textContent, /WORKFLOW_ROUTE_FAILED/);
   assert.match(first.querySelector("summary").textContent, /completed/);
-  assert.equal(first.querySelectorAll(".event-row").length, 4);
+  assert.equal(first.querySelectorAll(".event-row").length, 1);
   dom.window.close();
 });
 
@@ -410,7 +411,7 @@ test("loading older process pages preserves completed state and the latest tool 
   );
   assert.deepEqual(
     [...group.rows.children].map((node) => node.dataset.key),
-    ["event:2", "tool:call", "event:5"],
+    ["tool:call"],
   );
   dom.window.close();
 });
@@ -571,7 +572,8 @@ test("process counts logical rows, preserving tool details during a long delta s
   assert.match(root.textContent, /https:\/\/example.test/);
   assert.equal(feed.events.length, 3);
   assert.equal(
-    root.querySelector('[data-key="thought:call"] pre').textContent,
+    JSON.parse(root.querySelector('[data-key="thought:call"] pre').textContent)
+      .reasoning,
     "思".repeat(150),
   );
   feed.restore({
@@ -589,8 +591,266 @@ test("process counts logical rows, preserving tool details during a long delta s
   );
   assert.equal(feed.events.length, 1);
   assert.equal(
-    root.querySelector('[data-key="thought:call"] pre').textContent,
+    JSON.parse(root.querySelector('[data-key="thought:call"] pre').textContent)
+      .reasoning,
     "思".repeat(150),
+  );
+  dom.window.close();
+});
+
+test("model lifecycle and output share one row while proposed tool calls do not imply execution", () => {
+  const dom = setup(),
+    root = document.getElementById("feed"),
+    feed = new FeedView(root);
+  const llm = (seq, type, payload = {}) =>
+    event(seq, type, { llm_call_id: "model", ...payload });
+  const events = [
+    llm(1, "llm.requested", {
+      messages: [{ role: "user", content: "Inspect project" }],
+    }),
+    llm(2, "llm.stream.started"),
+    llm(3, "llm.reasoning.delta", { delta: "Inspect files", offset: 0 }),
+    llm(4, "llm.content.delta", { delta: "Proposed call", offset: 0 }),
+    llm(5, "llm.tool_call.started", {
+      tool_call_id: "proposed",
+      tool_name: "unavailable_tool",
+    }),
+    llm(6, "llm.tool_call.arguments.delta", {
+      tool_call_id: "proposed",
+      delta: "{}",
+    }),
+    llm(7, "llm.tool_call.completed", { tool_call_id: "proposed" }),
+    llm(8, "llm.stream.completed"),
+    llm(9, "llm.completed", {
+      response: {
+        content: "Proposed call",
+        tool_calls: [
+          { id: "proposed", name: "unavailable_tool", arguments: "{}" },
+        ],
+      },
+    }),
+    event(10, "operation.started", {
+      call: { id: "actual", name: "read_file" },
+    }),
+    event(11, "tool.started", {
+      tool_call_id: "actual",
+      tool_id: "read_file",
+      input: { path: "README.md" },
+    }),
+    event(12, "tool.completed", {
+      tool_call_id: "actual",
+      tool_id: "read_file",
+      output: "Project description",
+    }),
+    event(13, "operation.completed", { operation_id: "run:actual" }),
+  ];
+  for (const value of events) feed.append(value);
+  assert.equal(root.querySelectorAll(".event-row").length, 2);
+  const model = root.querySelector('[data-key="thought:model"]');
+  assert.match(
+    model.querySelector("summary").textContent,
+    /Inspect files.*Done/,
+  );
+  assert.equal(model.classList.contains("running"), false);
+  assert.match(model.querySelector("pre").textContent, /Inspect project/);
+  assert.match(model.querySelector("pre").textContent, /unavailable_tool/);
+  assert.equal(root.querySelector('[data-key="tool:proposed"]'), null);
+  assert.match(
+    root.querySelector('[data-key="tool:actual"]').textContent,
+    /README.md/,
+  );
+  // The historical page arrives newest first; older request/stream records
+  // must enrich details without changing the finished model back to Running.
+  feed.restore({ snapshot: state(), events: events.slice(8) });
+  for (const value of events.slice(0, 8).reverse()) feed.present(value);
+  feed.orderRecords();
+  assert.equal(root.querySelectorAll(".event-row").length, 2);
+  const restored = root.querySelector('[data-key="thought:model"]');
+  assert.match(restored.querySelector("summary").textContent, /Done/);
+  assert.match(restored.querySelector("pre").textContent, /Inspect project/);
+  assert.equal(restored.classList.contains("running"), false);
+  dom.window.close();
+});
+
+test("hidden bookkeeping cannot evict model failures and uncertain operations stay visible", () => {
+  const dom = setup(),
+    root = document.getElementById("feed"),
+    feed = new FeedView(root, { maxEvents: 3 });
+  feed.append(event(1, "llm.requested", { llm_call_id: "failed" }));
+  feed.append(
+    event(2, "llm.failed", {
+      llm_call_id: "failed",
+      error: { code: "LLM_FAILED", message: "Connection dropped" },
+    }),
+  );
+  for (let seq = 3; seq < 30; seq++)
+    feed.append(
+      event(seq, "llm.tool_call.started", { tool_call_id: String(seq) }),
+    );
+  feed.append(event(30, "operation.uncertain", { operation_id: "run:write" }));
+  assert.equal(feed.events.length, 3);
+  assert.equal(root.querySelectorAll(".event-row").length, 2);
+  assert.equal(root.querySelectorAll(".failed").length, 2);
+  assert.match(root.textContent, /Connection dropped/);
+  assert.match(root.textContent, /Recovery required/);
+  assert.match(
+    root.querySelector(".process-group > summary").textContent,
+    /2 failures/,
+  );
+  feed.older(
+    [event(0, "llm.stream.started", { llm_call_id: "failed" })],
+    state(),
+  );
+  assert.match(
+    root.querySelector('[data-key="thought:failed"] summary').textContent,
+    /Connection dropped/,
+  );
+  dom.window.close();
+});
+
+test("status and usage events update progress without adding rows or consuming the detail window", () => {
+  const dom = setup(),
+    root = document.getElementById("feed");
+  const snapshot = { ...state(), event_cursor: 0 };
+  const projection = new SessionProjection(snapshot);
+  const feed = new FeedView(root, {
+    maxEvents: 3,
+    loadProcess: async () => ({ events: [], next_before: null }),
+  });
+  feed.restore({ snapshot, events: [] });
+  const apply = (seq, type, payload = {}) => {
+    const value = { ...event(seq, type, payload), session_id: "one" };
+    assert.equal(projection.apply(value), true);
+    feed.append(value);
+  };
+  apply(1, "run.started");
+  apply(2, "tool.completed", {
+    tool_call_id: "read",
+    tool_id: "read_file",
+    output: "Evidence",
+  });
+  apply(3, "run.usage.changed", { total_tokens: 10 });
+  apply(4, "task.state.changed", { state: "paused", revision: 2 });
+  apply(5, "run.state.changed", { state: "paused" });
+  assert.equal(root.querySelectorAll(".event-row").length, 1);
+  assert.match(
+    root.querySelector(".process-group > summary").textContent,
+    /paused/,
+  );
+  for (let seq = 6; seq < 15; seq++)
+    apply(seq, "run.usage.changed", { total_tokens: seq });
+  assert.equal(feed.events.length, 3);
+  assert.match(root.textContent, /Evidence/);
+  apply(15, "run.state.changed", { state: "completed" });
+  apply(16, "task.state.changed", { state: "idle", revision: 3 });
+  assert.equal(projection.snapshot.token_budget.used, 14);
+  assert.equal(projection.snapshot.run.state, "completed");
+  assert.equal(projection.snapshot.task.state, "idle");
+  const group = feed.groups.get("run:1");
+  assert.equal(group.state, "completed");
+  assert.equal(Number(group.node.dataset.endSeq), 15);
+  assert.match(group.summary.textContent, /completed/);
+  for (const summary of root.querySelectorAll(".event-row > summary"))
+    assert.doesNotMatch(summary.textContent, /usage.changed|state.changed/);
+  feed.older(
+    [event(0, "run.state.changed", { state: "queued" })],
+    projection.snapshot,
+  );
+  assert.equal(feed.groups.get("run:1").state, "completed");
+  dom.window.close();
+});
+
+test("session synchronization updates sidebar fields while live and restored streams retain only errors and recovery", () => {
+  const dom = setup(),
+    root = document.getElementById("feed"),
+    sidebar = document.getElementById("panels");
+  const snapshot = { ...state(), event_cursor: 0 };
+  const projection = new SessionProjection(snapshot);
+  const panels = new PanelsView(sidebar, builtinPanels(), {
+    artifact: () => {},
+  });
+  const feed = new FeedView(root, {
+    loadProcess: async () => ({ events: [], next_before: null }),
+  });
+  feed.restore({ snapshot, events: [] });
+  let seq = 0;
+  const apply = (type, payload = {}) => {
+    const value = { ...event(++seq, type, payload), session_id: "one" };
+    projection.apply(value);
+    feed.append(value);
+    feed.snapshot = projection.snapshot;
+    panels.update(projection.snapshot);
+  };
+  const info = (label) =>
+    [...sidebar.querySelectorAll(".info-row")]
+      .find((row) => row.querySelector("small").textContent === label)
+      ?.querySelector("span").textContent;
+  apply("command.accepted", { type: "resume" });
+  apply("task.goal.revised", {
+    objective: "Inspect current source",
+    goal_revision: 2,
+  });
+  apply("task.budget.changed", { max_tokens: 200 });
+  apply("run.started");
+  apply("step.started");
+  apply("run.usage.changed", { total_tokens: 25 });
+  apply("run.state.changed", {
+    state: "suspended",
+    reason: "Time budget exhausted",
+  });
+  apply("task.state.changed", { state: "paused", revision: 2 });
+  assert.equal(info("State"), "paused");
+  assert.equal(info("Run state"), "suspended");
+  assert.equal(info("Reason"), "Time budget exhausted");
+  assert.equal(info("Objective"), "Inspect current source");
+  assert.match(
+    sidebar.querySelector('[data-panel="budget"]').textContent,
+    /25 used \/ 200 total/,
+  );
+  apply("run.time_budget.renewed", {
+    active_seconds: 120,
+    max_duration_seconds: 90,
+  });
+  assert.equal(info("Time budget"), "90 s");
+  apply("run.started");
+  assert.equal(projection.snapshot.run.time_budget_start_seconds, 120);
+  assert.equal(info("Reason"), undefined);
+  assert.equal(projection.snapshot.token_budget.used, 25);
+  apply("run.completed");
+  apply("task.state.changed", { state: "idle", revision: 3 });
+  apply("task.outputs.changed", {
+    artifacts: [{ kind: "report", sha256: "digest" }],
+  });
+  apply("step.completed");
+  apply("command.applied", { command_id: "resume" });
+  assert.equal(info("Run state"), "completed");
+  assert.equal(info("State"), "idle");
+  assert.match(
+    sidebar.querySelector('[data-panel="outputs"]').textContent,
+    /report/,
+  );
+  assert.equal(root.querySelectorAll(".event-row").length, 0);
+  apply("run.failed", { code: "LLM_FAILED", message: "Connection dropped" });
+  assert.equal(info("State"), "failed");
+  assert.equal(info("Error"), "Connection dropped");
+  apply("run.recovery.required", { reason: "Verify operation effects" });
+  apply("task.state.changed", { state: "recovering" });
+  assert.equal(info("Run state"), "suspended");
+  assert.equal(info("State"), "recovering");
+  apply("run.started");
+  assert.equal(info("Error"), undefined);
+  assert.equal(root.querySelectorAll(".event-row").length, 2);
+  feed.restore({
+    snapshot: projection.snapshot,
+    processes: feed.processes,
+    events: feed.events,
+  });
+  assert.equal(root.querySelectorAll(".event-row").length, 2);
+  assert.match(root.textContent, /Connection dropped/);
+  assert.match(root.textContent, /Verify operation effects/);
+  assert.doesNotMatch(
+    root.querySelector(".process-records").textContent,
+    /task\.goal\.revised|run\.started|run\.completed|step\.started|command\.accepted|run\.time_budget\.renewed/,
   );
   dom.window.close();
 });

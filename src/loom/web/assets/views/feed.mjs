@@ -1,4 +1,8 @@
-import { builtinRenderers, reportContent } from "../renderers.mjs";
+import {
+  builtinRenderers,
+  modelSummary,
+  reportContent,
+} from "../renderers.mjs";
 import { codePoints, streamKey } from "../state.mjs";
 import { element, renderResult } from "../markdown.mjs";
 
@@ -124,6 +128,8 @@ export class FeedView {
     if (follow) this.root.scrollTop = this.root.scrollHeight;
   }
   retain(event) {
+    const descriptor = this.renderers.describe(event);
+    if (descriptor.hidden && !descriptor.affectsProcess) return;
     const previous = this.events.at(-1);
     const delta =
       event.type.startsWith("llm.") &&
@@ -334,6 +340,8 @@ export class FeedView {
       return;
     }
     if (event.type === "command.applied") return;
+    const initial = this.renderers.describe(event);
+    if (initial.hidden && !initial.affectsProcess) return;
     let context = {};
     if (
       event.type.startsWith("llm.") &&
@@ -357,6 +365,7 @@ export class FeedView {
     descriptor.seq = event.seq;
     if (event.seq >= (group.stateSeq || 0)) {
       if (event.type === "run.started") group.state = "running";
+      else if (event.type === "run.completed") group.state = "completed";
       else if (event.type === "run.failed") group.state = "failed";
       else if (event.type === "run.stopped") group.state = "stopped";
       else if (event.type === "run.recovery.required")
@@ -366,6 +375,7 @@ export class FeedView {
       if (
         [
           "run.started",
+          "run.completed",
           "run.failed",
           "run.state.changed",
           "run.stopped",
@@ -381,6 +391,7 @@ export class FeedView {
       group.process &&
       ([
         "run.started",
+        "run.completed",
         "run.failed",
         "run.stopped",
         "run.recovery.required",
@@ -391,12 +402,13 @@ export class FeedView {
     )
       group.process.milestones.push(event);
     if (
-      ["run.failed", "run.stopped"].includes(event.type) ||
+      ["run.failed", "run.completed", "run.stopped"].includes(event.type) ||
       (event.type === "run.state.changed" &&
         ["completed", "failed", "stopped"].includes(event.payload.state))
     )
       group.node.dataset.endSeq = event.seq;
-    this.record(group, descriptor);
+    if (descriptor.hidden) this.processSummary(group);
+    else this.record(group, descriptor);
   }
   record(group, descriptor) {
     let record = group.records.get(descriptor.key);
@@ -424,9 +436,9 @@ export class FeedView {
     }
     const previous = record.descriptor;
     record.seq = Math.min(record.seq, descriptor.seq || record.seq);
-    if (descriptor.kind === "tool") {
+    if (descriptor.kind === "tool" || descriptor.kind === "model") {
       descriptor =
-        previous.seq > descriptor.seq
+        previous.seq > (descriptor.seq || 0)
           ? {
               ...previous,
               details: { ...descriptor.details, ...previous.details },
@@ -435,6 +447,12 @@ export class FeedView {
               ...descriptor,
               details: { ...previous.details, ...descriptor.details },
             };
+      if (descriptor.kind === "model")
+        descriptor.summary = modelSummary(
+          descriptor.details,
+          descriptor.status,
+          descriptor.stage,
+        );
     }
     if (previous.artifact?.sha256 !== descriptor.artifact?.sha256)
       record.loaded = false;

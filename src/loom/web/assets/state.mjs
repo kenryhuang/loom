@@ -63,12 +63,33 @@ export class SessionProjection {
         this.streams = {};
         this.origins = {};
       }
-      state.run = { id: event.run_id, state: "running" };
+      state.run = {
+        ...(state.run?.id === event.run_id ? state.run : {}),
+        id: event.run_id,
+        state: "running",
+      };
+      delete state.run.failure;
+      delete state.run.reason;
+    } else if (kind === "run.time_budget.renewed") {
+      state.run = {
+        ...state.run,
+        active_seconds: data.active_seconds,
+        time_budget_start_seconds: data.active_seconds,
+      };
+      if (data.max_duration_seconds != null)
+        state.task.limits.max_duration_seconds = data.max_duration_seconds;
+    } else if (kind === "run.completed" || kind === "run.stopped") {
+      state.run = {
+        ...state.run,
+        state: kind === "run.completed" ? "completed" : "stopped",
+        reason: data.reason,
+      };
     } else if (kind === "run.state.changed")
       state.run = { ...state.run, state: data.state, reason: data.reason };
-    else if (kind === "run.failed")
+    else if (kind === "run.failed") {
       state.run = { ...state.run, failure: structuredClone(data) };
-    else if (kind === "run.recovery.required")
+      state.task.state = "failed";
+    } else if (kind === "run.recovery.required")
       state.run = { ...state.run, state: "suspended", reason: data.reason };
     else if (kind.startsWith("input."))
       state.input_request = structuredClone(data);

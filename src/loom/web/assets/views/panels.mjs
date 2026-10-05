@@ -45,6 +45,27 @@ export function builtinPanels() {
             ["Session", state.session_id],
             ["Workspace", state.task.workspace || "—"],
             ["State", state.task.state],
+            ["Run state", state.run?.state || "—"],
+            ...(state.run?.reason ? [["Reason", state.run.reason]] : []),
+            ...(state.run?.failure
+              ? [
+                  [
+                    "Error",
+                    state.run.failure.message ||
+                      state.run.failure.code ||
+                      "Execution failed",
+                  ],
+                ]
+              : []),
+            ...(state.task.objective
+              ? [["Objective", state.task.objective]]
+              : []),
+            [
+              "Time budget",
+              state.task.limits.max_duration_seconds == null
+                ? "—"
+                : `${state.task.limits.max_duration_seconds.toLocaleString()} s`,
+            ],
             ["Model", state.task.model || "Service default"],
             [
               "Runtime",
