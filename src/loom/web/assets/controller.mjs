@@ -56,15 +56,25 @@ export class SessionController {
     return this.selectedId === id && this.generation === generation;
   }
   async load(id, generation, signal) {
-    const [snapshot, history] = await Promise.all([
+    const [snapshot, history, index] = await Promise.all([
       this.api.snapshot(id, signal),
       this.api.history(id, { signal }),
+      this.api.processes ? this.api.processes(id, signal) : { processes: [] },
     ]);
     if (!this.current(id, generation)) return;
     this.projection = new SessionProjection(snapshot);
     this.nextBefore = history.next_before;
     this.emit("restore", {
       snapshot,
+      processes: index.processes
+        .filter((process) => process.start_seq <= snapshot.event_cursor)
+        .map((process) => ({
+          ...process,
+          end_seq: Math.min(process.end_seq, snapshot.event_cursor),
+          milestones: process.milestones.filter(
+            (event) => event.seq <= snapshot.event_cursor,
+          ),
+        })),
       events: history.events.filter(
         (event) => event.seq <= snapshot.event_cursor,
       ),

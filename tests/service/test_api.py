@@ -42,7 +42,7 @@ def test_browser_assets_are_public_but_session_data_and_catalog_are_private(api)
             assert response.status == 200 and response.headers["Content-Type"].startswith(mime)
             assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
             assert "private-test-token" not in body
-    for route in ("/v1/sessions", "/v1/web/catalog"):
+    for route in ("/v1/sessions", "/v1/web/catalog", "/v1/sessions/private/processes"):
         with pytest.raises(urllib.error.HTTPError) as denied:
             urllib.request.urlopen(client.url + route)
         assert denied.value.code == 401
@@ -124,6 +124,56 @@ def test_snapshot_subscribe_race_two_readers_and_resume_cursor(api):
     assert future.value.status == 409
     # Subscriber disconnect never changes task execution state.
     assert client.snapshot(sid)["task"]["state"] == "queued"
+
+
+def test_process_index_keeps_failed_retries_and_scopes_history_to_each_round(api):
+    service, server, client, path = api
+    sid = new(client, path)
+    sequences = {}
+
+    def record(state, emit, db):
+        state["run"] = {"id": "reused-run"}
+        sequences["first"] = emit("run.started", {"epoch": 1})["seq"]
+        emit("tool.started", {"tool_call_id": "old", "tool_id": "read_file"})
+        sequences["failure"] = emit("run.failed", {"code": "WORKFLOW_ROUTE_FAILED", "message": "Missing route"})["seq"]
+        emit("run.started", {"epoch": 2})
+        for offset in range(220):
+            emit("llm.content.delta", {"llm_call_id": "old-model", "offset": offset, "delta": "x"})
+        emit("message.created", {"id": "old-result", "role": "assistant", "content": "Old answer"})
+        emit("run.state.changed", {"state": "completed", "reason": ""})
+        sequences["second"] = emit("run.started", {"epoch": 3})["seq"]
+        sequences["new_tool"] = emit("tool.completed", {"tool_call_id": "new", "tool_id": "read_file"})["seq"]
+        emit("run.state.changed", {"state": "completed", "reason": ""})
+
+    service.store.update(sid, record)
+    index = client._json(client._path(sid, "processes"))["processes"]
+    assert len(index) == 2
+    assert [p["start_seq"] for p in index] == [sequences["first"], sequences["second"]]
+    assert index[0]["end_seq"] == sequences["second"] - 1
+    assert index[0]["state"] == "completed"
+    assert sum(e["type"] == "run.started" for e in index[0]["milestones"]) == 2
+    assert any(e["seq"] == sequences["failure"] for e in index[0]["milestones"])
+    assert all(not e["type"].endswith(".delta") for p in index for e in p["milestones"])
+    page = client._json(client._path(sid, "history") +
+                        f"?run_id=reused-run&view=activity&after={index[0]['start_seq'] - 1}&before={index[0]['end_seq'] + 1}&limit=2")
+    found = []
+    while True:
+        found.extend(page["events"])
+        if page["next_before"] is None:
+            break
+        page = client._json(client._path(sid, "history") +
+                            f"?run_id=reused-run&view=activity&after={index[0]['start_seq'] - 1}&before={page['next_before']}&limit=2")
+    assert len({e["seq"] for e in found}) == len(found)
+    assert any(e["seq"] == sequences["failure"] for e in found)
+    assert all(index[0]["start_seq"] <= e["seq"] <= index[0]["end_seq"] for e in found)
+    assert all(not e["type"].endswith(".delta") for e in found)
+    assert not any(e["seq"] == sequences["new_tool"] for e in found)
+    raw = client.history(sid, before=index[0]["end_seq"] + 1, limit=200)
+    assert any(e["type"].endswith(".delta") for e in raw["events"])
+    for query in ("view=unknown", "run_id=", "view=raw&view=activity", "after=-1"):
+        with pytest.raises(ServiceError) as invalid:
+            client._json(client._path(sid, "history") + "?" + query)
+        assert invalid.value.status == 400
 
 
 def test_artifact_scoping_and_body_errors(api):

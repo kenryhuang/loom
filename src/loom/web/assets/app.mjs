@@ -18,6 +18,14 @@ const list = new SessionListView(
 const feed = new FeedView($("event-feed"), {
   loadArtifact: (digest) =>
     controller.api.artifact(controller.selectedId, digest),
+  loadProcess: (process, before) =>
+    controller.api.history(controller.selectedId, {
+      runId: process.run_id,
+      after: process.start_seq - 1,
+      before,
+      view: "activity",
+      signal: controller.abort.signal,
+    }),
   onDetailsChange: ({ available, expanded }) => {
     $("toggle-details").disabled = !available;
     $("toggle-details").textContent = expanded ? "Fold all" : "Expand all";

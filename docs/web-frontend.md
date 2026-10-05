@@ -55,6 +55,14 @@ The process is collapsed by default, with its latest event in the summary.
 Its event count represents the expandable rows: streaming chunks update a
 single Thought/output row, and tool start/completion update a single tool row.
 Consecutive text deltas are also coalesced in the display history window.
+An execution-round index restores Process sections for older tasks even when
+their detailed events fall outside the recent history page. Historical failures
+and retries remain visible after recovery or completion. Expanding a Process
+loads its own paginated execution history; the button inside that section loads
+earlier records for that round. These pages omit individual token chunks and
+retain model requests/replies, tool calls and lifecycle records. Raw events are
+still available through Earlier events. Completed rounds that reused a run ID
+have separate Process sections, while pause/resume attempts stay in one round.
 Thought and tool rows can be expanded to see their full detail; large tool
 artifacts load on demand. Final assistant results are expanded by default.
 JSON report envelopes are extracted and rendered as Markdown; arbitrary JSON is

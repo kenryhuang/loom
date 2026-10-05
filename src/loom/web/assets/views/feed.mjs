@@ -8,6 +8,7 @@ export class FeedView {
     {
       renderers = builtinRenderers(),
       loadArtifact,
+      loadProcess,
       maxEvents = 1000,
       onDetailsChange = () => {},
     } = {},
@@ -15,6 +16,7 @@ export class FeedView {
     this.root = root;
     this.renderers = renderers;
     this.loadArtifact = loadArtifact;
+    this.loadProcess = loadProcess;
     this.maxEvents = maxEvents;
     this.onDetailsChange = onDetailsChange;
     this.events = [];
@@ -23,7 +25,11 @@ export class FeedView {
     this.reset();
   }
   reset({ preserveDetails = false } = {}) {
-    if (!preserveDetails) this.detailMode = null;
+    if (!preserveDetails) {
+      this.detailMode = null;
+      this.processes = [];
+      this.processPages = new Map();
+    }
     this.groups = new Map();
     this.messages = new Map();
     this.blocks = new Map();
@@ -32,15 +38,18 @@ export class FeedView {
     this.root.replaceChildren(...(this.emptyState ? [this.emptyState] : []));
     this.detailsChanged();
   }
-  restore({ snapshot, events }) {
+  restore({ snapshot, events, processes = [] }) {
     const opened = this.detailStates();
     this.snapshot = snapshot;
     this.events = [];
     for (const event of events) this.retain(event);
     this.events = this.events.slice(-this.maxEvents);
     this.reset({ preserveDetails: true });
+    this.processes = processes;
+    this.seedProcesses();
     for (const event of this.events) this.present(event);
     this.seedStreams(snapshot);
+    this.orderRecords();
     this.syncMessages(snapshot.messages || []);
     this.reopen(opened);
     this.root.scrollTop = this.root.scrollHeight;
@@ -85,8 +94,10 @@ export class FeedView {
       this.retain(event);
     this.events = this.events.slice(0, this.maxEvents);
     this.reset({ preserveDetails: true });
+    this.seedProcesses();
     for (const event of this.events) this.present(event);
     this.seedStreams(snapshot);
+    this.orderRecords();
     this.syncMessages(snapshot.messages || []);
     this.reopen(opened);
     this.root.scrollTop = top + this.root.scrollHeight - height;
@@ -101,9 +112,11 @@ export class FeedView {
       const opened = this.detailStates();
       this.events = this.events.slice(-this.maxEvents);
       this.reset({ preserveDetails: true });
+      this.seedProcesses();
       for (const retained of this.events) this.present(retained);
       if (this.snapshot) {
         this.seedStreams(this.snapshot);
+        this.orderRecords();
         this.syncMessages(this.snapshot.messages || []);
       }
       this.reopen(opened);
@@ -152,7 +165,42 @@ export class FeedView {
   }
   group(event) {
     this.emptyState?.remove();
-    const key = event.run_id || "session";
+    let process = this.processes.find(
+      (item) =>
+        item.run_id === event.run_id &&
+        event.seq >= item.start_seq &&
+        event.seq <= item.end_seq,
+    );
+    if (!process) {
+      const latest = this.processes
+        .filter((item) => item.run_id === event.run_id)
+        .at(-1);
+      if (latest && (!event.seq || event.seq > latest.end_seq)) {
+        if (event.type === "run.started" && latest.state === "completed") {
+          process = {
+            id: `${event.run_id}:${event.seq}`,
+            run_id: event.run_id,
+            start_seq: event.seq,
+            end_seq: event.seq,
+            state: "running",
+            milestones: [],
+          };
+          this.processes.push(process);
+        } else process = latest;
+      }
+    }
+    if (!process && this.loadProcess && event.type === "run.started") {
+      process = {
+        id: `${event.run_id}:${event.seq}`,
+        run_id: event.run_id,
+        start_seq: event.seq,
+        end_seq: event.seq,
+        state: "running",
+        milestones: [],
+      };
+      this.processes.push(process);
+    }
+    const key = process?.id || event.run_id || "session";
     if (event.run_id && !this.groups.has(key) && this.groups.has("session")) {
       const pending = this.groups.get("session");
       this.groups.delete("session");
@@ -163,7 +211,8 @@ export class FeedView {
       const node = element("details", "process-group"),
         summary = element("summary", "", "Process");
       node.dataset.key = `group:${key}`;
-      node.dataset.seq = event.seq || this.snapshot?.event_cursor || 0;
+      node.dataset.seq =
+        process?.start_seq || event.seq || this.snapshot?.event_cursor || 0;
       node.open = this.detailMode === true;
       const rows = element("div", "process-records");
       node.append(summary, rows);
@@ -171,11 +220,113 @@ export class FeedView {
         node,
         summary,
         rows,
+        process,
+        failures: new Set(),
         records: new Map(),
       });
       this.layout();
     }
-    return this.groups.get(key);
+    const group = this.groups.get(key);
+    if (process) {
+      group.process = process;
+      group.node.dataset.seq = process.start_seq;
+      this.processHistoryButton(group);
+    }
+    return group;
+  }
+  seedProcesses() {
+    for (const process of this.processes) {
+      const group = this.group({
+        run_id: process.run_id,
+        seq: process.start_seq,
+      });
+      group.node.dataset.endSeq = process.end_seq;
+      group.state = process.state;
+      for (const event of process.milestones) this.present(event);
+      const cached = this.processPages.get(process.id);
+      for (const event of cached?.events || []) this.present(event);
+      this.processSummary(group);
+    }
+  }
+  processHistoryButton(group) {
+    if (!this.loadProcess || group.historyButton) return;
+    const process = group.process,
+      cached = this.processPages.get(process.id);
+    const button = element(
+      "button",
+      "quiet process-history",
+      cached?.nextBefore === null
+        ? "Process history loaded"
+        : "Load process history",
+    );
+    button.disabled = cached?.nextBefore === null;
+    group.node.append(button);
+    group.historyButton = button;
+    const load = () => this.history(group);
+    button.addEventListener("click", load);
+    group.node.addEventListener("toggle", () => {
+      if (group.node.open && !this.processPages.has(process.id)) load();
+    });
+  }
+  async history(group) {
+    if (!this.loadProcess || group.loading) return;
+    const process = group.process,
+      cached = this.processPages.get(process.id);
+    if (cached?.nextBefore === null) return;
+    group.loading = true;
+    group.historyButton.disabled = true;
+    group.historyButton.textContent = "Loading process history…";
+    try {
+      const page = await this.loadProcess(
+        process,
+        cached?.nextBefore || process.end_seq + 1,
+      );
+      if (this.groups.get(process.id) !== group) return;
+      const events = [
+        ...new Map(
+          [...(cached?.events || []), ...page.events].map((event) => [
+            event.seq,
+            event,
+          ]),
+        ).values(),
+      ].sort((a, b) => a.seq - b.seq);
+      this.processPages.set(process.id, {
+        events,
+        nextBefore: page.next_before,
+      });
+      for (const event of page.events) this.present(event);
+      // Insert older rows chronologically without changing expansion state.
+      this.orderRecords(group);
+      group.historyButton.textContent = page.next_before
+        ? "Load earlier process events"
+        : "Process history loaded";
+      group.historyButton.disabled = !page.next_before;
+      this.processSummary(group);
+    } catch (error) {
+      group.historyButton.textContent = `Retry loading process history: ${error.message}`;
+      group.historyButton.disabled = false;
+    } finally {
+      group.loading = false;
+    }
+  }
+  processSummary(group) {
+    const errors = group.failures.size;
+    group.summary.textContent = `Process · ${group.records.size} events${errors ? ` · ${errors} failures` : ""}${group.state ? ` · ${group.state}` : ""}${group.latest ? ` · ${group.latest}` : ""}`;
+    group.summary.classList.toggle("has-failures", errors > 0);
+  }
+  orderRecords(group) {
+    for (const current of group ? [group] : this.groups.values()) {
+      const records = [...current.records.values()].sort(
+        (a, b) => a.seq - b.seq,
+      );
+      records.forEach((record, index) => {
+        if (current.rows.children[index] !== record.node)
+          current.rows.insertBefore(
+            record.node,
+            current.rows.children[index] || null,
+          );
+      });
+    }
   }
   present(event) {
     if (event.type === "message.created") {
@@ -203,6 +354,42 @@ export class FeedView {
     }
     const descriptor = this.renderers.describe(event, context);
     const group = this.group(event);
+    descriptor.seq = event.seq;
+    if (event.seq >= (group.stateSeq || 0)) {
+      if (event.type === "run.started") group.state = "running";
+      else if (event.type === "run.failed") group.state = "failed";
+      else if (event.type === "run.stopped") group.state = "stopped";
+      else if (event.type === "run.recovery.required")
+        group.state = "suspended";
+      else if (event.type === "run.state.changed")
+        group.state = event.payload.state;
+      if (
+        [
+          "run.started",
+          "run.failed",
+          "run.state.changed",
+          "run.stopped",
+          "run.recovery.required",
+        ].includes(event.type)
+      )
+        group.stateSeq = event.seq;
+      if (group.process) group.process.state = group.state;
+    }
+    if (group.process)
+      group.process.end_seq = Math.max(group.process.end_seq, event.seq);
+    if (
+      group.process &&
+      ([
+        "run.started",
+        "run.failed",
+        "run.stopped",
+        "run.recovery.required",
+      ].includes(event.type) ||
+        (event.type === "run.state.changed" &&
+          event.payload.state !== "running")) &&
+      !group.process.milestones.some((item) => item.seq === event.seq)
+    )
+      group.process.milestones.push(event);
     if (
       ["run.failed", "run.stopped"].includes(event.type) ||
       (event.type === "run.state.changed" &&
@@ -223,28 +410,48 @@ export class FeedView {
       body.append(pre);
       node.append(summary, body);
       group.rows.append(node);
-      record = { node, summary, body, pre, descriptor };
+      record = {
+        node,
+        summary,
+        body,
+        pre,
+        descriptor,
+        seq: descriptor.seq || 0,
+      };
       group.records.set(descriptor.key, record);
       node.addEventListener("toggle", () => this.detail(record));
       this.detailsChanged();
     }
     const previous = record.descriptor;
-    if (descriptor.kind === "tool")
-      descriptor = {
-        ...descriptor,
-        details: { ...previous.details, ...descriptor.details },
-      };
+    record.seq = Math.min(record.seq, descriptor.seq || record.seq);
+    if (descriptor.kind === "tool") {
+      descriptor =
+        previous.seq > descriptor.seq
+          ? {
+              ...previous,
+              details: { ...descriptor.details, ...previous.details },
+            }
+          : {
+              ...descriptor,
+              details: { ...previous.details, ...descriptor.details },
+            };
+    }
     if (previous.artifact?.sha256 !== descriptor.artifact?.sha256)
       record.loaded = false;
     record.descriptor = descriptor;
     record.node.className = `event-row ${descriptor.status || ""}`;
     record.summary.textContent = descriptor.summary;
+    if (descriptor.status === "failed") group.failures.add(descriptor.key);
     if (!record.loaded)
       record.pre.textContent =
         typeof descriptor.details === "string"
           ? descriptor.details
           : JSON.stringify(descriptor.details, null, 2);
-    group.summary.textContent = `Process · ${group.records.size} events · ${descriptor.summary}`;
+    if (!group.latestSeq || descriptor.seq >= group.latestSeq) {
+      group.latestSeq = descriptor.seq;
+      group.latest = descriptor.summary;
+    }
+    this.processSummary(group);
     this.detail(record);
   }
   async detail(record) {

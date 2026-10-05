@@ -90,9 +90,15 @@ export class SessionApi {
   snapshot(id, signal) {
     return this.json(this.path(id, "snapshot"), { signal });
   }
-  history(id, { before, limit = 200, signal } = {}) {
+  processes(id, signal) {
+    return this.json(this.path(id, "processes"), { signal });
+  }
+  history(id, { before, after, runId, view, limit = 200, signal } = {}) {
     const query = new URLSearchParams({ limit });
     if (before != null) query.set("before", before);
+    if (after != null) query.set("after", after);
+    if (runId != null) query.set("run_id", runId);
+    if (view != null) query.set("view", view);
     return this.json(`${this.path(id, "history")}?${query}`, { signal });
   }
   artifact(id, digest, signal) {

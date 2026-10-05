@@ -173,14 +173,29 @@ class SessionHandler(BaseHTTPRequestHandler):
                 self._json(202, service.submit(sid, self._body()))
             elif method == "GET" and route == "snapshot" and len(parts) == 4:
                 self._json(200, service.snapshot(sid))
+            elif method == "GET" and route == "processes" and len(parts) == 4:
+                self._json(200, {"processes": service.store.processes(sid)})
             elif method == "GET" and route == "history" and len(parts) == 4:
                 limit = self._number(query, "limit", 200, 1, 1000)
+                after = self._number(query, "after", 0)
+                view = query.get("view", ["raw"])
+                run_id = query.get("run_id")
+                if len(view) != 1 or view[0] not in {"raw", "activity"} or (run_id is not None and (len(run_id) != 1 or not run_id[0])):
+                    raise ServiceError("Invalid history view or run_id")
                 with service.store.transaction() as db:
                     state = service.store._load(db, sid)
                     before = self._number(query, "before", state["event_cursor"] + 1, 1)
-                    rows = db.execute("SELECT body FROM events WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?", (sid, before, limit)).fetchall()
-                events = [json.loads(row[0]) for row in reversed(rows)]
-                self._json(200, {"events": events, "next_before": events[0]["seq"] if events and events[0]["seq"] > 1 else None})
+                    clauses, values = ["session_id=?", "seq<?", "seq>?"], [sid, before, after]
+                    if run_id:
+                        clauses.append("json_extract(body,'$.run_id')=?")
+                        values.append(run_id[0])
+                    if view[0] == "activity":
+                        clauses.append("json_extract(body,'$.type') NOT LIKE 'llm.%.delta'")
+                    rows = db.execute(
+                        "SELECT body FROM events WHERE " + " AND ".join(clauses) + " ORDER BY seq DESC LIMIT ?", (*values, limit + 1),
+                    ).fetchall()
+                events = [json.loads(row[0]) for row in reversed(rows[:limit])]
+                self._json(200, {"events": events, "next_before": events[0]["seq"] if len(rows) > limit else None})
             elif method == "GET" and route == "events" and len(parts) == 4:
                 cursor = self._number(query, "after", 0)
                 if self.headers.get("Last-Event-ID"):

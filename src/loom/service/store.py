@@ -296,6 +296,48 @@ class SessionStore:
             self._save(db, state)
             return result
 
+    def processes(self, sid):
+        """Index execution rounds without loading model token streams."""
+        with self.transaction() as db:
+            state = self._load(db, sid)
+            rows = db.execute(
+                """SELECT body FROM events WHERE session_id=? AND (
+                    json_extract(body,'$.type') IN ('run.started','run.failed','run.stopped','run.recovery.required')
+                    OR (json_extract(body,'$.type')='run.state.changed'
+                        AND json_extract(body,'$.payload.state')!='running')
+                    OR (json_extract(body,'$.type')='message.created'
+                        AND json_extract(body,'$.payload.role')='assistant')) ORDER BY seq""", (sid,),
+            )
+            processes, active = [], {}
+            for row in rows:
+                event = json.loads(row[0])
+                run_id = event.get("run_id")
+                if not run_id:
+                    continue
+                process = active.get(run_id)
+                if event["type"] == "run.started":
+                    if process is None or process["state"] == "completed":
+                        process = {"id": f"{run_id}:{event['seq']}", "run_id": run_id, "start_seq": event["seq"],
+                                   "state": "running", "milestones": []}
+                        active[run_id] = process
+                        processes.append(process)
+                    process["state"] = "running"
+                if process is None:
+                    continue
+                if event["type"] == "message.created":
+                    process["state"] = "completed"
+                    continue
+                process["milestones"].append(event)
+                if event["type"] == "run.failed":
+                    process["state"] = "failed"
+                elif event["type"] == "run.state.changed":
+                    process["state"] = event["payload"]["state"]
+                elif event["type"] in {"run.stopped", "run.recovery.required"}:
+                    process["state"] = "stopped" if event["type"] == "run.stopped" else "suspended"
+            for index, process in enumerate(processes):
+                process["end_seq"] = processes[index + 1]["start_seq"] - 1 if index + 1 < len(processes) else state["event_cursor"]
+            return processes
+
     def artifact_in_transaction(self, db, sid, value, kind):
         ref = self.artifacts.publish(value, kind)
         db.execute("INSERT OR IGNORE INTO artifacts VALUES(?,?,?)", (sid, ref["sha256"], canonical(ref)))

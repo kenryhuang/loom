@@ -398,6 +398,12 @@ summary {
   padding: 5px 14px 12px;
   border-top: 1px solid var(--line);
 }
+.process-group > summary.has-failures {
+  color: var(--danger);
+}
+.process-history {
+  margin: 4px 14px 12px;
+}
 .event-row {
   padding: 7px 0;
 }

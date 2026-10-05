@@ -213,6 +213,64 @@ test("snapshot subscription race replays only events beyond the snapshot", async
   }
 });
 
+test("restoring process history respects the snapshot cursor and session abort signal", async () => {
+  let processSignal;
+  const controller = new SessionController({
+    snapshot: async () => snapshot("one", 5),
+    history: async () => ({
+      events: [event(5, "tool.completed")],
+      next_before: 5,
+    }),
+    processes: async (_id, signal) => {
+      processSignal = signal;
+      return {
+        processes: [
+          {
+            id: "old:1",
+            run_id: "old",
+            start_seq: 1,
+            end_seq: 10,
+            state: "completed",
+            milestones: [
+              event(1, "run.started"),
+              event(4, "run.failed"),
+              event(7, "run.started"),
+            ],
+          },
+          {
+            id: "future:6",
+            run_id: "future",
+            start_seq: 6,
+            end_seq: 10,
+            milestones: [event(6, "run.started")],
+          },
+        ],
+      };
+    },
+    async *events(_id, _cursor, signal) {
+      await new Promise((resolve) =>
+        signal.addEventListener("abort", resolve, { once: true }),
+      );
+    },
+  });
+  const updates = [];
+  controller.subscribe((update) => updates.push(update));
+  try {
+    await controller.select("one");
+    const restored = updates.find((update) => update.type === "restore").detail;
+    assert.equal(restored.processes.length, 1);
+    assert.equal(restored.processes[0].end_seq, 5);
+    assert.deepEqual(
+      restored.processes[0].milestones.map((item) => item.seq),
+      [1, 4],
+    );
+    assert.equal(processSignal, controller.abort.signal);
+  } finally {
+    controller.disconnect();
+    assert.equal(processSignal.aborted, true);
+  }
+});
+
 test("switching sessions discards slow snapshots and aborts previous subscriptions", async () => {
   const slow = deferred();
   let oldSignal,

@@ -145,6 +145,276 @@ test("new guidance after a failed execution belongs to the next run's block", ()
   dom.window.close();
 });
 
+test("historical tasks retain their processes and failures outside the recent event window", async () => {
+  const dom = setup(),
+    root = document.getElementById("feed"),
+    requests = [];
+  const older = {
+    id: "old:2",
+    run_id: "old",
+    start_seq: 2,
+    end_seq: 9,
+    state: "completed",
+    milestones: [
+      { ...event(2, "run.started", {}), run_id: "old" },
+      {
+        ...event(4, "run.failed", {
+          code: "WORKFLOW_ROUTE_FAILED",
+          message: "Missing route",
+        }),
+        run_id: "old",
+      },
+      { ...event(5, "run.started", {}), run_id: "old" },
+      {
+        ...event(8, "run.state.changed", { state: "completed" }),
+        run_id: "old",
+      },
+    ],
+  };
+  const feed = new FeedView(root, {
+    maxEvents: 2,
+    loadProcess: async (process, before) => {
+      requests.push([process.run_id, before]);
+      return {
+        events: [
+          {
+            ...event(3, "tool.completed", {
+              tool_call_id: "old-tool",
+              tool_id: "read_file",
+              output: { value: { content: "Old evidence" } },
+            }),
+            run_id: "old",
+          },
+        ],
+        next_before: null,
+      };
+    },
+  });
+  const snapshot = {
+    ...state(),
+    messages: [
+      { id: "old-task", role: "user", content: "Old task", seq: 1 },
+      { id: "old-result", role: "assistant", content: "Old result", seq: 9 },
+      { id: "new-task", role: "user", content: "New task", seq: 10 },
+      { id: "new-result", role: "assistant", content: "New result", seq: 30 },
+    ],
+  };
+  const processes = [
+    older,
+    {
+      id: "run:11",
+      run_id: "run",
+      start_seq: 11,
+      end_seq: 30,
+      state: "completed",
+      milestones: [
+        event(11, "run.started", {}),
+        event(29, "run.state.changed", { state: "completed" }),
+      ],
+    },
+  ];
+  feed.restore({
+    snapshot,
+    processes,
+    events: [
+      event(25, "llm.content.delta", {
+        llm_call_id: "new",
+        offset: 0,
+        delta: "New answer",
+      }),
+    ],
+  });
+  assert.equal(root.querySelectorAll(".task-block").length, 2);
+  for (const block of root.querySelectorAll(".task-block"))
+    assert.deepEqual(
+      [...block.children].map((node) => node.className),
+      ["message-card user", "process-group", "message-card result"],
+    );
+  const group = root.querySelector('[data-key="group:old:2"]');
+  assert.match(group.querySelector("summary").textContent, /1 failures/);
+  assert.match(
+    group.querySelector(".failed").textContent,
+    /WORKFLOW_ROUTE_FAILED/,
+  );
+  group.open = true;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(requests, [["old", 10]]);
+  assert.match(group.textContent, /Old evidence/);
+  assert.equal(group.querySelector(".process-history").disabled, true);
+  feed.append(event(31, "new-event", {}));
+  feed.append(event(32, "newer-event", {}));
+  assert.equal(root.querySelectorAll(".process-group").length, 2);
+  assert.match(
+    root.querySelector('[data-key="group:old:2"]').textContent,
+    /Old evidence/,
+  );
+  assert.match(
+    root.querySelector('[data-key="group:old:2"]').textContent,
+    /WORKFLOW_ROUTE_FAILED/,
+  );
+  dom.window.close();
+});
+
+test("rounds that reuse a run ID have distinct processes between their task and result", () => {
+  const dom = setup(),
+    root = document.getElementById("feed"),
+    feed = new FeedView(root);
+  feed.restore({
+    snapshot: {
+      ...state(),
+      messages: [
+        { id: "first", role: "user", content: "First", seq: 1 },
+        {
+          id: "first-result",
+          role: "assistant",
+          content: "First result",
+          seq: 5,
+        },
+        { id: "second", role: "user", content: "Second", seq: 6 },
+        {
+          id: "second-result",
+          role: "assistant",
+          content: "Second result",
+          seq: 10,
+        },
+      ],
+    },
+    events: [],
+    processes: [
+      {
+        id: "run:2",
+        run_id: "run",
+        start_seq: 2,
+        end_seq: 6,
+        state: "completed",
+        milestones: [
+          event(2, "run.started", {}),
+          event(4, "run.state.changed", { state: "completed" }),
+        ],
+      },
+      {
+        id: "run:7",
+        run_id: "run",
+        start_seq: 7,
+        end_seq: 10,
+        state: "completed",
+        milestones: [
+          event(7, "run.started", {}),
+          event(9, "run.state.changed", { state: "completed" }),
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(
+    [...root.children].map((block) =>
+      [...block.children].map((node) => node.dataset.key),
+    ),
+    [
+      ["message:first", "group:run:2", "message:first-result"],
+      ["message:second", "group:run:7", "message:second-result"],
+    ],
+  );
+  dom.window.close();
+});
+
+test("live execution rounds keep failure and retry milestones when detailed events are evicted", () => {
+  const dom = setup(),
+    root = document.getElementById("feed");
+  const feed = new FeedView(root, {
+    maxEvents: 2,
+    loadProcess: async () => ({ events: [], next_before: null }),
+  });
+  feed.restore({ snapshot: state(), events: [] });
+  feed.append(event(1, "run.started", {}));
+  feed.append(
+    event(2, "run.failed", {
+      code: "WORKFLOW_ROUTE_FAILED",
+      message: "No route",
+    }),
+  );
+  feed.append(event(3, "run.started", {}));
+  feed.append(
+    event(4, "tool.completed", { tool_call_id: "call", tool_id: "read_file" }),
+  );
+  feed.append(event(5, "run.state.changed", { state: "completed" }));
+  feed.append({ ...event(6, "run.started", {}), run_id: "next" });
+  feed.append({
+    ...event(7, "tool.completed", { tool_call_id: "next-call" }),
+    run_id: "next",
+  });
+  assert.equal(feed.events.length, 2);
+  assert.equal(root.querySelectorAll(".process-group").length, 2);
+  const first = root.querySelector('[data-key="group:run:1"]');
+  assert.match(first.textContent, /WORKFLOW_ROUTE_FAILED/);
+  assert.match(first.querySelector("summary").textContent, /completed/);
+  assert.equal(first.querySelectorAll(".event-row").length, 4);
+  dom.window.close();
+});
+
+test("loading older process pages preserves completed state and the latest tool outcome", async () => {
+  const dom = setup(),
+    root = document.getElementById("feed");
+  const process = {
+    id: "run:2",
+    run_id: "run",
+    start_seq: 2,
+    end_seq: 5,
+    state: "completed",
+    milestones: [
+      event(2, "run.started", {}),
+      event(5, "run.state.changed", { state: "completed" }),
+    ],
+  };
+  const feed = new FeedView(root, {
+    loadProcess: async (_process, before) =>
+      before === 6
+        ? {
+            events: [
+              event(4, "tool.completed", {
+                tool_id: "shell_execute",
+                tool_call_id: "call",
+                output: {
+                  value: { ok: false, exit_code: 2, stderr: "Command failed" },
+                },
+              }),
+            ],
+            next_before: 4,
+          }
+        : {
+            events: [
+              event(3, "tool.started", {
+                tool_id: "shell_execute",
+                tool_call_id: "call",
+                input: { command: "failed-command" },
+              }),
+            ],
+            next_before: null,
+          },
+  });
+  feed.restore({ snapshot: state(), events: [], processes: [process] });
+  const group = feed.groups.get(process.id);
+  await feed.history(group);
+  await feed.history(group);
+  assert.equal(group.state, "completed");
+  assert.equal(
+    group.records.get("tool:call").node.classList.contains("failed"),
+    true,
+  );
+  assert.match(
+    group.records.get("tool:call").summary.textContent,
+    /Failed \(exit 2\)/,
+  );
+  assert.match(
+    group.records.get("tool:call").pre.textContent,
+    /failed-command/,
+  );
+  assert.deepEqual(
+    [...group.rows.children].map((node) => node.dataset.key),
+    ["event:2", "tool:call", "event:5"],
+  );
+  dom.window.close();
+});
+
 test("expand/fold all includes nested details, new events and results and survives replay", async () => {
   const dom = setup(),
     root = document.getElementById("feed"),

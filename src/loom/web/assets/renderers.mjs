@@ -68,19 +68,38 @@ export function firstLine(value) {
 export function builtinRenderers() {
   return new RendererRegistry()
     .register(
+      "execution-failure",
+      (event) => ["run.failed", "llm.failed"].includes(event.type),
+      (event) => {
+        const error = event.payload.error || event.payload;
+        return {
+          key: `event:${event.seq}`,
+          status: "failed",
+          summary: `Failed · ${error.code || event.type} · ${error.message || "Execution failed"}`,
+          details: event.payload,
+        };
+      },
+    )
+    .register(
       "tool",
       (event) => event.type.startsWith("tool."),
       (event) => {
         const data = event.payload,
           name = data.tool_id || data.tool_name || "tool";
-        const failed = event.type === "tool.failed",
+        const output = data.output?.value || data.output || {},
+          failed =
+            event.type === "tool.failed" ||
+            output.ok === false ||
+            (output.exit_code != null &&
+              output.exit_code !== 0 &&
+              output.status !== "no_match"),
           running = event.type === "tool.started";
         const argument =
           data.input?.path || data.input?.url || data.input?.command || "";
         return {
           key: `tool:${data.tool_call_id || event.seq}`,
           kind: "tool",
-          summary: `Tool call (${name})${argument ? ` · ${Array.isArray(argument) ? argument.join(" ") : argument}` : ""}${failed ? ` · ${data.error?.message || "Failed"}` : running ? " · Running" : " · Done"}`,
+          summary: `Tool call (${name})${argument ? ` · ${Array.isArray(argument) ? argument.join(" ") : argument}` : ""}${failed ? ` · ${data.error?.message || output.error?.message || `Failed${output.exit_code != null ? ` (exit ${output.exit_code})` : ""}`}` : running ? " · Running" : " · Done"}`,
           status: failed ? "failed" : running ? "running" : "",
           details: data,
           artifact: data.artifact,
