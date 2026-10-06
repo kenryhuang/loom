@@ -37,7 +37,21 @@ export class EvaluationView {
     this.status = element("p", "muted", "Loading evaluator…");
     this.form = element("form", "evaluation-controls");
     this.results = element("div", "evaluation-results");
-    this.root.append(this.status, this.form, this.results);
+    this.progress = element("section", "evaluation-progress");
+    this.progress.setAttribute("aria-label", "Evaluation progress");
+    this.progress.hidden = true;
+    this.settingsPanel = element("details", "evaluation-settings");
+    this.settingsPanel.open = true;
+    this.settingsPanel.append(
+      element("summary", "", "Evaluator settings"),
+      this.form,
+    );
+    this.root.append(
+      this.status,
+      this.progress,
+      this.settingsPanel,
+      this.results,
+    );
     try {
       const catalog = await this.api.evaluations(
         this.sessionId,
@@ -100,7 +114,7 @@ export class EvaluationView {
           "muted small",
           "Uses the selected model to review this snapshot. Evaluator usage is separate from task usage. Token thresholds are checked between calls; an in-flight response may exceed the threshold. Unknown evidence stays unknown.",
         ),
-        this.form,
+        this.settingsPanel,
       );
       this.status.textContent = catalog.models.length
         ? "Semantic evaluation has not run for this snapshot."
@@ -184,8 +198,12 @@ export class EvaluationView {
       );
       if (this.signal.aborted || generation !== this.generation) return;
       if (this.job?.id !== job.id) this.results.replaceChildren();
+      const wasActive =
+        this.job && ["queued", "running"].includes(this.job.state);
       this.job = job;
       const active = ["queued", "running"].includes(job.state);
+      if (active && !wasActive && this.settingsPanel)
+        this.settingsPanel.open = false;
       this.start.disabled = active;
       this.start.textContent = [
         "failed",
@@ -205,16 +223,117 @@ export class EvaluationView {
       }
       const usage = job.usage;
       this.status.textContent = `${job.state} · ${job.stage || "Preparing"} · ${job.reviewed_rounds || 0} / ${job.total_rounds ?? "?"} rounds reviewed · ${job.completed_batches || 0} saved batches · ${count(usage.calls)} calls · ${count(usage.total_tokens)} reported tokens${usage.unreported_calls ? ` · ${usage.unreported_calls} calls without final usage` : ""}${job.error ? ` · ${job.error}` : ""}`;
-      this.status.textContent += ` · ${count(Math.ceil(job.elapsed_seconds || 0))} / ${count(job.settings.max_seconds)} seconds used`;
+      this.status.textContent += ` · ${count(Math.ceil(job.elapsed_seconds || 0))} / ${count(job.settings.max_seconds)} reported seconds used`;
       if (job.state === "budget_exhausted")
         this.status.textContent +=
           " · Increase the exhausted total budget, then Resume evaluation; saved batches will be reused. Usage for the unfinished call is unknown.";
+      this.renderProgress(job);
       if (job.evaluation) this.render(job.evaluation);
       if (active)
         this.timer = setTimeout(() => this.follow(id, generation), 1200);
     } catch (error) {
       this.fail(error);
     }
+  }
+  renderProgress(job) {
+    if (!this.progress) return;
+    this.progress.hidden = false;
+    const active = ["queued", "running"].includes(job.state);
+    const total = job.selected_rounds ?? job.total_rounds;
+    const reviewed = job.reviewed_rounds || 0;
+    const call = job.current_call;
+    const heading = element("div", "evaluation-progress-heading");
+    heading.append(
+      element(
+        "strong",
+        "",
+        active ? "Evaluation in progress" : `Evaluation ${job.state}`,
+      ),
+    );
+    const stop = button("Cancel evaluation", () => this.cancel.click());
+    stop.hidden = !active;
+    heading.append(stop);
+    const coverage = element("progress");
+    coverage.setAttribute("aria-label", "Reviewed round coverage");
+    if (total != null && total > 0) {
+      coverage.max = total;
+      coverage.value = Math.min(reviewed, total);
+    }
+    const metrics = element("div", "evaluation-progress-metrics");
+    for (const [label, value] of [
+      ["Rounds reviewed", `${reviewed} / ${total ?? "?"}`],
+      ["Saved batches", job.completed_batches || 0],
+      ["Evaluator calls", count(job.usage.calls)],
+      ["Reported tokens", count(job.usage.total_tokens)],
+      ["Elapsed (reported)", `${Math.ceil(job.elapsed_seconds || 0)}s`],
+      ...(active && job.started_at
+        ? [
+            [
+              "Current attempt",
+              `${Math.max(0, Math.floor((Date.now() - Date.parse(job.started_at)) / 1000))}s`,
+            ],
+          ]
+        : []),
+    ]) {
+      const metric = element("div", "trajectory-metric");
+      metric.append(
+        element("small", "muted", label),
+        element("strong", "", String(value)),
+      );
+      metrics.append(metric);
+    }
+    const current = element("p", "evaluation-current");
+    current.setAttribute("role", "status");
+    if (active && call?.state === "waiting") {
+      const seconds = Math.max(
+        0,
+        Math.floor(
+          (job.elapsed_seconds || 0) - (call.started_elapsed_seconds || 0),
+        ),
+      );
+      current.textContent = `${call.stage || job.stage} · Waiting for evaluator response · ${seconds}s. Round coverage advances after a batch is saved.`;
+    } else if (active && !call && job.usage.unreported_calls) {
+      current.textContent = `${job.stage || "Evaluating"} · Waiting for evaluator response. Coverage and token usage are confirmed after the response is saved.`;
+    } else
+      current.textContent = `${job.stage || "Preparing"} · ${job.error || (active ? "Processing evaluation" : "Saved progress retained")}`;
+    const log = element("ol", "evaluation-progress-log");
+    log.setAttribute("aria-label", "Evaluation activity");
+    if (!job.progress) {
+      const signature = JSON.stringify([
+        job.id,
+        job.state,
+        job.stage,
+        job.completed_batches,
+        job.usage.calls,
+      ]);
+      if (signature !== this.observedSignature) {
+        if (this.observedJob !== job.id) this.observedProgress = [];
+        this.observedJob = job.id;
+        this.observedSignature = signature;
+        this.observedProgress = [
+          ...(this.observedProgress || []),
+          {
+            elapsed_seconds: job.elapsed_seconds,
+            message: `${job.state} · ${job.stage || "Preparing"} · ${job.completed_batches || 0} saved batches`,
+          },
+        ].slice(-100);
+      }
+    }
+    for (const item of job.progress || this.observedProgress || []) {
+      const row = element("li");
+      row.append(
+        element("time", "muted", `${Math.floor(item.elapsed_seconds || 0)}s`),
+        element("span", "", item.message),
+      );
+      log.append(row);
+    }
+    const previous = this.progress.querySelector(".evaluation-progress-log");
+    const bottom =
+      !previous ||
+      previous.scrollHeight - previous.scrollTop - previous.clientHeight < 30;
+    const scroll = previous?.scrollTop || 0;
+    this.progress.replaceChildren(heading, coverage, metrics, current, log);
+    log.scrollTop = bottom ? log.scrollHeight : scroll;
   }
   refs(root, refs = []) {
     const actions = element("div", "trajectory-actions");

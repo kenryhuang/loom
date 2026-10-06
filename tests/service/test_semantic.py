@@ -211,3 +211,28 @@ def test_exhausted_time_is_rejected_before_any_new_model_call(evaluation):
     done = wait_job(semantic, sid, aid, job["id"])
     assert done["state"] == "completed"
     assert provider.calls == 3
+
+
+def test_progress_is_durable_and_heartbeats_while_evaluator_waits(evaluation):
+    _, _, semantic, provider, sid, aid = evaluation
+    provider.block_after = 1
+    job = semantic.start(sid, aid, {"batch_rounds": 1})
+    assert provider.blocked.wait(5)
+    before = semantic.get(sid, aid, job["id"])
+    assert before["state"] == "running"
+    assert before["completed_batches"] == 1 and before["reviewed_rounds"] == 1
+    assert before["selected_rounds"] == 2
+    assert before["current_call"]["state"] == "waiting"
+    assert {row["kind"] for row in before["progress"]} >= {"started", "call.started", "call.completed", "batch.saved"}
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        current = semantic.get(sid, aid, job["id"])
+        if current["elapsed_seconds"] > before["elapsed_seconds"] + .5:
+            break
+        time.sleep(.05)
+    assert current["elapsed_seconds"] > before["elapsed_seconds"] + .5
+    assert current["reviewed_rounds"] == 1  # No invented progress while the model waits.
+    semantic.cancel(sid, aid, job["id"])
+    done = wait_job(semantic, sid, aid, job["id"])
+    assert done["progress"][-1]["kind"] == "cancelled"
+    assert done["current_call"]["state"] == "interrupted"

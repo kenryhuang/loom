@@ -31,6 +31,26 @@
           </svg>
         </button>
         <button
+          id="nav-evaluation"
+          class="activity-button"
+          data-component="evaluation"
+          aria-label="Evaluation / Evolve"
+          title="Evaluation / Evolve"
+          aria-pressed="false"
+          aria-controls="evaluation-panel"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            aria-hidden="true"
+          >
+            <path d="M4 3v18h17M8 16v-5M13 16V6M18 16V9" />
+            <path d="m7 6 5-3 7 2" />
+          </svg>
+        </button>
+        <button
           id="knowledge-bases"
           class="activity-button"
           data-component="knowledge"
@@ -85,6 +105,32 @@
           </nav>
         </section>
         <section
+          id="evaluation-panel"
+          class="component-panel"
+          aria-label="Evaluation sessions"
+          hidden
+        >
+          <div class="section-heading component-heading">
+            <h2>Evaluation / Evolve</h2>
+            <button
+              id="refresh-evaluation"
+              class="quiet"
+              aria-label="Refresh evaluation sessions"
+            >
+              ↻
+            </button>
+          </div>
+          <input
+            id="evaluation-search"
+            type="search"
+            placeholder="Find a session…"
+            aria-label="Find a session to evaluate"
+          />
+          <nav id="evaluation-list" aria-label="Sessions to evaluate">
+            <p class="muted">Connect to load sessions.</p>
+          </nav>
+        </section>
+        <section
           id="knowledge-panel"
           class="component-panel"
           aria-label="Knowledge panel"
@@ -121,7 +167,7 @@
           ><button id="disconnect" class="quiet">Disconnect</button>
         </footer>
       </aside>
-      <main class="workspace">
+      <main id="conversation-workspace" class="workspace">
         <div class="workspace-top">
           <header class="workspace-header">
             <div>
@@ -144,33 +190,10 @@
             hidden
           ></section>
         </div>
-        <div class="session-tabs" role="tablist" aria-label="Session views">
-          <button
-            id="session-conversation"
-            role="tab"
-            aria-selected="true"
-            aria-controls="conversation-page"
-            tabindex="0"
-            disabled
-          >
-            Conversation
-          </button>
-          <button
-            id="session-trajectory"
-            role="tab"
-            aria-selected="false"
-            aria-controls="trajectory-page"
-            tabindex="-1"
-            disabled
-          >
-            Trajectory
-          </button>
-        </div>
         <div
           id="conversation-page"
-          class="workspace-body session-tab-panel"
-          role="tabpanel"
-          aria-labelledby="session-conversation"
+          class="workspace-body"
+          aria-label="Conversation"
           tabindex="0"
         >
           <section class="conversation" aria-label="Session conversation">
@@ -226,13 +249,23 @@
             </form>
           </section>
         </div>
+      </main>
+      <main
+        id="evaluation-workspace"
+        class="workspace evaluation-workspace"
+        aria-label="Session evaluation"
+        hidden
+      >
+        <header class="workspace-header">
+          <div>
+            <small class="eyebrow">EVALUATION / EVOLVE</small>
+            <h1 id="evaluation-title">Choose a session to evaluate</h1>
+          </div>
+        </header>
         <section
           id="trajectory-page"
-          class="trajectory-page session-tab-panel"
-          role="tabpanel"
-          aria-labelledby="session-trajectory"
-          tabindex="0"
-          hidden
+          class="trajectory-page"
+          aria-label="Trajectory analysis"
         ></section>
       </main>
       <aside class="session-details" aria-label="Session information">

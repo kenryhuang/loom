@@ -243,3 +243,40 @@ test("raising a stopped evaluation's time budget sends its checkpoint identity",
   abort.abort();
   dom.window.close();
 });
+
+test("progress distinguishes saved coverage from an in-flight evaluator call", () => {
+  const dom = new JSDOM('<section id="root"></section>');
+  globalThis.document = dom.window.document;
+  const abort = new AbortController();
+  const root = document.querySelector("section");
+  const view = new EvaluationView(root, { signal: abort.signal });
+  view.progress = root;
+  view.cancel = document.createElement("button");
+  view.renderProgress({
+    state: "running",
+    stage: "batch-2",
+    selected_rounds: 24,
+    reviewed_rounds: 8,
+    completed_batches: 1,
+    elapsed_seconds: 45,
+    usage: { calls: 2, total_tokens: 1000 },
+    current_call: {
+      stage: "batch-2",
+      state: "waiting",
+      started_elapsed_seconds: 30,
+    },
+    progress: [
+      { kind: "batch.saved", message: "Saved batch 1", elapsed_seconds: 29 },
+    ],
+  });
+  assert.equal(root.querySelector("progress").value, 8);
+  assert.equal(root.querySelector("progress").max, 24);
+  assert.match(root.textContent, /Waiting for evaluator response · 15s/);
+  assert.match(root.textContent, /Saved batch 1/);
+  assert.equal(
+    root.querySelector("ol").getAttribute("aria-label"),
+    "Evaluation activity",
+  );
+  abort.abort();
+  dom.window.close();
+});

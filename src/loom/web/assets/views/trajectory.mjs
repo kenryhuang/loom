@@ -129,7 +129,38 @@ export class TrajectoryView {
     this.status = element("p", "muted small", "Preparing analysis…");
     this.status.setAttribute("role", "status");
     this.body = element("div", "trajectory-body");
-    this.root.append(heading, this.status, this.body);
+    const tabs = element("div", "evaluation-tabs");
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", "Evaluation views");
+    this.deepPanel = element("section", "trajectory-evaluation");
+    const panels = [this.body, this.deepPanel];
+    this.tabs = ["Trace analysis", "Deep evaluation"].map((label, index) => {
+      const tab = button(label, () => this.selectTab(index));
+      tab.id = `evaluation-tab-${index}`;
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-controls", `evaluation-content-${index}`);
+      panels[index].id = `evaluation-content-${index}`;
+      panels[index].setAttribute("role", "tabpanel");
+      panels[index].setAttribute("aria-labelledby", tab.id);
+      panels[index].tabIndex = 0;
+      tab.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key))
+          return;
+        event.preventDefault();
+        const next =
+          event.key === "Home" ? 0 : event.key === "End" ? 1 : 1 - index;
+        this.selectTab(next);
+        this.tabs[next].focus();
+      });
+      tabs.append(tab);
+      return tab;
+    });
+    this.deepPanel.append(
+      element("p", "muted", "Preparing snapshot for evaluation…"),
+    );
+    this.root.append(tabs, heading, this.status, this.body, this.deepPanel);
+    this.traceHeading = heading;
+    this.selectTab(this.selectedTab || 0);
     try {
       const started = await api.startTrajectory(sessionId, signal);
       if (signal.aborted) return;
@@ -153,17 +184,31 @@ export class TrajectoryView {
       if (signal.aborted) return;
       this.status.textContent = "Analysis unavailable";
       this.body.replaceChildren(element("p", "notice error", error.message));
+      this.deepPanel.replaceChildren(
+        element("p", "notice error", error.message),
+      );
       this.onError(error);
     } finally {
       if (!signal.aborted) this.refresh.disabled = false;
     }
+  }
+  selectTab(index) {
+    this.selectedTab = index;
+    this.body.hidden = index !== 0;
+    this.deepPanel.hidden = index !== 1;
+    this.traceHeading.hidden = index !== 0;
+    this.status.hidden = index !== 0;
+    this.tabs.forEach((tab, i) => {
+      tab.setAttribute("aria-selected", String(i === index));
+      tab.tabIndex = i === index ? 0 : -1;
+    });
   }
   render() {
     const data = this.analysis;
     this.body.replaceChildren();
     if (this.api.evaluations) {
       const evaluation = element("section", "trajectory-evaluation");
-      this.body.append(evaluation);
+      this.deepPanel.replaceChildren(evaluation);
       new EvaluationView(evaluation, {
         api: this.api,
         sessionId: this.sessionId,
@@ -172,6 +217,9 @@ export class TrajectoryView {
         evidence: (ref) => this.showEvidence(ref),
         onError: this.onError,
       }).open();
+    } else {
+      this.deepPanel.textContent =
+        "Deep evaluation is unavailable on this service.";
     }
     const cards = element("div", "trajectory-metrics");
     for (const [label, value] of [
@@ -195,7 +243,7 @@ export class TrajectoryView {
       element(
         "p",
         "muted small",
-        "Recorded facts · Use Deep evaluation above for semantic judgments. Runtime completion does not independently verify task completion.",
+        "Recorded facts · Use Deep evaluation tab for semantic judgments. Runtime completion does not independently verify task completion.",
       ),
     );
     const missing = data.rounds.filter(

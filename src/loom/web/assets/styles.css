@@ -447,27 +447,6 @@ pre {
   flex: 1;
   min-height: 0;
 }
-.session-tabs {
-  display: flex;
-  flex-shrink: 0;
-  gap: 24px;
-  border-bottom: 1px solid var(--line);
-}
-.session-tabs [role="tab"] {
-  background: transparent;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
-  padding: 12px 2px;
-  color: var(--muted);
-}
-.session-tabs [aria-selected="true"] {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
-.session-tab-panel {
-  min-width: 0;
-}
 .conversation-toolbar {
   display: flex;
   align-items: center;
@@ -1270,4 +1249,110 @@ dialog h1 {
   .session-details {
     grid-column: 1 / -1;
   }
+}
+
+.evaluation-workspace {
+  grid-column: 3 / -1;
+}
+.workspace[hidden],
+.session-details[hidden] {
+  display: none;
+}
+#evaluation-list {
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  overscroll-behavior: contain;
+  padding: 12px 0;
+}
+@media (max-width: 700px) {
+  .evaluation-workspace {
+    grid-column: 1 / -1;
+  }
+  #evaluation-list {
+    max-height: 160px;
+  }
+}
+
+.evaluation-tabs {
+  display: flex;
+  gap: 24px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 20px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg);
+}
+.evaluation-tabs [role="tab"] {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  padding: 12px 2px;
+}
+.evaluation-tabs [aria-selected="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.trajectory-heading[hidden],
+.trajectory-body[hidden],
+.trajectory-evaluation[hidden] {
+  display: none;
+}
+.evaluation-progress {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px;
+  margin: 16px 0;
+}
+.evaluation-progress-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.evaluation-progress progress {
+  width: 100%;
+  height: 8px;
+  margin: 16px 0;
+  accent-color: var(--accent);
+}
+.evaluation-progress-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+.evaluation-current {
+  color: var(--accent);
+}
+.evaluation-progress-log {
+  max-height: 220px;
+  overflow: auto;
+  padding: 0;
+  margin: 12px 0 0;
+  list-style: none;
+}
+.evaluation-progress-log li {
+  display: flex;
+  gap: 14px;
+  padding: 5px 0;
+}
+.evaluation-progress-log time {
+  min-width: 50px;
+}
+.evaluation-settings {
+  margin: 18px 0;
+}
+.evaluation-settings summary {
+  cursor: pointer;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+.evaluation-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  align-items: end;
 }

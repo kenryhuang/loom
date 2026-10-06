@@ -12,7 +12,7 @@ import { TrajectoryView } from "./views/trajectory.mjs";
 const $ = (id) => document.getElementById(id);
 let controller,
   catalog,
-  analysisMode = false,
+  evaluationId = null,
   sending = false;
 const trajectory = new TrajectoryView($("trajectory-page"), {
   onError: (error) => {
@@ -25,7 +25,7 @@ const list = new SessionListView(
   select,
 );
 const feed = new FeedView($("event-feed"), {
-  onTrajectory: () => $("session-trajectory").click(),
+  onTrajectory: () => openEvaluation(controller?.selectedId),
   loadArtifact: (digest) =>
     controller.api.artifact(controller.selectedId, digest),
   loadProcess: (process, before) =>
@@ -63,18 +63,41 @@ const knowledge = new KnowledgeView({
     });
   },
 });
+const evaluationList = new SessionListView(
+  $("evaluation-list"),
+  $("evaluation-search"),
+  openEvaluation,
+);
 let activeComponent = "sessions";
+function activateComponent(component) {
+  activeComponent = component;
+  for (const item of document.querySelectorAll("[data-component]")) {
+    const selected = item.dataset.component === component;
+    item.setAttribute("aria-pressed", String(selected));
+    $(item.getAttribute("aria-controls")).hidden = !selected;
+  }
+}
 for (const button of document.querySelectorAll("[data-component]")) {
   button.addEventListener("click", () => {
-    activeComponent = button.dataset.component;
-    for (const item of document.querySelectorAll("[data-component]")) {
-      const selected = item === button;
-      item.setAttribute("aria-pressed", String(selected));
-      $(item.getAttribute("aria-controls")).hidden = !selected;
+    const component = button.dataset.component;
+    activateComponent(component);
+    if (component === "knowledge") knowledgeList.refresh();
+    else if (component === "evaluation")
+      openEvaluation(evaluationId || controller?.selectedId);
+    else {
+      setWorkspaceMode(false);
+      if (controller?.selectedId)
+        history.pushState(
+          null,
+          "",
+          `#/sessions/${encodeURIComponent(controller.selectedId)}`,
+        );
     }
-    if (activeComponent === "knowledge") knowledgeList.refresh();
   });
 }
+$("refresh-evaluation").addEventListener("click", () =>
+  controller?.refresh().catch(showError),
+);
 $("new-knowledge").addEventListener("click", () =>
   knowledge.open(false, { create: true }),
 );
@@ -103,51 +126,47 @@ function connection(value) {
 function currentId() {
   try {
     return decodeURIComponent(
-      /^#\/sessions\/([^/]+)(?:\/trajectory)?$/.exec(location.hash)?.[1] || "",
+      /^#\/(?:sessions|evaluation)\/([^/]+)(?:\/trajectory)?$/.exec(
+        location.hash,
+      )?.[1] || "",
     );
   } catch {
     return "";
   }
 }
-function navigateTrajectory(analysis) {
-  if (!controller?.selectedId || analysisMode === analysis) return;
-  const id = controller.selectedId;
-  history.pushState(
-    null,
-    "",
-    `#/sessions/${encodeURIComponent(id)}${analysis ? "/trajectory" : ""}`,
+function evaluationRoute() {
+  return (
+    location.hash.startsWith("#/evaluation/") ||
+    location.hash.endsWith("/trajectory")
   );
-  select(id, { analysis, fromHistory: true });
 }
-function setSessionTab(analysis) {
-  analysisMode = analysis;
+function setWorkspaceMode(analysis) {
+  $("conversation-workspace").hidden = analysis;
   $("conversation-page").hidden = analysis;
-  $("trajectory-page").hidden = !analysis;
-  for (const [id, active] of [
-    ["session-conversation", !analysis],
-    ["session-trajectory", analysis],
-  ]) {
-    $(id).setAttribute("aria-selected", String(active));
-    $(id).tabIndex = active ? 0 : -1;
-  }
+  $("evaluation-workspace").hidden = !analysis;
+  document.querySelector(".session-details").hidden = analysis;
+  if (!analysis) trajectory.close();
 }
-async function select(id, { analysis = false, fromHistory = false } = {}) {
+async function openEvaluation(id, { fromHistory = false } = {}) {
+  activateComponent("evaluation");
+  setWorkspaceMode(true);
   if (!controller || !id) return;
-  if (trajectory.sessionId !== id) trajectory.close();
-  setSessionTab(analysis);
+  evaluationId = id;
+  evaluationList.update(controller.sessions, id);
+  const session = controller.sessions.find((item) => item.session_id === id);
+  $("evaluation-title").textContent = session?.title || "Session evaluation";
   if (!fromHistory)
-    history.replaceState(
-      null,
-      "",
-      `#/sessions/${encodeURIComponent(id)}${analysis ? "/trajectory" : ""}`,
-    );
-  if (controller.selectedId === id && controller.projection) {
-    if (analysis && trajectory.sessionId !== id)
-      trajectory.open(controller.api, id, controller.projection.cursor);
-    return;
-  }
-  $("session-conversation").disabled = true;
-  $("session-trajectory").disabled = true;
+    history.pushState(null, "", `#/evaluation/${encodeURIComponent(id)}`);
+  if (trajectory.sessionId !== id)
+    await trajectory.open(controller.api, id, session?.event_cursor || 0);
+}
+async function select(id, { fromHistory = false } = {}) {
+  if (!controller || !id) return;
+  activateComponent("sessions");
+  setWorkspaceMode(false);
+  if (!fromHistory)
+    history.replaceState(null, "", `#/sessions/${encodeURIComponent(id)}`);
+  if (controller.selectedId === id && controller.projection) return;
   notice("");
   feed.snapshot = null;
   feed.reset();
@@ -161,8 +180,6 @@ async function select(id, { analysis = false, fromHistory = false } = {}) {
   list.update(controller.sessions, id);
   try {
     await controller.select(id);
-    if (controller?.selectedId === id && analysisMode)
-      trajectory.open(controller.api, id, controller.projection.cursor);
   } catch (error) {
     showError(error);
   }
@@ -180,8 +197,7 @@ function renderState(state) {
     : state.run?.reason ||
       "Task execution failed. Resume or send new guidance to retry.";
   panels.update(state);
-  $("session-conversation").disabled = false;
-  $("session-trajectory").disabled = false;
+
   trajectory.updateState(state);
   feed.snapshot = state;
   feed.syncMessages(state.messages || []);
@@ -240,8 +256,10 @@ async function login(token) {
   next.subscribe(({ type, detail }) => {
     if (controller !== next) return;
     if (type === "connection") connection(detail);
-    else if (type === "sessions") list.update(detail, next.selectedId);
-    else if (type === "restore") {
+    else if (type === "sessions") {
+      list.update(detail, next.selectedId);
+      evaluationList.update(detail, evaluationId);
+    } else if (type === "restore") {
       feed.restore(detail);
       renderControls();
     } else if (type === "state") renderState(detail);
@@ -254,6 +272,7 @@ async function login(token) {
     else if (type === "unauthorized") disconnect();
   });
   list.update(next.sessions, null);
+  evaluationList.update(next.sessions, evaluationId);
   connection("Connected");
   $("new-session").disabled = false;
   $("new-knowledge").disabled = false;
@@ -267,10 +286,12 @@ async function login(token) {
     chosen =
       next.sessions.find((session) => session.session_id === requested) ||
       next.sessions[0];
-  if (chosen)
-    await select(chosen.session_id, {
-      analysis: location.hash.endsWith("/trajectory"),
-    });
+  const evaluating = evaluationRoute();
+  if (chosen) {
+    await select(chosen.session_id, { fromHistory: evaluating });
+    if (evaluating)
+      await openEvaluation(chosen.session_id, { fromHistory: true });
+  }
 }
 
 function disconnect() {
@@ -279,9 +300,10 @@ function disconnect() {
   $("new-knowledge").disabled = true;
   $("refresh-knowledge").disabled = true;
   trajectory.close();
-  setSessionTab(false);
-  $("session-conversation").disabled = true;
-  $("session-trajectory").disabled = true;
+  setWorkspaceMode(false);
+  activateComponent("sessions");
+  evaluationId = null;
+  evaluationList.update([], null);
   if (controller) {
     controller.disconnect();
     controller.api.token = "";
@@ -479,24 +501,10 @@ $("history").addEventListener("click", async () => {
     $("history").disabled = !controller?.nextBefore;
   }
 });
-const sessionTabs = [$("session-conversation"), $("session-trajectory")];
-for (const [index, tab] of sessionTabs.entries()) {
-  tab.addEventListener("click", () => navigateTrajectory(index === 1));
-  tab.addEventListener("keydown", (event) => {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    const next = event.key === "Home" ? 0 : event.key === "End" ? 1 : 1 - index;
-    if (sessionTabs[next].disabled) return;
-    sessionTabs[next].focus();
-    navigateTrajectory(next === 1);
-  });
-}
-window.addEventListener("hashchange", () =>
-  select(currentId(), {
-    analysis: location.hash.endsWith("/trajectory"),
-    fromHistory: true,
-  }),
-);
+window.addEventListener("hashchange", () => {
+  if (evaluationRoute()) openEvaluation(currentId(), { fromHistory: true });
+  else select(currentId(), { fromHistory: true });
+});
 window.addEventListener("pagehide", () => {
   trajectory.close();
   controller?.disconnect();

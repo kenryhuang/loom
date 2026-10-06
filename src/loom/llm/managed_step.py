@@ -216,7 +216,7 @@ class ManagedStep:
                 metadata={
                     **(base.metadata or {}),
                     "session_turn": True,
-                    "prior_requests": [*((base.metadata or {}).get("prior_requests", ()))[-3:], base.goal.objective[-6000:]],
+                    "prior_requests": [*((base.metadata or {}).get("prior_requests", ()))[-2:], base.goal.objective[-2000:]],
                 },
             )
             if self.assembly:

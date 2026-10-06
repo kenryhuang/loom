@@ -191,6 +191,10 @@ class SessionSemantic:
         prior_elapsed = body["elapsed_seconds"]
         stop = self.cancels[body["id"]]
         settings = body["settings"]
+        def progress(kind, message):
+            body["progress"] = [*body.get("progress", []), {"kind": kind, "message": message, "at": now_iso(),
+                "elapsed_seconds": prior_elapsed + round(time.monotonic() - started, 2)}][-100:]
+
         def persist():
             body["elapsed_seconds"] = prior_elapsed + round(time.monotonic() - started, 2)
             self._save(body)
@@ -207,11 +211,19 @@ class SessionSemantic:
                     body["usage"]["calls"] += 1
                     body["usage"]["unreported_calls"] += 1
                     body["stage"] = event.get("analysis_stage")
+                    body["current_call"] = {"stage": body["stage"], "state": "waiting", "started_at": now_iso(),
+                                            "started_elapsed_seconds": prior_elapsed + round(time.monotonic() - started, 2)}
+                    progress("call.started", f"Requesting evaluator: {body['stage']} (call {body['usage']['calls']})")
                 elif event["type"] == "llm.completed":
                     usage = event["response"].usage
                     for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
                         body["usage"][key] = body["usage"].get(key, 0) + getattr(usage, key, 0)
                     body["usage"]["unreported_calls"] -= 1
+                    body["current_call"]["state"] = "received"
+                    progress("call.completed", f"Response received: {body.get('stage')} · {usage.total_tokens} reported tokens")
+                elif event["type"] == "llm.failed":
+                    body["current_call"]["state"] = "failed"
+                    progress("call.failed", f"Evaluator request failed: {body.get('stage')}")
                 else:
                     return ok(None)
                 persist()
@@ -219,17 +231,24 @@ class SessionSemantic:
 
         async def run(source, facts, provider):
             def checkpoint(value):
+                previous_batches = body.get("completed_batches", 0)
                 body["checkpoint"] = value
                 body["completed_batches"] = len(value.get("batches", {}))
                 body["reviewed_rounds"] = len({row["round_id"] for batch in value.get("batches", {}).values()
                                               for row in batch["result"].get("round_analyses", [])})
+                if body["completed_batches"] > previous_batches:
+                    progress("batch.saved", f"Saved {body['completed_batches']} batches · {body['reviewed_rounds']} rounds reviewed")
                 persist()
             task = asyncio.create_task(judge_effectiveness(source, facts, provider, event_sink=Sink(),
                 **{key: settings[key] for key in ("max_read_rounds", "max_evidence_chars", "max_prompt_chars", "batch_rounds")},
                 checkpoint=body["checkpoint"], save_checkpoint=checkpoint, repair_invalid=True))
+            heartbeat = time.monotonic()
             try:
                 while not task.done():
                     await asyncio.wait({task}, timeout=.2)
+                    if time.monotonic() - heartbeat >= 1:
+                        persist()
+                        heartbeat = time.monotonic()
                     if stop.is_set() or self.closed.is_set():
                         raise InterruptedError("Evaluation stopped; completed batches retained")
                     if prior_elapsed + time.monotonic() - started >= settings["max_seconds"]:
@@ -242,7 +261,8 @@ class SessionSemantic:
         try:
             if stop.is_set() or self.closed.is_set():
                 raise InterruptedError("Evaluation stopped before starting")
-            body.update(state="running", started_at=now_iso())
+            body.update(state="running", started_at=now_iso(), current_call=None)
+            progress("started", "Preparing evaluation; previously saved batches will be reused")
             persist()
             parent = self.trajectory._load(body["session_id"], body["analysis_id"])
             source, result = self.trajectory._data(parent)
@@ -262,6 +282,7 @@ class SessionSemantic:
                 provider = created.value
             facts = FactAnalysis(**result["facts"])
             selected = facts.trajectory[:settings.get("max_rounds", 10000)]
+            body["selected_rounds"] = len(selected)
             selected_facts = replace(facts, trajectory=selected)
             if len(selected) < len(facts.trajectory):
                 runs = {row["run_id"] for row in selected}
@@ -289,6 +310,9 @@ class SessionSemantic:
         except Exception as exc:
             body.update(state="budget_exhausted" if "budget reached" in str(exc).lower() else "failed", error=str(exc))
         finally:
+            if (body.get("current_call") or {}).get("state") == "waiting":
+                body["current_call"]["state"] = "interrupted"
+            progress(body["state"], body.get("error") or "Evaluation completed")
             with self.lock:
                 persist()
                 self.cancels.pop(body["id"], None)

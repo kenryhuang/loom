@@ -89,31 +89,34 @@ test("browser app connects to real service, answers input, creates sessions, con
       "浏览器结果",
     );
     assert.equal($("event-feed").querySelector(".result").tagName, "ARTICLE");
+    await until(() => !$("event-feed").querySelector(".process-group").open);
     assert.equal($("event-feed").querySelector(".process-group").open, false);
     assert.equal($("session-objective"), null);
     assert.ok($("event-feed").querySelector(".task-block .result"));
-    $("session-trajectory").click();
+    $("nav-evaluation").click();
     await until(() =>
       $("trajectory-page").querySelector(".trajectory-metrics"),
     );
-    assert.equal(location.hash, `#/sessions/${questionId}/trajectory`);
+    assert.equal(location.hash, `#/evaluation/${questionId}`);
     assert.equal($("conversation-page").hidden, true);
-    assert.match(
-      $("trajectory-page").textContent,
-      /Use Deep evaluation/,
-    );
+    assert.match($("trajectory-page").textContent, /Use Deep evaluation/);
     history.back();
     await until(() => !$("conversation-page").hidden);
     assert.equal($("trajectory-page").hidden, true);
     history.forward();
     await until(() => !$("trajectory-page").hidden);
-    assert.equal($("session-trajectory").getAttribute("aria-selected"), "true");
-    assert.equal($("trajectory-page").getAttribute("role"), "tabpanel");
-    $("session-conversation").click();
+    assert.equal($("nav-evaluation").getAttribute("aria-pressed"), "true");
+    assert.equal(
+      $("trajectory-page").getAttribute("aria-label"),
+      "Trajectory analysis",
+    );
+    assert.equal(document.querySelector(".session-tabs"), null);
+    assert.equal($("evaluation-panel").hidden, false);
+    $("nav-sessions").click();
     await until(() => !$("conversation-page").hidden);
     assert.equal(location.hash, `#/sessions/${questionId}`);
-    assert.equal($("session-conversation").getAttribute("aria-selected"), "true");
-    assert.equal($("session-trajectory").tabIndex, -1);
+    assert.equal($("nav-sessions").getAttribute("aria-pressed"), "true");
+    assert.equal($("evaluation-panel").hidden, true);
     assert.ok($("event-feed").querySelector(".task-block .result"));
     assert.equal($("toggle-details").textContent, "Expand all");
     $("toggle-details").click();

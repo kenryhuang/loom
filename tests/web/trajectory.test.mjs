@@ -90,6 +90,15 @@ test("trajectory renders measured facts, filters calls and reads paginated evide
   };
   await view.open(api, "one", 10);
   assert.match(root.textContent, /Use Deep evaluation/);
+  assert.equal(root.querySelectorAll('[role="tab"]').length, 2);
+  assert.equal(view.deepPanel.hidden, true);
+  const signal = view.abort.signal;
+  view.selectTab(1);
+  assert.equal(view.body.hidden, true);
+  assert.equal(view.deepPanel.hidden, false);
+  assert.equal(signal.aborted, false);
+  view.selectTab(0);
+  assert.equal(view.body.hidden, false);
   assert.match(root.textContent, /15/);
   assert.equal(root.querySelectorAll(".trajectory-round").length, 1);
   assert.equal(root.querySelector("script"), null);
