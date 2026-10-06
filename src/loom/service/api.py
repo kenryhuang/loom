@@ -51,9 +51,14 @@ class ServiceHTTPServer(ThreadingHTTPServer):
         from loom.service.trajectory import SessionTrajectory
 
         self.trajectory = SessionTrajectory(service.store)
+        from loom.service.semantic import SessionSemantic
+
+        self.semantic = SessionSemantic(self.trajectory, service.config_path)
 
     def server_close(self):
         self.closing.set()
+        if hasattr(self, "semantic"):
+            self.semantic.close()
         if hasattr(self, "trajectory"):
             self.trajectory.close()
         super().server_close()
@@ -182,6 +187,20 @@ class SessionHandler(BaseHTTPRequestHandler):
                     if self._body() != {}:
                         raise ServiceError("Trajectory analysis accepts an empty object")
                     self._json(202, analysis.start(sid))
+                elif len(parts) >= 6 and parts[5] == "evaluation":
+                    evaluation = self.server.semantic
+                    if len(parts) == 6 and method == "GET":
+                        self._json(200, evaluation.list(sid, parts[4]))
+                    elif len(parts) == 6 and method == "POST":
+                        self._json(202, evaluation.start(sid, parts[4], self._body()))
+                    elif len(parts) == 7 and method == "GET":
+                        self._json(200, evaluation.get(sid, parts[4], parts[6]))
+                    elif len(parts) == 8 and parts[7] == "cancel" and method == "POST":
+                        if self._body() != {}:
+                            raise ServiceError("Cancel accepts an empty object")
+                        self._json(202, evaluation.cancel(sid, parts[4], parts[6]))
+                    else:
+                        raise ServiceError("Route not found", 404)
                 elif method == "GET" and len(parts) == 5:
                     self._json(200, analysis.get(sid, parts[4]))
                 elif method == "GET" and len(parts) == 6 and parts[5] == "round":

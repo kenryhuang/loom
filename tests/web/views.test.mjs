@@ -26,7 +26,7 @@ const state = () => ({
   run: { id: "run" },
 });
 
-test("feed defaults process to collapsed and results to expanded, places snapshot messages chronologically", () => {
+test("feed keeps snapshot messages chronological with readable answer and lazy activity details", () => {
   const dom = setup(),
     root = document.getElementById("feed"),
     feed = new FeedView(root);
@@ -64,12 +64,13 @@ test("feed defaults process to collapsed and results to expanded, places snapsho
   assert.equal(root.querySelector(".process-group").open, false);
   assert.equal(root.querySelectorAll(".event-row").length, 1);
   assert.equal(root.querySelector(".event-row").open, false);
+  feed.toggleAll();
   assert.match(
     root.querySelector(".event-detail").textContent,
     /https:\/\/example.test/,
   );
   assert.match(root.querySelector(".event-detail").textContent, /facts/);
-  assert.equal(root.querySelector(".result").open, true);
+  assert.equal(root.querySelector(".result").tagName, "ARTICLE");
   assert.equal(root.querySelector(".result h1").textContent, "Result");
   assert.equal(root.querySelector(".result strong").textContent, "Done");
   dom.window.close();
@@ -243,6 +244,7 @@ test("historical tasks retain their processes and failures outside the recent ev
   group.open = true;
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(requests, [["old", 10]]);
+  feed.toggleAll();
   assert.match(group.textContent, /Old evidence/);
   assert.equal(group.querySelector(".process-history").disabled, true);
   feed.append(event(31, "new-event", {}));
@@ -352,7 +354,7 @@ test("live execution rounds keep failure and retry milestones when detailed even
   assert.match(first.textContent, /WORKFLOW_ROUTE_FAILED/);
   assert.equal(
     first.querySelector("summary").textContent,
-    "Process · Tool call (read_file) · Done",
+    "Process · 1 loaded actions",
   );
   assert.equal(first.querySelectorAll(".event-row").length, 1);
   dom.window.close();
@@ -409,10 +411,10 @@ test("loading older process pages preserves completed state and the latest tool 
   );
   assert.match(
     group.records.get("tool:call").summary.textContent,
-    /Failed \(exit 2\)/,
+    /Failed · exit 2/,
   );
   assert.match(
-    group.records.get("tool:call").pre.textContent,
+    JSON.stringify(group.records.get("tool:call").descriptor.details),
     /failed-command/,
   );
   assert.deepEqual(
@@ -481,7 +483,7 @@ test("expand/fold all includes nested details, new events and results and surviv
     content: "Fresh session",
     seq: 1,
   });
-  assert.equal(root.querySelector(".result").open, true);
+  assert.equal(root.querySelector(".result").tagName, "ARTICLE");
   dom.window.close();
 });
 
@@ -568,14 +570,15 @@ test("process counts logical rows, preserving tool details during a long delta s
   }
   assert.match(
     root.querySelector(".process-group > summary").textContent,
-    /Thought: 思/,
+    /Working · 思/,
   );
   assert.equal(root.querySelectorAll(".event-row").length, 2);
+  feed.toggleAll();
   assert.match(root.textContent, /Verified source/);
   assert.match(root.textContent, /https:\/\/example.test/);
   assert.equal(feed.events.length, 3);
   assert.equal(
-    JSON.parse(root.querySelector('[data-key="thought:call"] pre').textContent)
+    feed.groups.get("run").records.get("thought:call").descriptor.details
       .reasoning,
     "思".repeat(150),
   );
@@ -588,7 +591,7 @@ test("process counts logical rows, preserving tool details during a long delta s
   assert.equal(root.querySelectorAll(".event-row").length, 1);
   assert.equal(feed.events.length, 1);
   assert.equal(
-    JSON.parse(root.querySelector('[data-key="thought:call"] pre').textContent)
+    feed.groups.get("run").records.get("thought:call").descriptor.details
       .reasoning,
     "思".repeat(150),
   );
@@ -649,8 +652,18 @@ test("model lifecycle and output share one row while proposed tool calls do not 
     /Inspect files.*Done/,
   );
   assert.equal(model.classList.contains("running"), false);
-  assert.match(model.querySelector("pre").textContent, /Inspect project/);
-  assert.match(model.querySelector("pre").textContent, /unavailable_tool/);
+  assert.match(
+    JSON.stringify(
+      feed.groups.get("run").records.get("thought:model").descriptor.details,
+    ),
+    /Inspect project/,
+  );
+  assert.match(
+    JSON.stringify(
+      feed.groups.get("run").records.get("thought:model").descriptor.details,
+    ),
+    /unavailable_tool/,
+  );
   assert.equal(root.querySelector('[data-key="tool:proposed"]'), null);
   assert.match(
     root.querySelector('[data-key="tool:actual"]').textContent,
@@ -664,7 +677,12 @@ test("model lifecycle and output share one row while proposed tool calls do not 
   assert.equal(root.querySelectorAll(".event-row").length, 2);
   const restored = root.querySelector('[data-key="thought:model"]');
   assert.match(restored.querySelector("summary").textContent, /Done/);
-  assert.match(restored.querySelector("pre").textContent, /Inspect project/);
+  assert.match(
+    JSON.stringify(
+      feed.groups.get("run").records.get("thought:model").descriptor.details,
+    ),
+    /Inspect project/,
+  );
   assert.equal(restored.classList.contains("running"), false);
   dom.window.close();
 });
@@ -737,11 +755,12 @@ test("status and usage events update progress without adding rows or consuming t
   assert.equal(root.querySelectorAll(".event-row").length, 1);
   assert.match(
     root.querySelector(".process-group > summary").textContent,
-    /Tool call \(read_file\) · Done/,
+    /Read file · 1 lines/,
   );
   for (let seq = 6; seq < 15; seq++)
     apply(seq, "run.usage.changed", { total_tokens: seq });
   assert.equal(feed.events.length, 3);
+  feed.toggleAll();
   assert.match(root.textContent, /Evidence/);
   apply(15, "run.state.changed", { state: "completed" });
   apply(16, "task.state.changed", { state: "idle", revision: 3 });
@@ -751,10 +770,7 @@ test("status and usage events update progress without adding rows or consuming t
   const group = feed.groups.get("run:1");
   assert.equal(group.state, "completed");
   assert.equal(Number(group.node.dataset.endSeq), 15);
-  assert.equal(
-    group.summary.textContent,
-    "Process · Tool call (read_file) · Done",
-  );
+  assert.equal(group.summary.textContent, "Process · 1 loaded actions");
   for (const summary of root.querySelectorAll(".event-row > summary"))
     assert.doesNotMatch(summary.textContent, /usage.changed|state.changed/);
   feed.older(

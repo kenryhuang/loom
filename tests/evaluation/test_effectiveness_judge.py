@@ -348,3 +348,19 @@ def test_task_synthesis_cannot_rewrite_validated_batch_round_states(tmp_path):
     result = asyncio.run(judge_effectiveness(store, facts, SynthesisRewrite(), batch_rounds=1)).unwrap()
     assert len(result.round_analyses) == 2
     assert all(row["observed_change"] == "original batch state" for row in result.round_analyses)
+
+
+def test_opt_in_bounded_correction_never_accepts_invalid_evidence(tmp_path):
+    from loom.evaluation.effectiveness_judge import judge_effectiveness
+
+    store, facts, ref = setup_evidence(tmp_path)
+    invalid = {"read_evidence": [{**ref, "field_path": "invented.field"}]}
+    result = asyncio.run(judge_effectiveness(store, facts, ScriptedJudge([invalid, final_payload(ref)]),
+                        repair_invalid=True, max_read_rounds=1)).unwrap()
+    assert result.coverage["corrected_responses"] == 1
+    assert result.diagnoses[0].supporting_refs[0].field_path == "response.content"
+    exhausted = asyncio.run(judge_effectiveness(store, facts, ScriptedJudge([invalid, invalid]),
+                           repair_invalid=True, max_read_rounds=1)).unwrap()
+    assert exhausted.coverage["status"] == "incomplete"
+    assert not exhausted.diagnoses
+    assert not exhausted.round_analyses

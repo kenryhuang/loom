@@ -51,6 +51,31 @@ def _context(row: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _compact_context(row: dict) -> dict:
+    for section in (row, row.get("tool_schemas", {})):
+        for name in ("units", "removed"):
+            units = section.get(name, [])
+            if len(units) <= 24:
+                continue
+            added = set(section.get("added_ids", []))
+            entries = []
+            for unit in units:
+                ref = unit.get("ref", {})
+                entries.append([unit.get("index"), unit.get("role") or unit.get("kind"), unit.get("char_length"),
+                                "removed" if name == "removed" else "added" if unit.get("id") in added else "retained",
+                                ref.get("line_number"), ref.get("field_path"), ref.get("event_hash"), unit.get("excerpt", "")[:80]])
+            section[name + "_directory"] = {
+                "columns": ["index", "role_or_kind", "char_length", "change", "line_number", "field_path", "event_hash", "excerpt"],
+                "rows": entries, "source_sha256": units[0].get("ref", {}).get("source_sha256"),
+                "instructions": ("All unit locations retained; content excerpts are at most 80 characters. Construct read_evidence pointers "
+                                 "from source_sha256, line_number, field_path and event_hash. Read full fields before judging relevance.")}
+            section[name] = []
+            if name == "units":
+                section.pop("added_ids", None)
+                section.pop("retained_ids", None)
+    return row
+
+
 def _tool(row: Mapping[str, Any]) -> dict[str, Any]:
     result = {key: value for key, value in row.items() if key not in {"injections", "output_excerpt"}}
     excerpt = row.get("output_excerpt")
@@ -65,7 +90,7 @@ def _tool(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _index(row: Mapping[str, Any]) -> dict[str, Any]:
-    result = _pick(row, ("id", "kind", "round_id"))
+    result = _pick(row, ("id", "kind", "round_id", "tool_id"))
     if "kind" not in row and "tool_id" in row:
         result["tool_id"] = row["tool_id"]
     refs = row.get("evidence_refs", ())
@@ -128,7 +153,7 @@ def batch_payload(store: EvidenceStore, facts: FactAnalysis, batch: Sequence[Map
                   (row.get("run_id"), row.get("loop_id"), row.get("tool_call_id")) not in verified_tool_keys]
     payload = {"stage": "round_analysis", "source_sha256": store.source_sha256,
             "task_contracts": [dict(row) for row in facts.task_contracts], "trajectory": list(batch),
-            "context_deltas": [_context(row) for row in facts.context_deltas if local(row)],
+            "context_deltas": [_compact_context(_context(row)) for row in facts.context_deltas if local(row)],
             "tool_uses": [_tool(row) for row in local_tools], "tool_index": tool_index,
             "token_ledger": [dict(row) for row in facts.token_ledger if local(row)],
             "verification_evidence": [_verification(row) for row in local_verification],
@@ -142,4 +167,26 @@ def batch_payload(store: EvidenceStore, facts: FactAnalysis, batch: Sequence[Map
                                                "unless already accessible through verification refs. Indexes are not reviewed evidence."),
                            "source_event_count": len(store.events),
                            "evidence_coverage": "Navigation selection does not establish full source review or semantic coverage"}}
+    # Large traces otherwise repeat the same source digest and long episode IDs
+    # hundreds of times in every batch. Preserve every navigable location in a
+    # compact directory, rather than dropping remote evidence.
+    if len(tool_index) + len(verification_index) > 32:
+        entries, seen = [], set()
+        for item in [*verification_index, *tool_index]:
+            for name in ("ref", "input_ref"):
+                ref = item.get(name)
+                if ref is None:
+                    continue
+                key = ref["line_number"], ref.get("field_path"), ref.get("event_hash")
+                if key in seen:
+                    continue
+                seen.add(key)
+                entries.append([*key, item.get("kind") or item.get("tool_id"), item.get("tool_id")])
+        payload["evidence_directory"] = {
+            "columns": ["line_number", "field_path", "event_hash", "kind", "tool_id"], "rows": entries,
+            "pointer_source_sha256": store.source_sha256,
+            "instructions": ("Construct read_evidence pointers from source_sha256 above and each row's line_number, field_path and event_hash. "
+                             "All nonlocal indexed locations retained; read their content to determine scope. Directory is not reviewed evidence.")}
+        payload["tool_index"], payload["verification_index"] = [], []
+        payload["navigation"]["index_selection"] = "All nonlocal index locations moved to evidence_directory; no content review implied."
     return {key: value if key == "task_contracts" else _lean_refs(value) for key, value in payload.items()}

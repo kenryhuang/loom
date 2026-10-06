@@ -89,7 +89,7 @@ test("trajectory renders measured facts, filters calls and reads paginated evide
     },
   };
   await view.open(api, "one", 10);
-  assert.match(root.textContent, /Semantic evaluation has not run/);
+  assert.match(root.textContent, /Use Deep evaluation/);
   assert.match(root.textContent, /15/);
   assert.equal(root.querySelectorAll(".trajectory-round").length, 1);
   assert.equal(root.querySelector("script"), null);

@@ -85,7 +85,12 @@ export function builtinRenderers() {
     .register(
       "internal-lifecycle",
       (event) =>
-        ["operation.started", "operation.completed"].includes(event.type) ||
+        [
+          "operation.started",
+          "operation.completed",
+          "workflow.routing.requested",
+          "workflow.route.selected",
+        ].includes(event.type) ||
         event.type.startsWith("llm.tool_call.") ||
         (["task.", "run.", "session.", "budget.", "command.", "step."].some(
           (prefix) => event.type.startsWith(prefix),
@@ -100,6 +105,26 @@ export function builtinRenderers() {
           "run.completed",
           "run.stopped",
         ].includes(event.type),
+      }),
+    )
+    .register(
+      "plan",
+      (event) => event.type.startsWith("plan."),
+      (event) => ({
+        key: `plan:${event.payload.plan_id || event.payload.plan?.plan_id || "current"}`,
+        kind: "plan",
+        details: event.payload,
+        summary: "Update plan",
+      }),
+    )
+    .register(
+      "recovery",
+      (event) => event.type === "run.recovery.required",
+      (event) => ({
+        key: `event:${event.seq}`,
+        status: "failed",
+        summary: `Recovery required · ${event.payload.reason || "Verify operation effects"}`,
+        details: event.payload,
       }),
     )
     .register(

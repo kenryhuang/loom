@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
@@ -163,11 +164,19 @@ def _parse_final(value: Any, store: EvidenceStore, facts: FactAnalysis) -> Seman
     owners = {row.get("id"): (_task_run(row, store), None) for row in facts.task_contracts}
     owners.update({row.get("id"): (row.get("run_id"), row.get("loop_id")) for row in (*facts.trajectory, *facts.tool_uses)})
     owners.update({f"run:{event.run_id}": (event.run_id, None) for event in store.events if event.run_id})
+    linked_lines = {}
+    rounds = {row["id"]: row for row in facts.trajectory}
+    for tool in facts.tool_uses:
+        round_id = tool.get("round_id")
+        if round_id in rounds:
+            linked_lines.setdefault(round_id, set()).update(ref["line_number"] for ref in tool.get("evidence_refs", []))
+            linked_lines.setdefault(tool["id"], set()).update(ref["line_number"] for ref in rounds[round_id].get("evidence_refs", []))
     for d in diagnoses:
         run, loop = owners[d.scope]
         for ref in (*d.supporting_refs, *d.counterevidence_refs):
             event = store.event(ref)
-            if event.run_id != run or (loop is not None and event.loop_id is not None and event.loop_id != loop):
+            if event.run_id != run or (loop is not None and event.loop_id is not None and event.loop_id != loop
+                                       and event.line_number not in linked_lines.get(d.scope, set())):
                 raise ValueError("Diagnosis evidence belongs to a different scope")
     preserved = []
     for row in value["preserved_behaviors"]:
@@ -203,10 +212,20 @@ async def judge_effectiveness(
     store: EvidenceStore, facts: FactAnalysis, provider: Any, *, stream: bool = False, event_sink: Any = None,
     run_id: str | None = None, loop_id: str | None = None, max_read_rounds: int = 6, max_evidence_chars: int = 80000,
     max_prompt_chars: int = 100000, batch_rounds: int = 8,
+    checkpoint: dict | None = None, save_checkpoint: Any = None, repair_invalid: bool = False,
 ) -> Result:
     if max_read_rounds < 0 or max_evidence_chars < 1 or max_prompt_chars < 2000 or batch_rounds < 1:
         return err(make_loom_error("VALIDATION_FAILED", "Invalid semantic analysis budget", retryable=False))
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0, "model": str(getattr(provider, "model", "unknown"))}
+    checkpoint = checkpoint if checkpoint is not None else {}
+    usage.update(checkpoint.get("usage", {}))
+    async def persist():
+        checkpoint["usage"] = dict(usage)
+        if save_checkpoint:
+            saved = save_checkpoint(checkpoint)
+            if hasattr(saved, "__await__"):
+                await saved
+
     coverage: dict[str, Any] = {"status": "complete", "evidence_reads": 0, "evidence_chars": 0, "batches": 0,
                                 "limitations": [], "dimensions": {name: "evaluated" for name in DIMENSIONS}}
     batches = [facts.trajectory[i:i + batch_rounds] for i in range(0, len(facts.trajectory), batch_rounds)] or [()]
@@ -222,9 +241,14 @@ async def judge_effectiveness(
         result = event_sink.emit(event)
         return await result if hasattr(result, "__await__") else result
 
-    async def evaluate(payload: dict[str, Any], stage: str) -> SemanticAnalysis | None:
+    async def evaluate_uncached(payload: dict[str, Any], stage: str) -> SemanticAnalysis | None:
         compact = _compact(payload)
-        compact["allowed_scopes"] = [row["id"] for row in (*facts.task_contracts, *facts.trajectory, *facts.tool_uses)]
+        compact["allowed_scopes"] = [row["id"] for row in (*facts.task_contracts, *payload.get("trajectory", ()), *payload.get("tool_uses", ()))]
+        compact["allowed_scopes"].extend(sorted({f"run:{event.run_id}" for event in store.events if event.run_id}))
+        source_coverage = compact.get("coverage", {}).get("source", {})
+        for key, value in list(source_coverage.items()):
+            if isinstance(value, list) and len(value) > 20:
+                source_coverage[key] = {"count": len(value), "first_lines": value[:20], "selection": "first 20 only"}
         assigned_round_ids = {row["id"] for row in payload.get("trajectory", ())}
         if payload.get("stage") == "task_synthesis":
             assigned_round_ids = {row["id"] for row in facts.trajectory}
@@ -234,7 +258,9 @@ async def judge_effectiveness(
         preview_chars = 0
         preview_limit = min(12000, max(1000, max_evidence_chars // (len(batches) + 2)))
         seen_refs = set()
-        for raw_ref in pointers_in(payload):
+        preview_source = {key: payload.get(key, []) for key in
+                          ("trajectory", "tool_uses", "context_deltas", "verification_evidence", "task_contracts")}
+        for raw_ref in pointers_in(preview_source):
             ref = store.pointer(raw_ref)
             if ref in seen_refs:
                 continue
@@ -274,72 +300,113 @@ async def judge_effectiveness(
             usage["calls"] += 1
             for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
                 usage[key] += getattr(response.value.usage, key, 0)
-            content = (response.value.content or "").strip()
-            if content.startswith("```"):
-                content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            value = json.loads(content)
-            if not isinstance(value, Mapping) or "read_evidence" not in value:
-                final = _parse_final(value, store, facts)
-                from loom.evaluation.round_review import validate_round_analyses
+            await persist()
+            try:
+                content = (response.value.content or "").strip()
+                if content.startswith("```"):
+                    content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                value = json.loads(content)
+                if not isinstance(value, Mapping) or "read_evidence" not in value:
+                    final = _parse_final(value, store, facts)
+                    from loom.evaluation.round_review import validate_round_analyses
 
-                rounds = validate_round_analyses(value.get("round_analyses", []), store, facts, review)
-                rounds = tuple(row for row in rounds if row["round_id"] in assigned_round_ids)
-                unreviewed = False
-                diagnoses = []
-                for d in final.diagnoses:
-                    if any(not review.covers(ref) for ref in (*d.supporting_refs, *d.counterevidence_refs)):
-                        unreviewed = True
-                        d = replace(d, epistemic_status="unknown", evidence_coverage="incomplete: cited evidence exceeds reviewed ranges")
-                    diagnoses.append(d)
-                verification = []
-                for row in final.verification:
-                    if row["status"] in {"supported", "contradicted"} and any(not review.covers(ref) for ref in row["evidence_refs"]):
-                        unreviewed = True
-                        row = dict(row, status="unverified", limitation="Cited evidence exceeds reviewed ranges")
-                    verification.append(row)
-                preserved = []
-                for row in final.preserved_behaviors:
-                    if all(review.covers(ref) for ref in row["evidence_refs"]):
-                        preserved.append(row)
-                    else:
-                        unreviewed = True
-                if unreviewed:
-                    coverage["limitations"].append(f"{stage}: cited evidence was unread or truncated; affected conclusions are unknown")
-                final = replace(final, diagnoses=tuple(diagnoses), verification=tuple(verification), preserved_behaviors=tuple(preserved),
-                                round_analyses=rounds)
-                return final
-            requests = value["read_evidence"]
-            if not isinstance(requests, list) or not requests or len(requests) > 24:
-                raise ValueError("read_evidence must contain 1 to 24 references")
-            # Validate even when the budget is exhausted: fabricated pointers are not uncertainty.
-            refs = [store.pointer(ref) for ref in requests]
-            if read_round == max_read_rounds:
-                coverage["limitations"].append(f"{stage}: evidence read-round budget exhausted")
-                return None
-            reads = []
-            expanded_chars = 0
-            reply_room = max_prompt_chars - sum(len(m.content or "") for m in messages) - len(content)
-            # Leave space for pointer metadata, JSON escaping and another exchange.
-            per_read = min(12000, max(0, (reply_room // 2 - len(refs) * 700) // max(1, len(refs) * 2)))
-            if per_read < 1:
-                coverage["limitations"].append(f"{stage}: expanded evidence exceeds prompt budget")
-                return None
-            for ref in refs:
-                remaining = max_evidence_chars - coverage["evidence_chars"] - expanded_chars
-                if remaining <= 0:
-                    coverage["limitations"].append(f"{stage}: evidence character budget exhausted")
+                    rounds = validate_round_analyses(value.get("round_analyses", []), store, facts, review)
+                    rounds = tuple(row for row in rounds if row["round_id"] in assigned_round_ids)
+                    unreviewed = False
+                    diagnoses = []
+                    for d in final.diagnoses:
+                        if any(not review.covers(ref) for ref in (*d.supporting_refs, *d.counterevidence_refs)):
+                            unreviewed = True
+                            d = replace(d, epistemic_status="unknown", evidence_coverage="incomplete: cited evidence exceeds reviewed ranges")
+                        diagnoses.append(d)
+                    verification = []
+                    for row in final.verification:
+                        if row["status"] in {"supported", "contradicted"} and any(not review.covers(ref) for ref in row["evidence_refs"]):
+                            unreviewed = True
+                            row = dict(row, status="unverified", limitation="Cited evidence exceeds reviewed ranges")
+                        verification.append(row)
+                    preserved = []
+                    for row in final.preserved_behaviors:
+                        if all(review.covers(ref) for ref in row["evidence_refs"]):
+                            preserved.append(row)
+                        else:
+                            unreviewed = True
+                    if unreviewed:
+                        coverage["limitations"].append(f"{stage}: cited evidence was unread or truncated; affected conclusions are unknown")
+                    final = replace(final, diagnoses=tuple(diagnoses), verification=tuple(verification), preserved_behaviors=tuple(preserved),
+                                    round_analyses=rounds)
+                    return final
+                requests = value["read_evidence"]
+                if not isinstance(requests, list) or not requests or len(requests) > 24:
+                    raise ValueError("read_evidence must contain 1 to 24 references")
+                # Validate even when the budget is exhausted: fabricated pointers are not uncertainty.
+                refs = [store.pointer(ref) for ref in requests]
+                if read_round == max_read_rounds:
+                    coverage["limitations"].append(f"{stage}: evidence read-round budget exhausted")
                     return None
-                expanded = review.present(ref, max_chars=min(remaining, per_read))
-                expanded_chars += expanded["returned_chars"]
-                reads.append(expanded)
-            reply = json.dumps({"evidence": reads}, ensure_ascii=False, sort_keys=True)
-            if sum(len(m.content or "") for m in messages) + len(content) + len(reply) > max_prompt_chars:
-                coverage["limitations"].append(f"{stage}: expanded evidence exceeds prompt budget")
-                return None
-            coverage["evidence_reads"] += len(reads)
-            coverage["evidence_chars"] += expanded_chars
-            messages.extend([LlmMessage("assistant", content), LlmMessage("user", reply)])
+                reads = []
+                expanded_chars = 0
+                reply_room = max_prompt_chars - sum(len(m.content or "") for m in messages) - len(content)
+                # Leave space for pointer metadata, JSON escaping and another exchange.
+                per_read = min(12000, max(0, (reply_room // 2 - len(refs) * 700) // max(1, len(refs) * 2)))
+                if per_read < 1:
+                    coverage["limitations"].append(f"{stage}: expanded evidence exceeds prompt budget")
+                    return None
+                for ref in refs:
+                    remaining = max_evidence_chars - coverage["evidence_chars"] - expanded_chars
+                    if remaining <= 0:
+                        coverage["limitations"].append(f"{stage}: evidence character budget exhausted")
+                        return None
+                    expanded = review.present(ref, max_chars=min(remaining, per_read))
+                    expanded_chars += expanded["returned_chars"]
+                    reads.append(expanded)
+                reply = json.dumps({"evidence": reads}, ensure_ascii=False, sort_keys=True)
+                if sum(len(m.content or "") for m in messages) + len(content) + len(reply) > max_prompt_chars:
+                    coverage["limitations"].append(f"{stage}: expanded evidence exceeds prompt budget")
+                    return None
+                coverage["evidence_reads"] += len(reads)
+                coverage["evidence_chars"] += expanded_chars
+                messages.extend([LlmMessage("assistant", content), LlmMessage("user", reply)])
+            except (ValueError, TypeError, KeyError) as exc:
+                if not repair_invalid:
+                    raise
+                if read_round == max_read_rounds:
+                    coverage["limitations"].append(f"{stage}: invalid evidence or output after bounded correction: {exc}")
+                    return None
+                correction = json.dumps({"validation_error": str(exc), "instructions": (
+                    "Correct the response using registered source evidence. Do not invent fields, scopes or ranges. "
+                    "If a nested field is missing, request the same registered event with field_path=null to inspect its actual structure. "
+                    "Use returned_ref ranges from delivered evidence. Return read_evidence or the required final JSON schema.")})
+                failed_content = response.value.content or ""
+                if sum(len(m.content or "") for m in messages) + len(failed_content) + len(correction) > max_prompt_chars:
+                    coverage["limitations"].append(f"{stage}: correction exceeds prompt budget")
+                    return None
+                coverage["corrected_responses"] = coverage.get("corrected_responses", 0) + 1
+                messages.extend([LlmMessage("assistant", failed_content), LlmMessage("user", correction)])
         return None
+
+    async def evaluate(payload: dict[str, Any], stage: str) -> SemanticAnalysis | None:
+        key = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        cached = checkpoint.setdefault("batches", {}).get(key)
+        if cached:
+            coverage["evidence_reads"] += cached["reads"]
+            coverage["evidence_chars"] += cached["chars"]
+            coverage["limitations"].extend(cached["limitations"])
+            value = cached["result"]
+            return SemanticAnalysis(
+                tuple(parse_diagnosis(d, store) for d in value["diagnoses"]),
+                tuple(value["verification"]), tuple(value["preserved_behaviors"]),
+                tuple(value["verification_framework"]), value["coverage"], value["usage"],
+                tuple(value.get("round_analyses", [])),
+            )
+        reads, chars, limitations = coverage["evidence_reads"], coverage["evidence_chars"], len(coverage["limitations"])
+        result = await evaluate_uncached(payload, stage)
+        if result is not None:
+            checkpoint["batches"][key] = {"result": asdict(result), "reads": coverage["evidence_reads"] - reads,
+                                          "chars": coverage["evidence_chars"] - chars,
+                                          "limitations": coverage["limitations"][limitations:]}
+            await persist()
+        return result
 
     try:
         from loom.evaluation.judge_navigation import batch_payload

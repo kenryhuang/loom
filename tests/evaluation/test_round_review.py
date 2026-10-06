@@ -198,3 +198,19 @@ def test_later_tool_result_can_show_progress_but_not_request_context_effectivene
     assert context["epistemic_status"] == "unknown"
     assert context["limitation"]
     assert context["hindsight_refs"] == [refs[2]]
+
+
+def test_unique_linked_resumed_tool_allows_cross_loop_evidence_but_not_cross_run(tmp_path):
+    from dataclasses import replace
+
+    from loom.evaluation.round_review import validate_round_analyses
+
+    store, facts, review, refs = setup_review(tmp_path)
+    facts = replace(facts, tool_uses=({"round_id": "round-1", "evidence_refs": [refs[3], refs[4]]},))
+    for ref in refs[3:]:
+        review.present(ref, max_chars=10000)
+    (row,) = validate_round_analyses([round_value([refs[3]])], store, facts, review)
+    assert row["progress_kind"] == "information_gain"
+    assert row["dimensions"]["context_effectiveness"]["status"] == "unknown"
+    with pytest.raises(ValueError, match="scope"):
+        validate_round_analyses([round_value([refs[4]])], store, facts, review)

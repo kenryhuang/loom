@@ -277,3 +277,43 @@ def test_trajectory_http_jobs_and_evidence_are_scoped_and_validated(api):
         client._json(f"/v1/sessions/{other}/trajectory/{job['id']}/evidence?line=1")
     assert denied.value.status == 404
     assert service.snapshot(sid)["event_cursor"] == job["source_cursor"]
+
+
+def test_semantic_api_validates_scope_and_runs_evaluation_without_task_events(api):
+    from loom.core import ok
+    from loom.llm import LlmResponse, TokenUsage
+
+    class Judge:
+        model = "test"
+
+        async def chat(self, messages, tools=None, cancellation=None):
+            return ok(LlmResponse(content=json.dumps({"diagnoses": [], "verification": [], "preserved_behaviors": [],
+                "verification_framework": [], "round_analyses": []}), usage=TokenUsage(10, 5, 15)))
+
+    service, server, client, path = api
+    server.semantic.provider_factory = lambda model: Judge()
+    sid = new(client, path)
+    base = f"/v1/sessions/{sid}/trajectory"
+    aid = client._json(base, {})["id"]
+    deadline = time.monotonic() + 5
+    while client._json(f"{base}/{aid}")["state"] != "completed":
+        assert time.monotonic() < deadline
+        time.sleep(.01)
+    route = f"{base}/{aid}/evaluation"
+    assert client._json(route)["models"][0]["id"] == "test"
+    cursor = client.snapshot(sid)["event_cursor"]
+    with pytest.raises(ServiceError):
+        client._json(route, {"max_calls": 0})
+    job = client._json(route, {})
+    while True:
+        result = client._json(route + "/" + job["id"])
+        if result["state"] not in {"queued", "running"}:
+            break
+        assert time.monotonic() < deadline
+        time.sleep(.01)
+    assert result["state"] == "completed", result
+    assert result["evaluation"]["semantic"]["usage"]["calls"] == 1
+    assert client.snapshot(sid)["event_cursor"] == cursor
+    assert client._json(route, {})["id"] == job["id"]
+    with pytest.raises(ServiceError):
+        client._json(route + "/missing")

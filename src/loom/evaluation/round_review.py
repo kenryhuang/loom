@@ -17,12 +17,12 @@ _STATES = ("pre_state", "intent", "action", "observed_change", "post_state")
 
 
 def _evidence(values: Any, store: EvidenceStore, round_item: Mapping, review: EvidenceReview,
-              boundary: int | None) -> tuple[dict, bool]:
+              boundary: int | None, linked_lines: set[int] | None = None) -> tuple[dict, bool]:
     refs = parse_refs(values, store)
     run_id, loop_id = round_item.get("run_id"), round_item.get("loop_id")
     for ref in refs:
         event = store.event(ref)
-        if (event.run_id != run_id or event.loop_id not in (None, loop_id)):
+        if event.run_id != run_id or (event.loop_id not in (None, loop_id) and event.line_number not in (linked_lines or set())):
             raise ValueError("Round evidence belongs to a different run or loop scope")
     covered = bool(refs) and all(review.covers(ref) for ref in refs)
     limitation = "" if covered else "No supporting evidence supplied" if not refs else "Supporting evidence was not fully delivered for review"
@@ -89,7 +89,9 @@ def validate_round_analyses(values: Any, store: EvidenceStore, facts: FactAnalys
         round_item = recorded[round_id]
         request_ref = round_item.get("request_ref")
         boundary = store.pointer(request_ref).line_number if request_ref is not None else None
-        evidence, covered = _evidence(value.get("evidence_refs", []), store, round_item, review, boundary)
+        linked_lines = {ref["line_number"] for tool in facts.tool_uses if tool.get("round_id") == round_id
+                        for ref in tool.get("evidence_refs", [])}
+        evidence, covered = _evidence(value.get("evidence_refs", []), store, round_item, review, boundary, linked_lines)
         covered = _attributable(evidence, covered, boundary)
         row = {"round_id": round_id, "run_id": round_item.get("run_id"), "loop_id": round_item.get("loop_id"),
                **{name: value[name] for name in _STATES}, "progress_kind": progress if covered else "unknown",
@@ -104,7 +106,7 @@ def validate_round_analyses(values: Any, store: EvidenceStore, facts: FactAnalys
                 raise ValueError(f"Invalid round dimension {name} status")
             if not isinstance(dimension.get("rationale"), str):
                 raise ValueError(f"Round dimension {name} rationale must be a string")
-            evidence, covered = _evidence(dimension.get("evidence_refs", []), store, round_item, review, boundary)
+            evidence, covered = _evidence(dimension.get("evidence_refs", []), store, round_item, review, boundary, linked_lines)
             covered = _attributable(evidence, covered, boundary, requires_request=name == "context_effectiveness")
             row["dimensions"][name] = {"status": status if covered else "unknown", "rationale": dimension["rationale"],
                                        **evidence, "epistemic_status": "inferred" if covered and status != "unknown" else "unknown"}

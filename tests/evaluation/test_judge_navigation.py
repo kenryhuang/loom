@@ -98,3 +98,40 @@ def test_orphan_index_exposes_result_and_input_as_separately_expandable_evidence
     indexed = payload["tool_index"][0]
     assert store.resolve(indexed["ref"]) == store.resolve(refs[2])
     assert store.resolve(indexed["input_ref"]) == store.resolve(refs[0])
+
+
+def test_large_index_keeps_all_locations_in_compact_directory():
+    from loom.evaluation.judge_navigation import batch_payload
+
+    store, refs = fixture()
+    facts = FactAnalysis(verification_evidence=tuple({"id": f"v:{i}", "round_id": "other", "kind": "recorded_content",
+                        "evidence_refs": [refs[i % len(refs)]]} for i in range(40)))
+    payload = batch_payload(store, facts, ({"id": "round:r", "run_id": "r"},))
+    assert payload["verification_index"] == []
+    directory = payload["evidence_directory"]
+    assert len(directory["rows"]) == 3
+    for line, field, event_hash, _, _ in directory["rows"]:
+        pointer = {"source_sha256": directory["pointer_source_sha256"], "line_number": line,
+                   "event_hash": event_hash, "field_path": field}
+        assert store.resolve(pointer) == store.resolve(refs[line - 1])
+
+
+def test_large_context_directory_preserves_locations_and_changes_without_repeated_ids():
+    from loom.evaluation.judge_navigation import batch_payload
+
+    store, refs = fixture()
+    units = [{"id": f"unit:{i}", "index": i, "role": "user", "ref": refs[0], "char_length": 400,
+              "excerpt": "x" * 120} for i in range(40)]
+    row = {"id": "round:r", "run_id": "r"}
+    facts = FactAnalysis(trajectory=(row,), context_deltas=({"round_id": "round:r", "units": units,
+                        "added": units[:10], "retained": units[10:], "removed": []},))
+    context = batch_payload(store, facts, (row,))["context_deltas"][0]
+    assert context["units"] == []
+    assert "added_ids" not in context
+    directory = context["units_directory"]
+    assert len(directory["rows"]) == 40
+    assert sum(row[3] == "added" for row in directory["rows"]) == 10
+    for _, _, _, _, line, field, event_hash, excerpt in directory["rows"]:
+        assert len(excerpt) == 80
+        assert store.resolve({"source_sha256": directory["source_sha256"], "line_number": line,
+                              "field_path": field, "event_hash": event_hash}) == store.resolve(refs[0])

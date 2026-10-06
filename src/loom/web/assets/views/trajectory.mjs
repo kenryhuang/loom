@@ -1,4 +1,5 @@
 import { element } from "../markdown.mjs";
+import { EvaluationView } from "./evaluation.mjs";
 
 const number = (value) => (value == null ? "—" : value.toLocaleString());
 const option = (label, value) => {
@@ -44,7 +45,9 @@ function readableEvidence(text) {
       try {
         const parsed = JSON.parse(fenced ? fenced[1] : value);
         if (parsed !== value) return render(parsed, depth + 1);
-      } catch { /* Plain text or an incomplete evidence page. */ }
+      } catch {
+        /* Plain text or an incomplete evidence page. */
+      }
     }
     if (value && typeof value === "object" && depth < 8 && remaining > 0) {
       const entries = Object.entries(value);
@@ -55,13 +58,20 @@ function readableEvidence(text) {
           const field = element("div", "evidence-field");
           const body = element("dd");
           body.append(render(child, depth + 1));
-          field.append(element("dt", "", Array.isArray(value) ? `[${key}]` : key), body);
+          field.append(
+            element("dt", "", Array.isArray(value) ? `[${key}]` : key),
+            body,
+          );
           root.append(field);
         }
         return root;
       }
     }
-    return element("pre", "evidence-text", typeof value === "string" ? value : JSON.stringify(value, null, 2));
+    return element(
+      "pre",
+      "evidence-text",
+      typeof value === "string" ? value : JSON.stringify(value, null, 2),
+    );
   };
   return render(text);
 }
@@ -105,7 +115,11 @@ export class TrajectoryView {
     const title = element("div");
     title.append(
       element("h2", "", "Trace analysis"),
-      element("p", "muted small", "Recorded calls, context and execution evidence."),
+      element(
+        "p",
+        "muted small",
+        "Recorded calls, context and execution evidence.",
+      ),
     );
     this.refresh = button("Refresh analysis", () =>
       this.open(api, sessionId, this.cursor),
@@ -147,6 +161,18 @@ export class TrajectoryView {
   render() {
     const data = this.analysis;
     this.body.replaceChildren();
+    if (this.api.evaluations) {
+      const evaluation = element("section", "trajectory-evaluation");
+      this.body.append(evaluation);
+      new EvaluationView(evaluation, {
+        api: this.api,
+        sessionId: this.sessionId,
+        analysisId: this.job.id,
+        signal: this.abort.signal,
+        evidence: (ref) => this.showEvidence(ref),
+        onError: this.onError,
+      }).open();
+    }
     const cards = element("div", "trajectory-metrics");
     for (const [label, value] of [
       ["Model calls", data.rounds.length],
@@ -169,7 +195,7 @@ export class TrajectoryView {
       element(
         "p",
         "muted small",
-        "Recorded facts · Semantic evaluation has not run. Task completion is not independently verified.",
+        "Recorded facts · Use Deep evaluation above for semantic judgments. Runtime completion does not independently verify task completion.",
       ),
     );
     const missing = data.rounds.filter(
@@ -418,7 +444,11 @@ export class TrajectoryView {
     );
     if (tool.seq)
       node.append(
-        element("p", "muted small", `Event ${tool.seq} · ${tool.at || "Time unknown"}`),
+        element(
+          "p",
+          "muted small",
+          `Event ${tool.seq} · ${tool.at || "Time unknown"}`,
+        ),
       );
     const actions = element("div", "trajectory-actions");
     if (tool.input_ref)
@@ -446,11 +476,13 @@ export class TrajectoryView {
     const title = element("h2", "", label),
       status = element("p", "muted small"),
       content = element("div", "evidence-content");
-    let offset = 0,
+    let offset = ref.start || 0,
       raw = "",
       rawMode = false;
     const renderContent = () => {
-      content.replaceChildren(rawMode ? element("pre", "evidence-text", raw) : readableEvidence(raw));
+      content.replaceChildren(
+        rawMode ? element("pre", "evidence-text", raw) : readableEvidence(raw),
+      );
     };
     const toggle = button("Show raw", () => {
       rawMode = !rawMode;
@@ -469,14 +501,18 @@ export class TrajectoryView {
           ref,
           offset,
           signal,
+          ref.end == null
+            ? 8000
+            : Math.max(1, Math.min(8000, ref.end - offset)),
         );
         if (signal.aborted || this.dialog !== dialog) return;
         title.textContent = `${label} · Event ${page.seq} · ${page.event_type}`;
         raw += page.content;
         renderContent();
         offset = page.returned_ref.end;
-        status.textContent = `${number(offset)} characters shown${page.truncated ? " · More evidence available" : " · Complete"}`;
-        more.hidden = !page.truncated;
+        const hasMore = page.truncated && (ref.end == null || offset < ref.end);
+        status.textContent = `Characters ${ref.start || 0}–${number(offset)}${hasMore ? " · More evidence available" : ref.end == null ? " · Complete" : " · Cited range"}`;
+        more.hidden = !hasMore;
       } catch (error) {
         if (!signal.aborted && this.dialog === dialog) {
           status.textContent = error.message;

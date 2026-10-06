@@ -102,14 +102,44 @@ export class SessionApi {
       { signal },
     );
   }
+  evaluations(id, analysisId, signal) {
+    return this.json(
+      this.path(id, `trajectory/${encodeURIComponent(analysisId)}/evaluation`),
+      { signal },
+    );
+  }
+  startEvaluation(id, analysisId, body, signal) {
+    return this.json(
+      this.path(id, `trajectory/${encodeURIComponent(analysisId)}/evaluation`),
+      { body, signal },
+    );
+  }
+  evaluation(id, analysisId, jobId, signal) {
+    return this.json(
+      this.path(
+        id,
+        `trajectory/${encodeURIComponent(analysisId)}/evaluation/${encodeURIComponent(jobId)}`,
+      ),
+      { signal },
+    );
+  }
+  cancelEvaluation(id, analysisId, jobId, signal) {
+    return this.json(
+      this.path(
+        id,
+        `trajectory/${encodeURIComponent(analysisId)}/evaluation/${encodeURIComponent(jobId)}/cancel`,
+      ),
+      { body: {}, signal },
+    );
+  }
   trajectoryRound(id, analysisId, roundId, signal) {
     return this.json(
       `${this.path(id, `trajectory/${encodeURIComponent(analysisId)}/round`)}?${new URLSearchParams({ round_id: roundId })}`,
       { signal },
     );
   }
-  trajectoryEvidence(id, analysisId, ref, start = 0, signal) {
-    const query = new URLSearchParams({ line: ref.line_number, start });
+  trajectoryEvidence(id, analysisId, ref, start = 0, signal, limit = 8000) {
+    const query = new URLSearchParams({ line: ref.line_number, start, limit });
     if (ref.field_path) query.set("field", ref.field_path);
     return this.json(
       `${this.path(id, `trajectory/${encodeURIComponent(analysisId)}/evidence`)}?${query}`,

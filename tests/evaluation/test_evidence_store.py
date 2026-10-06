@@ -87,3 +87,16 @@ def test_diagnosis_validation_rejects_unresolvable_evidence_and_unobserved_facts
         parse_diagnosis({**value, "dimension": "quality_score"}, store)
     with pytest.raises(ValueError, match="confidence"):
         parse_diagnosis({**value, "confidence": float("nan")}, store)
+
+
+def test_omitted_optional_hash_is_valid_only_for_hashless_records(tmp_path):
+    from loom.evaluation.evidence_store import EvidenceStore
+
+    store = make_store(tmp_path)
+    pointer = {"source_sha256": store.source_sha256, "line_number": 2, "field_path": "response.content"}
+    assert store.resolve(pointer) == "begin\ncritical ending"
+    path = tmp_path / "hashed.jsonl"
+    path.write_text(json.dumps({"hash": "recorded-hash", "payload": {"type": "run.started", "run_id": "r"}}))
+    hashed = EvidenceStore.open(path)
+    with pytest.raises(ValueError, match="hash"):
+        hashed.resolve({"source_sha256": hashed.source_sha256, "line_number": 1})

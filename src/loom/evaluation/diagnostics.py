@@ -11,8 +11,8 @@ from loom.evaluation.evidence_store import EvidencePointer, EvidenceStore
 
 DIMENSIONS = ("context_effectiveness", "tool_effectiveness", "loop_progress", "token_efficiency", "verify_gate")
 SCHEMA_VERSION = "loom.evaluation.bundle.v2"
-ANALYZER_VERSION = "trace-effectiveness.1"
-PROMPT_VERSION = "trace-effectiveness-rubric.1"
+ANALYZER_VERSION = "trace-effectiveness.2"
+PROMPT_VERSION = "trace-effectiveness-rubric.2"
 
 
 @dataclass(frozen=True, slots=True)

@@ -23,6 +23,7 @@ const list = new SessionListView(
   select,
 );
 const feed = new FeedView($("event-feed"), {
+  onTrajectory: () => $("session-trajectory").click(),
   loadArtifact: (digest) =>
     controller.api.artifact(controller.selectedId, digest),
   loadProcess: (process, before) =>

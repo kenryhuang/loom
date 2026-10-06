@@ -1,10 +1,10 @@
-import {
-  builtinRenderers,
-  modelSummary,
-  reportContent,
-} from "../renderers.mjs";
+import { builtinRenderers, reportContent } from "../renderers.mjs";
 import { codePoints, streamKey } from "../state.mjs";
 import { element, renderResult } from "../markdown.mjs";
+import { activityKey, mergeActivity } from "../activity/projection.mjs";
+import { builtinPresenters } from "../activity/presenters.mjs";
+import { ActivityRow } from "./activity-row.mjs";
+import { ActivityInspector } from "./activity-inspector.mjs";
 
 export class FeedView {
   constructor(
@@ -13,6 +13,8 @@ export class FeedView {
       renderers = builtinRenderers(),
       loadArtifact,
       loadProcess,
+      onTrajectory,
+      presenters = builtinPresenters(),
       maxEvents = 1000,
       onDetailsChange = () => {},
     } = {},
@@ -21,16 +23,31 @@ export class FeedView {
     this.renderers = renderers;
     this.loadArtifact = loadArtifact;
     this.loadProcess = loadProcess;
+    this.presenters = presenters;
+    this.inspector = new ActivityInspector({
+      load: (record) => this.detail(record, true),
+      trajectory: onTrajectory,
+      loadArtifact,
+    });
     this.maxEvents = maxEvents;
     this.onDetailsChange = onDetailsChange;
     this.events = [];
     this.emptyState = root.querySelector(".empty-state");
     root.addEventListener("toggle", () => this.detailsChanged(), true);
+    document.addEventListener("selectionchange", () => {
+      if (document.getSelection()?.isCollapsed) {
+        for (const group of this.groups.values())
+          for (const record of group.records.values())
+            if (record.node.open) record.view.renderDetails();
+      }
+    });
     this.reset();
   }
   reset({ preserveDetails = false } = {}) {
     if (!preserveDetails) {
+      this.inspector.close();
       this.detailMode = null;
+      this.manualProcesses = new Map();
       this.processes = [];
       this.processPages = new Map();
       this.latestSummaries = new Map();
@@ -45,6 +62,10 @@ export class FeedView {
   }
   restore({ snapshot, events, processes = [] }) {
     const opened = this.detailStates();
+    const scrollTop = this.root.scrollTop;
+    const sameSession = this.snapshot?.session_id === snapshot.session_id;
+    const follow =
+      this.root.scrollHeight - scrollTop - this.root.clientHeight < 70;
     this.snapshot = snapshot;
     this.events = [];
     for (const event of events) this.retain(event);
@@ -57,19 +78,39 @@ export class FeedView {
     this.orderRecords();
     this.syncMessages(snapshot.messages || []);
     this.reopen(opened);
-    this.root.scrollTop = this.root.scrollHeight;
+    this.root.scrollTop =
+      sameSession && !follow ? scrollTop : this.root.scrollHeight;
   }
   detailStates() {
+    this.scrollPositions = new Map(
+      [...this.groups.values()].map((group) => [
+        group.node.dataset.key,
+        group.rows.scrollTop,
+      ]),
+    );
     return new Map(
       [...this.root.querySelectorAll("details")].map((node) => [
-        node.dataset.key,
+        `${node.closest(".process-group")?.dataset.key || ""}/${node.dataset.key}`,
         node.open,
       ]),
     );
   }
   reopen(keys) {
     for (const node of this.root.querySelectorAll("details"))
-      if (keys.has(node.dataset.key)) node.open = keys.get(node.dataset.key);
+      if (
+        keys.has(
+          `${node.closest(".process-group")?.dataset.key || ""}/${node.dataset.key}`,
+        )
+      )
+        node.open = keys.get(
+          `${node.closest(".process-group")?.dataset.key || ""}/${node.dataset.key}`,
+        );
+    for (const group of this.groups.values()) {
+      for (const record of group.records.values())
+        if (record.node.open) record.view.renderDetails();
+      if (this.scrollPositions?.has(group.node.dataset.key))
+        group.rows.scrollTop = this.scrollPositions.get(group.node.dataset.key);
+    }
     this.detailsChanged();
   }
   detailsChanged() {
@@ -82,9 +123,13 @@ export class FeedView {
   toggleAll() {
     const details = [...this.root.querySelectorAll("details")];
     this.detailMode = !details.every((node) => node.open);
+    this.manualProcesses.clear();
     for (const node of details) node.open = this.detailMode;
     for (const group of this.groups.values())
-      for (const record of group.records.values()) this.detail(record);
+      for (const record of group.records.values()) {
+        if (record.node.open) record.view.renderDetails();
+        this.detail(record);
+      }
     this.detailsChanged();
   }
   older(events, snapshot) {
@@ -220,18 +265,41 @@ export class FeedView {
       node.dataset.key = `group:${key}`;
       node.dataset.seq =
         process?.start_seq || event.seq || this.snapshot?.event_cursor || 0;
-      node.open = this.detailMode === true;
+      node.open =
+        this.manualProcesses.get(key) ??
+        this.detailMode ??
+        process?.state === "running";
+      summary.addEventListener("click", () =>
+        this.manualProcesses.set(key, !node.open),
+      );
       const rows = element("div", "process-records");
       const latest = this.latestSummaries.get(`group:${key}`);
-      node.append(summary, rows);
+      const progress = element(
+        "button",
+        "quiet process-new-progress",
+        "New progress · Back to latest",
+      );
+      progress.type = "button";
+      progress.hidden = true;
+      progress.addEventListener("click", () => {
+        rows.scrollTop = rows.scrollHeight;
+        progress.hidden = true;
+      });
+      rows.addEventListener("scroll", () => {
+        if (rows.scrollHeight - rows.scrollTop - rows.clientHeight < 40)
+          progress.hidden = true;
+      });
+      node.append(summary, rows, progress);
       this.groups.set(key, {
         node,
+        key,
         summary,
         rows,
         process,
         latest: latest?.text,
         latestSeq: latest?.seq,
         records: new Map(),
+        progress,
       });
       this.layout();
     }
@@ -319,20 +387,111 @@ export class FeedView {
     }
   }
   processSummary(group) {
-    group.summary.textContent = `Process${group.latest ? ` · ${group.latest}` : ""}`;
+    const terminal = ["completed", "failed", "stopped"].includes(group.state);
+    const label =
+      group.state === "running"
+        ? "Processing"
+        : group.state === "failed"
+          ? "Execution failed"
+          : group.state === "stopped"
+            ? "Stopped"
+            : ["suspended", "paused"].includes(group.state)
+              ? "Paused"
+              : "Process";
+    const count = group.records.size;
+    const completeHistory =
+      group.process &&
+      this.processPages.get(group.process.id)?.nextBefore === null;
+    const elapsed =
+      group.endedAt && group.startedAt
+        ? Math.max(0, Math.round((group.endedAt - group.startedAt) / 1000))
+        : null;
+    const duration =
+      elapsed == null
+        ? ""
+        : ` · ${Math.floor(elapsed / 60)}m ${elapsed % 60}s elapsed`;
+    const suffix = terminal
+      ? `${count} ${completeHistory ? "actions" : "loaded actions"}${duration}`
+      : group.latest;
+    group.summary.textContent = `${label}${suffix ? ` · ${suffix}` : ""}`;
+    const manual = this.manualProcesses.get(group.process?.id || group.key);
+    if (manual !== undefined) group.node.open = manual;
+    else if (this.detailMode !== null) group.node.open = this.detailMode;
+    else if (group.state) group.node.open = !terminal;
   }
   orderRecords(group) {
     for (const current of group ? [group] : this.groups.values()) {
-      const records = [...current.records.values()].sort(
-        (a, b) => a.seq - b.seq,
-      );
-      records.forEach((record, index) => {
-        if (current.rows.children[index] !== record.node)
-          current.rows.insertBefore(
-            record.node,
-            current.rows.children[index] || null,
-          );
+      const all = [...current.records.values()].sort((a, b) => a.seq - b.seq);
+      const plan = all.find((record) => record.descriptor.kind === "plan");
+      if (plan) plan.related = [];
+      const records = all.filter((record) => {
+        // Successful plan tools are represented by the current checklist.
+        // Keep failed, unknown and currently inspected calls in the timeline.
+        const absorbed =
+          plan &&
+          record.descriptor.kind === "tool" &&
+          record.view.activity.kind === "plan" &&
+          record.view.activity.state === "completed" &&
+          !record.view.activity.pending &&
+          !record.node.open;
+        record.node.hidden = !!absorbed;
+        if (absorbed) {
+          plan.related.push(record);
+          record.node.remove();
+        }
+        return !absorbed;
       });
+      const buckets = [];
+      for (const record of records) {
+        const activity = record.view.activity;
+        const batchable =
+          activity?.state === "completed" &&
+          ["read", "search"].includes(activity.kind);
+        const tail = buckets.at(-1);
+        if (batchable && tail?.kind === activity.kind)
+          tail.records.push(record);
+        else
+          buckets.push({
+            kind: batchable ? activity.kind : null,
+            records: [record],
+          });
+      }
+      current.batches ||= new Map();
+      const retained = new Set();
+      const nodes = buckets.map((bucket) => {
+        if (bucket.records.length === 1) return bucket.records[0].node;
+        const key = `batch:${bucket.records[0].node.dataset.key}`;
+        let batch = current.batches.get(key);
+        if (!batch) {
+          const node = element("details", "activity-batch");
+          node.dataset.key = key;
+          const summary = element("summary");
+          const content = element("div", "activity-batch-content");
+          node.append(summary, content);
+          node.open = this.detailMode === true;
+          batch = { node, summary, content };
+          current.batches.set(key, batch);
+        }
+        retained.add(key);
+        batch.summary.textContent = `${bucket.kind === "read" ? "Read files" : "Search"} · ${bucket.records.length} calls`;
+        bucket.records.forEach((record, index) => {
+          if (batch.content.children[index] !== record.node)
+            batch.content.insertBefore(
+              record.node,
+              batch.content.children[index] || null,
+            );
+        });
+        return batch.node;
+      });
+      nodes.forEach((node, index) => {
+        if (current.rows.children[index] !== node)
+          current.rows.insertBefore(node, current.rows.children[index] || null);
+      });
+      for (const [key, batch] of current.batches)
+        if (!retained.has(key)) {
+          batch.node.remove();
+          current.batches.delete(key);
+        }
     }
   }
   present(event) {
@@ -363,7 +522,19 @@ export class FeedView {
     }
     const descriptor = this.renderers.describe(event, context);
     const group = this.group(event);
+    const at = Date.parse(event.at || event.payload.at || "");
+    if (event.type === "run.started" && Number.isFinite(at))
+      group.startedAt = Math.min(group.startedAt || at, at);
     descriptor.seq = event.seq;
+    descriptor.source = {
+      seq: event.seq,
+      type: event.type,
+      run_id: event.run_id,
+      timestamp:
+        event.at || event.timestamp || event.created_at || event.payload.at,
+      artifact: event.payload.artifact,
+    };
+    descriptor.key = activityKey(descriptor, event);
     if (event.seq >= (group.stateSeq || 0)) {
       if (event.type === "run.started") group.state = "running";
       else if (event.type === "run.completed") group.state = "completed";
@@ -385,6 +556,18 @@ export class FeedView {
       )
         group.stateSeq = event.seq;
       if (group.process) group.process.state = group.state;
+      if (
+        Number.isFinite(at) &&
+        [
+          "run.completed",
+          "run.failed",
+          "run.stopped",
+          "run.state.changed",
+        ].includes(event.type) &&
+        ["completed", "failed", "stopped"].includes(group.state)
+      )
+        group.endedAt = at;
+      else if (group.state === "running") group.endedAt = null;
     }
     if (group.process)
       group.process.end_seq = Math.max(group.process.end_seq, event.seq);
@@ -409,99 +592,113 @@ export class FeedView {
     )
       group.node.dataset.endSeq = event.seq;
     if (descriptor.hidden) this.processSummary(group);
-    else this.record(group, descriptor);
+    else {
+      descriptor.eventType = event.type;
+      this.record(group, descriptor);
+    }
   }
   record(group, descriptor) {
     let record = group.records.get(descriptor.key);
+    const follow =
+      group.rows.scrollHeight - group.rows.scrollTop - group.rows.clientHeight <
+      50;
     if (!record) {
-      const node = element("details", "event-row"),
-        summary = element("summary"),
-        body = element("div", "event-detail"),
-        pre = element("pre");
-      node.dataset.key = descriptor.key;
-      node.open = this.detailMode === true;
-      body.append(pre);
-      node.append(summary, body);
-      group.rows.append(node);
+      const view = new ActivityRow(descriptor.key, {
+        inspect: (trigger) => this.inspector.open(record, trigger),
+        expand: () => this.detail(record),
+      });
+      view.node.open = this.detailMode === true;
+      view.summary.addEventListener("click", () => {
+        if (!view.node.open) this.manualProcesses.set(group.key, true);
+      });
       record = {
-        node,
-        summary,
-        body,
-        pre,
-        descriptor,
+        node: view.node,
+        summary: view.summary,
+        body: view.body,
+        view,
+        group,
         seq: descriptor.seq || 0,
       };
       group.records.set(descriptor.key, record);
-      node.addEventListener("toggle", () => this.detail(record));
+      group.rows.append(view.node);
       this.detailsChanged();
     }
-    const previous = record.descriptor;
     record.seq = Math.min(record.seq, descriptor.seq || record.seq);
-    if (descriptor.kind === "tool" || descriptor.kind === "model") {
-      descriptor =
-        previous.seq > (descriptor.seq || 0)
-          ? {
-              ...previous,
-              details: { ...descriptor.details, ...previous.details },
-            }
-          : {
-              ...descriptor,
-              details: { ...previous.details, ...descriptor.details },
-            };
-      if (descriptor.kind === "model")
-        descriptor.summary = modelSummary(
-          descriptor.details,
-          descriptor.status,
-          descriptor.stage,
-        );
-    }
-    if (previous.artifact?.sha256 !== descriptor.artifact?.sha256)
+    const previousDigest = record.descriptor?.artifact?.sha256;
+    record.descriptor = mergeActivity(record.descriptor, descriptor);
+    if (previousDigest !== record.descriptor.artifact?.sha256) {
       record.loaded = false;
-    record.descriptor = descriptor;
-    record.node.className = `event-row ${descriptor.status || ""}`;
-    record.summary.textContent = descriptor.summary;
-    if (!record.loaded)
-      record.pre.textContent =
-        typeof descriptor.details === "string"
-          ? descriptor.details
-          : JSON.stringify(descriptor.details, null, 2);
+      record.descriptor.hydrated = false;
+    }
+    this.renderActivity(record);
+    this.orderRecords(group);
+    this.detail(record);
+    if (follow) group.rows.scrollTop = group.rows.scrollHeight;
+    else group.progress.hidden = false;
+  }
+  renderActivity(record) {
+    const { descriptor, group } = record;
+    const activity = this.presenters.present(descriptor, {
+      workspace: this.snapshot?.task.workspace,
+    });
+    record.view.update(activity);
     if (!group.latestSeq || descriptor.seq >= group.latestSeq) {
       group.latestSeq = descriptor.seq;
-      group.latest = descriptor.summary;
+      group.latest = [activity.title, activity.subject, activity.outcome]
+        .filter(Boolean)
+        .join(" · ");
       this.latestSummaries.set(group.node.dataset.key, {
         seq: descriptor.seq,
-        text: descriptor.summary,
+        text: group.latest,
       });
     }
     this.processSummary(group);
-    this.detail(record);
   }
-  async detail(record) {
+  async detail(record, force = false) {
     const digest = record.descriptor.artifact?.sha256;
     if (
-      !record.node.open ||
+      (!force && !record.node.open) ||
       !digest ||
       record.loaded ||
-      record.loading ||
       !this.loadArtifact
     )
       return;
-    record.loading = true;
-    try {
-      const detail = await this.loadArtifact(digest);
-      if (record.descriptor.artifact?.sha256 === digest) {
-        const value =
-          record.descriptor.kind === "tool"
-            ? { ...record.descriptor.details, ...detail }
-            : detail;
-        record.pre.textContent = JSON.stringify(value, null, 2);
-        record.loaded = true;
-      }
-    } catch (error) {
-      record.pre.textContent = `Could not load full detail: ${error.message}`;
-    } finally {
-      record.loading = false;
+    if (record.loading) {
+      await record.loading;
+      if (record.descriptor.artifact?.sha256 !== digest)
+        return this.detail(record, force);
+      return;
     }
+    record.loading = (async () => {
+      try {
+        const detail = await this.loadArtifact(digest);
+        if (record.descriptor.artifact?.sha256 === digest) {
+          record.descriptor = {
+            ...record.descriptor,
+            details: { ...record.descriptor.details, ...detail },
+            hydrated: true,
+          };
+          record.loaded = true;
+          this.renderActivity(record);
+        }
+      } catch (error) {
+        record.view.content.append(
+          element(
+            "p",
+            "activity-hint",
+            `Could not load full detail: ${error.message}. Reopen to retry.`,
+          ),
+        );
+        if (force) throw error;
+      }
+    })();
+    try {
+      await record.loading;
+    } finally {
+      record.loading = null;
+    }
+    if (record.descriptor.artifact?.sha256 !== digest)
+      return this.detail(record, force);
   }
   seedStreams(snapshot) {
     Object.assign(this.streams, snapshot.streams || {});
@@ -516,10 +713,16 @@ export class FeedView {
           payload: { llm_call_id: id },
         };
       const group = this.group(event);
-      this.record(
-        group,
-        this.renderers.describe(event, { streamText: text, streamKey: key }),
+      const existing = [...group.records.entries()].find(
+        ([key]) => key === `thought:${id}` || key.endsWith(`:thought:${id}`),
       );
+      if (existing?.[1].descriptor.status !== "running" && existing) continue;
+      const descriptor = this.renderers.describe(event, {
+        streamText: text,
+        streamKey: key,
+      });
+      if (existing) descriptor.key = existing[0];
+      this.record(group, descriptor);
     }
   }
   syncMessages(messages) {
@@ -529,14 +732,10 @@ export class FeedView {
     if (this.messages.has(message.id)) return;
     this.emptyState?.remove();
     const result = message.role === "assistant",
-      node = element(
-        result ? "details" : "article",
-        `message-card ${result ? "result" : "user"}`,
-      );
+      node = element("article", `message-card ${result ? "result" : "user"}`);
     node.dataset.key = `message:${message.id}`;
     if (result) {
-      node.open = this.detailMode !== false;
-      node.append(element("summary", "", "Result"));
+      node.append(element("small", "", "Loom"));
       node.append(renderResult(reportContent(message.content)));
     } else {
       node.append(element("small", "", "Task · You"));

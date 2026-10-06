@@ -22,7 +22,7 @@ def text_value(value: Any) -> str:
 class EvidencePointer:
     source_sha256: str
     line_number: int
-    event_hash: str | None
+    event_hash: str | None = None
     field_path: str | None = None
     start: int | None = None
     end: int | None = None

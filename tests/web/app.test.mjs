@@ -88,7 +88,7 @@ test("browser app connects to real service, answers input, creates sessions, con
       $("event-feed").querySelector(".result h1").textContent,
       "浏览器结果",
     );
-    assert.equal($("event-feed").querySelector(".result").open, true);
+    assert.equal($("event-feed").querySelector(".result").tagName, "ARTICLE");
     assert.equal($("event-feed").querySelector(".process-group").open, false);
     assert.equal($("session-objective"), null);
     assert.ok($("event-feed").querySelector(".task-block .result"));
@@ -100,7 +100,7 @@ test("browser app connects to real service, answers input, creates sessions, con
     assert.equal($("conversation-page").hidden, true);
     assert.match(
       $("trajectory-page").textContent,
-      /Semantic evaluation has not run/,
+      /Use Deep evaluation/,
     );
     history.back();
     await until(() => !$("conversation-page").hidden);
