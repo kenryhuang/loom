@@ -274,7 +274,7 @@ test("user reading above the bottom is not dragged by new actions", () => {
   dom.window.close();
 });
 
-test("the current checklist absorbs successful plan calls but keeps rejected calls and raw evidence", async () => {
+test("plan calls remain visible alongside the current checklist with their own raw evidence", async () => {
   const { dom, root, feed } = setup();
   feed.append(
     event(1, "plan.updated", {
@@ -297,16 +297,16 @@ test("the current checklist absorbs successful plan calls but keeps rejected cal
       output: observation({ accepted: false, message: "Invalid transition" }),
     }),
   );
-  assert.equal(root.querySelectorAll(".event-row").length, 2);
+  assert.equal(root.querySelectorAll(".event-row").length, 3);
   assert.ok(root.querySelector('[data-key="tool:blocked"].failed'));
-  const plan = root.querySelector('[data-key="plan:p"]');
+  const plan = root.querySelector('[data-key="tool:good"]');
   plan.open = true;
   await tick();
   plan.querySelector("button").click();
   await tick();
   assert.match(
-    document.querySelector("dialog pre").textContent,
-    /related_plan_calls/,
+    plan.querySelector(".activity-tool").textContent,
+    /Tool · update_plan/,
   );
   assert.match(document.querySelector("dialog pre").textContent, /good/);
   feed.inspector.close();
@@ -392,4 +392,30 @@ test("completed process elapsed time uses lifecycle timestamps, not later detail
     /0m 5s elapsed/,
   );
   dom.window.close();
+});
+
+test("model summaries use explicit summary or action intent rather than truncating the detail", () => {
+  const presenters = builtinPresenters();
+  const show = (content) =>
+    presenters.present({
+      kind: "model",
+      details: { response: { content: JSON.stringify(content) } },
+    });
+  const prose = "This is a long explanation with multiple details. ".repeat(30);
+  const explicit = show({
+    summary: "Check configuration",
+    reasoning: prose,
+    action: { kind: "tool", description: "Read the config" },
+  });
+  assert.equal(explicit.subject, "Check configuration");
+  assert.equal(explicit.sections[0].value, prose);
+  assert.equal(
+    show({
+      reasoning: prose,
+      action: { kind: "tool", description: "Read the config" },
+    }).subject,
+    "Read the config",
+  );
+  assert.equal(show({ reasoning: prose }).subject, "Response received");
+  assert.equal(explicit.toolName, "");
 });

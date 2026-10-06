@@ -1,4 +1,11 @@
-import { compact, decode, modelText, outputValue, text } from "./content.mjs";
+import {
+  compact,
+  decode,
+  modelHeadline,
+  modelText,
+  outputValue,
+  text,
+} from "./content.mjs";
 
 /** Extensions can prepend a capability presenter without editing the feed. */
 export class ActivityPresenters {
@@ -55,6 +62,7 @@ function base({ descriptor, data, input, output, name, workspace }) {
   );
   return {
     kind: descriptor.kind || "event",
+    toolName: descriptor.kind === "tool" ? name : "",
     title: name.replace(/[_.-]+/g, " "),
     subject,
     state,
@@ -117,7 +125,7 @@ export function builtinPresenters() {
           { data, descriptor } = args;
         const prose = typeof data === "string" ? data : modelText(data);
         result.title = result.state === "failed" ? "Model failed" : "Working";
-        result.subject = compact(prose);
+        result.subject = modelHeadline(data, result.state === "running");
         result.outcome =
           result.state === "failed"
             ? compact(data.error?.message)
@@ -310,7 +318,10 @@ export function builtinPresenters() {
         result.kind = "plan";
         result.title =
           args.descriptor.kind === "plan" ? "Current plan" : "Update plan";
-        result.subject = compact(plan?.explanation || data.explanation);
+        const items = plan?.items || data.items || input.items || [];
+        result.subject = items.length
+          ? `${items.filter((item) => item.status === "completed").length}/${items.length} steps completed`
+          : "";
         result.sections = [
           section(
             "Plan",

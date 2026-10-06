@@ -103,9 +103,16 @@ export class ActivityRow {
     this.summary = element("summary");
     this.status = element("span", "activity-status");
     this.title = element("span", "activity-title");
+    this.tool = element("span", "activity-tool");
     this.subject = element("span", "activity-subject");
     this.outcome = element("span", "activity-outcome");
-    this.summary.append(this.status, this.title, this.subject, this.outcome);
+    this.summary.append(
+      this.status,
+      this.title,
+      this.tool,
+      this.subject,
+      this.outcome,
+    );
     this.body = element("div", "event-detail");
     this.content = element("div", "activity-content");
     this.raw = element("button", "quiet activity-raw", "View raw records");
@@ -134,6 +141,8 @@ export class ActivityRow {
     );
     this.status.setAttribute("aria-label", activity.state);
     set(this.title, activity.title);
+    set(this.tool, activity.toolName ? `Tool · ${activity.toolName}` : "");
+    this.tool.hidden = !activity.toolName;
     set(this.subject, activity.subject);
     set(this.outcome, activity.outcome);
     this.subject.title = activity.subject;

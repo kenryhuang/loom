@@ -535,6 +535,7 @@ test("bounded feed retains restored text and snapshot results after compaction",
   feed.append(event(4, "three", {}));
   assert.equal(feed.events.length, 2);
   assert.equal(root.querySelectorAll(".result").length, 1);
+  feed.toggleAll();
   assert.match(root.textContent, /全部思考/);
   assert.equal(root.querySelectorAll(".event-row").length, 3);
   dom.window.close();
@@ -570,7 +571,7 @@ test("process counts logical rows, preserving tool details during a long delta s
   }
   assert.match(
     root.querySelector(".process-group > summary").textContent,
-    /Working · 思/,
+    /Working · Considering the next step/,
   );
   assert.equal(root.querySelectorAll(".event-row").length, 2);
   feed.toggleAll();
@@ -649,7 +650,7 @@ test("model lifecycle and output share one row while proposed tool calls do not 
   const model = root.querySelector('[data-key="thought:model"]');
   assert.match(
     model.querySelector("summary").textContent,
-    /Inspect files.*Done/,
+    /Preparing unavailable_tool.*Done/,
   );
   assert.equal(model.classList.contains("running"), false);
   assert.match(

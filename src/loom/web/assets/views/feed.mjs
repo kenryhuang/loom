@@ -421,26 +421,9 @@ export class FeedView {
   }
   orderRecords(group) {
     for (const current of group ? [group] : this.groups.values()) {
-      const all = [...current.records.values()].sort((a, b) => a.seq - b.seq);
-      const plan = all.find((record) => record.descriptor.kind === "plan");
-      if (plan) plan.related = [];
-      const records = all.filter((record) => {
-        // Successful plan tools are represented by the current checklist.
-        // Keep failed, unknown and currently inspected calls in the timeline.
-        const absorbed =
-          plan &&
-          record.descriptor.kind === "tool" &&
-          record.view.activity.kind === "plan" &&
-          record.view.activity.state === "completed" &&
-          !record.view.activity.pending &&
-          !record.node.open;
-        record.node.hidden = !!absorbed;
-        if (absorbed) {
-          plan.related.push(record);
-          record.node.remove();
-        }
-        return !absorbed;
-      });
+      const records = [...current.records.values()].sort(
+        (a, b) => a.seq - b.seq,
+      );
       const buckets = [];
       for (const record of records) {
         const activity = record.view.activity;

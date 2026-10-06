@@ -150,6 +150,8 @@ export function builtinRenderers() {
           stage = "Waiting";
         } else if (event.type === "llm.completed") {
           details.response = data.response;
+          if (typeof data.summary === "string" && !data.artifact)
+            details.summary = data.summary;
           stage = "Done";
           status = "";
         } else if (event.type === "llm.failed") {

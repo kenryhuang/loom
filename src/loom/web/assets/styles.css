@@ -903,3 +903,18 @@ dialog h1 {
     max-height: 48dvh;
   }
 }
+
+.activity-tool {
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 5px;
+  font-size: 10px;
+  max-width: 30%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+}
+.activity-tool[hidden] {
+  display: none;
+}
