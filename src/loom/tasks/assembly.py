@@ -97,6 +97,9 @@ def default_plugin_registry():
     for name in ("filesystem", "shell", "task_control"):
         registry.register("tools", name, lambda config, request, name=name: _builtin(name, config, request))
     registry.register("tools", "web_research", lambda config, request: _custom_collection(research_collection, config, request))
+    from loom.knowledge.tools import knowledge_collection
+
+    registry.register("tools", "knowledge", lambda config, request: _custom_collection(knowledge_collection, config, request))
     registry.register("tools", "document_outputs", lambda config, request: _custom_collection(document_collection, config, request))
     return registry
 

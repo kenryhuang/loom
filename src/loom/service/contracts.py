@@ -10,7 +10,18 @@ from typing import Any
 
 EVENT_SCHEMA = "loom.session.event.v1"
 COMMAND_TYPES = frozenset(
-    {"submit_message", "answer_input", "supersede_input", "pause", "resume", "stop_run", "complete_task", "reopen_task", "set_token_budget"}
+    {
+        "submit_message",
+        "answer_input",
+        "supersede_input",
+        "pause",
+        "resume",
+        "stop_run",
+        "complete_task",
+        "reopen_task",
+        "set_token_budget",
+        "set_knowledge_bases",
+    }
 )
 LIMITS = {"max_steps": 100, "max_llm_calls": 200, "max_tokens": 10_000_000, "max_duration_seconds": 1800, "max_window_chars": 240_000}
 
@@ -50,7 +61,7 @@ def object_value(value: Any, name: str = "payload") -> dict:
 
 def validate_create(payload: Any, *, plugin_registry=None) -> dict:
     payload = object_value(payload)
-    allowed = {"objective", "workspace", "title", "model", "plan_mode", "limits", "task_spec", "resource_claims", "plugin_version_refs"}
+    allowed = {"objective", "workspace", "title", "model", "plan_mode", "limits", "task_spec", "resource_claims", "plugin_version_refs", "knowledge_base_ids"}
     if set(payload) - allowed:
         raise ServiceError("Unknown session fields")
     objective = text(payload["objective"], "objective") if payload.get("objective") is not None else None
@@ -70,9 +81,22 @@ def validate_create(payload: Any, *, plugin_registry=None) -> dict:
     from loom.tasks.assembly import TaskAssembly
     from loom.tasks.request import TaskRequest
 
+    ids = payload.get("knowledge_base_ids", [])
+    if not isinstance(ids, list) or len(ids) > 20 or any(not isinstance(item, str) for item in ids) or len(set(ids)) != len(ids):
+        raise ServiceError("knowledge_base_ids must be a unique list of at most 20 IDs")
+    from loom.tasks.assembly import normalize_task_spec
+
     try:
+        spec = normalize_task_spec(payload.get("task_spec"), workspace=workspace, plan_mode=mode)
+        collections = spec["tools"]["collections"]
+        if "knowledge" in collections:
+            collections.remove("knowledge")
+        if ids:
+            collections.append("knowledge")
         assembly = TaskAssembly(
-            TaskRequest(objective or "New session", workspace=workspace, task_spec=payload.get("task_spec")), plan_mode=mode, registry=plugin_registry
+            TaskRequest(objective or "New session", workspace=workspace, task_spec=spec, metadata={"knowledge_base_ids": ids}),
+            plan_mode=mode,
+            registry=plugin_registry,
         )
     except (ValueError, KeyError, TypeError) as exc:
         raise ServiceError(str(exc)) from exc
@@ -86,6 +110,7 @@ def validate_create(payload: Any, *, plugin_registry=None) -> dict:
     if "plugin_version_refs" in payload and payload["plugin_version_refs"] != manifests:
         raise ServiceError("Plugin manifests must match the registered task plugins")
     return {
+        "knowledge_base_ids": ids,
         "objective": objective,
         "workspace": str(directory) if directory else None,
         "task_spec": assembly.spec,
@@ -111,6 +136,11 @@ def validate_command(command: Any) -> dict:
     if kind == "submit_message":
         allowed = {"content"}
         text(payload.get("content"), "content")
+    elif kind == "set_knowledge_bases":
+        allowed = {"knowledge_base_ids"}
+        ids = payload.get("knowledge_base_ids")
+        if not isinstance(ids, list) or len(ids) > 20 or any(not isinstance(item, str) for item in ids) or len(set(ids)) != len(ids):
+            raise ServiceError("knowledge_base_ids must be a unique list of at most 20 IDs")
     elif kind == "set_token_budget":
         allowed = {"max_tokens"}
         value = payload.get("max_tokens")

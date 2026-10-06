@@ -37,7 +37,7 @@ function renderSection(item) {
       const row = element("li");
       if (typeof hit === "string") row.textContent = preview(hit);
       else {
-        const label = `${hit.path || hit.file || hit.title || hit.url || "Match"}${hit.line != null ? `:${hit.line}` : ""}`;
+        const label = `${hit.path || hit.file || hit.document || hit.title || hit.url || "Match"}${(hit.line ?? hit.start_line) != null ? `:${hit.line ?? hit.start_line}` : ""}`;
         const href = safeLink(hit.url);
         const title = element(href ? "a" : "code", "", label);
         if (href) {
@@ -49,6 +49,12 @@ function renderSection(item) {
           title,
           element("p", "", preview(hit.text || hit.snippet || hit.content)),
         );
+        if (hit.page_number)
+          row.append(
+            element("small", "activity-hint", `Page ${hit.page_number}`),
+          );
+        if (hit.source_id)
+          row.append(element("small", "activity-hint", hit.source_id));
       }
       list.append(row);
     }

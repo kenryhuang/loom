@@ -157,7 +157,13 @@ class LoomService:
             old = state["run"]
             if not old or old["state"] in {"completed", "stopped", "failed"}:
                 state["run"] = {"id": new_id("run"), "state": "queued", "steps": 0, "checkpoint": None, "active_seconds": 0, "counters": encode({})}
-                state["run"]["reset_planning"] = bool(old and old["state"] == "completed")
+                state["run"]["reset_planning"] = bool(
+                    old
+                    and (
+                        old["state"] == "completed"
+                        or (old["state"] == "stopped" and any(m["role"] == "user" and m["seq"] > state["input_cursor"] for m in state["messages"]))
+                    )
+                )
             state["epoch"] += 1
             state["run"].update(state="running", attempt_id=new_id("attempt"), process=None)
             state["task"]["state"] = "running"
@@ -166,6 +172,7 @@ class LoomService:
             emit("task.state.changed", {"state": "running", "revision": state["task"]["revision"]})
             descriptor = json.loads(canonical(state))
             descriptor["checkpoint_value"] = encode(self._checkpoint_value(state))
+            descriptor["knowledge_directory"] = str(self.store.knowledge.directory)
             return descriptor
 
         return self.store.update(sid, prepare)

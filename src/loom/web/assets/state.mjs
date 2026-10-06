@@ -51,6 +51,8 @@ export class SessionProjection {
         goal_revision: data.goal_revision,
       });
       if (data.title) state.title = state.task.title = data.title;
+    } else if (kind === "task.knowledge.changed") {
+      Object.assign(state.task, structuredClone(data));
     } else if (kind === "task.budget.changed") {
       state.task.limits.max_tokens = data.max_tokens;
       this.budget();

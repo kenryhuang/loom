@@ -9,31 +9,112 @@
   </head>
   <body>
     <div class="shell">
+      <nav class="activity-bar" aria-label="Workspace components">
+        <button
+          id="nav-sessions"
+          class="activity-button"
+          data-component="sessions"
+          aria-label="Sessions"
+          title="Sessions"
+          aria-pressed="true"
+          aria-controls="sessions-panel"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            aria-hidden="true"
+          >
+            <path d="M4 4h16v12H9l-5 4V4Z" />
+            <path d="M8 8h8M8 12h5" />
+          </svg>
+        </button>
+        <button
+          id="knowledge-bases"
+          class="activity-button"
+          data-component="knowledge"
+          aria-label="Knowledge"
+          title="Knowledge"
+          aria-pressed="false"
+          aria-controls="knowledge-panel"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            aria-hidden="true"
+          >
+            <ellipse cx="12" cy="5" rx="8" ry="3" />
+            <path
+              d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"
+            />
+          </svg>
+        </button>
+      </nav>
       <aside class="sidebar">
         <header class="brand">
           <span class="brand-mark">L</span>
           <div><strong>Loom</strong><small>Session workspace</small></div>
         </header>
-        <button id="new-session" class="primary" disabled>New session</button>
-        <div class="section-heading">
-          <h2>Sessions</h2>
-          <button
-            id="refresh-sessions"
-            class="quiet"
-            aria-label="Refresh sessions"
-          >
-            ↻
-          </button>
-        </div>
-        <input
-          id="session-search"
-          type="search"
-          placeholder="Find a session…"
-          aria-label="Find a session"
-        />
-        <nav id="session-list" aria-label="Sessions">
-          <p class="muted">Connect to load sessions.</p>
-        </nav>
+        <section
+          id="sessions-panel"
+          class="component-panel"
+          aria-label="Sessions panel"
+        >
+          <button id="new-session" class="primary" disabled>New session</button>
+          <div class="section-heading">
+            <h2>Sessions</h2>
+            <button
+              id="refresh-sessions"
+              class="quiet"
+              aria-label="Refresh sessions"
+            >
+              ↻
+            </button>
+          </div>
+          <input
+            id="session-search"
+            type="search"
+            placeholder="Find a session…"
+            aria-label="Find a session"
+          />
+          <nav id="session-list" aria-label="Sessions">
+            <p class="muted">Connect to load sessions.</p>
+          </nav>
+        </section>
+        <section
+          id="knowledge-panel"
+          class="component-panel"
+          aria-label="Knowledge panel"
+          hidden
+        >
+          <div class="section-heading component-heading">
+            <h2>Knowledge</h2>
+            <button id="new-knowledge" class="primary" disabled>New</button>
+          </div>
+          <input
+            id="knowledge-search"
+            type="search"
+            placeholder="Find a knowledge base…"
+            aria-label="Find a knowledge base"
+          />
+          <div class="section-heading knowledge-list-heading">
+            <span class="muted small">Knowledge bases</span>
+            <button
+              id="refresh-knowledge"
+              class="quiet"
+              aria-label="Refresh knowledge bases"
+              disabled
+            >
+              ↻
+            </button>
+          </div>
+          <nav id="knowledge-list" aria-label="Knowledge bases">
+            <p class="muted">Connect to load knowledge bases.</p>
+          </nav>
+        </section>
         <footer class="sidebar-footer">
           <span id="connection" class="connection" role="status"
             >Disconnected</span
@@ -71,7 +152,9 @@
             aria-controls="conversation-page"
             tabindex="0"
             disabled
-          >Conversation</button>
+          >
+            Conversation
+          </button>
           <button
             id="session-trajectory"
             role="tab"
@@ -79,7 +162,9 @@
             aria-controls="trajectory-page"
             tabindex="-1"
             disabled
-          >Trajectory</button>
+          >
+            Trajectory
+          </button>
         </div>
         <div
           id="conversation-page"
@@ -90,10 +175,18 @@
         >
           <section class="conversation" aria-label="Session conversation">
             <div class="conversation-toolbar">
-              <section id="controls" class="controls" aria-label="Task controls"></section>
+              <section
+                id="controls"
+                class="controls"
+                aria-label="Task controls"
+              ></section>
               <div class="feed-actions">
-                <button id="toggle-details" class="quiet" disabled>Expand all</button>
-                <button id="history" class="quiet" disabled>Earlier events</button>
+                <button id="toggle-details" class="quiet" disabled>
+                  Expand all
+                </button>
+                <button id="history" class="quiet" disabled>
+                  Earlier events
+                </button>
               </div>
             </div>
             <div id="event-feed" class="event-feed">
@@ -210,6 +303,16 @@
         </div>
         <label for="create-model">Model</label
         ><select id="create-model"></select>
+        <label for="create-knowledge">Knowledge bases (optional)</label>
+        <select
+          id="create-knowledge"
+          multiple
+          size="3"
+          aria-describedby="create-knowledge-hint"
+        ></select>
+        <p id="create-knowledge-hint" class="muted small">
+          The model can search selected knowledge bases when needed.
+        </p>
         <div id="spec-field" hidden>
           <label for="create-spec">Task specification (JSON)</label
           ><textarea id="create-spec" rows="8" spellcheck="false"></textarea>

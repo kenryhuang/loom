@@ -739,7 +739,9 @@ class PlanningRuntime:
                     "Use enter_plan for three or more dependent phases, investigation followed by implementation "
                     "and verification, multiple modules or artifacts, high uncertainty, or work needing explicit "
                     "progress tracking. Use continue_react for a one-shot query, read-only lookup, single local edit, "
-                    "or a few independent actions. Give a concise reason; do not execute task tools in this step."
+                    "or a few independent actions. A focused explanation or follow-up question normally uses continue_react, "
+                    "even when answering requires reading several related files. Count necessary user outcomes, not files or possible audit topics; "
+                    "do not manufacture phases for a narrow question. Give a concise reason; do not execute task tools in this step."
                 )
             return (
                 "Execute only what the current request needs. Reuse evidence from successful operations, avoid repeating them, "

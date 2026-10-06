@@ -14,9 +14,7 @@ from loom.tasks.runner import _create_provider, make_task_context, make_task_loo
 async def execute(state, bridge, config_path, provider_factory, plugin_registry_factory=None):
     # Consume the initial input before assembling capabilities and workflow.
     # A completed run's follow-up is a new goal, not more text on its old goal.
-    fresh_turn = not bridge.checkpoint and not state["run"]["steps"] and (
-        not state.get("context") or state["run"].get("reset_planning", False)
-    )
+    fresh_turn = not bridge.checkpoint and not state["run"]["steps"] and (not state.get("context") or state["run"].get("reset_planning", False))
     inputs = [m for m in state["messages"] if m["role"] == "user" and m["seq"] > state["input_cursor"]] if fresh_turn else []
     if inputs:
         state = {**state, "task": {**state["task"], "objective": "\n\n".join(m["content"] for m in inputs)}}
@@ -29,7 +27,12 @@ async def execute(state, bridge, config_path, provider_factory, plugin_registry_
         else _create_provider(load_task_config(config_path).unwrap() if config_path else None, model_name=state["task"]["model"]).unwrap()
     )
     task = state["task"]
-    request = TaskRequest(task["objective"], workspace=task["workspace"], task_spec=task.get("task_spec"))
+    request = TaskRequest(
+        task["objective"],
+        workspace=task["workspace"],
+        task_spec=task.get("task_spec"),
+        metadata={"knowledge_base_ids": task.get("knowledge_base_ids", []), "knowledge_directory": state.get("knowledge_directory")},
+    )
     assembly = TaskAssembly(
         request,
         plan_mode=task["plan_mode"],
@@ -52,24 +55,30 @@ async def _execute_assembled(state, bridge, provider, request, assembly):
     if bridge.fresh_turn:
         context = replace(initial, knowledge=previous.knowledge) if previous else initial
         archive = assembly.publish_artifact({"messages": bridge.turn_messages}, "session_history") if bridge.turn_messages else None
-        context = replace(context, metadata={
-            **(context.metadata or {}),
-            "session_history": _history(bridge.turn_messages, state["task"]["limits"]["max_window_chars"]),
-            "session_history_artifact": archive,
-        })
+        context = replace(
+            context,
+            metadata={
+                **(context.metadata or {}),
+                "session_history": _history(bridge.turn_messages, state["task"]["limits"]["max_window_chars"]),
+                "session_history_artifact": archive,
+            },
+        )
     else:
         context = previous or initial
     same_run = context.run_id == state["run"]["id"]
     if not bridge.checkpoint and not same_run:
-        context = replace(context, metadata={
-            **(context.metadata or {}),
-            "session_turn": True,
-            "result_scope": {
-                "run_id": state["run"]["id"],
-                "observation_start": len(context.state.observations),
-                "decision_start": len(context.state.decisions),
+        context = replace(
+            context,
+            metadata={
+                **(context.metadata or {}),
+                "session_turn": True,
+                "result_scope": {
+                    "run_id": state["run"]["id"],
+                    "observation_start": len(context.state.observations),
+                    "decision_start": len(context.state.decisions),
+                },
             },
-        })
+        )
     context = bridge.checkpoint["context"] if bridge.checkpoint else replace(context, run_id=state["run"]["id"])
     if bridge.checkpoint and bridge.checkpoint.get("plugin_states"):
         assembly.restore(bridge.checkpoint["plugin_states"])

@@ -263,7 +263,21 @@ def build_system_prompt(context: Context) -> str:
             "The Objective is the active request for this execution round. "
             "Earlier conversation is background for understanding references and reusing results.",
             "Earlier rounds have already been answered; do not execute or restate their tasks unless the current request asks for it.",
-            "Focus the final answer on the active request and its latest user guidance. Guidance updates or corrects the unfinished work in this round.",
+            "The latest user message determines scope. If it asks a new question or describes new work, answer that request; "
+            "do not combine it with earlier objectives. If it adds a constraint, correction, or clarification, apply it to the relevant earlier work.",
+            "For a focused follow-up question, reuse relevant context and inspect only the files or facts needed to answer it. "
+            "Do not repeat a repository-wide review, remote version checks, document imports, benchmarks, or demonstrations unless requested or necessary.",
+            "Match effort and answer length to the request. Once the specific question has sufficient evidence, answer and finish. "
+            "Do not invent additional verification or deliverables to expand the task. Historical response length and plans are not requirements.",
+            "If the latest request changes scope, revise or retire obsolete unfinished plan items instead of completing them for their own sake.",
+        ])
+    prior = (context.metadata or {}).get("prior_requests", ())
+    if prior:
+        lines.extend([
+            "",
+            "Earlier requests in this interrupted round (reference only; not additional tasks):",
+            *prior,
+            "Use this context only to resolve references or apply an incremental constraint. The latest Objective has priority.",
         ])
     return "\n".join(lines)
 

@@ -88,9 +88,7 @@ class ManagedStep:
         cp["messages"].append(LlmMessage("assistant", response.content or "", tool_calls=response.tool_calls))
         for call in response.tool_calls:
             cp["messages"].append(LlmMessage("tool", canonical({"ok": False, "error": detail}), name=call.name, tool_call_id=call.id))
-        cp["messages"].append(
-            LlmMessage("user", f"{detail} Available tools: {', '.join(visible)}. {policy.retry_prompt}", name="workflow_tool_required")
-        )
+        cp["messages"].append(LlmMessage("user", f"{detail} Available tools: {', '.join(visible)}. {policy.retry_prompt}", name="workflow_tool_required"))
         return {"available_tools": visible, "unavailable_tools": list(unavailable), "reason": detail}
 
     def _terminal(self, cp, runtime):
@@ -212,7 +210,15 @@ class ManagedStep:
             cp["input_cursor"] = inputs[-1]["seq"]
             guidance = "\n".join(item["content"] for item in inputs)
             base = cp["context"]
-            cp["context"] = replace(base, goal=replace(base.goal, objective=f"{base.goal.objective}\n\nUser guidance:\n{guidance}"))
+            cp["context"] = replace(
+                base,
+                goal=replace(base.goal, objective=guidance),
+                metadata={
+                    **(base.metadata or {}),
+                    "session_turn": True,
+                    "prior_requests": [*((base.metadata or {}).get("prior_requests", ()))[-3:], base.goal.objective[-6000:]],
+                },
+            )
             if self.assembly:
                 self.assembly.update_goal(cp["context"].goal)
                 cp["messages"][0] = self.assembly.context_manager.project(cp["context"])[0]
@@ -315,8 +321,13 @@ class ManagedStep:
                 if suspended is not None:
                     return suspended
                 await self._emit(
-                    runtime, "llm.requested", llm_call_id=llm_id, model=self.provider.model,
-                    messages=tuple(cp["messages"]), tools=tools, tool_choice=policy.tool_choice if policy else None,
+                    runtime,
+                    "llm.requested",
+                    llm_call_id=llm_id,
+                    model=self.provider.model,
+                    messages=tuple(cp["messages"]),
+                    tools=tools,
+                    tool_choice=policy.tool_choice if policy else None,
                 )
                 request = asyncio.create_task(
                     request_llm_response(
@@ -382,10 +393,14 @@ class ManagedStep:
                     continue
                 if policy and policy.require_tool_call:
                     if cp["missing_retries"] >= policy.missing_tool_call_retries:
-                        return err(make_loom_error(
-                            policy.failure_code, "Model did not select the required workflow tool", retryable=False,
-                            cause={"available_tools": cp.get("visible_tool_ids", []), "unavailable_tools": list(unavailable)},
-                        ))
+                        return err(
+                            make_loom_error(
+                                policy.failure_code,
+                                "Model did not select the required workflow tool",
+                                retryable=False,
+                                cause={"available_tools": cp.get("visible_tool_ids", []), "unavailable_tools": list(unavailable)},
+                            )
+                        )
                     cp["missing_retries"] += 1
                     self._required_tool_feedback(cp, policy, unavailable)
                     cp["phase"] = "before_llm"

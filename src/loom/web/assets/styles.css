@@ -284,7 +284,7 @@ pre {
 }
 .shell {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr) 285px;
+  grid-template-columns: 52px 260px minmax(0, 1fr) 285px;
   height: 100vh;
   height: 100dvh;
   overflow: hidden;
@@ -299,7 +299,7 @@ pre {
   min-height: 0;
   overflow: hidden;
 }
-.sidebar > :not(#session-list) {
+.sidebar > :not(.component-panel) {
   flex-shrink: 0;
 }
 .brand {
@@ -873,7 +873,7 @@ dialog h1 {
 }
 @media (max-width: 1100px) {
   .shell {
-    grid-template-columns: 210px minmax(0, 1fr) 250px;
+    grid-template-columns: 48px 210px minmax(0, 1fr) 250px;
   }
   .workspace {
     padding: 25px 20px;
@@ -899,7 +899,8 @@ dialog h1 {
   .brand {
     margin-bottom: 15px;
   }
-  #session-list {
+  #session-list,
+  #knowledge-list {
     max-height: 160px;
   }
   .section-heading {
@@ -1115,4 +1116,158 @@ dialog h1 {
 }
 .activity-tool[hidden] {
   display: none;
+}
+
+.knowledge-dialog {
+  width: min(860px, 94vw);
+  max-height: 90dvh;
+  overflow: auto;
+}
+.knowledge-form {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0;
+}
+.knowledge-field {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+}
+.knowledge-binding,
+.knowledge-create,
+.knowledge-base-panel {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+.knowledge-choice {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 10px 0;
+}
+.knowledge-choice input {
+  width: auto;
+}
+.knowledge-documents {
+  padding: 0;
+  list-style: none;
+}
+.knowledge-documents li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.knowledge-search {
+  display: flex;
+  gap: 10px;
+  align-items: end;
+  margin-top: 20px;
+}
+.knowledge-search label {
+  flex: 1;
+}
+.knowledge-hit {
+  border-left: 2px solid var(--line);
+  padding: 12px;
+  margin: 12px 0;
+  overflow-wrap: anywhere;
+}
+.knowledge-hit small {
+  display: block;
+}
+
+/* Component navigation: add another data-component button and matching panel to extend. */
+.activity-bar {
+  background: #0c1119;
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding-top: 20px;
+  gap: 8px;
+}
+.activity-button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 48px;
+  padding: 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+}
+.activity-button svg {
+  width: 24px;
+  height: 24px;
+}
+.activity-button[aria-pressed="true"] {
+  color: var(--accent);
+  background: #15232a;
+}
+.activity-button[aria-pressed="true"]::before {
+  content: "";
+  position: absolute;
+  inset: 6px auto 6px 0;
+  width: 3px;
+  background: var(--accent);
+}
+.activity-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+.component-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.component-panel[hidden] {
+  display: none;
+}
+.component-panel > :not(nav) {
+  flex-shrink: 0;
+}
+.component-heading {
+  margin: 0 0 16px;
+  min-height: 38px;
+}
+.knowledge-list-heading {
+  margin: 12px 3px 0;
+}
+#knowledge-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 10px 0;
+}
+.knowledge-link small {
+  display: block;
+  margin-top: 4px;
+}
+.knowledge-link .knowledge-engine {
+  color: var(--accent);
+  font-size: 11px;
+}
+@media (max-width: 700px) {
+  .shell {
+    grid-template-columns: 48px minmax(0, 1fr);
+  }
+  .activity-bar {
+    grid-column: 1;
+    grid-row: 1;
+    padding-top: 16px;
+  }
+  .sidebar {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .workspace,
+  .session-details {
+    grid-column: 1 / -1;
+  }
 }

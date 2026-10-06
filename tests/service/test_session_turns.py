@@ -22,10 +22,10 @@ def test_follow_up_targets_latest_request_and_retains_answered_conversation_afte
         service.close()
     service = LoomService(tmp_path / "data", provider_factory=turn_prompt_provider_factory).start()
     try:
-        command(service, sid, "submit_message", content="Now compare Kafka and RabbitMQ only")
+        command(service, sid, "submit_message", content="yakDB在分析导入文档的时候，如何建立的索引？用的什么技术，也没有使用embedding?")
         second = wait_state(service, sid, "idle")
         answer = json.loads([m["content"] for m in second["messages"] if m["role"] == "assistant"][-1])
-        assert answer["objective"] == "Now compare Kafka and RabbitMQ only"
+        assert answer["objective"] == "yakDB在分析导入文档的时候，如何建立的索引？用的什么技术，也没有使用embedding?"
         assert second["task"]["objective"] == answer["objective"]
         assert answer["history"] == [
             {"role": "user", "content": payload["objective"]},
@@ -86,5 +86,24 @@ def test_empty_session_consumes_all_initial_messages_before_creating_workflow(tm
         assert state["workflow"]["workflow"]["nodes"][0]["objective"] == expected
         assert json.loads(state["messages"][-1]["content"])["objective"] == expected
         assert all(m["state"] == "applied" for m in state["messages"])
+    finally:
+        service.close()
+
+
+def test_stopped_round_with_new_input_gets_a_new_scope(tmp_path):
+    from tests.service.fakes import provider_factory
+
+    service = LoomService(tmp_path / "data", provider_factory=provider_factory).start()
+    try:
+        sid = service.create("stop-followup", {"objective": "question", "workspace": str(tmp_path), "plan_mode": "off"})["session_id"]
+        wait_state(service, sid, "awaiting_input")
+        command(service, sid, "stop_run")
+        wait_state(service, sid, "paused")
+        service.provider_factory = turn_prompt_provider_factory
+        command(service, sid, "submit_message", content="Only explain the indexing technology")
+        command(service, sid, "resume")
+        done = wait_state(service, sid, "idle")
+        assert done["task"]["objective"] == "Only explain the indexing technology"
+        assert json.loads(done["messages"][-1]["content"])["objective"] == done["task"]["objective"]
     finally:
         service.close()

@@ -247,7 +247,7 @@ export function builtinPresenters() {
     )
     .register(
       ({ name }) =>
-        /^(search_files|search_code|grep|glob|file_search|web_search|search)$/.test(
+        /^(knowledge_search|search_files|search_code|grep|glob|file_search|web_search|search)$/.test(
           name,
         ),
       (args) => {

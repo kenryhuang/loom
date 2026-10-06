@@ -20,6 +20,9 @@ class SessionStore:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "service.sqlite"
         self.artifacts = ServiceArtifacts(self.directory)
+        from loom.knowledge.store import KnowledgeStore
+
+        self.knowledge = KnowledgeStore(self.directory / "knowledge")
         self.lock = threading.RLock()
         self.changed = threading.Condition(self.lock)
         with self.transaction() as db:
@@ -86,7 +89,10 @@ class SessionStore:
     def _replay(self, db, cid, normalized):
         row = db.execute("SELECT input,receipt FROM commands WHERE id=?", (cid,)).fetchone()
         if row:
-            if row[0] != canonical(normalized):
+            previous = json.loads(row[0])
+            if previous.get("type") == "create":
+                previous["payload"].setdefault("knowledge_base_ids", [])
+            if canonical(previous) != canonical(normalized):
                 raise ServiceError("Command conflict: ID already has different input", 409)
             return json.loads(row[1])
         return None
@@ -94,6 +100,7 @@ class SessionStore:
     def create(self, command_id, payload):
         text(command_id, "command_id", max_length=200)
         payload = validate_create(payload, plugin_registry=self.plugin_registry_factory() if self.plugin_registry_factory else None)
+        self.knowledge.validate_ids(payload["knowledge_base_ids"])
         normalized = {"type": "create", "payload": payload}
         with self.transaction() as db:
             replay = self._replay(db, command_id, normalized)
@@ -165,6 +172,10 @@ class SessionStore:
             if kind == "submit_message":
                 if task["state"] == "completed":
                     raise ServiceError("Reopen the completed task first", 409)
+            elif kind == "set_knowledge_bases":
+                if task["state"] not in {"idle", "completed"} or (state["run"] and state["run"]["state"] not in {"completed", "stopped"}):
+                    raise ServiceError("Change knowledge bases between tasks, when the session is idle or completed", 409)
+                self.knowledge.validate_ids(payload["knowledge_base_ids"])
             elif kind == "set_token_budget":
                 if task["state"] in {"running", "pausing", "queued"} or (state["run"] and state["run"]["state"] == "running"):
                     raise ServiceError("Pause execution before changing the token budget", 409)
@@ -236,6 +247,21 @@ class SessionStore:
                     state["run"]["state"] = "stopped"
             elif kind == "reopen_task":
                 task["state"] = "idle"
+            elif kind == "set_knowledge_bases":
+                updated = validate_create(
+                    {
+                        **{key: task[key] for key in ("objective", "workspace", "title", "model", "plan_mode", "limits", "task_spec")},
+                        "objective": task["objective"] or None,
+                        "knowledge_base_ids": payload["knowledge_base_ids"],
+                    },
+                    plugin_registry=self.plugin_registry_factory() if self.plugin_registry_factory else None,
+                )
+                state["context"] = None  # New tools take effect in a fresh turn; durable conversation/trace remain intact.
+                for key in ("knowledge_base_ids", "task_spec", "plugin_version_refs"):
+                    task[key] = updated[key]
+                self.append(
+                    db, state, "task.knowledge.changed", {key: task[key] for key in ("knowledge_base_ids", "task_spec", "plugin_version_refs")}, command_id=cid
+                )
             elif kind == "set_token_budget":
                 task["limits"]["max_tokens"] = payload["max_tokens"]
                 self.append(db, state, "task.budget.changed", {"max_tokens": payload["max_tokens"]}, command_id=cid)
@@ -243,7 +269,9 @@ class SessionStore:
             self.append(db, state, "task.state.changed", {"state": task["state"], "revision": task["revision"]})
             receipt = {"session_id": sid, "command_id": cid, "state": "accepted"}
             db.execute("INSERT INTO commands VALUES(?,?,?,?,?)", (cid, sid, canonical(normalized), canonical(receipt), "accepted"))
-            if kind in {"resume", "reopen_task", "complete_task", "set_token_budget"} or (kind in {"pause", "stop_run"} and task["state"] == "paused"):
+            if kind in {"resume", "reopen_task", "complete_task", "set_token_budget", "set_knowledge_bases"} or (
+                kind in {"pause", "stop_run"} and task["state"] == "paused"
+            ):
                 self.applied(db, state, cid)
             if after is not None:
                 after(state, lambda kind, payload: self.append(db, state, kind, payload), db)
@@ -256,7 +284,9 @@ class SessionStore:
         if run and run["state"] == "suspended":
             run["time_budget_start_seconds"] = run.get("active_seconds", 0)
             self.append(
-                db, state, "run.time_budget.renewed",
+                db,
+                state,
+                "run.time_budget.renewed",
                 {"active_seconds": run["time_budget_start_seconds"], "max_duration_seconds": state["task"]["limits"]["max_duration_seconds"]},
                 command_id=command_id,
             )
@@ -306,7 +336,8 @@ class SessionStore:
                     OR (json_extract(body,'$.type')='run.state.changed'
                         AND json_extract(body,'$.payload.state')!='running')
                     OR (json_extract(body,'$.type')='message.created'
-                        AND json_extract(body,'$.payload.role')='assistant')) ORDER BY seq""", (sid,),
+                        AND json_extract(body,'$.payload.role')='assistant')) ORDER BY seq""",
+                (sid,),
             )
             processes, active = [], {}
             for row in rows:
@@ -317,8 +348,7 @@ class SessionStore:
                 process = active.get(run_id)
                 if event["type"] == "run.started":
                     if process is None or process["state"] == "completed":
-                        process = {"id": f"{run_id}:{event['seq']}", "run_id": run_id, "start_seq": event["seq"],
-                                   "state": "running", "milestones": []}
+                        process = {"id": f"{run_id}:{event['seq']}", "run_id": run_id, "start_seq": event["seq"], "state": "running", "milestones": []}
                         active[run_id] = process
                         processes.append(process)
                     process["state"] = "running"

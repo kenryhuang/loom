@@ -109,14 +109,18 @@ def test_human_answer_completes_pending_tool_exactly_once(tmp_path):
     asyncio.run(scenario())
 
 
-def test_steering_interrupts_unexecuted_native_tool_batch(tmp_path):
+@pytest.mark.parametrize("latest", [
+    "Do not read the second file",
+    "yakDB在分析导入文档的时候，如何建立的索引？用的什么技术，也没有使用embedding?",
+])
+def test_steering_interrupts_unexecuted_native_tool_batch(tmp_path, latest):
     async def scenario():
         execution = Execution()
         calls = []
 
         async def read(value, _options):
             calls.append(value["path"])
-            execution.inputs = [{"seq": 10, "content": "Do not read the second file"}]
+            execution.inputs = [{"seq": 10, "content": latest}]
             return ok(Observation("o", "read_file", {}, "now"))
 
         provider = Provider(
@@ -130,8 +134,12 @@ def test_steering_interrupts_unexecuted_native_tool_batch(tmp_path):
         assert calls == ["one"]
         messages = provider.calls[-1]
         assert {m.tool_call_id for m in messages if m.role == "tool"} == {"one", "two"}
-        assert any(m.role == "user" and "Do not read" in m.content for m in messages)
-        assert "User guidance:\nDo not read the second file" in messages[0].content
+        assert any(m.role == "user" and latest in m.content for m in messages)
+        assert f"- Objective: {latest}\n" in messages[0].content
+        assert result.value.context.goal.objective == latest
+        assert "If it adds a constraint" in messages[0].content
+        assert "do not combine it with earlier objectives" in messages[0].content
+        assert "Earlier requests in this interrupted round" in messages[0].content
         assert "Maintain" in messages[0].content
 
     asyncio.run(scenario())

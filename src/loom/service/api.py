@@ -54,9 +54,14 @@ class ServiceHTTPServer(ThreadingHTTPServer):
         from loom.service.semantic import SessionSemantic
 
         self.semantic = SessionSemantic(self.trajectory, service.config_path)
+        from loom.knowledge.jobs import KnowledgeJobs
+
+        self.knowledge_jobs = KnowledgeJobs(service.store.knowledge)
 
     def server_close(self):
         self.closing.set()
+        if hasattr(self, "knowledge_jobs"):
+            self.knowledge_jobs.close()
         if hasattr(self, "semantic"):
             self.semantic.close()
         if hasattr(self, "trajectory"):
@@ -89,14 +94,14 @@ class SessionHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _body(self):
+    def _body(self, max_bytes=1_048_576):
         if self.headers.get("Transfer-Encoding"):
             raise ServiceError("Transfer-Encoding is unsupported")
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError as exc:
             raise ServiceError("Invalid Content-Length") from exc
-        if length > 1_048_576:
+        if length > max_bytes:
             # Drain small excess bodies so clients can read the JSON rejection.
             # Arbitrarily large uploads are rejected without allocating or consuming them.
             if length <= 2_097_152:
@@ -107,7 +112,7 @@ class SessionHandler(BaseHTTPRequestHandler):
                         break
                     remaining -= len(chunk)
             self.close_connection = True
-            raise ServiceError("Command body exceeds 1 MiB", 413)
+            raise ServiceError(f"Command body exceeds {max_bytes // 1_048_576} MiB", 413)
         if length <= 0:
             raise ServiceError("JSON body required")
         try:
@@ -159,6 +164,12 @@ class SessionHandler(BaseHTTPRequestHandler):
             service = self.server.service
             if method == "GET" and parts == ["v1", "web", "catalog"] and self.server.web_frontend:
                 self._json(200, self.server.web_frontend.catalog(service))
+                return
+            if parts[:2] == ["v1", "knowledge-bases"]:
+                from loom.knowledge.api import dispatch
+
+                status, body = dispatch(self, method, parts)
+                self._json(status, body)
                 return
             if parts == ["v1", "sessions"]:
                 if method == "POST":

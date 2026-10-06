@@ -5,6 +5,8 @@ import { reportContent } from "./renderers.mjs";
 import { FeedView } from "./views/feed.mjs";
 import { builtinPanels, PanelsView } from "./views/panels.mjs";
 import { SessionListView } from "./views/sessions.mjs";
+import { KnowledgeListView } from "./views/knowledge-list.mjs";
+import { KnowledgeView } from "./views/knowledge.mjs";
 import { TrajectoryView } from "./views/trajectory.mjs";
 
 const $ = (id) => document.getElementById(id);
@@ -40,10 +42,48 @@ const feed = new FeedView($("event-feed"), {
     $("toggle-details").setAttribute("aria-expanded", String(expanded));
   },
 });
+const knowledgeList = new KnowledgeListView(
+  $("knowledge-list"),
+  $("knowledge-search"),
+  {
+    api: () => controller?.api,
+    select: (baseId) => knowledge.open(false, { baseId }),
+    error: showError,
+  },
+);
+const knowledge = new KnowledgeView({
+  changed: () => knowledgeList.refresh(),
+  api: () => controller?.api,
+  state: () => controller?.projection?.snapshot,
+  bind: (ids, sid) => {
+    if (controller.selectedId !== sid)
+      throw new Error("Session changed. Reopen knowledge settings.");
+    return controller.command("set_knowledge_bases", {
+      knowledge_base_ids: ids,
+    });
+  },
+});
+let activeComponent = "sessions";
+for (const button of document.querySelectorAll("[data-component]")) {
+  button.addEventListener("click", () => {
+    activeComponent = button.dataset.component;
+    for (const item of document.querySelectorAll("[data-component]")) {
+      const selected = item === button;
+      item.setAttribute("aria-pressed", String(selected));
+      $(item.getAttribute("aria-controls")).hidden = !selected;
+    }
+    if (activeComponent === "knowledge") knowledgeList.refresh();
+  });
+}
+$("new-knowledge").addEventListener("click", () =>
+  knowledge.open(false, { create: true }),
+);
+$("refresh-knowledge").addEventListener("click", () => knowledgeList.refresh());
 const panels = new PanelsView($("session-panels"), builtinPanels(), {
   command: (kind, payload) => controller.command(kind, payload),
   error: showError,
   artifact: openArtifact,
+  knowledge: () => knowledge.open(true),
 });
 
 function notice(message, error = false) {
@@ -216,6 +256,9 @@ async function login(token) {
   list.update(next.sessions, null);
   connection("Connected");
   $("new-session").disabled = false;
+  $("new-knowledge").disabled = false;
+  $("refresh-knowledge").disabled = false;
+  if (activeComponent === "knowledge") knowledgeList.refresh();
   populateCreate();
   $("auth-dialog").close();
   $("credential").value = "";
@@ -231,6 +274,10 @@ async function login(token) {
 }
 
 function disconnect() {
+  knowledge.close();
+  knowledgeList.reset();
+  $("new-knowledge").disabled = true;
+  $("refresh-knowledge").disabled = true;
   trajectory.close();
   setSessionTab(false);
   $("session-conversation").disabled = true;
@@ -353,9 +400,22 @@ $("disconnect").addEventListener("click", disconnect);
 $("refresh-sessions").addEventListener("click", () =>
   controller?.refresh().catch(showError),
 );
-$("new-session").addEventListener("click", () => {
+$("new-session").addEventListener("click", async () => {
   $("create-error").textContent = "";
   $("create-dialog").showModal();
+  $("create-knowledge").replaceChildren();
+  const active = controller;
+  try {
+    const data = await active.api.json("/v1/knowledge-bases");
+    if (controller !== active || !$("create-dialog").open) return;
+    for (const base of data.knowledge_bases) {
+      const option = element("option", "", base.name);
+      option.value = base.id;
+      $("create-knowledge").append(option);
+    }
+  } catch (error) {
+    $("create-error").textContent = error.message;
+  }
 });
 $("create-template").addEventListener("change", templateChanged);
 $("create-form").addEventListener("submit", async (event) => {
@@ -371,6 +431,9 @@ $("create-form").addEventListener("submit", async (event) => {
       payload.objective = $("create-objective").value.trim();
     if ($("create-title").value.trim())
       payload.title = $("create-title").value.trim();
+    payload.knowledge_base_ids = [...$("create-knowledge").selectedOptions].map(
+      (option) => option.value,
+    );
     if ($("create-model").value) payload.model = $("create-model").value;
     if ($("create-template").value === "custom")
       payload.task_spec = JSON.parse($("create-spec").value);

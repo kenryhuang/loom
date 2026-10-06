@@ -1,0 +1,181 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { JSDOM } from "jsdom";
+import { KnowledgeView } from "../../src/loom/web/assets/views/knowledge.mjs";
+import { SessionProjection } from "../../src/loom/web/assets/state.mjs";
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+function setup(
+  api,
+  state = {
+    session_id: "one",
+    title: "Demo",
+    task: { state: "idle", revision: 1, knowledge_base_ids: [] },
+  },
+  bind = async () => {},
+) {
+  const dom = new JSDOM("<body></body>");
+  globalThis.document = dom.window.document;
+  dom.window.HTMLDialogElement.prototype.showModal = function () {
+    this.open = true;
+  };
+  dom.window.HTMLDialogElement.prototype.close = function () {
+    this.open = false;
+  };
+  return {
+    dom,
+    view: new KnowledgeView({ api: () => api, state: () => state, bind }),
+  };
+}
+const base = {
+  id: "kb",
+  name: "Manual",
+  engine: "sqlite_fts",
+  description: "Reference",
+  chunk_count: 1,
+  documents: [{ id: "doc", name: "manual.md" }],
+  jobs: [],
+};
+const catalog = {
+  knowledge_bases: [base],
+  embedding_profiles: [],
+  engines: ["sqlite_fts", "sqlite_hybrid"],
+};
+
+test("knowledge manager renders sources, binds selected KBs and searches safely", async () => {
+  const requests = [],
+    bindings = [];
+  const api = {
+    json: async (path, options) => {
+      requests.push([path, options.body]);
+      if (path.endsWith("/search"))
+        return {
+          matches: [
+            {
+              document: "manual.md",
+              start_line: 2,
+              end_line: 4,
+              source_id: "kb/doc#0",
+              text: "<script>bad()</script> Evidence",
+            },
+          ],
+        };
+      return path.endsWith("/kb") ? base : catalog;
+    },
+  };
+  const { dom, view } = setup(api, undefined, async (...args) =>
+    bindings.push(args),
+  );
+  await view.open(true);
+  const checkbox = view.dialog.querySelector('[type="checkbox"]');
+  checkbox.checked = true;
+  checkbox.dispatchEvent(new dom.window.Event("change"));
+  view.dialog.querySelector(".knowledge-binding button").click();
+  await tick();
+  assert.deepEqual(bindings[0], [["kb"], "one", 1]);
+  const search = view.dialog.querySelector(".knowledge-search");
+  search.querySelector("input").value = "protocol";
+  search.dispatchEvent(new dom.window.Event("submit", { cancelable: true }));
+  await tick();
+  assert.match(
+    view.dialog.querySelector(".knowledge-hit").textContent,
+    /manual.md:2–4/,
+  );
+  assert.match(view.dialog.textContent, /kb\/doc#0/);
+  assert.equal(view.dialog.querySelector("script"), null);
+  assert.deepEqual(requests.at(-1), [
+    "/v1/knowledge-bases/kb/search",
+    { query: "protocol", limit: 5 },
+  ]);
+  view.close();
+  dom.window.close();
+});
+
+test("closed manager ignores late responses and busy sessions cannot change bindings", async () => {
+  let resolve;
+  const { dom, view } = setup({
+    json: () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  });
+  const pending = view.open(true);
+  view.close();
+  resolve(catalog);
+  await pending;
+  assert.equal(view.dialog.open, false);
+  assert.equal(view.content.children.length, 0);
+  view.client = {
+    json: async (path) => (path.endsWith("/kb") ? base : catalog),
+  };
+  view.api = () => view.client;
+  view.state = () => ({
+    session_id: "one",
+    task: { state: "running", knowledge_base_ids: ["kb"] },
+  });
+  await view.open(true);
+  assert.equal(
+    view.dialog.querySelector(".knowledge-binding button").disabled,
+    true,
+  );
+  assert.equal(view.dialog.querySelector('[type="checkbox"]').disabled, true);
+  view.close();
+  dom.window.close();
+});
+
+test("knowledge binding events update session state without changing task progress", () => {
+  const projection = new SessionProjection({
+    event_cursor: 0,
+    session_id: "one",
+    task: { state: "idle", limits: {} },
+  });
+  projection.apply({
+    seq: 1,
+    session_id: "one",
+    type: "task.knowledge.changed",
+    payload: {
+      knowledge_base_ids: ["kb"],
+      task_spec: { tools: { collections: ["knowledge"] } },
+    },
+  });
+  assert.deepEqual(projection.snapshot.task.knowledge_base_ids, ["kb"]);
+  assert.equal(projection.snapshot.task.state, "idle");
+});
+
+test("creation errors stay beside the form and DashScope preset fills a reusable profile", async () => {
+  const api = {
+    json: async (path, options) => {
+      if (options.body) throw new Error("Unknown knowledge engine");
+      return path.endsWith("/kb") ? base : catalog;
+    },
+  };
+  const { dom, view } = setup(api);
+  await view.open(false, { create: true });
+  const form = view.content.querySelector(".knowledge-create form");
+  const name = form.querySelector("input");
+  name.value = "Keep my input";
+  form.dispatchEvent(new dom.window.Event("submit", { cancelable: true }));
+  await tick();
+  const error = form.querySelector('[role="alert"]');
+  assert.equal(error.hidden, false);
+  assert.match(error.textContent, /Restart the service/);
+  assert.equal(name.value, "Keep my input");
+  assert.equal(form.querySelector('button[type="submit"]').disabled, false);
+  assert.equal(
+    form.querySelector('option[value="yakdb_local"]').disabled,
+    true,
+  );
+  const profileForm = view.content.querySelectorAll(
+    ".knowledge-create form",
+  )[1];
+  profileForm.querySelector('button[type="button"]').click();
+  const values = [...profileForm.querySelectorAll("input")].map(
+    (input) => input.value,
+  );
+  assert.deepEqual(values, [
+    "DashScope text-embedding-v4",
+    "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings",
+    "text-embedding-v4",
+    "LOOM_LLM_API_KEY",
+  ]);
+  view.close();
+});

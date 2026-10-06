@@ -122,6 +122,23 @@ export function builtinPanels() {
         },
       };
     })
+    .register("knowledge", (actions) => {
+      const root = panel("Knowledge bases"),
+        text = element("p", "muted"),
+        configure = element("button", "quiet", "Configure knowledge bases");
+      configure.type = "button";
+      configure.addEventListener("click", () => actions.knowledge?.());
+      root.append(text, configure);
+      return {
+        element: root,
+        update(state) {
+          const ids = state.task.knowledge_base_ids || [];
+          text.textContent = ids.length
+            ? `${ids.length} attached · Model searches when needed`
+            : "No knowledge bases attached";
+        },
+      };
+    })
     .register("workflow", () => {
       const root = panel("Workflow"),
         list = element("ul", "plan-list");
