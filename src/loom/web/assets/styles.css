@@ -562,6 +562,7 @@ pre {
   padding: 6px 8px;
 }
 .plan-list {
+  list-style-type: disc;
   padding-left: 18px;
   margin: 0;
   font-size: 12px;
@@ -572,11 +573,15 @@ pre {
 .plan-list .completed,
 .plan-list .succeeded {
   color: var(--muted);
-  text-decoration: line-through;
+  text-decoration: none;
 }
 .plan-list .in_progress,
 .plan-list .running {
   color: var(--accent);
+}
+.plan-list .in_progress::marker,
+.plan-list .running::marker {
+  content: "> ";
 }
 .output-link {
   display: block;

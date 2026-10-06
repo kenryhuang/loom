@@ -124,7 +124,7 @@ export function builtinPanels() {
     })
     .register("workflow", () => {
       const root = panel("Workflow"),
-        list = element("ol", "plan-list");
+        list = element("ul", "plan-list");
       root.append(list);
       let signature;
       return {
