@@ -59,7 +59,10 @@ class SessionStore:
         row = db.execute("SELECT body FROM sessions WHERE id=?", (sid,)).fetchone()
         if row is None:
             raise ServiceError("Session not found", 404)
-        return json.loads(row[0])
+        state = json.loads(row[0])
+        if state.get("deleted_at"):
+            raise ServiceError("Session not found", 404)
+        return state
 
     def _save(self, db, state):
         db.execute("UPDATE sessions SET body=? WHERE id=?", (canonical(state), state["session_id"]))
@@ -308,7 +311,28 @@ class SessionStore:
 
     def list_sessions(self):
         with self.transaction() as db:
-            return [json.loads(row[0]) for row in db.execute("SELECT body FROM sessions ORDER BY rowid DESC")]
+            return [json.loads(row[0]) for row in db.execute("SELECT body FROM sessions WHERE json_extract(body, '$.deleted_at') IS NULL ORDER BY rowid DESC")]
+
+    def delete(self, sid):
+        with self.transaction() as db:
+            row = db.execute("SELECT body FROM sessions WHERE id=?", (sid,)).fetchone()
+            if row is None:
+                raise ServiceError("Session not found", 404)
+            state = json.loads(row[0])
+            if state.get("deleted_at"):
+                return {"session_id": sid, "deleted": True}
+            if (state["task"]["state"] not in {"idle", "completed", "failed", "paused"}
+                    or (state.get("run") or {}).get("state") == "running" or state.get("workspace_blocked")):
+                raise ServiceError("Stop the session and wait for its processes to exit before deleting", 409)
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            for table in ("semantic_jobs", "session_analyses"):
+                if table in tables and db.execute(
+                    f"SELECT 1 FROM {table} WHERE session_id=? AND json_extract(body,'$.state') IN ('queued','running')", (sid,)
+                ).fetchone():
+                    raise ServiceError("Wait for analysis or stop Deep evaluation before deleting this session", 409)
+            state["deleted_at"] = now_iso()
+            self._save(db, state)
+            return {"session_id": sid, "deleted": True}
 
     def events(self, sid, after=0, limit=200):
         if isinstance(after, bool) or not isinstance(after, int) or after < 0 or not 1 <= limit <= 1000:

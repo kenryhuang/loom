@@ -139,6 +139,7 @@ class SessionSemantic:
                     "session": sid, "analysis": aid}
         key = hashlib.sha256(canonical(identity).encode()).hexdigest()
         with self.lock, self.store.transaction() as db:
+            self.store._load(db, sid)
             if self.closed.is_set():
                 raise ServiceError("Service is closing", 503)
             row = db.execute("SELECT body FROM semantic_jobs WHERE cache_key=?", (key,)).fetchone()

@@ -473,3 +473,27 @@ def test_yakdb_progress_review_failure_is_bounded_and_resume_corrects_field_only
         assert execution.operations == ["route"]
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("arguments", ['{"path":"a", }', '[]', '{"path":"a"'])
+def test_malformed_tool_arguments_return_feedback_without_executing_and_can_recover(tmp_path, arguments):
+    async def scenario():
+        calls = []
+
+        async def read(value, _options):
+            calls.append(value)
+            return ok(Observation("read", "read_file", {"content": "evidence"}, "now"))
+
+        provider = Provider([
+            LlmResponse("", (LlmToolCall("bad", "read_file", arguments),)),
+            LlmResponse("", (LlmToolCall("fixed", "read_file", '{"path":"a"}'),)), final(),
+        ])
+        execution = Execution()
+        result = await run_managed(tmp_path, provider, execution, {"read_file": read})
+        assert result.ok and result.value.control.kind == "completed"
+        assert calls == [{"path": "a"}]
+        assert execution.operations == ["fixed"]
+        feedback = [m for m in provider.calls[1] if m.role == "tool" and m.tool_call_id == "bad"]
+        assert len(feedback) == 1 and "No action was executed" in feedback[0].content
+
+    asyncio.run(scenario())

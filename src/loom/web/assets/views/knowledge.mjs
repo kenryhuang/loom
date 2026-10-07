@@ -18,14 +18,23 @@ function button(label) {
 }
 
 export class KnowledgeView {
-  constructor({ api, state, bind, changed = () => {} }) {
+  constructor({
+    api,
+    state,
+    bind,
+    root,
+    selected = () => {},
+    changed = () => {},
+  }) {
+    this.root = root;
+    this.onSelected = selected;
     this.api = api;
     this.state = state;
     this.bind = bind;
     this.changed = changed;
-    this.dialog = element("dialog", "knowledge-dialog");
+    this.dialog = root || element("dialog", "knowledge-dialog");
     this.dialog.setAttribute("aria-label", "Knowledge bases");
-    document.body.append(this.dialog);
+    if (!root) document.body.append(this.dialog);
     this.dialog.addEventListener("cancel", (event) => {
       event.preventDefault();
       this.close();
@@ -34,7 +43,7 @@ export class KnowledgeView {
   close() {
     this.abort?.abort();
     clearTimeout(this.timer);
-    if (this.dialog.open) this.dialog.close();
+    if (!this.root && this.dialog.open) this.dialog.close();
   }
   async open(bindSession = false, { baseId, create = false } = {}) {
     this.close();
@@ -47,14 +56,15 @@ export class KnowledgeView {
     const heading = element("div", "dialog-heading");
     const close = button("Close");
     close.onclick = () => this.close();
-    heading.append(element("h2", "", "Knowledge bases"), close);
+    heading.append(element("h2", "", "Knowledge bases"));
+    if (!this.root) heading.append(close);
     this.dialog.append(heading);
     this.notice = element("p", "muted");
     this.notice.setAttribute("role", "status");
     this.dialog.append(this.notice);
     this.content = element("div");
     this.dialog.append(this.content);
-    this.dialog.showModal();
+    if (!this.root) this.dialog.showModal();
     try {
       await this.refresh(baseId ?? this.baseId);
       if (create) {
@@ -97,13 +107,14 @@ export class KnowledgeView {
       option.value = base.id;
       select.append(option);
     }
-    this.content.append(field("Manage knowledge base", select));
+    if (!this.root) this.content.append(field("Manage knowledge base", select));
     this.basePanel = element("section", "knowledge-base-panel");
     this.content.append(this.basePanel);
     this.baseId = catalog.knowledge_bases.some((base) => base.id === selectedId)
       ? selectedId
       : catalog.knowledge_bases[0]?.id;
     select.value = this.baseId || "";
+    this.onSelected(this.baseId);
     select.onchange = () => {
       this.baseId = select.value;
       this.renderBase().catch((error) => this.error(error));

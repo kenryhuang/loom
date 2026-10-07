@@ -58,6 +58,12 @@ class LoomService:
     def create(self, command_id, payload):
         return self.store.create(command_id, payload)
 
+    def delete(self, sid):
+        with self.lock:
+            if sid in self.active:
+                raise ServiceError("Wait for the session worker to exit before deleting", 409)
+            return self.store.delete(sid)
+
     def snapshot(self, sid):
         state = self.store.snapshot(sid)
         counters = decode((state["run"] or {}).get("counters", encode({})))
@@ -358,7 +364,10 @@ class LoomService:
             elif kind == "read_artifact":
                 digest = value["digest"]
                 if not db.execute("SELECT 1 FROM artifacts WHERE session_id=? AND digest=?", (sid, digest)).fetchone():
-                    raise ServiceError("Artifact does not belong to this session", 404)
+                    raise ServiceError(
+                        "Artifact does not belong to this session. Use knowledge_read with knowledge_base_id and document_id "
+                        "for knowledge documents; their checksums are not artifact IDs.", 404,
+                    )
                 response = json.loads(self.store.artifacts.read(digest))
             elif kind == "request_input":
                 existing = state["input_request"]

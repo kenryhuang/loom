@@ -397,8 +397,8 @@ class TaskAssembly:
     def artifact_tool_ref():
         return ToolRef(
             "read_artifact",
-            "Read retained evidence in bounded pages. Auto prefers readable text; json reads the original serialized artifact. "
-            "Follow read_more/next_offset to advance; has_more means more stored content, not a failed fetch. Use a smaller limit if context is tight.",
+            "Read retained session artifacts by artifact digest. For knowledge documents use knowledge_read, not document_digest. "
+            "Auto prefers text; json returns serialized data. Follow read_more/next_offset to page forward; limit counts characters.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -441,6 +441,14 @@ class TaskAssembly:
             refs.extend(item for item in evidence if item.strip())
         self._evidence = list(dict.fromkeys([*self._evidence, *refs]))
         artifact = output.get("artifact", {})
+        if binding.artifact_kind == "knowledge_source" and isinstance(artifact, dict) and artifact.get("kind") == "knowledge_source":
+            passages = output.get("matches", [output])
+            for passage in passages:
+                if isinstance(passage, dict) and passage.get("text", "").strip() and isinstance(passage.get("source_id"), str):
+                    source = passage["source_id"]
+                    self._verified_sources[source] = artifact
+                    if source not in self._evidence:
+                        self._evidence.append(source)
         if binding.artifact_kind == "source" and isinstance(artifact, dict) and artifact.get("kind") == "source":
             for url in [*refs, output.get("requested_url", "")]:
                 if isinstance(url, str) and urlsplit(url).scheme in {"http", "https"}:

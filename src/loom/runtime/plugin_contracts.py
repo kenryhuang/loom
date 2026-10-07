@@ -64,6 +64,10 @@ class PluginRegistry:
             raise ValueError(f"Duplicate plugin: {kind}/{plugin_id}")
         self._factories[key] = factory
 
+    def catalog(self, kind: str) -> list[dict[str, str]]:
+        """Describe registered identities without instantiating or executing plugins."""
+        return [{"id": plugin_id, "version": version} for registered_kind, plugin_id, version in sorted(self._factories) if registered_kind == kind]
+
     def create(self, kind: str, spec: Mapping, **services):
         spec = json_value(dict(spec))
         plugin_id = spec.pop("plugin", None)

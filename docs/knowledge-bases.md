@@ -80,3 +80,18 @@ The web form has a **Use DashScope · text-embedding-v4** preset. For the existi
 ```
 
 This reuses the task model's key variable, including the service's configured `.env` fallback. The Beijing endpoint above was verified with the existing installation; use the endpoint matching your account's region for another deployment. Indexing submits at most 10 passages per embedding request, matching the [DashScope v4 synchronous API batch limit](https://www.alibabacloud.com/help/en/model-studio/text-embedding-synchronous-api). The preset fills the form; click **Add embedding profile** to save, then select it when creating a hybrid knowledge base.
+
+## Reading retrieved documents
+
+`knowledge_read` reads only documents from bases attached to the session. Use
+`read_with` from `knowledge_list` or `knowledge_search`, then `read_more` to
+continue. PDF/Office pages use `page_number`; plain text uses page 1 and character
+offsets. Each call returns at most 12,000 characters.
+
+Model-facing document checksums are named `document_digest`; these are not
+session artifact IDs. `read_artifact` remains the reader for retained session
+artifacts. Successful knowledge retrieval is retained as `knowledge_source`
+evidence and satisfies research output contracts; empty results do not.
+
+Malformed tool-call JSON is returned as validation feedback to the model without
+executing the call. Corrections remain subject to the existing run budgets.

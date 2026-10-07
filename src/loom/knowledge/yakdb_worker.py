@@ -39,6 +39,12 @@ async def execute(value):
             if fid:
                 await backend.delete_file(fid)
             return {}
+        if value["action"] == "read":
+            fid = await backend.find_file_exact(value["name"])
+            if not fid:
+                raise ValueError("Document not found")
+            passage = await workspace.read(str(fid), pages=str(value["page_number"]))
+            return {"text": passage[value["offset"]:value["offset"] + value["limit"]], "total_chars": len(passage)}
         result = await workspace.search(value["query"], limit=value["limit"])
         for hit in result["results"]:
             passage = await workspace.read(hit["file_id"], pages=str(hit["page_number"]))

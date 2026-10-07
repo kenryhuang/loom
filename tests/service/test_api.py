@@ -317,3 +317,39 @@ def test_semantic_api_validates_scope_and_runs_evaluation_without_task_events(ap
     assert client._json(route, {})["id"] == job["id"]
     with pytest.raises(ServiceError):
         client._json(route + "/missing")
+
+
+def test_session_soft_delete_hides_history_and_is_idempotent(api):
+    service, server, client, directory = api
+    sid = client.create({"title": "Disposable", "task_spec": {"tools": {"collections": ["task_control"]}}})["session_id"]
+    other = client.create({"title": "Keep", "task_spec": {"tools": {"collections": ["task_control"]}}})["session_id"]
+    assert client._json(f"/v1/sessions/{sid}/delete", {})["deleted"]
+    assert client._json(f"/v1/sessions/{sid}/delete", {})["deleted"]
+    assert sid not in [s["session_id"] for s in client._json("/v1/sessions")["sessions"]]
+    assert client.snapshot(other)["title"] == "Keep"
+    with pytest.raises(ServiceError, match="not found"):
+        client.snapshot(sid)
+    with pytest.raises(ServiceError, match="not found"):
+        service.store.events(sid)
+    with service.store.transaction() as db:
+        state = json.loads(db.execute("SELECT body FROM sessions WHERE id=?", (sid,)).fetchone()[0])
+        assert state["deleted_at"]
+        assert db.execute("SELECT count(*) FROM events WHERE session_id=?", (sid,)).fetchone()[0] > 0
+
+
+def test_session_delete_rejects_live_work_and_evaluation(api):
+    service, server, client, _ = api
+    sid = client.create({"task_spec": {"tools": {"collections": ["task_control"]}}})["session_id"]
+    for status in ("running", "queued", "pausing", "recovering"):
+        with service.store.transaction() as db:
+            state = service.store._load(db, sid)
+            state["task"]["state"] = status
+            service.store._save(db, state)
+        with pytest.raises(ServiceError, match="Stop the session"):
+            client._json(f"/v1/sessions/{sid}/delete", {})
+    with service.store.transaction() as db:
+        state["task"]["state"] = "idle"
+        service.store._save(db, state)
+        db.execute("INSERT INTO semantic_jobs VALUES(?,?,?,?)", ("busy", sid, "busy", json.dumps({"state": "running"})))
+    with pytest.raises(ServiceError, match="Deep evaluation"):
+        client._json(f"/v1/sessions/{sid}/delete", {})

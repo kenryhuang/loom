@@ -160,3 +160,53 @@ def test_embedding_key_uses_service_dotenv_and_batches_fit_dashscope(tmp_path, m
     base = store.create({"name": "Long document", "engine": "sqlite_hybrid", "embedding_profile_id": profile["id"]})
     store.index(base["id"], {"name": "long.md", "content": "hello " * 4000})
     assert len(batches) > 1 and max(batches) == 10
+
+
+@pytest.mark.asyncio
+async def test_knowledge_reader_is_bounded_scoped_and_distinguishes_document_checksums(tmp_path):
+    from loom.core import thaw_json
+
+    store = KnowledgeStore(tmp_path)
+    base, other = store.create({"name": "Allowed"}), store.create({"name": "Other"})
+    doc = store.index(base["id"], {"name": "manual.md", "content": "Launch Alpha. " * 50})
+    foreign = store.index(other["id"], {"name": "private.md", "content": "Private"})
+    collection = knowledge_collection(TaskRequest("Read", metadata={"knowledge_base_ids": [base["id"]], "knowledge_directory": str(tmp_path)}))
+    listing = thaw_json((await collection.entrypoints["knowledge/knowledge_list"]({})).value.value)
+    entry = listing["knowledge_bases"][0]["documents"][0]
+    assert "digest" not in entry and entry["document_digest"] == doc["digest"]
+    hits = thaw_json((await collection.entrypoints["knowledge/knowledge_search"]({"query": "Alpha"})).value.value)["matches"]
+    assert "digest" not in hits[0] and hits[0]["read_with"] == entry["read_with"]
+    read = collection.entrypoints["knowledge/knowledge_read"]
+    first = thaw_json((await read({**entry["read_with"], "limit": 20})).value.value)
+    second = thaw_json((await read(first["read_more"])).value.value)
+    assert first["has_more"] and len(first["text"]) == 20 and second["offset"] == 20
+    assert not (await read({"knowledge_base_id": other["id"], "document_id": foreign["document_id"]})).ok
+    assert not (await read({"knowledge_base_id": base["id"], "document_id": foreign["document_id"]})).ok
+    for args in ({"offset": -1}, {"limit": 12001}, {"page_number": 2}, {"offset": 10000}):
+        with pytest.raises(ServiceError):
+            store.read(base["id"], doc["document_id"], **args)
+
+
+@pytest.mark.asyncio
+async def test_knowledge_evidence_satisfies_research_contract_and_survives_restore(tmp_path):
+    from loom.tasks.assembly import TaskAssembly
+
+    store = KnowledgeStore(tmp_path)
+    base = store.create({"name": "References"})
+    store.index(base["id"], {"name": "manual.md", "content": "Launch Alpha safely."})
+    request = TaskRequest("Research", metadata={"knowledge_base_ids": [base["id"]], "knowledge_directory": str(tmp_path)}, task_spec={
+        "tools": {"collections": ["knowledge", "task_control"]},
+        "outputs": [{"kind": "report", "format": "markdown", "require_evidence_refs": True, "require_verified_sources": True}],
+    })
+    assembly = TaskAssembly(request, plan_mode="off")
+    assert assembly.completion_error()
+    await assembly.handlers()["knowledge_search"]({"query": "zzzznonexistent"})
+    assert assembly.completion_error()  # An empty search is not evidence.
+    result = await assembly.handlers()["knowledge_search"]({"query": "Alpha"})
+    assert result.ok
+    assert assembly.completion_error() is None
+    restored = TaskAssembly(request, plan_mode="off")
+    restored.restore(assembly.snapshot())
+    assert restored.completion_error() is None
+    await assembly.close()
+    await restored.close()

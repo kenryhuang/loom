@@ -4,6 +4,7 @@ import { element, renderResult } from "./markdown.mjs";
 import { reportContent } from "./renderers.mjs";
 import { FeedView } from "./views/feed.mjs";
 import { builtinPanels, PanelsView } from "./views/panels.mjs";
+import { SessionSetupView } from "./views/session-setup.mjs";
 import { SessionListView } from "./views/sessions.mjs";
 import { KnowledgeListView } from "./views/knowledge-list.mjs";
 import { KnowledgeView } from "./views/knowledge.mjs";
@@ -14,6 +15,10 @@ let controller,
   catalog,
   evaluationId = null,
   sending = false;
+const sessionSetup = new SessionSetupView($("create-page"), {
+  api: () => controller?.api,
+  templateChanged,
+});
 const trajectory = new TrajectoryView($("trajectory-page"), {
   onError: (error) => {
     if (error.status === 401) showError(error);
@@ -23,6 +28,7 @@ const list = new SessionListView(
   $("session-list"),
   $("session-search"),
   select,
+  deleteSession,
 );
 const feed = new FeedView($("event-feed"), {
   onTrajectory: () => openEvaluation(controller?.selectedId),
@@ -47,11 +53,20 @@ const knowledgeList = new KnowledgeListView(
   $("knowledge-search"),
   {
     api: () => controller?.api,
-    select: (baseId) => knowledge.open(false, { baseId }),
+    select: (baseId) => openKnowledge({ baseId }),
     error: showError,
   },
 );
 const knowledge = new KnowledgeView({
+  root: $("knowledge-page"),
+  selected: (id) => {
+    knowledgeList.selectedId = id;
+    knowledgeList.render();
+  },
+  changed: () => knowledgeList.refresh(),
+  api: () => controller?.api,
+});
+const knowledgeBinding = new KnowledgeView({
   changed: () => knowledgeList.refresh(),
   api: () => controller?.api,
   state: () => controller?.projection?.snapshot,
@@ -67,6 +82,7 @@ const evaluationList = new SessionListView(
   $("evaluation-list"),
   $("evaluation-search"),
   openEvaluation,
+  deleteSession,
 );
 let activeComponent = "sessions";
 function activateComponent(component) {
@@ -81,7 +97,7 @@ for (const button of document.querySelectorAll("[data-component]")) {
   button.addEventListener("click", () => {
     const component = button.dataset.component;
     activateComponent(component);
-    if (component === "knowledge") knowledgeList.refresh();
+    if (component === "knowledge") openKnowledge();
     else if (component === "evaluation")
       openEvaluation(evaluationId || controller?.selectedId);
     else {
@@ -99,15 +115,70 @@ $("refresh-evaluation").addEventListener("click", () =>
   controller?.refresh().catch(showError),
 );
 $("new-knowledge").addEventListener("click", () =>
-  knowledge.open(false, { create: true }),
+  openKnowledge({ create: true }),
 );
 $("refresh-knowledge").addEventListener("click", () => knowledgeList.refresh());
 const panels = new PanelsView($("session-panels"), builtinPanels(), {
   command: (kind, payload) => controller.command(kind, payload),
   error: showError,
   artifact: openArtifact,
-  knowledge: () => knowledge.open(true),
+  knowledge: () => knowledgeBinding.open(true),
 });
+
+async function deleteSession(session) {
+  if (!controller) return;
+  if (!catalog?.session_delete) {
+    alert(
+      "Restart the Loom service and refresh this page to enable session deletion.",
+    );
+    return;
+  }
+  if (
+    !confirm(
+      `Delete “${session.title}”? This removes it from Sessions and Evaluation. Local records are retained; knowledge bases and workspace files are unchanged.`,
+    )
+  )
+    return;
+  const active = controller,
+    id = session.session_id;
+  try {
+    await active.api.json(active.api.path(id, "delete"), { body: {} });
+    if (controller !== active) return;
+    if (active.selectedId === id) {
+      active.abort?.abort();
+      ++active.generation;
+      active.selectedId = null;
+      active.projection = null;
+      feed.reset();
+      $("session-panels").hidden = true;
+      $("message").value = "";
+      $("message").disabled = true;
+      $("send").disabled = true;
+      $("controls").replaceChildren();
+      $("session-title").textContent = "Choose a session or start a new one";
+      $("task-status").textContent = "Ready";
+      $("run-failure").hidden = true;
+      $("pending-input").hidden = true;
+    }
+    if (evaluationId === id) {
+      evaluationId = null;
+      trajectory.close();
+      $("evaluation-title").textContent = "Choose a session to evaluate";
+    }
+    await active.refresh();
+    if (controller !== active) return;
+    if (currentId() === id) {
+      history.replaceState(null, "", "#/sessions");
+      if (active.sessions[0]) await select(active.sessions[0].session_id);
+      else {
+        activateComponent("sessions");
+        setWorkspaceMode(false);
+      }
+    }
+  } catch (error) {
+    if (controller === active) alert(error.message);
+  }
+}
 
 function notice(message, error = false) {
   const root = $("notice");
@@ -140,11 +211,25 @@ function evaluationRoute() {
     location.hash.endsWith("/trajectory")
   );
 }
-function setWorkspaceMode(analysis) {
-  $("conversation-workspace").hidden = analysis;
+function openKnowledge(options = {}) {
+  activateComponent("knowledge");
+  setWorkspaceMode("knowledge");
+  knowledgeList.refresh();
+  return knowledge.open(false, options);
+}
+function setWorkspaceMode(mode) {
+  const creating = mode === "create";
+  $("create-page").hidden = !creating;
+  if (!creating) sessionSetup.abort?.abort();
+  const knowledgeMode = mode === "knowledge";
+  const analysis = mode === true;
+  $("knowledge-workspace").hidden = !knowledgeMode;
+  if (!knowledgeMode) knowledge.close();
+  $("conversation-workspace").hidden = analysis || knowledgeMode || creating;
   $("conversation-page").hidden = analysis;
   $("evaluation-workspace").hidden = !analysis;
-  document.querySelector(".session-details").hidden = analysis;
+  document.querySelector(".session-details").hidden =
+    analysis || knowledgeMode || creating;
   if (!analysis) trajectory.close();
 }
 async function openEvaluation(id, { fromHistory = false } = {}) {
@@ -295,7 +380,10 @@ async function login(token) {
 }
 
 function disconnect() {
+  sessionSetup.abort?.abort();
   knowledge.close();
+  knowledgeBinding.close();
+  $("knowledge-page").replaceChildren();
   knowledgeList.reset();
   $("new-knowledge").disabled = true;
   $("refresh-knowledge").disabled = true;
@@ -343,6 +431,7 @@ function populateCreate() {
     option.value = model.id;
     $("create-model").append(option);
   }
+  sessionSetup.configure(catalog);
   templateChanged();
 }
 function templateChanged() {
@@ -351,8 +440,7 @@ function templateChanged() {
   $("template-description").textContent =
     template?.description ||
     "Provide a task specification for the installed plugins.";
-  $("workspace-field").hidden = !template?.requires_workspace;
-  $("create-workspace").required = !!template?.requires_workspace;
+  sessionSetup.template(template);
   $("spec-field").hidden = id !== "custom";
   if (id === "custom" && !$("create-spec").value)
     $("create-spec").value = JSON.stringify(
@@ -424,12 +512,22 @@ $("refresh-sessions").addEventListener("click", () =>
 );
 $("new-session").addEventListener("click", async () => {
   $("create-error").textContent = "";
-  $("create-dialog").showModal();
+  sessionSetup.configure(catalog);
+  templateChanged();
+  $("setup-knowledge-reasons").textContent = "";
+  activateComponent("sessions");
+  setWorkspaceMode("create");
+  $("create-objective").focus();
   $("create-knowledge").replaceChildren();
   const active = controller;
   try {
     const data = await active.api.json("/v1/knowledge-bases");
-    if (controller !== active || !$("create-dialog").open) return;
+    if (
+      controller !== active ||
+      $("create-page").hidden ||
+      sessionSetup.recommendation?.result.knowledge_bases
+    )
+      return;
     for (const base of data.knowledge_bases) {
       const option = element("option", "", base.name);
       option.value = base.id;
@@ -461,12 +559,12 @@ $("create-form").addEventListener("submit", async (event) => {
       payload.task_spec = JSON.parse($("create-spec").value);
     else if (template.task_spec)
       payload.task_spec = structuredClone(template.task_spec);
-    if (template?.requires_workspace)
+    if ($("create-workspace").value.trim())
       payload.workspace = $("create-workspace").value.trim();
+    sessionSetup.apply(payload, template);
     const active = controller,
       result = await active.api.create(payload);
     if (controller !== active) return;
-    $("create-dialog").close();
     $("create-objective").value = "";
     $("create-title").value = "";
     await active.refresh();
@@ -477,8 +575,10 @@ $("create-form").addEventListener("submit", async (event) => {
     $("create-submit").disabled = false;
   }
 });
-for (const button of document.querySelectorAll("[data-close]"))
-  button.addEventListener("click", () => $(button.dataset.close).close());
+$("cancel-create").addEventListener("click", () => {
+  setWorkspaceMode(false);
+  $("new-session").focus();
+});
 $("composer").addEventListener("submit", (event) => {
   event.preventDefault();
   send();

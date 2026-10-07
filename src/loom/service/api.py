@@ -46,6 +46,10 @@ class ServiceHTTPServer(ThreadingHTTPServer):
 
             web_frontend = WebFrontend()
         self.web_frontend = web_frontend or None
+        from loom.service.session_setup import SessionSetup
+        from loom.web.frontend import WebFrontend
+
+        self.session_setup = SessionSetup(service, self.web_frontend or WebFrontend())
         self.closing = threading.Event()
         super().__init__(address, SessionHandler)
         from loom.service.trajectory import SessionTrajectory
@@ -165,6 +169,9 @@ class SessionHandler(BaseHTTPRequestHandler):
             if method == "GET" and parts == ["v1", "web", "catalog"] and self.server.web_frontend:
                 self._json(200, self.server.web_frontend.catalog(service))
                 return
+            if method == "POST" and parts == ["v1", "session-setup", "recommend"]:
+                self._json(200, self.server.session_setup.recommend(self._body()))
+                return
             if parts[:2] == ["v1", "knowledge-bases"]:
                 from loom.knowledge.api import dispatch
 
@@ -190,7 +197,11 @@ class SessionHandler(BaseHTTPRequestHandler):
             if len(parts) < 4 or parts[:2] != ["v1", "sessions"]:
                 raise ServiceError("Route not found", 404)
             sid, route = parts[2:4]
-            if method == "POST" and route == "commands" and len(parts) == 4:
+            if method == "POST" and route == "delete" and len(parts) == 4:
+                if self._body() != {}:
+                    raise ServiceError("Session deletion requires an empty object")
+                self._json(200, service.delete(sid))
+            elif method == "POST" and route == "commands" and len(parts) == 4:
                 self._json(202, service.submit(sid, self._body()))
             elif route == "trajectory":
                 analysis = self.server.trajectory

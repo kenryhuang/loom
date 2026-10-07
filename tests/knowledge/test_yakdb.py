@@ -28,6 +28,14 @@ def test_pdf_native_search_page_citations_replacement_failure_and_delete(tmp_pat
     assert len(hits) == 1 and hits[0]["page_number"] == 2
     assert "July eight" in hits[0]["text"]
     assert hits[0]["source_id"].endswith("#page=2")
+    first_page = store.read(base["id"], result["document_id"], limit=20)
+    assert first_page["total_pages"] == 2 and len(first_page["text"]) == 20
+    continuation = store.read(base["id"], result["document_id"], offset=first_page["read_more"]["offset"], limit=20)
+    assert continuation["offset"] == 20
+    second_page = store.read(base["id"], result["document_id"], page_number=2)
+    assert "July eight" in second_page["text"] and not second_page["has_more"]
+    with pytest.raises(ServiceError, match="out of range"):
+        store.read(base["id"], result["document_id"], page_number=3)
     generation = store.get(base["id"])["yakdb_generation"]
     with pytest.raises(ServiceError, match="YakDB index failed"):
         store.index(base["id"], {"name": "manual.pdf", "file_base64": base64.b64encode(b"not a PDF").decode()})

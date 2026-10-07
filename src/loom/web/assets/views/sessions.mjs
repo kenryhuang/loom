@@ -1,10 +1,11 @@
 import { element } from "../markdown.mjs";
 
 export class SessionListView {
-  constructor(root, search, select) {
+  constructor(root, search, select, remove = null) {
     this.root = root;
     this.search = search;
     this.select = select;
+    this.remove = remove;
     this.sessions = [];
     this.selectedId = null;
     this.signature = "";
@@ -47,7 +48,16 @@ export class SessionListView {
         element("small", "", session.task.state),
       );
       button.addEventListener("click", () => this.select(session.session_id));
-      this.root.append(button);
+      if (this.remove) {
+        const row = element("div", "session-list-row");
+        const remove = element("button", "quiet session-delete", "×");
+        remove.type = "button";
+        remove.setAttribute("aria-label", `Delete ${session.title}`);
+        remove.title = "Delete session";
+        remove.onclick = () => this.remove(session);
+        row.append(button, remove);
+        this.root.append(row);
+      } else this.root.append(button);
     }
     if (!sessions.length)
       this.root.append(

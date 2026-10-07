@@ -268,6 +268,104 @@
           aria-label="Trajectory analysis"
         ></section>
       </main>
+      <main
+        id="knowledge-workspace"
+        class="workspace knowledge-workspace"
+        aria-label="Knowledge base management"
+        hidden
+      >
+        <section id="knowledge-page" class="knowledge-page"></section>
+      </main>
+      <main
+        id="create-page"
+        class="workspace create-workspace"
+        aria-label="New session"
+        hidden
+      >
+        <form id="create-form">
+          <div class="dialog-heading">
+            <h2>New session</h2>
+            <button
+              class="quiet"
+              type="button"
+              id="cancel-create"
+              aria-label="Cancel new session"
+            >
+              Cancel
+            </button>
+          </div>
+          <label for="create-objective"
+            >Initial task <span class="muted">(optional)</span></label
+          ><textarea
+            id="create-objective"
+            rows="3"
+            placeholder="What should Loom work on?"
+          ></textarea>
+          <div class="setup-assistance">
+            <button id="setup-recommend" type="button" class="quiet">
+              Recommend with LLM
+            </button>
+            <p id="setup-status" class="muted small" role="status"></p>
+          </div>
+          <label for="create-template">Task type</label
+          ><select id="create-template"></select>
+          <p id="template-description" class="muted small"></p>
+          <fieldset id="collections-field">
+            <legend>Tool collections · adjust as needed</legend>
+            <div id="create-collections"></div>
+          </fieldset>
+          <fieldset id="setup-plugins" hidden>
+            <legend>Plugins · adjust as needed</legend>
+            <label for="setup-context">Context plugin</label>
+            <select id="setup-context"></select>
+            <p id="setup-context-reason" class="muted small"></p>
+            <label for="setup-workflow">Workflow plugin</label>
+            <select id="setup-workflow"></select>
+            <p id="setup-workflow-reason" class="muted small"></p>
+          </fieldset>
+          <details class="setup-external">
+            <summary>External tools</summary>
+            <p class="muted small">
+              No external tools are connected yet. External integrations will
+              appear here when supported.
+            </p>
+          </details>
+          <label for="create-title"
+            >Session title <span class="muted">(optional)</span></label
+          ><input id="create-title" placeholder="A name for this work" />
+          <div id="workspace-field">
+            <label for="create-workspace">Workspace path</label
+            ><input
+              id="create-workspace"
+              placeholder="/absolute/path/to/project"
+              aria-describedby="workspace-hint"
+            />
+            <p id="workspace-hint" class="muted small">
+              Existing directory on the Loom service machine. Required for file
+              and command tools; optional otherwise. Enter the full path.
+            </p>
+          </div>
+          <label for="create-model">Model</label
+          ><select id="create-model"></select>
+          <label for="create-knowledge">Knowledge bases (optional)</label>
+          <select
+            id="create-knowledge"
+            multiple
+            size="3"
+            aria-describedby="create-knowledge-hint"
+          ></select>
+          <p id="setup-knowledge-reasons" class="muted small"></p>
+          <p id="create-knowledge-hint" class="muted small">
+            The model can search selected knowledge bases when needed.
+          </p>
+          <div id="spec-field" hidden>
+            <label for="create-spec">Task specification (JSON)</label
+            ><textarea id="create-spec" rows="8" spellcheck="false"></textarea>
+          </div>
+          <p id="create-error" class="error" role="alert"></p>
+          <button class="primary" id="create-submit">Create session</button>
+        </form>
+      </main>
       <aside class="session-details" aria-label="Session information">
         <header class="details-header">
           <h2>Session info</h2>
@@ -299,59 +397,6 @@
         </p>
         <p id="auth-error" class="error" role="alert"></p>
         <button class="primary" id="connect">Connect</button>
-      </form>
-    </dialog>
-    <dialog id="create-dialog">
-      <form id="create-form">
-        <div class="dialog-heading">
-          <h2>New session</h2>
-          <button
-            class="quiet"
-            type="button"
-            data-close="create-dialog"
-            aria-label="Close"
-          >
-            ×
-          </button>
-        </div>
-        <label for="create-template">Task type</label
-        ><select id="create-template"></select>
-        <p id="template-description" class="muted small"></p>
-        <label for="create-objective"
-          >Initial task <span class="muted">(optional)</span></label
-        ><textarea
-          id="create-objective"
-          rows="3"
-          placeholder="What should Loom work on?"
-        ></textarea>
-        <label for="create-title"
-          >Session title <span class="muted">(optional)</span></label
-        ><input id="create-title" placeholder="A name for this work" />
-        <div id="workspace-field" hidden>
-          <label for="create-workspace">Workspace path</label
-          ><input
-            id="create-workspace"
-            placeholder="/absolute/path/to/project"
-          />
-        </div>
-        <label for="create-model">Model</label
-        ><select id="create-model"></select>
-        <label for="create-knowledge">Knowledge bases (optional)</label>
-        <select
-          id="create-knowledge"
-          multiple
-          size="3"
-          aria-describedby="create-knowledge-hint"
-        ></select>
-        <p id="create-knowledge-hint" class="muted small">
-          The model can search selected knowledge bases when needed.
-        </p>
-        <div id="spec-field" hidden>
-          <label for="create-spec">Task specification (JSON)</label
-          ><textarea id="create-spec" rows="8" spellcheck="false"></textarea>
-        </div>
-        <p id="create-error" class="error" role="alert"></p>
-        <button class="primary" id="create-submit">Create session</button>
       </form>
     </dialog>
   </body>

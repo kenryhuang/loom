@@ -36,6 +36,8 @@ class WebFrontend:
         return (resource.read_bytes(), content_type) if resource.is_file() else None
 
     def catalog(self, service):
+        from loom.service.session_setup import capability_catalog
+
         models, default_model = [], None
         if service.config_path:
             from loom.tasks.config import load_task_config
@@ -46,6 +48,8 @@ class WebFrontend:
                 models = [{"id": name, "label": f"{name} · {value.model}"} for name, value in loaded.value.models.items()]
         return {
             "schema_version": 1,
+            "session_delete": True,
+            **capability_catalog(service),
             "commands": [{"id": name, "label": COMMAND_LABELS[name]} for name in COMMAND_LABELS if name in COMMAND_TYPES],
             "templates": deepcopy(self.templates),
             "models": models,

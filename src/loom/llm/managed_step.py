@@ -443,11 +443,27 @@ class ManagedStep:
                     value = json.loads(call.arguments)
                     if not isinstance(value, dict):
                         raise ValueError("Tool arguments must be an object")
+                    if call.name == "request_input" and (not isinstance(value.get("question"), str) or not value["question"].strip()):
+                        raise ValueError("Input question must be non-empty")
                 except (ValueError, TypeError) as exc:
-                    return err(make_loom_error("VALIDATION_FAILED", str(exc), retryable=False))
+                    error = make_loom_error(
+                        "VALIDATION_FAILED", f"Invalid tool arguments: {exc}. "
+                        "Reissue this tool with a valid JSON object matching its schema. No action was executed.",
+                        retryable=False, metadata={"failureDomain": "tool", "error_kind": "invalid_input"},
+                    )
+                    await self._emit(runtime, "tool.failed", tool_call_id=call.id, tool_id=call.name, error=error)
+                    observation = _tool_failure_observation(error, observation_id=f"{call.id}-failure", source=call.name, at=runtime.now()).unwrap()
+                    cp["observations"].append(observation)
+                    cp["messages"].append(LlmMessage(
+                        "tool" if cp["native"] else "user", canonical(thaw_json(observation.value)),
+                        name=call.name, tool_call_id=call.id if cp["native"] else None,
+                    ))
+                    cp["tool_index"] += 1
+                    suspended = await self._boundary(cp, runtime)
+                    if suspended is not None:
+                        return suspended
+                    continue
                 if call.name == "request_input":
-                    if not isinstance(value.get("question"), str) or not value["question"].strip():
-                        return err(make_loom_error("VALIDATION_FAILED", "Input question must be non-empty", retryable=False))
                     await self._emit(runtime, "tool.started", tool_call_id=call.id, tool_id=call.name, input=value)
                     request = self.execution.request_input(call, value)
                     cp["pending_input"] = {"call": call, "request_id": request["id"]}
