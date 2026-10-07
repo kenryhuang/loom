@@ -7,7 +7,7 @@ import socket
 import ssl
 import time
 from collections import deque
-from urllib.parse import urldefrag, urljoin, urlsplit, urlunsplit
+from urllib.parse import quote, urldefrag, urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
 
 from loom.service.contracts import ServiceError
@@ -29,7 +29,16 @@ def normalize(url):
         _ = parts.port
     except ValueError as exc:
         raise ServiceError("Invalid website port") from exc
-    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path or "/", parts.query, ""))
+    try:
+        host = parts.hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise ServiceError("Invalid website hostname") from exc
+    netloc = f"[{host}]" if ":" in host else host
+    if parts.port is not None:
+        netloc += f":{parts.port}"
+    return urlunsplit((parts.scheme.lower(), netloc,
+                       quote(parts.path or "/", safe="/%:@!$&'()*+,;=-._~"),
+                       quote(parts.query, safe="%/?@:!$&'()*+,;=-._~"), ""))
 
 
 def public_addresses(host, port):
@@ -102,7 +111,7 @@ def extract(html, url):
 def crawl(source, progress=lambda **_: None, cancelled=lambda: False, *, fetcher=fetch):
     start = normalize(source["url"])
     origin = urlsplit(start)
-    prefix = source["path_prefix"].rstrip("/")
+    prefix = quote(source["path_prefix"].rstrip("/"), safe="/%:@!$&'()*+,;=-._~")
 
     def scope(url):
         p = urlsplit(url)

@@ -41,6 +41,77 @@ export async function renderKnowledgeGraph(view, base) {
       control.disabled = false;
     }
   };
+  const details = element("section", "knowledge-url-import");
+  details.append(element("h3", "", "Import URL"));
+  const form = element("form", "knowledge-form knowledge-url-form");
+  const [urlField, url] = field("Website URL", "", "url");
+  url.required = true;
+  url.placeholder = "https://docs.example.com/";
+  const [pathField, path] = field("Path scope", "/");
+  const [pagesField, pages] = field("Maximum pages (1–1000)", 200, "number");
+  pages.min = 1;
+  pages.max = 1000;
+  const [depthField, depth] = field("Maximum link depth (0–10)", 3, "number");
+  depth.min = 0;
+  depth.max = 10;
+  const [intervalField, interval] = field(
+    "Sync interval in hours (0 = manual)",
+    0,
+    "number",
+  );
+  interval.min = 0;
+  interval.max = 720;
+  const removeWrap = element("label", "knowledge-choice"),
+    remove = element("input");
+  remove.type = "checkbox";
+  removeWrap.append(
+    remove,
+    document.createTextNode(
+      "Remove missing pages only after a complete, successful crawl",
+    ),
+  );
+  const submit = element("button", "primary", "Import URL");
+  submit.type = "submit";
+  const advanced = element("details", "knowledge-url-options");
+  advanced.append(
+    element("summary", "", "Crawl settings"),
+    pathField,
+    pagesField,
+    depthField,
+    intervalField,
+    removeWrap,
+  );
+  form.append(
+    urlField,
+    advanced,
+    element(
+      "p",
+      "muted small",
+      "Crawls public HTML/Markdown within this origin and path, respecting robots.txt. Login-only or JavaScript-only content must be exported first. Indexing sends page text to the selected LLM and embedding services; graph and documents remain local.",
+    ),
+    submit,
+  );
+  form.onsubmit = (event) => {
+    event.preventDefault();
+    invoke(async () => {
+      const source = await view.request(`/${id}/sources`, {
+        url: url.value.trim(),
+        path_prefix: path.value.trim(),
+        max_pages: Number(pages.value),
+        max_depth: Number(depth.value),
+        interval_hours: Number(interval.value),
+        delete_missing: remove.checked,
+      });
+      try {
+        await view.request(`/${id}/sources/${source.id}/sync`, {});
+      } finally {
+        await view.renderBase();
+      }
+    }, submit);
+  };
+  details.append(form);
+  root.insertBefore(details, sourceList);
+
   const data = await view.request(`/${id}/sources`);
   if (view.baseId !== id || !root.isConnected) return;
   for (const source of data.sources) {
@@ -79,10 +150,88 @@ export async function renderKnowledgeGraph(view, base) {
     }
     const sync = button("Sync now"),
       scheduled = button(source.enabled ? "Pause source" : "Enable source");
+    const progress = element("p", "knowledge-source-progress");
+    progress.setAttribute("role", "status");
+    progress.setAttribute("aria-live", "polite");
+    const cancel = button("Cancel sync");
+    cancel.hidden = true;
+    const updateProgress = (job) => {
+      if (job.source_id !== source.id) return;
+      const active = ["queued", "running"].includes(job.state);
+      sync.disabled = active;
+      sync.textContent = active ? "Syncing…" : "Sync now";
+      cancel.hidden = !active;
+      const stages = {
+        queued: "Waiting to start",
+        crawling: "Crawling pages",
+        diffing: "Checking changes",
+        checking_embedding: "Checking embedding service",
+        initializing: "Initializing LightRAG",
+        indexing: "Indexing documents",
+        extracting: "Extracting entities and relationships",
+        embedding: "Generating embeddings",
+        publishing: "Publishing index",
+        completed: "Sync complete",
+      };
+      const parts = [
+        job.state,
+        stages[job.stage] || job.stage || "Starting sync",
+      ];
+      if (job.visited !== undefined) parts.push(`${job.visited} URLs visited`);
+      if (job.pages !== undefined) parts.push(`${job.pages} pages collected`);
+      if (job.indexed !== undefined)
+        parts.push(`${job.indexed}/${job.total} documents indexed`);
+      if (job.llm_calls)
+        parts.push(
+          `${job.llm_calls} LLM calls`,
+          `${job.reported_tokens || 0} reported tokens`,
+        );
+      if (job.embedding_inputs)
+        parts.push(`${job.embedding_inputs} embedding inputs`);
+      if (job.elapsed_seconds !== undefined)
+        parts.push(`${Math.round(job.elapsed_seconds)}s elapsed`);
+      if (active && (job.current_document || job.current_url))
+        parts.push(job.current_document || job.current_url);
+      if (job.error) parts.push(job.error);
+      if (job.state === "completed" && job.result)
+        parts.push(
+          `${job.result.updated || 0} updated`,
+          `${job.result.unchanged || 0} unchanged`,
+          `${job.result.removed || 0} removed`,
+        );
+      progress.textContent = parts.join(" · ");
+      cancel.onclick = async () => {
+        cancel.disabled = true;
+        try {
+          await view.request(`/${id}/jobs/${job.id}/cancel`, {});
+          progress.textContent += " · Cancellation requested…";
+        } catch (error) {
+          progress.textContent = error.message;
+          cancel.disabled = false;
+        }
+      };
+    };
+    view.knowledgeJobListeners.add(updateProgress);
+    const latest =
+      view.latestKnowledgeJob?.source_id === source.id
+        ? view.latestKnowledgeJob
+        : base.jobs?.find((job) => job.source_id === source.id);
+    if (latest) updateProgress(latest);
+    row.append(progress, cancel);
     sync.onclick = () =>
       invoke(async () => {
-        await view.request(`/${id}/sources/${source.id}/sync`, {});
-        await view.renderBase();
+        progress.textContent = "Starting sync…";
+        try {
+          const job = await view.request(
+            `/${id}/sources/${source.id}/sync`,
+            {},
+          );
+          updateProgress(job);
+          await view.renderBase();
+        } catch (error) {
+          progress.textContent = `Sync failed: ${error.message}`;
+          throw error;
+        }
       }, sync);
     scheduled.onclick = () =>
       invoke(async () => {
@@ -132,71 +281,6 @@ export async function renderKnowledgeGraph(view, base) {
     };
     sourceList.append(row);
   }
-  const details = element("details", "knowledge-create");
-  details.append(element("summary", "", "Add website source"));
-  const form = element("form", "knowledge-form");
-  const [urlField, url] = field("Website URL", "", "url");
-  url.required = true;
-  url.placeholder = "https://docs.example.com/";
-  const [pathField, path] = field("Path scope", "/");
-  const [pagesField, pages] = field("Maximum pages (1–1000)", 200, "number");
-  pages.min = 1;
-  pages.max = 1000;
-  const [depthField, depth] = field("Maximum link depth (0–10)", 3, "number");
-  depth.min = 0;
-  depth.max = 10;
-  const [intervalField, interval] = field(
-    "Sync interval in hours (0 = manual)",
-    0,
-    "number",
-  );
-  interval.min = 0;
-  interval.max = 720;
-  const removeWrap = element("label", "knowledge-choice"),
-    remove = element("input");
-  remove.type = "checkbox";
-  removeWrap.append(
-    remove,
-    document.createTextNode(
-      "Remove missing pages only after a complete, successful crawl",
-    ),
-  );
-  const submit = element("button", "primary", "Add & sync");
-  submit.type = "submit";
-  form.append(
-    urlField,
-    pathField,
-    pagesField,
-    depthField,
-    intervalField,
-    removeWrap,
-    element(
-      "p",
-      "muted small",
-      "Crawls public HTML/Markdown within this origin and path, respecting robots.txt. Login-only or JavaScript-only content must be exported first. Indexing sends page text to the selected LLM and embedding services; graph and documents remain local.",
-    ),
-    submit,
-  );
-  form.onsubmit = (event) => {
-    event.preventDefault();
-    invoke(async () => {
-      const source = await view.request(`/${id}/sources`, {
-        url: url.value.trim(),
-        path_prefix: path.value.trim(),
-        max_pages: Number(pages.value),
-        max_depth: Number(depth.value),
-        interval_hours: Number(interval.value),
-        delete_missing: remove.checked,
-      });
-      try {
-        await view.request(`/${id}/sources/${source.id}/sync`, {});
-      } finally {
-        await view.renderBase();
-      }
-    }, submit);
-  };
-  details.append(form);
-  root.append(details);
 
   const graphSection = element("details", "knowledge-create");
   graphSection.append(element("summary", "", "Explore knowledge graph"));

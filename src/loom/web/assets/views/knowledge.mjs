@@ -338,6 +338,8 @@ export class KnowledgeView {
     );
     if (option)
       option.textContent = `${base.name} · ${base.engine} · ${base.documents.length} documents`;
+    this.knowledgeJobListeners = new Set();
+    this.latestKnowledgeJob = null;
     this.basePanel.replaceChildren(
       element("h3", "", base.name),
       element(
@@ -438,9 +440,19 @@ export class KnowledgeView {
     );
     const cancel = button("Cancel indexing / sync");
     cancel.hidden = true;
-    form.append(cancel);
+    if (base.engine === "lightrag_local") {
+      const progress = element("section", "knowledge-job-progress");
+      progress.append(
+        element("h3", "", "Indexing / sync progress"),
+        status,
+        cancel,
+      );
+      this.basePanel.insertBefore(progress, documents);
+    } else form.append(cancel);
     const poll = async (job) => {
       if (id !== this.baseId || this.abort.signal.aborted) return;
+      this.latestKnowledgeJob = job;
+      for (const listener of this.knowledgeJobListeners) listener(job);
       status.textContent = `${job.document} · ${job.state} · ${job.stage || "indexing"}${job.pages !== undefined ? ` · ${job.pages} pages` : ""}${job.indexed !== undefined ? ` · ${job.indexed}/${job.total} documents` : ""}${job.llm_calls ? ` · ${job.llm_calls} LLM calls · ${job.reported_tokens || 0} tokens` : ""}${job.embedding_inputs ? ` · ${job.embedding_inputs} embedding inputs` : ""}${job.current_document ? ` · ${job.current_document}` : ""}${job.current_url ? ` · ${job.current_url}` : ""}${job.error ? ` · ${job.error}` : ""}`;
       add.disabled = ["queued", "running"].includes(job.state);
       cancel.hidden = !add.disabled || base.engine !== "lightrag_local";

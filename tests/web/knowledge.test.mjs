@@ -234,6 +234,16 @@ test("LightRAG creation selects model/profile and website graph lives in main pa
   await view.open(true);
   assert.match(view.dialog.textContent, /Website sources & knowledge graph/);
   assert.match(view.dialog.textContent, /Sync settings/);
+  const urlInput = view.dialog.querySelector(
+    '.knowledge-url-form input[type="url"]',
+  );
+  assert.ok(urlInput);
+  assert.equal(urlInput.closest("details"), null);
+  assert.equal(
+    view.dialog.querySelector('.knowledge-url-form button[type="submit"]')
+      .textContent,
+    "Import URL",
+  );
   const load = [...view.dialog.querySelectorAll("button")].find(
     (b) => b.textContent === "Load graph",
   );
@@ -258,4 +268,73 @@ test("LightRAG creation selects model/profile and website graph lives in main pa
   assert.equal(model.required, true);
   view.close();
   dom.window.close();
+});
+
+test("website sync progress and failures appear beside the source", async () => {
+  const job = {
+    id: "job",
+    source_id: "web",
+    document: "https://example.com/",
+    state: "running",
+    stage: "crawling",
+    pages: 6,
+    visited: 8,
+  };
+  const graphBase = {
+    ...base,
+    engine: "lightrag_local",
+    indexing_model: "main",
+    jobs: [job],
+  };
+  const { dom, view } = setup({
+    json: async (path) => {
+      if (path.endsWith("/sources"))
+        return {
+          sources: [
+            {
+              id: "web",
+              url: "https://example.com/",
+              path_prefix: "/",
+              max_pages: 10,
+              max_depth: 2,
+              delay_seconds: 0.3,
+              interval_hours: 0,
+              enabled: true,
+            },
+          ],
+        };
+      if (path.endsWith("/kb")) return graphBase;
+      return { ...catalog, knowledge_bases: [graphBase] };
+    },
+  });
+  try {
+    await view.open(true);
+    const row = view.dialog.querySelector(".knowledge-source");
+    assert.match(
+      row.textContent,
+      /Crawling pages.*8 URLs visited.*6 pages collected/,
+    );
+    assert.ok(
+      [...row.querySelectorAll("button")].find(
+        (b) => b.textContent === "Syncing…",
+      ).disabled,
+    );
+    const cancel = [...row.querySelectorAll("button")].find(
+      (b) => b.textContent === "Cancel sync",
+    );
+    assert.equal(cancel.hidden, false);
+    for (const listener of view.knowledgeJobListeners)
+      listener({ ...job, state: "failed", error: "Website request failed" });
+    assert.match(row.textContent, /failed.*Website request failed/);
+    assert.equal(cancel.hidden, true);
+    assert.equal(
+      [...row.querySelectorAll("button")].find(
+        (b) => b.textContent === "Sync now",
+      ).disabled,
+      false,
+    );
+  } finally {
+    view.close();
+    dom.window.close();
+  }
 });

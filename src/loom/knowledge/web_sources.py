@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from loom.core import now_iso
 from loom.knowledge.crawler import crawl, normalize
@@ -36,6 +36,7 @@ def save_source(store, kb_id, payload, identifier=None):
     prefix = result["path_prefix"]
     if not isinstance(prefix, str) or not prefix.startswith("/") or "?" in prefix or "#" in prefix:
         raise ServiceError("Website path prefix must be an absolute URL path")
+    prefix = result["path_prefix"] = quote(prefix, safe="/%:@!$&'()*+,;=-._~")
     if previous and any(result[k] != previous[k] for k in ("url", "path_prefix")):
         raise ServiceError("Create a new source to change its URL or scope")
     path = urlsplit(result["url"]).path

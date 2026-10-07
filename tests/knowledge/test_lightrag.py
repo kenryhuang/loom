@@ -122,3 +122,9 @@ def test_cancelled_index_job_retains_previous_generation(graph_store, monkeypatc
         assert store.get(kb)['lightrag_generation'] == generation
     finally:
         jobs.close()
+
+
+def test_crawler_encodes_unicode_urls_without_double_encoding():
+    url = crawler.normalize("https://例子.com/文档/hello%20world?q=中文#标题")
+    assert url == "https://xn--fsqu00a.com/%E6%96%87%E6%A1%A3/hello%20world?q=%E4%B8%AD%E6%96%87"
+    assert crawler.normalize(url) == url
