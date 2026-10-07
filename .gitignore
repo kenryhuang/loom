@@ -27,6 +27,7 @@ __pycache__/
 .coverage.*
 htmlcov/
 coverage.xml
+coverage/
 
 # Build and packaging output
 build/
@@ -41,10 +42,17 @@ runs/
 .loom/
 .worktrees/
 
+# Logs
+*.log
+
+# Caches
+.cache/
+
 # Editor and OS-local files
 .vscode/
 .idea/
 .DS_Store
+Thumbs.db
 *.swp
 *.swo
 .understand-anything/
