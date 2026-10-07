@@ -120,6 +120,8 @@ class ResearchContextManager(BoundedContextManager):
             "Record source URLs and distinguish evidence from inference in the final report. "
             "Failed retrieval and model memory do not satisfy a request to read a source. "
             "Use the returned readable text. A source page with has_more=false is complete in the current view. "
-            "If has_more=true, follow read_more to read the next stored page; do not fetch the same URL again to recover context.",
+            "If has_more=true, read further only when needed to resolve a specific missing fact; do not exhaustively page through a source. "
+            "Do not fetch the same URL again to recover context. Stop collecting once the requested deliverable has sufficient evidence. "
+            "Synthesize supported conclusions, label uncertainty and finish; breadth of related material is not a reason to keep searching.",
         )
         return window

@@ -59,6 +59,8 @@ export class SessionProjection {
     } else if (kind === "task.outputs.changed")
       state.output_artifacts = structuredClone(data.artifacts);
     else if (kind === "run.usage.changed") this.budget(data.total_tokens);
+    else if (kind === "run.wrapping_up")
+      state.run = { ...state.run, reason: `Wrapping up: ${data.reason}` };
     else if (kind === "run.started") {
       if (state.run?.id !== event.run_id) {
         this.budget(0);

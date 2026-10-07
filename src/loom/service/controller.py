@@ -173,6 +173,7 @@ class LoomService:
                 )
             state["epoch"] += 1
             state["run"].update(state="running", attempt_id=new_id("attempt"), process=None)
+            state["run"].pop("reason", None)
             state["task"]["state"] = "running"
             state["task"]["revision"] += 1
             emit("run.started", {"epoch": state["epoch"]})
@@ -226,6 +227,8 @@ class LoomService:
                     dropped = max(0, len(text) - state["task"]["limits"]["max_window_chars"])
                     streams[key] = text[dropped:]
                     origins[key] = origins.get(key, 0) + dropped
+                if event["type"] == "run.wrapping_up":
+                    run["reason"] = "Wrapping up: " + event["reason"]
                 if event["type"] == "llm.completed":
                     prefix = f"{event['llm_call_id']}:"
                     for field in ("streams", "stream_origins", "stream_offsets"):
@@ -306,7 +309,8 @@ class LoomService:
                 control = state["control"]
                 if not control and _time_budget_exceeded(state):
                     control = {"kind": "paused", "reason": "Active time budget exceeded"}
-                response = {"control": control, "inputs": inputs, "input_answer": answer, "goal_revision": state["task"]["goal_revision"]}
+                response = {"control": control, "inputs": inputs, "input_answer": answer, "goal_revision": state["task"]["goal_revision"],
+                            "active_seconds": run["active_seconds"] - run.get("time_budget_start_seconds", 0), "run_steps": run["steps"]}
             elif kind == "operation_start":
                 effect_kind = value.get("effect_kind") if isinstance(value, dict) else None
                 value = value["call"] if isinstance(value, dict) and "call" in value else value
@@ -430,6 +434,8 @@ class LoomService:
                     state["task"]["state"] = "queued" if any(m["state"] == "accepted" and m["role"] == "user" for m in state["messages"]) else "idle"
                     self.store._message(db, state, None, _report_from_run_result(value), role="assistant", status="applied")
                 elif control.kind != "continue":
+                    if control.kind == "paused" and value.output and (value.context.state.scratch or {}).get("partial_report"):
+                        self.store._message(db, state, None, str(value.output), role="assistant", status="applied")
                     run["state"] = "stopped" if control.kind == "stopped" else "suspended"
                     if control.kind == "stopped":
                         self._end_suspended(state, emit, db)
@@ -443,6 +449,7 @@ class LoomService:
                     if control.kind == "stopped" and request and request["state"] == "pending":
                         request["state"] = "cancelled"
                         emit("input.cancelled", request)
+                run["reason"] = control.reason
                 emit("run.state.changed", {"state": run["state"], "reason": control.reason})
                 state["task"]["revision"] += 1
                 emit("task.state.changed", {"state": state["task"]["state"], "revision": state["task"]["revision"]})

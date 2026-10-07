@@ -278,3 +278,25 @@ def test_guidance_at_worker_failure_waits_for_cleanup_and_preserves_guards(tmp_p
         assert "retry_requested" not in service.snapshot(sid)["run"]
     finally:
         service.close()
+
+
+def test_budget_wrap_up_is_persisted_as_partial_assistant_answer(tmp_path):
+    from tests.service.fakes import budget_wrap_provider_factory
+
+    (tmp_path / "notes.txt").write_text("Available evidence")
+    service = LoomService(tmp_path / "data", provider_factory=budget_wrap_provider_factory).start()
+    try:
+        sid = service.create("wrap", {"objective": "Research the notes", "workspace": str(tmp_path), "plan_mode": "off",
+                                      "limits": {"max_llm_calls": 3}})["session_id"]
+        state = wait_state(service, sid, "paused")
+        replies = [m for m in state["messages"] if m["role"] == "assistant"]
+        assert len(replies) == 1
+        assert "Completed:" in replies[0]["content"] and "Remaining:" in replies[0]["content"]
+        assert state["run"]["state"] == "suspended"
+        events = service.events(sid, limit=1000)
+        assert any(e["type"] == "run.wrapping_up" for e in events)
+        llm = [e for e in events if e["type"] == "llm.requested"]
+        assert len(llm) == 3
+        assert llm[-1]["payload"]["tools"] == []
+    finally:
+        service.close()

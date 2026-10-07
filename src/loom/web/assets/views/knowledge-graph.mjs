@@ -170,6 +170,8 @@ export async function renderKnowledgeGraph(view, base) {
         indexing: "Indexing documents",
         extracting: "Extracting entities and relationships",
         embedding: "Generating embeddings",
+        embedding_retry: "Retrying embedding request",
+        embedding_failed: "Embedding request failed",
         publishing: "Publishing index",
         completed: "Sync complete",
       };
@@ -193,6 +195,12 @@ export async function renderKnowledgeGraph(view, base) {
       if (active && (job.current_document || job.current_url))
         parts.push(job.current_document || job.current_url);
       if (job.error) parts.push(job.error);
+      if (
+        active &&
+        job.detail &&
+        ["embedding_retry", "embedding_failed"].includes(job.stage)
+      )
+        parts.push(job.detail);
       if (job.state === "completed" && job.result)
         parts.push(
           `${job.result.updated || 0} updated`,

@@ -128,3 +128,36 @@ def test_crawler_encodes_unicode_urls_without_double_encoding():
     url = crawler.normalize("https://例子.com/文档/hello%20world?q=中文#标题")
     assert url == "https://xn--fsqu00a.com/%E6%96%87%E6%A1%A3/hello%20world?q=%E4%B8%AD%E6%96%87"
     assert crawler.normalize(url) == url
+
+
+@pytest.mark.asyncio
+async def test_embedding_retries_transport_failures_and_preserves_batch():
+    from loom.knowledge.lightrag_worker import embed_batch
+    attempts, events, delays = [], [], []
+    def embedder(profile, texts):
+        attempts.append(texts)
+        if len(attempts) < 3:
+            raise ServiceError('Embedding service failed', 502) from TimeoutError()
+        return [[1, 0]]
+    async def sleep(delay):
+        delays.append(delay)
+    vectors = await embed_batch(embedder, {}, ['same input'], lambda **v: events.append(v), sleep=sleep)
+    assert vectors == [[1, 0]]
+    assert attempts == [['same input']] * 3
+    assert delays == [2, 4]
+    assert [e['retry'] for e in events] == [1, 2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('cause,expected', [(ValueError(), 1), (TimeoutError(), 3)])
+async def test_embedding_retry_is_bounded_and_rejects_invalid_vectors(cause, expected):
+    from loom.knowledge.lightrag_worker import embed_batch
+    attempts = []
+    def embedder(*_):
+        attempts.append(1)
+        raise ServiceError('Embedding failed', 502) from cause
+    async def sleep(_):
+        pass
+    with pytest.raises(ServiceError):
+        await embed_batch(embedder, {}, ['input'], lambda **_: None, sleep=sleep)
+    assert len(attempts) == expected

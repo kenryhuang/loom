@@ -497,3 +497,82 @@ def test_malformed_tool_arguments_return_feedback_without_executing_and_can_reco
         assert len(feedback) == 1 and "No action was executed" in feedback[0].content
 
     asyncio.run(scenario())
+
+
+def test_budget_reserves_one_tool_free_partial_report_and_stops_batch(tmp_path):
+    async def scenario():
+        provider = Provider([
+            LlmResponse("", (LlmToolCall("first", "read_file", '{"path":"a"}'),)),
+            LlmResponse("Completed: read the evidence. Remaining: verify the implementation."),
+        ])
+        calls = []
+        async def read(value, _options):
+            calls.append(value)
+            return ok(Observation("o", "read_file", {"content": "evidence"}, "now"))
+        execution = Execution()
+        result = await run_managed(tmp_path, provider, execution, {"read_file": read}, limits={"max_llm_calls": 2})
+        assert result.ok and result.value.control.kind == "paused"
+        assert "Remaining:" in result.value.output
+        assert not calls  # Last remaining call is synthesis, not more tool work.
+        assert len(provider.calls) == 2
+        assert "No tools are available" in provider.calls[-1][0].content
+        assert result.value.context.state.scratch["partial_report"]["reason"]
+    asyncio.run(scenario())
+
+
+def test_time_reserve_uses_active_execution_time_and_reports_partial_work(tmp_path):
+    async def scenario():
+        class TimedExecution(Execution):
+            def boundary(self, checkpoint):
+                return {**super().boundary(checkpoint), "active_seconds": 91}
+        provider = Provider([LlmResponse("Completed: inspected sources. Remaining: validate recommendations.")])
+        result = await run_managed(tmp_path, provider, TimedExecution(), limits={"max_duration_seconds": 100})
+        assert result.ok and result.value.control.kind == "paused"
+        assert "Time budget" in result.value.control.reason
+        assert "Remaining" in result.value.output
+        assert len(provider.calls) == 1
+    asyncio.run(scenario())
+
+
+def test_retrieval_ledger_detects_rephrased_queries_without_new_evidence():
+    from loom.llm.progress import record, stop_reason
+    from loom.service.contracts import LIMITS
+    cp = {"llm_calls": 10, "usage": TokenUsage()}
+    for i in range(9):
+        record(cp, "knowledge_search", {"query": f"different query {i}"},
+               Observation(str(i), "knowledge_search", {"matches": [{"source_id": "book#p1", "text": "Same evidence"}]}, "now"))
+    assert "no new readable evidence" in stop_reason(cp, LIMITS)
+    assert len(cp["progress"]["evidence"]) == 1
+    record(cp, "knowledge_read", {}, Observation("new", "knowledge_read", {"source_id": "book#p2", "text": "New page"}, "now"))
+    assert stop_reason(cp, LIMITS) is None
+    assert cp["progress"]["stale"] == 0
+
+
+def test_token_reserve_uses_recent_request_cost():
+    from loom.llm.progress import stop_reason
+    from loom.service.contracts import LIMITS
+    cp = {"llm_calls": 4, "usage": TokenUsage(8000, 0, 8000), "last_call_tokens": 1500}
+    assert "Token budget" in stop_reason(cp, {**LIMITS, "max_tokens": 10000})
+
+
+def test_repeated_search_loop_yields_report_instead_of_exhausting_budget(tmp_path):
+    async def scenario():
+        from dataclasses import replace
+
+        from loom.core import ToolRef
+        context = make_task_context(TaskRequest("Research a learning roadmap", workspace=tmp_path), plan_mode="off").unwrap()
+        context = replace(context, affordances=replace(context.affordances, tools=(*context.affordances.tools,
+                          ToolRef("knowledge_search", "Search evidence", input_schema={"type": "object"}))))
+        responses = [LlmResponse("", (LlmToolCall(str(i), "knowledge_search", json.dumps({"query": f"topic {i}"})),)) for i in range(9)]
+        provider = Provider([*responses, LlmResponse("Completed: found the source. Remaining: verify specific recommendations.")])
+        calls = []
+        async def search(value, _options):
+            calls.append(value)
+            return ok(Observation("o", "knowledge_search", {"matches": [{"source_id": "book#p1", "text": "The same facts"}]}, "now"))
+        result = await run_managed(tmp_path, provider, Execution(), {"knowledge_search": search}, context=context)
+        assert result.ok and result.value.control.kind == "paused"
+        assert "no new readable evidence" in result.value.control.reason
+        assert "Remaining:" in result.value.output
+        assert len(calls) == 9 and len(provider.calls) == 10
+        assert len(result.value.context.state.scratch["run_progress"]["ledger"]["evidence"]) == 1
+    asyncio.run(scenario())

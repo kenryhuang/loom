@@ -98,3 +98,16 @@ class TurnPromptProvider:
 
 def turn_prompt_provider_factory(state):
     return TurnPromptProvider()
+
+
+class BudgetWrapProvider:
+    model = "budget-wrap-test"
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        if not tools:
+            return ok(LlmResponse("Completed: inspected available evidence. Remaining: implementation and verification. Stopped for the call budget."))
+        return ok(LlmResponse("", (LlmToolCall(f"read-{len(messages)}", "read_file", '{"path":"notes.txt"}'),)))
+
+
+def budget_wrap_provider_factory(state):
+    return BudgetWrapProvider()
