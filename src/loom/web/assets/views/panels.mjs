@@ -195,6 +195,14 @@ export function builtinPanels() {
               actions.artifact(ref.sha256),
             );
             body.append(button);
+            for (const path of ref.workspace_paths || [])
+              body.append(
+                element(
+                  "p",
+                  "output-path small",
+                  `Saved in workspace: ${path}`,
+                ),
+              );
           }
           if (!refs.length)
             body.append(

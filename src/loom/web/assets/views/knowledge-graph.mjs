@@ -1,4 +1,8 @@
 import { element } from "../markdown.mjs";
+import {
+  knowledgeJobStage,
+  knowledgeStageLabel,
+} from "./knowledge-progress.mjs";
 
 function button(text) {
   const node = element("button", "quiet", text);
@@ -17,7 +21,11 @@ function field(label, value, type = "text") {
 export async function renderKnowledgeGraph(view, base) {
   const id = base.id,
     root = element("section", "knowledge-graph-section");
-  view.basePanel.prepend(root);
+  const progressPanel = view.basePanel.querySelector(".knowledge-job-progress");
+  view.basePanel.insertBefore(
+    root,
+    progressPanel ? progressPanel.nextSibling : view.basePanel.firstChild,
+  );
   const stats = base.graph_stats;
   root.append(element("h3", "", "Website sources & knowledge graph"));
   root.append(
@@ -169,9 +177,11 @@ export async function renderKnowledgeGraph(view, base) {
     progress.setAttribute("aria-live", "polite");
     const cancel = button("Cancel sync");
     cancel.hidden = true;
+    let cancellationRequested;
     const updateProgress = (job) => {
       if (job.source_id !== source.id) return;
       const active = ["queued", "running"].includes(job.state);
+      if (job.cancel_requested) cancellationRequested = job.id;
       sync.disabled = active;
       sync.textContent = active
         ? "Syncing…"
@@ -183,34 +193,14 @@ export async function renderKnowledgeGraph(view, base) {
           ? "Resume sync"
           : "Sync now";
       cancel.hidden = !active;
-      const stages = {
-        queued: "Waiting to start",
-        crawling: "Crawling pages",
-        crawl_saved: "Website snapshot saved",
-        resuming_crawl: "Resuming saved website snapshot",
-        resuming_index: "Resuming saved document checkpoints",
-        checkpointed: "Document checkpoint saved",
-        crawl_retry: "Retrying webpage request",
-        partial:
-          "Partial sync — collected pages indexed; website crawl incomplete",
-        diffing: "Checking changes",
-        checking_embedding: "Checking embedding service",
-        initializing: "Initializing LightRAG",
-        indexing: "Indexing documents",
-        extracting: "Extracting entities and relationships",
-        embedding: "Generating embeddings",
-        embedding_retry: "Retrying embedding request",
-        embedding_failed: "Embedding request failed",
-        publishing: "Publishing index",
-        completed: "Sync complete",
-      };
+      cancel.disabled = active && cancellationRequested === job.id;
       const partial =
         job.state === "completed" && job.result?.complete === false;
       const parts = [
         partial ? "partial" : job.state,
         partial
-          ? stages.partial
-          : stages[job.stage] || job.stage || "Starting sync",
+          ? knowledgeStageLabel("partial")
+          : knowledgeStageLabel(knowledgeJobStage(job)),
       ];
       if (job.visited !== undefined) parts.push(`${job.visited} URLs visited`);
       if (job.pages !== undefined) parts.push(`${job.pages} pages collected`);
@@ -236,10 +226,18 @@ export async function renderKnowledgeGraph(view, base) {
       if (active && (job.current_document || job.current_url))
         parts.push(job.current_document || job.current_url);
       if (job.error) parts.push(job.error);
+      if (active && cancellationRequested === job.id)
+        parts.push("Cancellation requested…");
       if (
         active &&
         job.detail &&
-        ["embedding_retry", "embedding_failed"].includes(job.stage)
+        [
+          "embedding_retry",
+          "embedding_failed",
+          "extracting_failed",
+          "indexing_failed",
+          "cleanup_failed",
+        ].includes(job.stage)
       )
         parts.push(job.detail);
       if (job.state === "completed" && job.result)
@@ -260,8 +258,12 @@ export async function renderKnowledgeGraph(view, base) {
       cancel.onclick = async () => {
         cancel.disabled = true;
         try {
-          await view.request(`/${id}/jobs/${job.id}/cancel`, {});
-          progress.textContent += " · Cancellation requested…";
+          const receipt = await view.request(
+            `/${id}/jobs/${job.id}/cancel`,
+            {},
+          );
+          view.latestKnowledgeJob = receipt;
+          for (const listener of view.knowledgeJobListeners) listener(receipt);
         } catch (error) {
           progress.textContent = error.message;
           cancel.disabled = false;

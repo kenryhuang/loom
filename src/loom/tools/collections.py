@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import zlib
 from html.parser import HTMLParser
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -168,21 +169,47 @@ class _PageText(HTMLParser):
         return "\n".join(line for part in "".join(self._parts).splitlines() if (line := " ".join(part.split())))
 
 
-def document_collection(_request):
+def document_collection(request):
+    from loom.tasks.tools import make_task_tools
+
+    workspace = request.workspace if request is not None else None
+    writer = make_task_tools(request)["write_file"] if workspace is not None else None
+
     async def create_report(value, _options=None):
         if not isinstance(value.get("content"), str) or not value["content"].strip():
-            raise ValueError("Report content must be nonempty")
-        return ok(Observation(new_trace_id(), "create_report", {"report": value["content"], "sources": value.get("sources", [])}, now_iso()))
+            return err(make_loom_error("VALIDATION_FAILED", "Report content must be nonempty", retryable=False))
+        output = {"report": value["content"], "sources": value.get("sources", [])}
+        if writer is not None or "path" in value:
+            if writer is None:
+                return err(make_loom_error("VALIDATION_FAILED", "Saving a report requires a writable workspace", retryable=False))
+            path = value.get("path")
+            if not isinstance(path, str) or not path.strip() or Path(path).is_absolute():
+                return err(make_loom_error("VALIDATION_FAILED", "Report path must be a nonempty workspace-relative path", retryable=False))
+            written = await writer({"path": path, "content": value["content"]}, _options)
+            if not written.ok:
+                return written
+            output.update(written.value.value)
+        return ok(Observation(new_trace_id(), "create_report", output, now_iso()))
 
     ref = ToolRef(
         "create_report",
-        "Create a Markdown report with explicit evidence source references.",
+        "Create a Markdown report with explicit evidence source references and retain it as a report artifact. "
+        + (
+            "A writable workspace is bound: path is required. Save the complete analysis before finishing and mention its path in the final answer. "
+            "Creates parent directories and replaces the file at the supplied path."
+            if writer is not None
+            else "No writable workspace is bound: creates an artifact only; omit path."
+        ),
         input_schema={
             "type": "object",
-            "properties": {"content": {"type": "string"}, "sources": {"type": "array", "items": {"type": "string"}}},
-            "required": ["content"],
+            "properties": {
+                "content": {"type": "string"},
+                "sources": {"type": "array", "items": {"type": "string"}},
+                "path": {"type": "string", "minLength": 1, "description": "Workspace-relative document path, e.g. reports/ai-infra-study.md."},
+            },
+            "required": ["content", "path"] if writer is not None else ["content"],
             "additionalProperties": False,
         },
         metadata={"artifact_kind": "report", "evidence_fields": ["sources"]},
     )
-    return ToolCollection("document_outputs", (ref,), {"create_report": create_report}, {"create_report": "read_only"})
+    return ToolCollection("document_outputs", (ref,), {"create_report": create_report}, {"create_report": "side_effecting" if writer else "read_only"})

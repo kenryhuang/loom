@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import time
@@ -162,7 +163,18 @@ class TaskAssembly:
         workspace_id = self.spec["execution_runtime"].get("workspace_resource")
         workspace = next((r for r in directories if r.id == workspace_id), None)
         self.tool_request = replace(request, workspace=Path(workspace.uri) if workspace else None)
-        self.collections = [self.registry.create("tools", {"plugin": name}, request=self.tool_request) for name in self.spec["tools"]["collections"]]
+        self.report_workspace = Path(workspace.uri) if workspace and workspace.access == "read-write" else None
+        self.collections = [
+            self.registry.create(
+                "tools", {"plugin": name},
+                # Read-only sessions retain report artifacts without receiving a file writer.
+                request=replace(self.tool_request, workspace=None) if name == "document_outputs" and self.report_workspace is None else self.tool_request,
+            )
+            for name in self.spec["tools"]["collections"]
+        ]
+        self.workspace_report_required = (
+            self.report_workspace is not None and "document_outputs" in self.spec["tools"]["collections"] and bool(self.spec["outputs"])
+        )
         self.bindings = {}
         self.entrypoints = {}
         self.expose_artifacts = harness is None or harness.allowed_tools is None or "read_artifact" in harness.allowed_tools
@@ -174,7 +186,9 @@ class TaskAssembly:
                     raise ValueError("Filesystem and shell tools require an explicit workspace resource")
                 if workspace and workspace.access in {"read", "read-only"} and binding.effect_kind == "side_effecting":
                     continue
-                if collection.manifest.plugin_id in {"filesystem", "shell"}:
+                if collection.manifest.plugin_id in {"filesystem", "shell"} or (
+                    collection.manifest.plugin_id == "document_outputs" and binding.effect_kind == "side_effecting"
+                ):
                     binding = replace(binding, resource_refs=(workspace.id,))
                 if not set(binding.resource_refs).issubset({r.id for r in self.resources}):
                     raise ValueError(f"Unbound resources required by tool {binding.id}")
@@ -223,6 +237,7 @@ class TaskAssembly:
         self._local_artifacts = None
         self._evidence = []
         self._verified_sources = {}
+        self._workspace_reports = {}
         plugins = [self.environment, self.context_manager, self.runtime, self.workflow, *self.collections]
         self.manifests = [asdict(plugin.manifest) for plugin in plugins]
         available = {f"{p.manifest.kind}/{p.manifest.plugin_id}" for p in plugins}
@@ -260,6 +275,7 @@ class TaskAssembly:
                 "tools": {c.manifest.plugin_id: c.snapshot() for c in self.collections},
                 "evidence": self._evidence,
                 "verified_sources": self._verified_sources,
+                **({"workspace_reports": self._workspace_reports} if self._workspace_reports else {}),
                 "manifests": self.manifests,
             }
         )
@@ -281,6 +297,7 @@ class TaskAssembly:
             collection.restore(snapshot["tools"][collection.manifest.plugin_id])
         self._evidence = snapshot.get("evidence", [])
         self._verified_sources = snapshot.get("verified_sources", {})
+        self._workspace_reports = snapshot.get("workspace_reports", {})
         if not self.environment.reconnect() or not self.runtime.reconnect():
             raise ValueError("Task execution resources could not be reconnected")
 
@@ -432,6 +449,14 @@ class TaskAssembly:
         output = thaw_json(observation.value)
         if not isinstance(output, dict):
             return
+        if (
+            binding.artifact_kind == "report" and self.report_workspace is not None
+            and isinstance(output.get("path"), str) and isinstance(output.get("report"), str)
+        ):
+            self._workspace_reports[output["path"]] = {
+                "sha256": hashlib.sha256(output["report"].encode("utf-8")).hexdigest(),
+                "artifact": output.get("artifact"),
+            }
         refs = []
         for field in binding.evidence_fields:
             evidence = output.get(field, [])
@@ -462,6 +487,21 @@ class TaskAssembly:
             return "Final report requires source evidence from a successful retrieval tool"
         if any(o.get("require_evidence_refs") for o in self.spec["outputs"]) and not self._evidence:
             return "Final report requires evidence source references"
+        if self.workspace_report_required:
+            if not self._workspace_reports:
+                return "Save the complete analysis in the workspace using create_report with a relative path before finishing"
+            from loom.tasks.tools import _resolve_workspace_path
+
+            for path, report in self._workspace_reports.items():
+                resolved = _resolve_workspace_path(self.report_workspace, path)
+                if not resolved.ok:
+                    return f"Saved report path is no longer inside the workspace: {path}. Save it again using create_report"
+                try:
+                    current = hashlib.sha256(resolved.value.read_bytes()).hexdigest()
+                except OSError:
+                    return f"Saved report is unavailable: {path}. Save it again using create_report"
+                if current != report["sha256"]:
+                    return f"Saved report changed since create_report: {path}. Save its final content again using create_report"
         return None
 
     def wrap_loop(self, definition):
@@ -489,7 +529,12 @@ class TaskAssembly:
                     report = _report_from_run_result(result.value)
                     if not report.strip():
                         return err(make_loom_error("OUTPUT_CONTRACT_FAILED", "Final report must be nonempty", retryable=False))
-                    ref = self.publish_artifact({"report": report, "sources": list(dict.fromkeys(self._evidence))}, "report")
+                    output = {"report": report, "sources": list(dict.fromkeys(self._evidence))}
+                    if self._workspace_reports:
+                        output["documents"] = [{"path": path, **saved} for path, saved in self._workspace_reports.items()]
+                    ref = self.publish_artifact(output, "report")
+                    if self._workspace_reports:
+                        ref = {**ref, "workspace_paths": list(self._workspace_reports)}
                     scratch["output_artifacts"] = [ref]
                 scratch["execution_plugins"] = self.snapshot()
                 result = ok(replace(result.value, context=replace(updated, state=replace(updated.state, scratch=scratch))))

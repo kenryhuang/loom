@@ -15,7 +15,9 @@ COLLECTIONS = {
     "filesystem": ("Files", "Read, create and edit workspace files. Does not run commands.", True),
     "shell": ("Commands", "Execute shell commands and processes in the workspace.", True),
     "web_research": ("Web sources", "Fetch and read HTTP(S) source URLs. Not a general web search engine.", False),
-    "document_outputs": ("Document outputs", "Publish Markdown reports as artifacts.", False),
+    "document_outputs": (
+        "Document outputs", "Save Markdown reports in a writable workspace and publish artifacts; without a writable workspace, publish artifacts only.", False,
+    ),
     "task_control": ("Task completion", "Finish the task and return its report.", False),
     "knowledge": ("Knowledge bases", "Search only knowledge bases explicitly attached to the session.", False),
 }

@@ -103,6 +103,8 @@ def call(store, base, workspace, action, *, progress=lambda **_: None, cancelled
             if "progress" in message:
                 progress(**message["progress"])
             if "error" in message:
+                if "progress" not in message:
+                    progress(stage="indexing_failed", detail=message["error"])
                 raise ServiceError(message["error"], 502)
             if "result" in message:
                 result = message["result"]

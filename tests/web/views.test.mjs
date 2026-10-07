@@ -920,3 +920,39 @@ test("panels show workspace second, dynamic workflow and extension widgets", () 
   assert.equal(root.querySelector('[data-panel="domain"]').textContent, "one");
   dom.window.close();
 });
+
+test("outputs show saved workspace paths while keeping artifact access", () => {
+  const dom = setup(),
+    root = document.getElementById("panels"),
+    opened = [],
+    panels = new PanelsView(root, builtinPanels(), {
+      artifact: (digest) => opened.push(digest),
+    });
+  try {
+    panels.update({
+      ...state(),
+      output_artifacts: [
+        {
+          kind: "report",
+          sha256: "report-digest",
+          workspace_paths: [
+            "reports/ai-study.md",
+            "<img src=x onerror=bad()>.md",
+          ],
+        },
+      ],
+    });
+    const output = root.querySelector('[data-panel="outputs"]');
+    assert.match(
+      output.textContent,
+      /Saved in workspace: reports\/ai-study.md/,
+    );
+    assert.equal(output.querySelector("img"), null);
+    output.querySelector("button").click();
+    assert.deepEqual(opened, ["report-digest"]);
+    panels.update({ ...state(), output_artifacts: [] });
+    assert.equal(output.querySelector(".output-path"), null);
+  } finally {
+    dom.window.close();
+  }
+});

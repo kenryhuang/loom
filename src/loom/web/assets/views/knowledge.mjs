@@ -1,5 +1,6 @@
 import { element } from "../markdown.mjs";
 import { renderKnowledgeGraph } from "./knowledge-graph.mjs";
+import { KnowledgeProgress } from "./knowledge-progress.mjs";
 
 function field(label, input) {
   const node = element("label", "knowledge-field");
@@ -440,17 +441,28 @@ export class KnowledgeView {
     );
     const cancel = button("Cancel indexing / sync");
     cancel.hidden = true;
+    let progress;
     if (base.engine === "lightrag_local") {
-      const progress = element("section", "knowledge-job-progress");
-      progress.append(
-        element("h3", "", "Indexing / sync progress"),
-        status,
+      status.hidden = true;
+      progress = new KnowledgeProgress({
         cancel,
-      );
-      this.basePanel.insertBefore(progress, documents);
+        resume: async (job) => {
+          await this.request(`/${id}/sources/${job.source_id}/sync`, {});
+          await this.renderBase();
+        },
+        error: (error) => this.error(error),
+      });
+      this.knowledgeJobListeners.add((job) => progress.update(job));
+      this.basePanel.insertBefore(progress.root, documents);
     } else form.append(cancel);
+    const abort = this.abort;
+    const current = () =>
+      id === this.baseId &&
+      abort === this.abort &&
+      !abort.signal.aborted &&
+      status.isConnected;
     const poll = async (job) => {
-      if (id !== this.baseId || this.abort.signal.aborted) return;
+      if (!current()) return;
       this.latestKnowledgeJob = job;
       for (const listener of this.knowledgeJobListeners) listener(job);
       status.textContent = `${job.document} · ${job.state} · ${job.stage || "indexing"}${job.pages !== undefined ? ` · ${job.pages} pages` : ""}${job.indexed !== undefined ? ` · ${job.indexed}/${job.total} documents` : ""}${job.llm_calls ? ` · ${job.llm_calls} LLM calls · ${job.reported_tokens || 0} tokens` : ""}${job.embedding_inputs ? ` · ${job.embedding_inputs} embedding inputs` : ""}${job.current_document ? ` · ${job.current_document}` : ""}${job.current_url ? ` · ${job.current_url}` : ""}${job.error ? ` · ${job.error}` : ""}`;
@@ -459,25 +471,36 @@ export class KnowledgeView {
       cancel.onclick = async () => {
         cancel.disabled = true;
         try {
-          await this.request(`/${id}/jobs/${job.id}/cancel`, {});
+          const receipt = await this.request(
+            `/${id}/jobs/${job.id}/cancel`,
+            {},
+          );
+          this.latestKnowledgeJob = receipt;
+          for (const listener of this.knowledgeJobListeners) listener(receipt);
           status.textContent = "Cancellation requested…";
+          progress?.cancellationRequested();
         } catch (error) {
           this.error(error);
           cancel.disabled = false;
         }
       };
-      if (add.disabled)
-        this.timer = setTimeout(async () => {
+      if (add.disabled) {
+        const follow = async () => {
+          if (!current()) return;
           try {
             await poll(await this.request(`/${id}/jobs/${job.id}`));
           } catch (error) {
-            this.error(error);
+            if (!current()) return;
+            if (progress) progress.connectionError(error);
+            else this.error(error);
+            this.timer = setTimeout(follow, 2000);
           }
-        }, 800);
-      else if (job.state === "completed") {
+        };
+        this.timer = setTimeout(follow, 800);
+      } else if (job.state === "completed") {
         this.changed();
         this.notice.textContent =
-          job.result.complete === false
+          job.result?.complete === false
             ? `Partial sync: ${job.result.pages} collected pages indexed; website crawl incomplete. See source details.`
             : `Indexed ${job.result.chunks} passages from ${job.document}.`;
         await this.renderBase();
@@ -504,6 +527,8 @@ export class KnowledgeView {
     if (pending) poll(pending);
     else if (base.jobs?.[0]) {
       const job = base.jobs[0];
+      this.latestKnowledgeJob = job;
+      progress?.update(job);
       status.textContent = `${job.result?.complete === false ? "Partial sync — website crawl incomplete" : job.state}: ${job.error || `${job.result?.chunks || 0} indexed chunks`}`;
     }
     const search = element("form", "knowledge-search"),

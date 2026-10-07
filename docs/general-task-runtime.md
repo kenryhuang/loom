@@ -42,7 +42,7 @@ uv run loom session create '读取 https://www.python.org/about/ 并总结，注
 | `tools.collections` | `filesystem`, `shell` | 现有文件和命令工具；需要目录资源 |
 | `tools.collections` | `task_control` | 最终 `finish` 报告 |
 | `tools.collections` | `web_research` | `fetch_url` 解压 gzip/deflate 并按响应字符集解码，原始响应最多保留 100 KB；模型优先接收可读正文页，HTML 原文保存在 source artifact |
-| `tools.collections` | `document_outputs` | `create_report` 产生 Markdown 报告和来源引用 |
+| `tools.collections` | `document_outputs` | `create_report` 产生 Markdown 报告 artifact 和来源引用；有可写 workspace 时同时保存文档 |
 | `workflow` | `legacy_planning` | 兼容 `off / auto / force` planning |
 | `workflow` | `dynamic` | 顺序节点、依赖检查、受约束修订、完成节点与 plan 投影 |
 
@@ -51,6 +51,10 @@ uv run loom session create '读取 https://www.python.org/about/ 并总结，注
 上下文参数为 `max_window_chars`、`max_history_steps`、`reserve_chars`、`recent_exchanges`、`summary_chars`。工具可见预算为 `tools.budget` 下的 `max_tools`、`max_tool_schema_tokens`、`max_composed_tools`、`max_ephemeral_tools`。必须保留的控制工具优先；预算无法容纳时明确报错。摘要是确定性摘录，完整移出内容仍可通过 `read_artifact` 读取。
 
 配置 `outputs: [{kind: report, format: markdown, require_evidence_refs: true}]` 后，没有证据引用的最终答案不能完成任务。`fetch_url` 的 URL 和 `create_report` 的 sources 作为引用记录；这项检查保证引用存在，不判断来源内容是否证明每项结论。最终报告以 `{report, sources}` 保存为 artifact。持久 session 的 `output_artifacts` 可用 `loom session artifact SESSION_ID DIGEST --output report.json` 导出；一次性执行的结果和 trace 引用携带 `local_path`，指向本次临时 artifact 目录。
+
+`create_report` 接受 `content`、可选的 `sources` 和 workspace 相对路径 `path`。有可写 workspace 时必须提供 `path`，例如 `{"path":"reports/ai-infra-study.md","content":"# 学习路线\n…","sources":["source:one"]}`；工具创建父目录、写入 UTF-8 文档，并返回 `path`、`bytes_written` 和包含全文的 `artifact` 引用。同一路径再次调用会替换原文档。绝对路径、越界路径和指向 workspace 外部的符号链接会被拒绝。没有 workspace 或目录只读时仍可创建 artifact，但不能提供保存路径，也不会回退到服务进程的当前目录。
+
+选择 `document_outputs`、配置 report 输出契约并绑定可写 workspace 的任务，必须先成功调用 `create_report` 保存分析文档，再结束任务；缺少文档、文件被删除或内容在保存后变化时拒绝完成。保存路径、内容校验值和原报告 artifact 引用随 checkpoint 恢复，工具 operation 重放不会重复写入。最终报告 artifact 额外包含 `documents`，记录这些文档的路径、内容 SHA-256 和报告 artifact 引用；页面 Outputs 区域显示 workspace 保存路径。最终回复可以是文档摘要，完整分析仍保存在文档及对应 artifact 中。
 
 `research.yaml` 还设置 `require_verified_sources: true`：必须有成功来源工具返回的 source artifact，手写 sources 或模型记忆不满足此条件。没有目录资源的显式任务若包含“读取/抓取/访问”等指令和 HTTP URL，会要求成功读取这些 URL；没有来源工具时在装配阶段拒绝执行。重定向保留请求 URL 和最终 URL，来源证据随 checkpoint 保存，已提交的抓取结果在恢复时重用。这些检查保证抓取发生，不替代对摘要准确性的校验。
 

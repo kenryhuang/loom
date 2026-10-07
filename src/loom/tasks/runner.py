@@ -89,6 +89,15 @@ def make_task_context(
     effective_request = assembly.tool_request if assembly is not None else request
     workspace = effective_request.workspace.resolve() if effective_request.workspace is not None else None
     constraints = _constraints_for_request(profile, request, workspace, task_harness)
+    if assembly is not None and assembly.workspace_report_required:
+        constraints += (
+            Constraint(
+                "workspace-report",
+                "Save the complete analysis as a Markdown document using create_report with a workspace-relative path before finishing. "
+                "Keep evidence source references and mention the saved document path in the final answer. "
+                "A reply alone does not satisfy the report output contract.",
+            ),
+        )
     criteria = _criteria_for_request(profile, request)
     normal_tools = assembly.context_tools() if assembly is not None else _filter_tools(_task_tool_refs(), task_harness.allowed_tools)
     plan_runtime.configure_normal_tool_refs(normal_tools)

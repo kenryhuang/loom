@@ -23,7 +23,9 @@ class KnowledgeJobs:
             for row in db.execute("SELECT id,body FROM jobs").fetchall():
                 job = json.loads(row[1])
                 if job["state"] in {"queued", "running"}:
-                    job.update(state="failed", stage="interrupted", error="Service restarted. Retry the import or website sync; the previous index is intact.")
+                    finished = now_iso()
+                    job.update(state="failed", stage="interrupted", failed_stage=job.get("stage"), finished_at=finished, updated_at=finished,
+                               error="Service restarted. Retry the import or website sync; the previous index is intact.")
                     db.execute("UPDATE jobs SET body=? WHERE id=?", (canonical(job), row[0]))
         self.scheduler = threading.Thread(target=self._schedule, daemon=True, name="loom-web-sync")
         self.scheduler.start()
@@ -33,7 +35,11 @@ class KnowledgeJobs:
             row = db.execute("SELECT body FROM jobs WHERE id=? AND kb_id=?", (job_id, kb_id)).fetchone()
             if not row:
                 raise ServiceError("Indexing job not found", 404)
-            return json.loads(row[0])
+            job = json.loads(row[0])
+            event = self.cancels.get(job_id)
+            if event is not None:
+                job["cancel_requested"] = event.is_set()
+            return job
 
     def start(self, kb_id, payload):
         base = self.store.get(kb_id)
@@ -122,9 +128,14 @@ class KnowledgeJobs:
             job.update(state="completed", stage="partial" if job["kind"] == "website" and not result.get("complete", True) else "completed",
                        result=result)
         except Exception as exc:
-            job.update(state="cancelled" if cancelled.is_set() else "failed",
+            stage = job.get("stage", "indexing")
+            job.update(state="cancelled" if cancelled.is_set() else "failed", failed_stage=stage.removesuffix("_failed"),
+                       stage="cancelled" if cancelled.is_set() else stage if stage.endswith("_failed") else "failed",
                        error=str(exc) if isinstance(exc, ServiceError) else f"Knowledge job failed ({type(exc).__name__})")
-        job.update(finished_at=now_iso(), elapsed_seconds=round(time.monotonic() - started, 1))
+        finished = now_iso()
+        job.update(finished_at=finished, updated_at=finished, elapsed_seconds=round(time.monotonic() - started, 1), cancel_requested=cancelled.is_set())
+        job["progress"] = [*job.get("progress", [])[-59:], {"at": finished, "stage": job["stage"], "state": job["state"],
+                                                           **({"detail": job["error"]} if job.get("error") else {})}]
         self._save(job)
         with self.lock:
             self.cancels.pop(job["id"], None)

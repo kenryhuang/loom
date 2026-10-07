@@ -36,6 +36,57 @@ def general_provider_factory(state):
     return GeneralProvider(state)
 
 
+class WorkspaceReportProvider:
+    model = "workspace-report-test"
+
+    def __init__(self, state):
+        self.calls = 0
+
+    async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+        self.calls += 1
+        if self.calls == 1:
+            name, value = "create_report", {"content": "# AI 学习路线\n\n完整分析文档。", "path": "reports/ai-study.md", "sources": ["source:book"]}
+        else:
+            name, value = "finish", {"report": "分析已保存到 reports/ai-study.md。"}
+        return ok(LlmResponse("", (LlmToolCall(f"report-{self.calls}", name, json.dumps(value)),)))
+
+
+def workspace_report_provider_factory(state):
+    return WorkspaceReportProvider(state)
+
+
+def test_durable_research_session_saves_workspace_report_and_artifacts(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = LoomService(tmp_path / "data", provider_factory=workspace_report_provider_factory).start()
+    try:
+        spec = {
+            "session_environment": {
+                "plugin": "session", "resources": [{"id": "workspace", "kind": "directory", "uri": str(workspace), "access": "read-write"}],
+            },
+            "tools": {"collections": ["document_outputs", "task_control"]},
+            "workflow": {"plugin": "dynamic"},
+            "outputs": [{"kind": "report", "require_evidence_refs": True}],
+        }
+        sid = service.create("research", {"objective": "AIstudy", "workspace": str(workspace), "task_spec": spec})["session_id"]
+        state = wait_state(service, sid, "idle")
+        assert state["run"]["state"] == "completed"
+        assert (workspace / "reports/ai-study.md").read_text() == "# AI 学习路线\n\n完整分析文档。"
+        ref = state["output_artifacts"][0]
+        assert ref["workspace_paths"] == ["reports/ai-study.md"]
+        final = json.loads(service.store.read_artifact(sid, ref["sha256"]))
+        saved = final["documents"][0]
+        original = json.loads(service.store.read_artifact(sid, saved["artifact"]["sha256"]))
+        assert original["report"] == (workspace / saved["path"]).read_text()
+        assert final["report"] == state["messages"][-1]["content"]
+        with service.store.transaction() as db:
+            operations = [json.loads(row[0]) for row in db.execute("SELECT body FROM operations WHERE session_id=?", (sid,))]
+        operation = next(op for op in operations if op["call"]["name"] == "create_report")
+        assert operation["effect_kind"] == "side_effecting" and operation["status"] == "completed"
+    finally:
+        service.close()
+
+
 class PagedSourceProvider:
     model = "paged-source-test"
 
@@ -189,9 +240,9 @@ def test_large_research_result_compacts_and_retains_session_artifact(tmp_path):
                     {"id": "summary", "objective": "Summarize the source", "dependencies": ["fetch"]},
                 ],
             },
-            # Three pinned node descriptions need more space than a root-only workflow;
+            # Three pinned node descriptions plus tool instructions need room to fit;
             # the 32 KB source still exceeds this window and must be compacted.
-            "context": {"plugin": "research_context", "max_window_chars": 11000},
+            "context": {"plugin": "research_context", "max_window_chars": 14000},
             "outputs": [{"kind": "report", "require_evidence_refs": True, "require_verified_sources": True}],
         }
         sid = service.create("source", {"objective": f"source {url}", "task_spec": spec})["session_id"]

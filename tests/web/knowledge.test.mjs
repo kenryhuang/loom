@@ -309,6 +309,17 @@ test("website sync progress and failures appear beside the source", async () => 
   });
   try {
     await view.open(true);
+    const panel = view.dialog.querySelector(".knowledge-job-progress");
+    assert.ok(panel);
+    assert.ok(
+      panel.compareDocumentPosition(
+        view.dialog.querySelector(".knowledge-url-import"),
+      ) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    assert.equal(
+      panel.querySelector(".knowledge-progress-state").textContent,
+      "Running",
+    );
     const row = view.dialog.querySelector(".knowledge-source");
     assert.match(
       row.textContent,
@@ -326,6 +337,12 @@ test("website sync progress and failures appear beside the source", async () => 
     for (const listener of view.knowledgeJobListeners)
       listener({ ...job, state: "failed", error: "Website request failed" });
     assert.match(row.textContent, /failed.*Website request failed/);
+    assert.equal(
+      panel.querySelector(".knowledge-progress-state").textContent,
+      "Failed",
+    );
+    assert.match(row.textContent, /Sync failed/);
+    assert.doesNotMatch(row.textContent, /Crawling pages/);
     assert.equal(cancel.hidden, true);
     for (const listener of view.knowledgeJobListeners)
       listener({
@@ -370,6 +387,152 @@ test("website sync progress and failures appear beside the source", async () => 
       ).disabled,
       false,
     );
+  } finally {
+    view.close();
+    dom.window.close();
+  }
+});
+
+test("sync polling propagates a model failure to the panel and source and stops polling", async (t) => {
+  const timers = [];
+  t.mock.method(globalThis, "setTimeout", (callback) => {
+    timers.push(callback);
+    return timers.length;
+  });
+  const job = {
+    id: "job",
+    kind: "website",
+    source_id: "web",
+    state: "running",
+    stage: "embedding",
+    document: "https://example.com",
+    current_document: "Transformer.md",
+    indexed: 3,
+    total: 184,
+    checkpointed: 3,
+  };
+  const graphBase = {
+    ...base,
+    engine: "lightrag_local",
+    indexing_model: "main",
+    jobs: [job],
+  };
+  const { dom, view } = setup({
+    json: async (path) => {
+      if (path.endsWith("/sources"))
+        return { sources: [{ id: "web", url: job.document, enabled: true }] };
+      if (path.endsWith("/jobs/job"))
+        return {
+          ...job,
+          state: "failed",
+          stage: "extracting_failed",
+          failed_stage: "extracting",
+          error:
+            "Indexing model request failed (LLM_FAILED); 3 document checkpoints retained",
+          finished_at: "2026-10-07T15:18:46Z",
+        };
+      return path.endsWith("/kb")
+        ? graphBase
+        : { ...catalog, knowledge_bases: [graphBase] };
+    },
+  });
+  try {
+    await view.open(true);
+    assert.equal(timers.length, 1);
+    await timers[0]();
+    const panel = view.dialog.querySelector(".knowledge-job-progress");
+    const source = view.dialog.querySelector(".knowledge-source");
+    assert.equal(
+      panel.querySelector(".knowledge-progress-state").textContent,
+      "Failed",
+    );
+    assert.match(
+      panel.textContent,
+      /Entity extraction or merging failed.*LLM_FAILED/s,
+    );
+    assert.match(
+      source.textContent,
+      /failed.*Entity extraction or merging failed.*LLM_FAILED/s,
+    );
+    assert.equal(panel.querySelector("progress").value, 3);
+    assert.ok(
+      [...source.querySelectorAll("button")].some(
+        (button) => button.textContent === "Resume sync" && !button.disabled,
+      ),
+    );
+    assert.equal(timers.length, 1);
+  } finally {
+    view.close();
+    dom.window.close();
+  }
+});
+
+test("sync polling recovers from network errors and renders the terminal result", async (t) => {
+  const timers = [];
+  t.mock.method(globalThis, "setTimeout", (callback, delay) => {
+    timers.push({ callback, delay });
+    return timers.length;
+  });
+  const job = {
+    id: "job",
+    kind: "website",
+    source_id: "web",
+    state: "running",
+    stage: "embedding",
+    document: "https://example.com",
+    indexed: 3,
+    total: 4,
+    checkpointed: 3,
+  };
+  const graphBase = {
+    ...base,
+    engine: "lightrag_local",
+    indexing_model: "main",
+    jobs: [job],
+  };
+  let attempts = 0;
+  const { dom, view } = setup({
+    json: async (path) => {
+      if (path.endsWith("/sources")) return { sources: [] };
+      if (path.endsWith("/jobs/job")) {
+        if (++attempts === 1) throw new Error("Network unavailable");
+        const completed = {
+          ...job,
+          state: "completed",
+          stage: "completed",
+          indexed: 4,
+          checkpointed: 4,
+          result: { complete: true, chunks: 20 },
+        };
+        graphBase.jobs = [completed];
+        return completed;
+      }
+      return path.endsWith("/kb")
+        ? graphBase
+        : { ...catalog, knowledge_bases: [graphBase] };
+    },
+  });
+  try {
+    await view.open(true);
+    assert.equal(timers[0].delay, 800);
+    await timers[0].callback();
+    assert.match(
+      view.dialog.querySelector(".knowledge-job-progress").textContent,
+      /Updates interrupted.*Network unavailable.*Reconnecting automatically/s,
+    );
+    assert.equal(timers[1].delay, 2000);
+    await timers[1].callback();
+    const panel = view.dialog.querySelector(".knowledge-job-progress");
+    assert.equal(
+      panel.querySelector(".knowledge-progress-state").textContent,
+      "Complete",
+    );
+    assert.equal(panel.querySelector("progress").value, 4);
+    assert.equal(
+      panel.querySelector(".knowledge-progress-message").hidden,
+      true,
+    );
+    assert.equal(attempts, 2);
   } finally {
     view.close();
     dom.window.close();

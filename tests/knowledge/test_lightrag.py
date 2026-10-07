@@ -7,6 +7,7 @@ from loom.knowledge import crawler, lightrag_local, web_sources
 from loom.knowledge.store import KnowledgeStore
 from loom.service.contracts import ServiceError
 
+WORKER_CALL = lightrag_local.call
 
 def test_crawler_scope_robots_and_depth():
     seen = []
@@ -119,7 +120,71 @@ def test_cancelled_index_job_retains_previous_generation(graph_store, monkeypatc
                 break
             time.sleep(0.01)
         assert state['state'] == 'cancelled'
+        assert state['stage'] == 'cancelled'
+        assert state['updated_at'] == state['finished_at']
         assert store.get(kb)['lightrag_generation'] == generation
+    finally:
+        jobs.close()
+
+
+def test_worker_failure_reaches_job_before_child_exit_and_keeps_checkpoints(graph_store, monkeypatch):
+    import subprocess
+    import sys
+    import time
+
+    from loom.knowledge.jobs import KnowledgeJobs
+
+    store, kb, _ = graph_store
+    store.index(kb, {'name': 'original', 'content': 'Published evidence'})
+    generation = store.get(kb)['lightrag_generation']
+    source = web_sources.save_source(store, kb, {'url': 'https://example.com/'})
+    pages = [{'url': f'https://example.com/{name}', 'title': name, 'content': name} for name in ('a', 'b')]
+    sync = web_sources.sync
+    monkeypatch.setattr(web_sources, 'sync', lambda *args, **kwargs: sync(
+        *args, **kwargs, crawler=lambda *args: {'pages': pages, 'complete': True, 'errors': [], 'skipped': []},
+    ))
+    monkeypatch.setattr(lightrag_local, 'call', WORKER_CALL)
+    popen, children = subprocess.Popen, []
+    script = '''
+import json,sys,time
+value = json.load(sys.stdin)
+doc = value['documents'][0]
+if doc['name'].endswith('_a.md'):
+    print(json.dumps({'result': {'entities': 2, 'relations': 1, 'graph_truncated': False, 'chunks': 1,
+                               'usage': {'llm_calls': 1, 'reported_tokens': 100, 'embedding_inputs': 3}}}), flush=True)
+else:
+    print(json.dumps({'progress': {'stage': 'extracting_failed', 'current_document': doc['name'], 'llm_calls': 2},
+                      'error': 'Indexing model request failed (LLM_FAILED)'}), flush=True)
+    time.sleep(60)
+'''
+
+    def child(*args, **kwargs):
+        process = popen([sys.executable, '-c', script], **kwargs)
+        children.append(process)
+        return process
+
+    monkeypatch.setattr(lightrag_local.subprocess, 'Popen', child)
+    jobs = KnowledgeJobs(store)
+    started = time.monotonic()
+    try:
+        job = jobs.sync(kb, source['id'])
+        while time.monotonic() - started < 5:
+            state = jobs.get(kb, job['id'])
+            if state['state'] == 'failed':
+                break
+            time.sleep(0.01)
+        assert state['state'] == 'failed' and state['stage'] == 'extracting_failed'
+        assert state['failed_stage'] == 'extracting'
+        assert 'LLM_FAILED' in state['error'] and '1 document checkpoints retained' in state['error']
+        assert state['checkpointed'] == 1 and state['total'] == 2
+        assert state['updated_at'] == state['finished_at']
+        assert state['progress'][-1]['state'] == 'failed'
+        assert state['llm_calls'] == 3  # Completed document plus failed attempt.
+        assert all(process.poll() is not None for process in children)
+        assert store.get(kb)['lightrag_generation'] == generation
+        assert len(store.get(kb)['documents']) == 1
+        checkpoint = json.loads((store.directory / 'lightrag' / kb / f"resume_{source['id']}" / 'index.json').read_text())
+        assert checkpoint['done'] == 1
     finally:
         jobs.close()
 
@@ -173,7 +238,7 @@ async def test_worker_embedding_timeout_allows_retries_and_preserves_batches(mon
     from loom.knowledge import store as store_module
     from loom.tasks.config import ModelConfig, TaskRunnerConfig
 
-    requests, delays, settings = [], [], {}
+    requests, delays, settings, events = [], [], {}, []
     clock = [0]
 
     def embedder(profile, texts, *, timeout):
@@ -220,7 +285,7 @@ async def test_worker_embedding_timeout_allows_retries_and_preserves_batches(mon
     monkeypatch.setitem(sys.modules, 'lightrag.utils', SimpleNamespace(EmbeddingFunc=SimpleNamespace))
     monkeypatch.setattr(store_module, 'embed', embedder)
     monkeypatch.setattr(lightrag_worker, 'embed_batch', embed_batch)
-    monkeypatch.setattr(lightrag_worker, 'emit', lambda value: None)
+    monkeypatch.setattr(lightrag_worker, 'emit', events.append)
     config = TaskRunnerConfig(models={'main': ModelConfig(model='test')})
     monkeypatch.setattr(lightrag_worker, 'load_task_config', lambda path: ok(config))
     monkeypatch.setattr(lightrag_worker, 'create_provider_from_task_config', lambda *args, **kwargs: ok(None))
@@ -232,6 +297,7 @@ async def test_worker_embedding_timeout_allows_retries_and_preserves_batches(mon
     assert [texts for texts, _ in requests] == [list(map(str, range(10)))] * 3 + [list(map(str, range(10, 20))), ['20']]
     assert [timeout for _, timeout in requests] == [60] * 5
     assert delays == [2, 4]
+    assert events[0]['progress'] == {'stage': 'initializing', 'current_document': 'test'}
     assert result['chunks'] == 21
     assert settings['finalized']
 

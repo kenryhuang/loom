@@ -1474,3 +1474,176 @@ dialog h1 {
 .knowledge-graph-section {
   overflow-wrap: anywhere;
 }
+
+.knowledge-job-progress {
+  padding: 20px;
+  margin: 20px 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  min-width: 0;
+}
+.knowledge-progress-heading,
+.knowledge-progress-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.knowledge-progress-announcement {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.knowledge-progress-heading h3,
+.knowledge-progress-current p,
+.knowledge-progress-metrics dd {
+  margin: 0;
+}
+.knowledge-progress-state {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.knowledge-job-progress[data-state="running"] .knowledge-progress-state,
+.knowledge-job-progress[data-state="completed"] .knowledge-progress-state {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.knowledge-job-progress[data-state="failed"] .knowledge-progress-state {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.knowledge-job-progress[data-state="partial"] .knowledge-progress-state,
+.knowledge-job-progress[data-state="interrupted"] .knowledge-progress-state {
+  color: #f0ca85;
+  border-color: #f0ca85;
+}
+.knowledge-progress-source,
+.knowledge-progress-item,
+.knowledge-progress-message,
+.knowledge-progress-log span {
+  overflow-wrap: anywhere;
+}
+.knowledge-progress-source {
+  margin: 6px 0 20px;
+  font-size: 12px;
+}
+.knowledge-progress-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 0;
+  margin: 0 0 20px;
+  list-style: none;
+  gap: 8px;
+  counter-reset: sync-step;
+}
+.knowledge-progress-steps li {
+  counter-increment: sync-step;
+  color: var(--muted);
+  border-top: 2px solid var(--line);
+  padding-top: 10px;
+  font-size: 12px;
+}
+.knowledge-progress-steps li::before {
+  content: counter(sync-step) ". ";
+}
+.knowledge-progress-steps .current,
+.knowledge-progress-steps .done {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.knowledge-job-progress[data-state="failed"]
+  .knowledge-progress-steps
+  .current {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.knowledge-progress-current {
+  padding: 14px;
+  background: var(--raised);
+  border-radius: 8px;
+  margin-bottom: 18px;
+}
+.knowledge-progress-current strong {
+  display: block;
+  margin-bottom: 6px;
+}
+.knowledge-progress-current small {
+  display: block;
+  margin-top: 6px;
+}
+.knowledge-progress-item {
+  font-size: 13px;
+}
+.knowledge-progress-coverage progress {
+  width: 100%;
+  height: 9px;
+  margin: 10px 0 0;
+  accent-color: var(--accent);
+}
+.knowledge-progress-coverage p {
+  margin: 6px 0 0;
+}
+.knowledge-progress-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+  gap: 12px;
+  padding: 16px 0;
+  margin: 16px 0 0;
+  border-top: 1px solid var(--line);
+}
+.knowledge-progress-metrics dt {
+  font-size: 12px;
+}
+.knowledge-progress-metrics dd {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+.knowledge-progress-message {
+  padding: 12px;
+  background: var(--raised);
+  border-radius: 8px;
+  margin: 0 0 14px;
+}
+.knowledge-progress-history {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+.knowledge-progress-history summary {
+  color: var(--muted);
+  cursor: pointer;
+}
+.knowledge-progress-log {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+}
+.knowledge-progress-log li {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 6px 0;
+  font-size: 12px;
+}
+.knowledge-progress-log time {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.knowledge-job-progress [hidden] {
+  display: none;
+}
+@media (max-width: 600px) {
+  .knowledge-job-progress {
+    padding: 14px;
+  }
+  .knowledge-progress-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .knowledge-progress-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
