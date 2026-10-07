@@ -31,7 +31,8 @@ async def execute(state, bridge, config_path, provider_factory, plugin_registry_
         task["objective"],
         workspace=task["workspace"],
         task_spec=task.get("task_spec"),
-        metadata={"knowledge_base_ids": task.get("knowledge_base_ids", []), "knowledge_directory": state.get("knowledge_directory")},
+        metadata={"knowledge_base_ids": task.get("knowledge_base_ids", []), "knowledge_directory": state.get("knowledge_directory"),
+                  "knowledge_config_path": config_path},
     )
     assembly = TaskAssembly(
         request,

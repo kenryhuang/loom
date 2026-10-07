@@ -129,3 +129,23 @@ def test_yakdb_pdf_upload_job_and_page_search(api):  # noqa: F811
     assert job["state"] == "completed", job
     hit = client._json(f"{prefix}/{base['id']}/search", {"query": "Moonbase"})["matches"][0]
     assert hit["page_number"] == 2 and "July eight" in hit["text"]
+
+
+def test_lightrag_source_and_graph_routes(api, monkeypatch):  # noqa: F811
+    from loom.knowledge import lightrag_local
+    service, server, client, path = api
+    monkeypatch.setattr(lightrag_local, "require", lambda: None)
+    monkeypatch.setattr(lightrag_local, "binding", lambda *a: "test")
+    prefix = "/v1/knowledge-bases"
+    profile = client._json(prefix + "/embedding-profiles", {"name": "Local", "endpoint": "http://localhost:8000/embeddings", "model": "test"})
+    base = client._json(prefix, {"name": "Graph", "engine": "lightrag_local", "indexing_model": "main", "embedding_profile_id": profile["id"]})
+    route = f"{prefix}/{base['id']}"
+    source = client._json(route + "/sources", {"url": "https://example.com/", "max_pages": 10})
+    assert client._json(route + "/sources")["sources"][0]["id"] == source["id"]
+    updated = client._json(route + "/sources/" + source["id"], {"enabled": False, "interval_hours": 24})
+    assert not updated["enabled"] and updated["interval_hours"] == 24
+    assert client._json(route + "/graph", {}) == {"nodes": [], "edges": [], "is_truncated": False}
+    with pytest.raises(ServiceError):
+        client._json(route + "/sources/" + source["id"], {"url": "https://other.example/"})
+    with pytest.raises(ServiceError):
+        client._json(route + "/graph", {"limit": 10000})

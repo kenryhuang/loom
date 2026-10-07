@@ -1454,3 +1454,23 @@ dialog h1 {
 .session-delete:hover {
   color: var(--danger);
 }
+
+.knowledge-source {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 10px 0;
+  overflow-wrap: anywhere;
+}
+.knowledge-graph svg {
+  width: 100%;
+  max-height: 600px;
+  background: var(--panel);
+}
+.knowledge-graph svg circle,
+.knowledge-graph svg line {
+  cursor: pointer;
+}
+.knowledge-graph-section {
+  overflow-wrap: anywhere;
+}

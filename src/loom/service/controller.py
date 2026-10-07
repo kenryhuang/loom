@@ -37,6 +37,7 @@ class LoomService:
             self.owner.close()
             raise ServiceError("Another supervisor owns this data directory", 409) from exc
         self.config_path = str(Path(config_path).resolve()) if config_path else None
+        self.store.knowledge.config_path = self.config_path
         self.capacity = max_active_runs
         self.provider_factory = provider_factory
         self.active = {}

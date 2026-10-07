@@ -1,4 +1,5 @@
 import { element } from "../markdown.mjs";
+import { renderKnowledgeGraph } from "./knowledge-graph.mjs";
 
 function field(label, input) {
   const node = element("label", "knowledge-field");
@@ -183,6 +184,7 @@ export class KnowledgeView {
       ["sqlite_fts", "Local keyword search · no embedding required"],
       ["sqlite_hybrid", "Local hybrid search · embedding + keywords"],
       ["yakdb_local", "YakDB local · PDF / Office / text"],
+      ["lightrag_local", "LightRAG local · knowledge graph + website sources"],
     ]) {
       const option = element("option", "", label);
       option.value = id;
@@ -200,10 +202,23 @@ export class KnowledgeView {
       option.value = item.id;
       profile.append(option);
     }
+    const indexingModel = element("select");
+    indexingModel.append(element("option", "", "Choose indexing model"));
+    indexingModel.firstChild.value = "";
+    for (const item of catalog.models || []) {
+      const option = element("option", "", item.label);
+      option.value = item.id;
+      indexingModel.append(option);
+    }
+    indexingModel.disabled = true;
     profile.disabled = true;
     engine.onchange = () => {
-      profile.disabled = engine.value !== "sqlite_hybrid";
+      profile.disabled = !["sqlite_hybrid", "lightrag_local"].includes(
+        engine.value,
+      );
       profile.required = !profile.disabled;
+      indexingModel.disabled = engine.value !== "lightrag_local";
+      indexingModel.required = !indexingModel.disabled;
     };
     const createError = element("p", "notice error knowledge-form-error");
     createError.setAttribute("role", "alert");
@@ -216,6 +231,7 @@ export class KnowledgeView {
       field("Description", description),
       field("Engine", engine),
       field("Embedding profile", profile),
+      field("Indexing LLM (LightRAG)", indexingModel),
       createError,
       submit,
     );
@@ -230,6 +246,9 @@ export class KnowledgeView {
           description: description.value,
           engine: engine.value,
           ...(profile.disabled ? {} : { embedding_profile_id: profile.value }),
+          ...(indexingModel.disabled
+            ? {}
+            : { indexing_model: indexingModel.value }),
         });
         await this.refresh(base.id);
         this.notice.textContent = "Knowledge base created.";
@@ -417,10 +436,24 @@ export class KnowledgeView {
     const pending = base.jobs?.find((job) =>
       ["queued", "running"].includes(job.state),
     );
+    const cancel = button("Cancel indexing / sync");
+    cancel.hidden = true;
+    form.append(cancel);
     const poll = async (job) => {
       if (id !== this.baseId || this.abort.signal.aborted) return;
-      status.textContent = `${job.document} · ${job.state}${job.error ? ` · ${job.error}` : ""}`;
+      status.textContent = `${job.document} · ${job.state} · ${job.stage || "indexing"}${job.pages !== undefined ? ` · ${job.pages} pages` : ""}${job.indexed !== undefined ? ` · ${job.indexed}/${job.total} documents` : ""}${job.llm_calls ? ` · ${job.llm_calls} LLM calls · ${job.reported_tokens || 0} tokens` : ""}${job.embedding_inputs ? ` · ${job.embedding_inputs} embedding inputs` : ""}${job.current_document ? ` · ${job.current_document}` : ""}${job.current_url ? ` · ${job.current_url}` : ""}${job.error ? ` · ${job.error}` : ""}`;
       add.disabled = ["queued", "running"].includes(job.state);
+      cancel.hidden = !add.disabled || base.engine !== "lightrag_local";
+      cancel.onclick = async () => {
+        cancel.disabled = true;
+        try {
+          await this.request(`/${id}/jobs/${job.id}/cancel`, {});
+          status.textContent = "Cancellation requested…";
+        } catch (error) {
+          this.error(error);
+          cancel.disabled = false;
+        }
+      };
       if (add.disabled)
         this.timer = setTimeout(async () => {
           try {
@@ -454,8 +487,10 @@ export class KnowledgeView {
     };
     this.basePanel.append(form);
     if (pending) poll(pending);
-    else if (base.jobs?.[0]?.state === "failed")
-      status.textContent = base.jobs[0].error;
+    else if (base.jobs?.[0]) {
+      const job = base.jobs[0];
+      status.textContent = `${job.state}: ${job.error || `${job.result?.chunks || 0} indexed chunks`}`;
+    }
     const search = element("form", "knowledge-search"),
       query = input("Test a query"),
       submit = element("button", "", "Search"),
@@ -478,9 +513,11 @@ export class KnowledgeView {
             element(
               "strong",
               "",
-              hit.page_number
-                ? `${hit.document} · page ${hit.page_number}`
-                : `${hit.document}:${hit.start_line}–${hit.end_line}`,
+              hit.source_url
+                ? hit.source_url
+                : hit.page_number
+                  ? `${hit.document} · page ${hit.page_number}`
+                  : `${hit.document}:${hit.start_line}–${hit.end_line}`,
             ),
             element("small", "muted", hit.source_id),
             element("p", "", hit.text),
@@ -495,5 +532,7 @@ export class KnowledgeView {
       }
     };
     this.basePanel.append(search, results);
+    if (base.engine === "lightrag_local")
+      await renderKnowledgeGraph(this, base);
   }
 }

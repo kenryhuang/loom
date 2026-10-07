@@ -95,3 +95,36 @@ evidence and satisfies research output contracts; empty results do not.
 
 Malformed tool-call JSON is returned as validation feedback to the model without
 executing the call. Corrections remain subject to the existing run budgets.
+
+## LightRAG local and website sources
+
+Install the optional engine in the service environment (no LightRAG source is vendored):
+
+```sh
+uv pip install --python .venv/bin/python '.[knowledge-graph]'
+```
+
+This pins `lightrag-hku==1.5.7` and installs BeautifulSoup for local HTML extraction. Restart the service after installation. In **Knowledge → New**, choose **LightRAG local**, an indexing LLM from the service configuration, and an embedding profile (for example DashScope `text-embedding-v4`). The LLM extracts entities and relationships; embeddings support semantic retrieval. NetworkX, NanoVectorDB, and JSON stores run locally without Neo4j or another database server. Initial tokenizer setup may download tiktoken data.
+
+Open the base in the main panel and select **Add website source**. Supply a starting URL, same-origin path scope, page/depth limits and optionally a periodic sync interval. **Add & sync** starts a durable background job. Progress includes crawl counts/current URL, indexing stage/document, LLM calls, reported tokens and embedding inputs. **Cancel indexing** stops the current operation; **Sync now** retries. **Sync settings** changes limits, delay and interval; **Pause source** disables automatic scheduling. Scheduling runs only while Loom service is running.
+
+The crawler follows public HTTP(S) HTML links, extracts readable HTML/Markdown/text, preserves original URLs, respects robots.txt and rate limits, and validates/pins public addresses on every request and redirect. It excludes query-string links and cannot log in or render JavaScript-only pages. Export those pages to Markdown/HTML first. Limits are 1,000 visited pages, depth 10, 4 MB per HTTP response, 500,000 characters per extracted page and 50 MB per crawl snapshot. Scope changes require a new source.
+
+Sync hashes extracted content: unchanged pages skip LLM/embedding work, changed pages replace their graph contributions. Optional missing-page removal applies only to complete successful crawls; page/depth caps, robots exclusions or failures retain old pages. Crawl errors are shown on the source card. Each indexing operation has a 30-minute timeout and 500 LLM callback limit; retrieval/graph requests have a 3-minute timeout. Requests already in flight can finish after cancellation. Indexing usage is reported separately from session task usage; it is not charged against the task's token budget.
+
+Documents, source definitions, URL provenance and jobs are in `knowledge/knowledge.sqlite`. Graph/vector/cache data is in `knowledge/lightrag/<kb-id>/<generation-id>/loom/`. Indexing uses a copied generation and atomically publishes its pointer only after successful completion. Failures/cancellation retain the previous searchable graph. Historical generations are retained and consume additional disk space; automatic reclamation is not implemented. Interrupted jobs are marked failed with an interrupted stage on restart; retry manually. LLM configuration and embedding profile/dimension are pinned; create a new base if changing them.
+
+**Explore knowledge graph** loads up to 150 nodes, or an entity's neighborhood. Click nodes/relationships to inspect descriptions and source URLs; export the displayed graph as JSON. Overview counts are capped at 1,000 nodes and explicitly marked when truncated. Attach the base to a session normally: `knowledge_search` performs LightRAG mixed graph/vector retrieval and returns source passages plus related entities/relationships; `knowledge_read` reads original locally stored text with source URLs. The model decides when to retrieve. Crawled text is sent to the configured model and embedding services; storage remains local.
+
+Additional authenticated routes:
+
+| Method | Route | Body / purpose |
+| --- | --- | --- |
+| POST | `/v1/knowledge-bases` | `{"name":"Docs","engine":"lightrag_local","indexing_model":"main","embedding_profile_id":"emb_..."}` |
+| GET / POST | `/v1/knowledge-bases/{id}/sources` | List / add a source (`url`, optional `path_prefix`, `max_pages`, `max_depth`, `delay_seconds`, `interval_hours`, `delete_missing`, `enabled`) |
+| POST | `/v1/knowledge-bases/{id}/sources/{source_id}` | Update limits/schedule/flags; URL and scope are immutable |
+| POST | `/v1/knowledge-bases/{id}/sources/{source_id}/sync` | `{}`; returns 202 with job ID |
+| POST | `/v1/knowledge-bases/{id}/jobs/{job_id}/cancel` | `{}`; request cancellation |
+| POST | `/v1/knowledge-bases/{id}/graph` | `{"label":"","limit":150}`; maximum 300 nodes |
+
+LightRAG document deletion is asynchronous and returns 202 with a job ID. Text/Markdown imports use the existing document API; binary PDF/Office parsing remains available through YakDB local.

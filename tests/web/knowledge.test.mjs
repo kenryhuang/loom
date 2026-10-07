@@ -179,3 +179,83 @@ test("creation errors stay beside the form and DashScope preset fills a reusable
   ]);
   view.close();
 });
+
+test("LightRAG creation selects model/profile and website graph lives in main panel", async () => {
+  const graphBase = {
+    ...base,
+    engine: "lightrag_local",
+    indexing_model: "main",
+    graph_stats: { entities: 2, relations: 1, chunks: 1 },
+  };
+  const requests = [];
+  const { dom, view } = setup({
+    json: async (path, options) => {
+      requests.push([path, options.body]);
+      if (path.endsWith("/sources"))
+        return {
+          sources: [
+            {
+              id: "web",
+              url: "https://example.com/",
+              path_prefix: "/",
+              max_pages: 10,
+              max_depth: 2,
+              delay_seconds: 0.3,
+              interval_hours: 0,
+              enabled: true,
+            },
+          ],
+        };
+      if (path.endsWith("/graph"))
+        return {
+          nodes: [
+            {
+              id: "Loom",
+              labels: ["Loom"],
+              properties: {
+                description: "Agent service",
+                file_path: "https://example.com/",
+              },
+            },
+          ],
+          edges: [],
+          is_truncated: false,
+        };
+      if (path.endsWith("/kb")) return graphBase;
+      return {
+        ...catalog,
+        knowledge_bases: [graphBase],
+        engines: ["sqlite_fts", "lightrag_local"],
+        models: [{ id: "main", label: "Main LLM" }],
+        embedding_profiles: [{ id: "emb", name: "Vectors", model: "embed" }],
+      };
+    },
+  });
+  await view.open(true);
+  assert.match(view.dialog.textContent, /Website sources & knowledge graph/);
+  assert.match(view.dialog.textContent, /Sync settings/);
+  const load = [...view.dialog.querySelectorAll("button")].find(
+    (b) => b.textContent === "Load graph",
+  );
+  load.click();
+  await tick();
+  assert.equal(view.dialog.querySelectorAll("svg circle").length, 1);
+  view.dialog
+    .querySelector("svg circle")
+    .dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+  assert.match(view.dialog.textContent, /Agent service/);
+  const selects = [...view.dialog.querySelectorAll("select")];
+  const engine = selects.find((s) =>
+    [...s.options].some((o) => o.value === "lightrag_local"),
+  );
+  engine.value = "lightrag_local";
+  engine.dispatchEvent(new dom.window.Event("change"));
+  const model = selects.find((s) =>
+    [...s.options].some((o) => o.value === "main"),
+  );
+  assert.equal(model.disabled, false);
+  model.value = "main";
+  assert.equal(model.required, true);
+  view.close();
+  dom.window.close();
+});

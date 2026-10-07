@@ -17,7 +17,7 @@ from loom.core import now_iso
 from loom.service.contracts import ServiceError, canonical, new_id, object_value, text
 from loom.tasks.config import _env_value
 
-ENGINES = ("sqlite_fts", "sqlite_hybrid", "yakdb_local")
+ENGINES = ("sqlite_fts", "sqlite_hybrid", "yakdb_local", "lightrag_local")
 MAX_CHUNKS = 20000
 
 
@@ -81,11 +81,12 @@ def embed(profile, inputs):
 
 
 class KnowledgeStore:
-    def __init__(self, directory, *, embedder=embed):
+    def __init__(self, directory, *, embedder=embed, config_path=None):
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "knowledge.sqlite"
         self.embedder = embedder
+        self.config_path = config_path
         with self.connect() as db:
             db.executescript("""
                 PRAGMA journal_mode=WAL;
@@ -100,6 +101,9 @@ class KnowledgeStore:
                 CREATE INDEX IF NOT EXISTS chunks_base ON chunks(kb_id);
                 CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(terms, tokenize='unicode61');
                 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, kb_id TEXT NOT NULL, body TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS web_sources(id TEXT PRIMARY KEY, kb_id TEXT NOT NULL, body TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS web_pages(source_id TEXT NOT NULL, kb_id TEXT NOT NULL, url TEXT NOT NULL,
+                    document_id TEXT NOT NULL, digest TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(source_id,url));
             """)
 
     @contextmanager
@@ -151,6 +155,8 @@ class KnowledgeStore:
             base["chunk_count"] = db.execute("SELECT COUNT(*) FROM chunks WHERE kb_id=?", (kb_id,)).fetchone()[0]
             if base["engine"] == "yakdb_local":
                 base["chunk_count"] = base.get("yakdb_pages", 0)
+            if base["engine"] == "lightrag_local":
+                base["chunk_count"] = base.get("graph_stats", {}).get("chunks", 0)
             return base
 
     def list(self):
@@ -192,7 +198,10 @@ class KnowledgeStore:
             more = {"page_number": page_number, "offset": next_offset}
         elif page_number < total_pages:
             more = {"page_number": page_number + 1, "offset": 0}
+        with self.connect() as db:
+            provenance = db.execute("SELECT url FROM web_pages WHERE kb_id=? AND document_id=?", (kb_id, document_id)).fetchone()
         return {
+            "source_url": provenance[0] if provenance else None,
             "knowledge_base_id": kb_id, "document_id": document_id, "document": doc["name"],
             "source_id": f"{kb_id}/{document_id}#page={page_number}" if base["engine"] == "yakdb_local" else f"{kb_id}/{document_id}#offset={offset}",
             "page_number": page_number, "total_pages": total_pages, "offset": offset, "text": content,
@@ -208,7 +217,7 @@ class KnowledgeStore:
 
     def create(self, payload):
         value = object_value(payload)
-        if set(value) - {"name", "description", "engine", "embedding_profile_id"}:
+        if set(value) - {"name", "description", "engine", "embedding_profile_id", "indexing_model"}:
             raise ServiceError("Unknown knowledge base fields")
         engine = value.get("engine", "sqlite_fts")
         if engine not in ENGINES:
@@ -219,9 +228,9 @@ class KnowledgeStore:
             require()
         profile_id = value.get("embedding_profile_id")
         profile = next((p for p in self.profiles() if p["id"] == profile_id), None)
-        if engine == "sqlite_hybrid" and profile is None:
-            raise ServiceError("Hybrid knowledge bases require an embedding profile")
-        if engine != "sqlite_hybrid" and profile_id:
+        if engine in {"sqlite_hybrid", "lightrag_local"} and profile is None:
+            raise ServiceError("This knowledge engine requires an embedding profile")
+        if engine not in {"sqlite_hybrid", "lightrag_local"} and profile_id:
             raise ServiceError("Keyword knowledge bases do not use an embedding profile")
         description = value.get("description", "")
         if not isinstance(description, str) or len(description) > 2000:
@@ -235,6 +244,14 @@ class KnowledgeStore:
             "embedding_dimension": None,
             "created_at": now_iso(),
         }
+        if engine == "lightrag_local":
+            from loom.knowledge.lightrag_local import binding, require
+
+            require()
+            base["indexing_model"] = text(value.get("indexing_model"), "indexing_model", max_length=200)
+            base["model_fingerprint"] = binding(self.config_path, base["indexing_model"])
+        elif value.get("indexing_model"):
+            raise ServiceError("An indexing model is only used by LightRAG")
         with self.connect() as db:
             db.execute("INSERT INTO bases VALUES(?,?)", (base["id"], canonical(base)))
         return self.get(base["id"])
@@ -242,7 +259,7 @@ class KnowledgeStore:
     def _profile(self, base):
         return next(p for p in self.profiles() if p["id"] == base["embedding_profile_id"])
 
-    def index(self, kb_id, payload):
+    def index(self, kb_id, payload, *, progress=lambda **_: None, cancelled=lambda: False):
         base = self.get(kb_id)
         if base["engine"] == "yakdb_local":
             from loom.knowledge.yakdb_local import publish
@@ -256,6 +273,13 @@ class KnowledgeStore:
         if "\x00" in content:
             raise ServiceError("Binary documents are unsupported; import UTF-8 text or Markdown")
         base = self.get(kb_id)
+        if base["engine"] == "lightrag_local":
+            from loom.knowledge.lightrag_local import publish
+
+            existing = next((d for d in base["documents"] if d["name"] == name), None)
+            identifier = existing["id"] if existing else new_id("doc")
+            doc = {"id": identifier, "name": name, "content": content, "digest": hashlib.sha256(content.encode()).hexdigest()}
+            return publish(self, kb_id, [doc], progress=progress, cancelled=cancelled)
         parts = list(chunks(content))
         vectors = []
         if base["engine"] == "sqlite_hybrid":
@@ -294,8 +318,14 @@ class KnowledgeStore:
         db.execute("DELETE FROM search WHERE rowid IN (SELECT id FROM chunks WHERE document_id=?)", (document_id,))
         db.execute("DELETE FROM chunks WHERE document_id=?", (document_id,))
 
-    def remove_document(self, kb_id, document_id):
+    def remove_document(self, kb_id, document_id, *, progress=lambda **_: None, cancelled=lambda: False):
         base = self.get(kb_id)
+        if base["engine"] == "lightrag_local":
+            from loom.knowledge.lightrag_local import publish
+
+            if document_id not in {d["id"] for d in base["documents"]}:
+                raise ServiceError("Document not found", 404)
+            return publish(self, kb_id, [], [document_id], progress=progress, cancelled=cancelled)
         if base["engine"] == "yakdb_local":
             from loom.knowledge.yakdb_local import publish
 
@@ -316,6 +346,11 @@ class KnowledgeStore:
         terms = list(dict.fromkeys(tokens(query)))[:80]
         matches = []
         for base in bases:
+            if base["engine"] == "lightrag_local":
+                from loom.knowledge.lightrag_local import search
+
+                matches.extend(search(self, base["id"], query, limit))
+                continue
             if base["engine"] == "yakdb_local":
                 from loom.knowledge.yakdb_local import search
 
