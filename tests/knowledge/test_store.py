@@ -71,7 +71,23 @@ async def test_tool_only_searches_attached_bases_and_does_not_force_retrieval(tm
     assert all(binding.effect_kind == "read_only" for binding in collection.bindings())
 
 
-def test_embedding_http_contract_validation_and_secret_reference(monkeypatch):
+@pytest.mark.parametrize("timeout", [None, 60])
+def test_embedding_http_contract_validation_and_secret_reference(monkeypatch, timeout):
+    from loom.knowledge import store as store_module
+
+    real_build_opener = store_module.build_opener
+    timeouts = []
+
+    class RecordingOpener:
+        def __init__(self, *handlers):
+            self.opener = real_build_opener(*handlers)
+
+        def open(self, request, *, timeout):
+            timeouts.append(timeout)
+            return self.opener.open(request, timeout=timeout)
+
+    monkeypatch.setattr(store_module, "build_opener", RecordingOpener)
+    options = {} if timeout is None else {"timeout": timeout}
     requests = []
     invalid = False
 
@@ -95,15 +111,16 @@ def test_embedding_http_contract_validation_and_secret_reference(monkeypatch):
     monkeypatch.setenv("LOOM_TEST_EMBED_KEY", "test-secret")
     profile = {"endpoint": f"http://127.0.0.1:{server.server_port}/v1/embeddings", "model": "test", "api_key_env": "LOOM_TEST_EMBED_KEY"}
     try:
-        assert embed(profile, ["one", "two"]) == [[0.6, 0.8], [0.6, 0.8]]
+        assert embed(profile, ["one", "two"], **options) == [[0.6, 0.8], [0.6, 0.8]]
         assert requests[0][0] == "Bearer test-secret"
         invalid = True
         with pytest.raises(ServiceError, match="invalid vectors"):
-            embed(profile, ["bad"])
+            embed(profile, ["bad"], **options)
         monkeypatch.delenv("LOOM_TEST_EMBED_KEY")
         with pytest.raises(ServiceError, match="not set"):
-            embed(profile, ["no request"])
+            embed(profile, ["no request"], **options)
         assert len(requests) == 2
+        assert timeouts == [30 if timeout is None else timeout] * 2
     finally:
         server.shutdown()
         server.server_close()

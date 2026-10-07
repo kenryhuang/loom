@@ -5,6 +5,7 @@ import contextlib
 import json
 import sys
 from dataclasses import replace
+from functools import partial
 from urllib.error import HTTPError, URLError
 
 from loom.llm.api import LlmMessage
@@ -44,6 +45,7 @@ async def execute(value):
 
     from loom.knowledge.store import embed
 
+    embedder = partial(embed, timeout=60)
     config = load_task_config(value["config_path"]).unwrap()
     name = value["model"]
     selected = config.models[name]
@@ -78,7 +80,7 @@ async def execute(value):
         vectors = []
         for offset in range(0, len(texts), 10):
             try:
-                vectors.extend(await embed_batch(embed, value["profile"], texts[offset:offset + 10],
+                vectors.extend(await embed_batch(embedder, value["profile"], texts[offset:offset + 10],
                                                 lambda **p: emit({"progress": {**p, **usage}})))
             except Exception as exc:
                 detail = str(exc) if isinstance(exc, ServiceError) else type(exc).__name__
@@ -95,6 +97,8 @@ async def execute(value):
         embedding_func=EmbeddingFunc(embedding_dim=value["dimension"], max_token_size=4096, func=embeddings),
         kv_storage="JsonKVStorage", vector_storage="NanoVectorDBStorage", graph_storage="NetworkXStorage",
         doc_status_storage="JsonDocStatusStorage", llm_model_max_async=2, embedding_func_max_async=2,
+        # LightRAG doubles this for its execution deadline, allowing three 60s attempts plus backoff.
+        default_embedding_timeout=120,
         embedding_batch_num=10, chunk_token_size=900, chunk_overlap_token_size=100, entity_extract_max_gleaning=0,
     )
     await rag.initialize_storages()

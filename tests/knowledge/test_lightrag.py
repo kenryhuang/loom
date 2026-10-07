@@ -163,6 +163,79 @@ async def test_embedding_retry_is_bounded_and_rejects_invalid_vectors(cause, exp
     assert len(attempts) == expected
 
 
+@pytest.mark.asyncio
+async def test_worker_embedding_timeout_allows_retries_and_preserves_batches(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from loom.core import ok
+    from loom.knowledge import lightrag_worker
+    from loom.knowledge import store as store_module
+    from loom.tasks.config import ModelConfig, TaskRunnerConfig
+
+    requests, delays, settings = [], [], {}
+    clock = [0]
+
+    def embedder(profile, texts, *, timeout):
+        requests.append((list(texts), timeout))
+        if len(requests) < 3:
+            clock[0] += timeout
+            raise ServiceError('Embedding service failed', 502) from TimeoutError()
+        return [[1, 0] for _ in texts]
+
+    async def sleep(delay):
+        delays.append(delay)
+        clock[0] += delay
+
+    original_embed_batch = lightrag_worker.embed_batch
+
+    async def embed_batch(*args):
+        return await original_embed_batch(*args, sleep=sleep)
+
+    class FakeRag:
+        def __init__(self, **kwargs):
+            settings.update(kwargs)
+            self.doc_status = self
+
+        async def initialize_storages(self):
+            pass
+
+        async def ainsert(self, content, **kwargs):
+            vectors = await settings['embedding_func'].func([str(i) for i in range(21)])
+            assert vectors == [[1, 0]] * 21
+            # LightRAG 1.5.7 derives this deadline from default_embedding_timeout.
+            assert clock[0] < 2 * settings['default_embedding_timeout']
+
+        async def get_by_id(self, identifier):
+            return {'status': 'processed', 'chunks_count': 21}
+
+        async def get_knowledge_graph(self, *args, **kwargs):
+            return SimpleNamespace(nodes=[], edges=[], is_truncated=False)
+
+        async def finalize_storages(self):
+            settings['finalized'] = True
+
+    monkeypatch.setitem(sys.modules, 'numpy', SimpleNamespace(asarray=lambda value: value))
+    monkeypatch.setitem(sys.modules, 'lightrag', SimpleNamespace(LightRAG=FakeRag, QueryParam=SimpleNamespace))
+    monkeypatch.setitem(sys.modules, 'lightrag.utils', SimpleNamespace(EmbeddingFunc=SimpleNamespace))
+    monkeypatch.setattr(store_module, 'embed', embedder)
+    monkeypatch.setattr(lightrag_worker, 'embed_batch', embed_batch)
+    monkeypatch.setattr(lightrag_worker, 'emit', lambda value: None)
+    config = TaskRunnerConfig(models={'main': ModelConfig(model='test')})
+    monkeypatch.setattr(lightrag_worker, 'load_task_config', lambda path: ok(config))
+    monkeypatch.setattr(lightrag_worker, 'create_provider_from_task_config', lambda *args, **kwargs: ok(None))
+
+    result = await lightrag_worker.execute({
+        'config_path': 'unused', 'model': 'main', 'workspace': 'unused', 'profile': {}, 'dimension': 2,
+        'action': 'index', 'documents': [{'id': 'doc', 'name': 'test', 'content': 'test'}], 'all_ids': ['doc'],
+    })
+    assert [texts for texts, _ in requests] == [list(map(str, range(10)))] * 3 + [list(map(str, range(10, 20))), ['20']]
+    assert [timeout for _, timeout in requests] == [60] * 5
+    assert delays == [2, 4]
+    assert result['chunks'] == 21
+    assert settings['finalized']
+
+
 def test_raw_utf8_redirect_header_preserves_chinese_path(monkeypatch):
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

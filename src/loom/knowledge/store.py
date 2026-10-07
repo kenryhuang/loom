@@ -40,7 +40,7 @@ class _NoRedirect(HTTPRedirectHandler):
         raise HTTPError(req.full_url, code, "Embedding redirects are unsupported", headers, fp)
 
 
-def embed(profile, inputs):
+def embed(profile, inputs, *, timeout=30):
     key = _env_value(profile.get("api_key_env"), None) or ""
     if profile.get("api_key_env") and not key:
         raise ServiceError(f"Embedding environment variable {profile['api_key_env']} is not set", 422, "EMBEDDING_UNAVAILABLE")
@@ -50,7 +50,7 @@ def embed(profile, inputs):
         headers={"Content-Type": "application/json", **({"Authorization": f"Bearer {key}"} if key else {})},
     )
     try:
-        with build_opener(_NoRedirect).open(request, timeout=30) as response:
+        with build_opener(_NoRedirect).open(request, timeout=timeout) as response:
             raw = response.read(16_000_001)
         if len(raw) > 16_000_000:
             raise ValueError("Embedding response too large")
