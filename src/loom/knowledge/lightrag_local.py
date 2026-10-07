@@ -123,7 +123,7 @@ def call(store, base, workspace, action, *, progress=lambda **_: None, cancelled
         reader.join(timeout=1)
 
 
-def publish(store, kb_id, documents, delete_ids=(), *, progress=lambda **_: None, cancelled=lambda: False, publication=None):
+def publish(store, kb_id, documents, delete_ids=(), *, progress=lambda **_: None, cancelled=lambda: False, publication=None, checkpoint_key=None):
     with ownership(store, kb_id, cancelled) as directory:
         base = store.get(kb_id)
         generation = new_id("generation")
@@ -143,8 +143,15 @@ def publish(store, kb_id, documents, delete_ids=(), *, progress=lambda **_: None
                 progress(stage="checking_embedding")
                 base["embedding_dimension"] = len(store.embedder(store._profile(base), ["embedding dimension probe"])[0])
             all_ids = (set(existing) - removed) | {d["id"] for d in changed}
-            result = call(store, base, workspace, "index", documents=changed, delete_ids=sorted(removed | set(replaced)),
-                          all_ids=sorted(all_ids), progress=progress, cancelled=cancelled)
+            if checkpoint_key:
+                from loom.knowledge.resume import index_snapshot
+
+                result = index_snapshot(store, base, directory, workspace, checkpoint_key, changed,
+                                        sorted(removed | set(replaced)), sorted(all_ids), call,
+                                        progress=progress, cancelled=cancelled)
+            else:
+                result = call(store, base, workspace, "index", documents=changed, delete_ids=sorted(removed | set(replaced)),
+                              all_ids=sorted(all_ids), progress=progress, cancelled=cancelled)
             if cancelled():
                 raise ServiceError("Knowledge job cancelled", 409)
             progress(stage="publishing")
@@ -164,6 +171,8 @@ def publish(store, kb_id, documents, delete_ids=(), *, progress=lambda **_: None
                 db.execute("UPDATE bases SET body=? WHERE id=?", (canonical(current), kb_id))
                 if publication:
                     publication(db)
+            if checkpoint_key:
+                shutil.rmtree(directory / checkpoint_key, ignore_errors=True)
             return {**result, "documents_updated": len(changed), "documents_removed": len(removed), "generation": generation}
         except BaseException:
             shutil.rmtree(workspace, ignore_errors=True)

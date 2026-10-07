@@ -142,7 +142,7 @@ def extract(html, url):
     return title, content, links
 
 
-def crawl(source, progress=lambda **_: None, cancelled=lambda: False, *, fetcher=fetch):
+def crawl(source, progress=lambda **_: None, cancelled=lambda: False, *, fetcher=fetch, resume=None, checkpoint=lambda _: None):
     start = normalize(source["url"])
     origin = urlsplit(start)
     prefix = quote(source["path_prefix"].rstrip("/"), safe="/%:@!$&'()*+,;=-._~")
@@ -167,8 +167,18 @@ def crawl(source, progress=lambda **_: None, cancelled=lambda: False, *, fetcher
     complete = True
     total_bytes = 0
     missing, unsupported, duplicates, attempted, reasons = [], [], 0, 0, set()
+    if resume:
+        pending, seen = deque(resume["pending"]), set(resume["seen"])
+        pages, errors, skipped = resume["pages"], resume["errors"], resume["skipped"]
+        complete, total_bytes = resume["complete"], resume["total_bytes"]
+        missing, unsupported = resume["missing"], resume["unsupported"]
+        duplicates, attempted, reasons = resume["duplicates"], resume["attempted"], set(resume["reasons"])
+        progress(stage="resuming_crawl", pages=len(pages), visited=attempted)
     last = time.monotonic()
     while pending:
+        checkpoint({"pending": list(pending), "seen": sorted(seen), "pages": pages, "errors": errors,
+                    "skipped": skipped, "complete": complete, "total_bytes": total_bytes, "missing": missing,
+                    "unsupported": unsupported, "duplicates": duplicates, "attempted": attempted, "reasons": sorted(reasons)})
         if cancelled():
             raise ServiceError("Knowledge job cancelled", 409)
         url, depth = pending.popleft()
@@ -238,6 +248,8 @@ def crawl(source, progress=lambda **_: None, cancelled=lambda: False, *, fetcher
                     reasons.add("depth_limit" if depth >= source["max_depth"] else "queue_limit")
                     complete = False
         except ServiceError as exc:
+            if cancelled():
+                raise
             reasons.add("request_errors")
             errors.append({"url": url, "error": str(exc)})
             complete = False

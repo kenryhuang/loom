@@ -173,11 +173,23 @@ export async function renderKnowledgeGraph(view, base) {
       if (job.source_id !== source.id) return;
       const active = ["queued", "running"].includes(job.state);
       sync.disabled = active;
-      sync.textContent = active ? "Syncing…" : "Sync now";
+      sync.textContent = active
+        ? "Syncing…"
+        : job.state !== "completed" &&
+            (job.crawl_checkpoint ||
+              job.checkpointed ||
+              job.snapshot_saved ||
+              job.snapshot_reused)
+          ? "Resume sync"
+          : "Sync now";
       cancel.hidden = !active;
       const stages = {
         queued: "Waiting to start",
         crawling: "Crawling pages",
+        crawl_saved: "Website snapshot saved",
+        resuming_crawl: "Resuming saved website snapshot",
+        resuming_index: "Resuming saved document checkpoints",
+        checkpointed: "Document checkpoint saved",
         crawl_retry: "Retrying webpage request",
         partial:
           "Partial sync — collected pages indexed; website crawl incomplete",
@@ -208,6 +220,10 @@ export async function renderKnowledgeGraph(view, base) {
         parts.push(`${job.request_errors} request errors`);
       if (job.indexed !== undefined)
         parts.push(`${job.indexed}/${job.total} documents indexed`);
+      if (job.checkpointed)
+        parts.push(`${job.checkpointed} documents saved for resume`);
+      if (job.snapshot_reused)
+        parts.push("saved crawl reused; usage includes saved attempts");
       if (job.llm_calls)
         parts.push(
           `${job.llm_calls} LLM calls`,

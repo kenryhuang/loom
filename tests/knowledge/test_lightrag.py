@@ -76,9 +76,9 @@ def test_website_diff_skips_model_and_only_prunes_complete_crawls(graph_store):
     def crawl(*_):
         return {'pages': pages, 'complete': complete, 'errors': [], 'skipped': []}
     first = web_sources.sync(store, kb, source['id'], crawler=crawl)
-    assert first['updated'] == 2 and len(calls) == 1
+    assert first['updated'] == 2 and len(calls) == 2
     assert web_sources.sync(store, kb, source['id'], crawler=crawl)['unchanged'] == 2
-    assert len(calls) == 1
+    assert len(calls) == 2
     pages.pop()
     complete = False
     assert web_sources.sync(store, kb, source['id'], crawler=crawl)['removed'] == 0
@@ -250,3 +250,111 @@ def test_partial_crawl_job_is_terminal_but_does_not_claim_full_sync(graph_store,
         assert not value['result']['complete']
     finally:
         jobs.close()
+
+
+def test_website_resume_reuses_crawl_and_only_finalized_documents(graph_store, monkeypatch):
+    store, kb, _ = graph_store
+    store.index(kb, {'name': 'original', 'content': 'Published evidence'})
+    generation = store.get(kb)['lightrag_generation']
+    source = web_sources.save_source(store, kb, {'url': 'https://example.com/'})
+    pages = [{'url': f'https://example.com/{name}', 'title': name, 'content': name} for name in ('a', 'b', 'c')]
+    crawls, attempted, updates = [], [], []
+    fail = True
+    original_call = lightrag_local.call
+    def crawl(*_):
+        crawls.append(1)
+        return {'pages': pages, 'complete': True, 'errors': [], 'skipped': []}
+    def call(*args, **kw):
+        name = kw['documents'][0]['name']
+        attempted.append(name)
+        kw['progress'](stage='extracting', llm_calls=2, reported_tokens=100, embedding_inputs=3)
+        if fail and '_b.md' in name:
+            (args[2] / 'corrupt').write_text('Interrupted worker output')
+            raise ServiceError('Time limit', 504)
+        assert not (args[2] / 'corrupt').exists()
+        return {**original_call(*args, **kw), 'usage': {'llm_calls': 2, 'reported_tokens': 100, 'embedding_inputs': 3}}
+    monkeypatch.setattr(lightrag_local, 'call', call)
+    with pytest.raises(ServiceError, match='1 document checkpoints retained'):
+        web_sources.sync(store, kb, source['id'], crawler=crawl, progress=lambda **v: updates.append(v))
+    assert store.get(kb)['lightrag_generation'] == generation
+    assert len(store.get(kb)['documents']) == 1
+    # A new store instance simulates service restart, without process-local recovery state.
+    restarted = KnowledgeStore(store.directory, embedder=store.embedder)
+    fail = False
+    result = web_sources.sync(restarted, kb, source['id'], crawler=crawl, progress=lambda **v: updates.append(v))
+    assert len(crawls) == 1
+    assert [name.rsplit('_', 1)[-1] for name in attempted] == ['a.md', 'b.md', 'b.md', 'c.md']
+    assert len(restarted.get(kb)['documents']) == 4
+    assert result['usage']['llm_calls'] == 8  # Includes the failed attempt.
+    assert any(v.get('resumed_documents') == 1 for v in updates)
+    assert not (store.directory / 'website_snapshots' / kb / f"{source['id']}.json").exists()
+    assert not (store.directory / 'lightrag' / kb / f"resume_{source['id']}").exists()
+
+
+def test_crawl_resume_retries_interrupted_page_without_refetching_completed_pages():
+    requested, saved = [], []
+    stop = False
+    def fetch(url, **_):
+        nonlocal stop
+        requested.append(url)
+        if url.endswith('robots.txt'):
+            return {'url': url, 'status': 404, 'text': ''}
+        if url.endswith('/b') and len(requested) == 3:
+            stop = True
+            raise ServiceError('Cancelled')
+        return {'url': url, 'status': 200, 'type': 'text/html', 'text': '<main>Body<a href="/b">Next</a></main>'}
+    spec = {'url': 'https://example.com/', 'path_prefix': '/', 'max_pages': 10, 'max_depth': 2, 'delay_seconds': 0}
+    def checkpoint(value):
+        saved.append(json.loads(json.dumps(value)))
+    with pytest.raises(ServiceError):
+        crawler.crawl(spec, cancelled=lambda: stop, fetcher=fetch, checkpoint=checkpoint)
+    stop = False
+    result = crawler.crawl(spec, fetcher=fetch, resume=saved[-1])
+    assert requested.count('https://example.com/') == 1
+    assert requested.count('https://example.com/b') == 2
+    assert len(result['pages']) == 2 and result['complete']
+
+
+def test_website_settings_change_invalidates_saved_snapshot(graph_store, monkeypatch):
+    store, kb, _ = graph_store
+    source = web_sources.save_source(store, kb, {'url': 'https://example.com/'})
+    crawls = []
+    def crawl(spec, *_):
+        crawls.append(spec['max_pages'])
+        return {'pages': [{'url': spec['url'], 'title': 'A', 'content': 'A'}], 'complete': True, 'errors': [], 'skipped': []}
+    original = lightrag_local.call
+    def fail(*a, **kw):
+        raise ServiceError('Offline')
+    monkeypatch.setattr(lightrag_local, 'call', fail)
+    with pytest.raises(ServiceError):
+        web_sources.sync(store, kb, source['id'], crawler=crawl)
+    web_sources.save_source(store, kb, {'max_pages': 300}, source['id'])
+    monkeypatch.setattr(lightrag_local, 'call', original)
+    web_sources.sync(store, kb, source['id'], crawler=crawl)
+    assert crawls == [200, 300]
+
+
+def test_website_budget_stops_between_documents_and_resumes(graph_store, monkeypatch):
+    from types import SimpleNamespace
+
+    from loom.knowledge import resume
+
+    store, kb, calls = graph_store
+    source = web_sources.save_source(store, kb, {'url': 'https://example.com/'})
+    clock = [0]
+    monkeypatch.setattr(resume, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    original = lightrag_local.call
+    def call(*args, **kw):
+        clock[0] += 1801
+        return original(*args, **kw)
+    monkeypatch.setattr(lightrag_local, 'call', call)
+    def crawl(*_):
+        return {'pages': [{'url': f'https://example.com/{n}', 'title': n, 'content': n} for n in ('a', 'b')],
+                'complete': True, 'errors': [], 'skipped': []}
+    with pytest.raises(ServiceError, match='sync budget reached'):
+        web_sources.sync(store, kb, source['id'], crawler=crawl)
+    assert len(calls) == 1
+    assert store.get(kb)['documents'] == []
+    result = web_sources.sync(store, kb, source['id'], crawler=crawl)
+    assert result['updated'] == 2 and len(calls) == 2
+    assert len(store.get(kb)['documents']) == 2

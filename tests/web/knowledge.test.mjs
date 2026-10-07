@@ -330,6 +330,21 @@ test("website sync progress and failures appear beside the source", async () => 
     for (const listener of view.knowledgeJobListeners)
       listener({
         ...job,
+        state: "failed",
+        checkpointed: 4,
+        total: 187,
+        indexed: 4,
+        snapshot_saved: true,
+      });
+    assert.match(row.textContent, /4 documents saved for resume/);
+    assert.ok(
+      [...row.querySelectorAll("button")].find(
+        (b) => b.textContent === "Resume sync",
+      ),
+    );
+    for (const listener of view.knowledgeJobListeners)
+      listener({
+        ...job,
         state: "completed",
         stage: "completed",
         result: {

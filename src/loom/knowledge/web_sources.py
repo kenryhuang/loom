@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import shutil
 from urllib.parse import quote, urlsplit
 
 from loom.core import now_iso
@@ -61,7 +62,25 @@ def sync(store, kb_id, identifier, *, progress=lambda **_: None, cancelled=lambd
     spec = source(store, kb_id, identifier)
     if not spec:
         raise ServiceError("Website source not found", 404)
-    result = crawler(spec, progress, cancelled)
+    from loom.knowledge.resume import save
+
+    snapshot_path = store.directory / "website_snapshots" / kb_id / f"{identifier}.json"
+    identity = hashlib.sha256(canonical({k: spec[k] for k in
+                                        ("url", "path_prefix", "max_pages", "max_depth", "delay_seconds", "delete_missing")}).encode()).hexdigest()
+    snapshot = json.loads(snapshot_path.read_text()) if snapshot_path.exists() else {}
+    if snapshot.get("identity") != identity:
+        snapshot = {"identity": identity}
+    result = snapshot.get("result")
+    if result is not None:
+        progress(stage="resuming_crawl", pages=len(result["pages"]), visited=result.get("visited"), snapshot_reused=True)
+    else:
+        def checkpoint(state):
+            save(snapshot_path, {"identity": identity, "crawl": state})
+            progress(crawl_checkpoint=True)
+        options = {"resume": snapshot.get("crawl"), "checkpoint": checkpoint} if crawler is crawl else {}
+        result = crawler(spec, progress, cancelled, **options)
+        save(snapshot_path, {"identity": identity, "result": result})
+    progress(stage="crawl_saved", snapshot_saved=True, pages=len(result["pages"]))
     with store.connect() as db:
         previous = {r["url"]: dict(r) for r in db.execute("SELECT * FROM web_pages WHERE source_id=?", (identifier,))}
     documents, updates = [], []
@@ -95,11 +114,14 @@ def sync(store, kb_id, identifier, *, progress=lambda **_: None, cancelled=lambd
 
     progress(stage="diffing", **{k: summary[k] for k in ("pages", "updated", "unchanged", "removed")})
     if changed or removed:
-        index = publish(store, kb_id, changed, removed, progress=progress, cancelled=cancelled, publication=publication)
+        index = publish(store, kb_id, changed, removed, progress=progress, cancelled=cancelled, publication=publication,
+                        checkpoint_key=f"resume_{identifier}")
     else:
         if cancelled():
             raise ServiceError("Knowledge job cancelled", 409)
         with store.connect() as db:
             publication(db)
         index = {"chunks": store.get(kb_id)["chunk_count"]}
+    snapshot_path.unlink(missing_ok=True)
+    shutil.rmtree(store.directory / "lightrag" / kb_id / f"resume_{identifier}", ignore_errors=True)
     return {**index, **summary}
