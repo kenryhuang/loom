@@ -128,3 +128,5 @@ Additional authenticated routes:
 | POST | `/v1/knowledge-bases/{id}/graph` | `{"label":"","limit":150}`; maximum 300 nodes |
 
 LightRAG document deletion is asynchronous and returns 202 with a job ID. Text/Markdown imports use the existing document API; binary PDF/Office parsing remains available through YakDB local.
+
+Website sync distinguishes indexing completion from crawl completeness: terminal jobs keep state `completed`, with stage `partial` and `result.complete=false` when network errors, robots exclusions or crawl limits leave the website incomplete. The UI also recognizes older jobs with `result.complete=false`. Results report missing (404/410) URLs, unsupported content counts, duplicate pages, pending URLs and incompleteness reasons. Missing URLs are counted rather than silently discarded. Temporary webpage timeouts, connection resets, HTTP 429 and selected 5xx responses get at most two retries with backoff, rotating among validated public addresses. Raw UTF-8 redirect headers are repaired before URL encoding, and final redirect targets are deduplicated.

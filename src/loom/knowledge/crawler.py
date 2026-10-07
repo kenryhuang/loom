@@ -7,6 +7,7 @@ import socket
 import ssl
 import time
 from collections import deque
+from contextlib import suppress
 from urllib.parse import quote, urldefrag, urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
 
@@ -51,17 +52,28 @@ def public_addresses(host, port):
     return addresses
 
 
-def fetch(url, *, scope=None):
+def redirect_target(url, location):
+    # http.client exposes header bytes as Latin-1; some sites send raw UTF-8 in Location.
+    with suppress(UnicodeEncodeError, UnicodeDecodeError):
+        location = location.encode("latin-1").decode("utf-8")
+    return normalize(urljoin(url, location))
+
+
+def _fetch(url, *, scope=None, address_index=0, deadline=None):
     for _ in range(6):
         url = normalize(url)
         if scope and not scope(url):
             raise ServiceError("Redirect leaves the configured website scope")
         parts = urlsplit(url)
         port = parts.port or (443 if parts.scheme == "https" else 80)
-        address = public_addresses(parts.hostname, port)[0]
-        conn = http.client.HTTPConnection(parts.hostname, port, timeout=20)
+        addresses = public_addresses(parts.hostname, port)
+        address = addresses[address_index % len(addresses)]
+        timeout = min(20, deadline - time.monotonic()) if deadline else 20
+        if timeout <= 0:
+            raise ServiceError("Website request deadline reached") from TimeoutError()
+        conn = http.client.HTTPConnection(parts.hostname, port, timeout=timeout)
         try:
-            sock = socket.create_connection((address, port), timeout=20)
+            sock = socket.create_connection((address, port), timeout=timeout)
             conn.sock = sock
             if parts.scheme == "https":
                 sock = ssl.create_default_context().wrap_socket(sock, server_hostname=parts.hostname)
@@ -73,7 +85,7 @@ def fetch(url, *, scope=None):
                 location = response.getheader("Location")
                 if not location:
                     raise ServiceError("Website redirect has no destination")
-                url = urljoin(url, location)
+                url = redirect_target(url, location)
                 continue
             body = response.read(MAX_BYTES + 1)
             if len(body) > MAX_BYTES:
@@ -86,6 +98,28 @@ def fetch(url, *, scope=None):
         finally:
             conn.close()
     raise ServiceError("Too many website redirects")
+
+
+def fetch(url, *, scope=None, cancelled=lambda: False, progress=lambda **_: None):
+    deadline = time.monotonic() + 45
+    for attempt in range(3):
+        if cancelled():
+            raise ServiceError("Knowledge job cancelled", 409)
+        try:
+            reply = _fetch(url, scope=scope, address_index=attempt, deadline=deadline)
+            if reply["status"] not in {429, 500, 502, 503, 504} or attempt == 2:
+                return reply
+        except ServiceError as exc:
+            if not isinstance(exc.__cause__, (TimeoutError, ConnectionError, http.client.RemoteDisconnected)) or attempt == 2:
+                raise
+        if time.monotonic() >= deadline:
+            raise ServiceError("Website request deadline reached") from TimeoutError()
+        progress(stage="crawl_retry", current_url=url, retry=attempt + 1)
+        until = min(deadline, time.monotonic() + 2 ** attempt)
+        while time.monotonic() < until:
+            if cancelled():
+                raise ServiceError("Knowledge job cancelled", 409)
+            time.sleep(0.05)
 
 
 def extract(html, url):
@@ -118,7 +152,7 @@ def crawl(source, progress=lambda **_: None, cancelled=lambda: False, *, fetcher
         return (p.scheme, p.netloc) == (origin.scheme, origin.netloc) and (not prefix or p.path == prefix or p.path.startswith(prefix + "/"))
 
     robots_url = urlunsplit((origin.scheme, origin.netloc, "/robots.txt", "", ""))
-    robots_reply = fetcher(robots_url, scope=lambda u: urlsplit(u).netloc == origin.netloc)
+    robots_reply = fetcher(robots_url, scope=lambda u: urlsplit(u).netloc == origin.netloc, cancelled=cancelled, progress=progress)
     robot = RobotFileParser()
     if robots_reply["status"] == 404:
         robot.parse([])
@@ -132,19 +166,24 @@ def crawl(source, progress=lambda **_: None, cancelled=lambda: False, *, fetcher
     pending, seen, pages, errors, skipped = deque([(start, 0)]), set(), [], [], []
     complete = True
     total_bytes = 0
+    missing, unsupported, duplicates, attempted, reasons = [], [], 0, 0, set()
     last = time.monotonic()
     while pending:
         if cancelled():
             raise ServiceError("Knowledge job cancelled", 409)
-        if len(seen) >= source["max_pages"]:
-            complete = False
-            break
         url, depth = pending.popleft()
         if url in seen:
             continue
+        if attempted >= source["max_pages"]:
+            pending.appendleft((url, depth))
+            complete = False
+            reasons.add("page_limit")
+            break
         seen.add(url)
+        attempted += 1
         if not robot.can_fetch(USER_AGENT, url):
             skipped.append(url)
+            reasons.add("robots")
             complete = False
             continue
         while time.monotonic() - last < delay:
@@ -152,10 +191,12 @@ def crawl(source, progress=lambda **_: None, cancelled=lambda: False, *, fetcher
                 raise ServiceError("Knowledge job cancelled", 409)
             time.sleep(0.05)
         last = time.monotonic()
-        progress(stage="crawling", visited=len(seen), discovered=len(seen) + len(pending), pages=len(pages), current_url=url)
+        progress(stage="crawling", visited=attempted, discovered=len(seen) + len(pending), pages=len(pages), current_url=url,
+                 missing_count=len(missing), request_errors=len(errors))
         try:
-            reply = fetcher(url, scope=scope)
+            reply = fetcher(url, scope=scope, cancelled=cancelled, progress=progress)
             if reply["status"] in {404, 410}:
+                missing.append({"url": url, "status": reply["status"]})
                 continue
             if reply["status"] != 200:
                 raise ServiceError(f"HTTP {reply['status']}")
@@ -164,6 +205,7 @@ def crawl(source, progress=lambda **_: None, cancelled=lambda: False, *, fetcher
             elif any(t in reply["type"] for t in ("text/plain", "text/markdown")):
                 title, content, links = url, reply["text"], []
             else:
+                unsupported.append(url)
                 continue
             if not content.strip():
                 raise ServiceError("No readable content; client-rendered sites need exported HTML or Markdown")
@@ -171,12 +213,16 @@ def crawl(source, progress=lambda **_: None, cancelled=lambda: False, *, fetcher
                 raise ServiceError("Extracted page exceeds 500,000 characters")
             total_bytes += len(content.encode())
             if total_bytes > 50_000_000:
+                reasons.add("snapshot_limit")
                 errors.append({"url": url, "error": "Website snapshot exceeds 50 MB"})
                 complete = False
                 break
             canonical_url = reply["url"]
+            seen.add(canonical_url)
             if not any(p["url"] == canonical_url for p in pages):
                 pages.append({"url": canonical_url, "title": title, "content": content, "digest": hashlib.sha256(content.encode()).hexdigest()})
+            else:
+                duplicates += 1
             for link in links:
                 try:
                     link = normalize(link)
@@ -189,10 +235,13 @@ def crawl(source, progress=lambda **_: None, cancelled=lambda: False, *, fetcher
                 if depth < source["max_depth"] and len(pending) < 2000:
                     pending.append((link, depth + 1))
                 else:
+                    reasons.add("depth_limit" if depth >= source["max_depth"] else "queue_limit")
                     complete = False
         except ServiceError as exc:
+            reasons.add("request_errors")
             errors.append({"url": url, "error": str(exc)})
             complete = False
     if not pages:
         raise ServiceError("No readable pages found. " + (errors[0]["error"] if errors else "Check scope and robots.txt rules."))
-    return {"pages": pages, "complete": complete, "errors": errors, "skipped": skipped, "visited": len(seen)}
+    return {"pages": pages, "complete": complete, "errors": errors, "skipped": skipped, "visited": attempted,
+            "missing": missing, "unsupported": unsupported, "duplicates": duplicates, "pending": len(pending), "incomplete_reasons": sorted(reasons)}

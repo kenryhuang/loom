@@ -327,6 +327,28 @@ test("website sync progress and failures appear beside the source", async () => 
       listener({ ...job, state: "failed", error: "Website request failed" });
     assert.match(row.textContent, /failed.*Website request failed/);
     assert.equal(cancel.hidden, true);
+    for (const listener of view.knowledgeJobListeners)
+      listener({
+        ...job,
+        state: "completed",
+        stage: "completed",
+        result: {
+          complete: false,
+          pages: 11,
+          updated: 11,
+          missing_count: 8,
+          pending: 20,
+          incomplete_reasons: ["page_limit"],
+          errors: [],
+        },
+      });
+    assert.match(row.textContent, /Partial sync/);
+    assert.match(row.textContent, /8 URLs returned 404\/410/);
+    assert.match(row.textContent, /20 URLs still queued/);
+    assert.doesNotMatch(
+      row.querySelector(".knowledge-source-progress").textContent,
+      /Sync complete/,
+    );
     assert.equal(
       [...row.querySelectorAll("button")].find(
         (b) => b.textContent === "Sync now",

@@ -119,7 +119,8 @@ class KnowledgeJobs:
                 result = self.store.remove_document(job["knowledge_base_id"], payload["document_id"], progress=progress, cancelled=cancelled.is_set)
             else:
                 result = self.store.index(job["knowledge_base_id"], payload, progress=progress, cancelled=cancelled.is_set)
-            job.update(state="completed", stage="completed", result=result)
+            job.update(state="completed", stage="partial" if job["kind"] == "website" and not result.get("complete", True) else "completed",
+                       result=result)
         except Exception as exc:
             job.update(state="cancelled" if cancelled.is_set() else "failed",
                        error=str(exc) if isinstance(exc, ServiceError) else f"Knowledge job failed ({type(exc).__name__})")

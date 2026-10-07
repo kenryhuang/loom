@@ -79,7 +79,11 @@ def sync(store, kb_id, identifier, *, progress=lambda **_: None, cancelled=lambd
     changed = [doc for doc, page in zip(documents, updates, strict=True)
                if page["url"] not in previous or previous[page["url"]]["digest"] != page["digest"]]
     summary = {"pages": len(updates), "updated": len(changed), "unchanged": len(updates) - len(changed), "removed": len(removed),
-               "complete": result["complete"], "errors": result["errors"][:100], "skipped": result["skipped"][:100]}
+               "complete": result["complete"], "errors": result["errors"][:100], "skipped": result["skipped"][:100],
+               "visited": result.get("visited"), "pending": result.get("pending", 0),
+               "incomplete_reasons": result.get("incomplete_reasons", []),
+               "missing_count": len(result.get("missing", [])), "missing": result.get("missing", [])[:100],
+               "unsupported_count": len(result.get("unsupported", [])), "duplicates": result.get("duplicates", 0)}
 
     def publication(db):
         current = json.loads(db.execute("SELECT body FROM web_sources WHERE id=? AND kb_id=?", (identifier, kb_id)).fetchone()[0])

@@ -161,3 +161,92 @@ async def test_embedding_retry_is_bounded_and_rejects_invalid_vectors(cause, exp
     with pytest.raises(ServiceError):
         await embed_batch(embedder, {}, ['input'], lambda **_: None, sleep=sleep)
     assert len(attempts) == expected
+
+
+def test_raw_utf8_redirect_header_preserves_chinese_path(monkeypatch):
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import quote
+
+    paths = []
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_GET(self):
+            paths.append(self.path)
+            if self.path == quote('/中文'):
+                self.send_response(301)
+                self.send_header('Location', '/中文/'.encode().decode('latin-1'))
+            else:
+                self.send_response(200 if self.path == quote('/中文/') else 404)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(b'<main>Actual page</main>')
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(crawler, 'public_addresses', lambda *_: ['127.0.0.1'])
+    try:
+        result = crawler.fetch(f'http://example.test:{server.server_port}/中文')
+        assert result['status'] == 200
+        assert paths == [quote('/中文'), quote('/中文/')]
+        assert result['url'].endswith(quote('/中文/'))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_crawl_retry_is_bounded_and_rotates_validated_address(monkeypatch):
+    attempts, updates = [], []
+    def request(url, **options):
+        attempts.append(options['address_index'])
+        if len(attempts) == 1:
+            raise ServiceError('Request timed out') from TimeoutError()
+        return {'url': url, 'status': 200, 'text': 'ok'}
+    monkeypatch.setattr(crawler, '_fetch', request)
+    assert crawler.fetch('https://example.com/', progress=lambda **v: updates.append(v))['status'] == 200
+    assert attempts == [0, 1]
+    assert updates[0]['stage'] == 'crawl_retry'
+
+
+def test_crawl_counts_missing_urls_and_deduplicates_redirect_targets():
+    visited = []
+    def fetch(url, **_):
+        visited.append(url)
+        if url.endswith('robots.txt'):
+            return {'url': url, 'status': 404, 'text': ''}
+        if url.endswith('/gone'):
+            return {'url': url, 'status': 404, 'text': ''}
+        return {'url': url + '/' if url.endswith('/doc') else url, 'status': 200, 'type': 'text/html',
+                'text': '<main>Hello<a href="/doc">Document</a><a href="/doc/">Alias</a><a href="/gone">Missing</a></main>'}
+    result = crawler.crawl({'url': 'https://example.com/', 'path_prefix': '/', 'max_pages': 3, 'max_depth': 2, 'delay_seconds': 0}, fetcher=fetch)
+    assert result['visited'] == 3 and len(result['pages']) == 2
+    assert result['missing'] == [{'url': 'https://example.com/gone', 'status': 404}]
+    assert 'https://example.com/doc/' not in visited
+    assert result['complete']
+
+
+def test_partial_crawl_job_is_terminal_but_does_not_claim_full_sync(graph_store, monkeypatch):
+    import time
+
+    from loom.knowledge.jobs import KnowledgeJobs
+
+    store, kb, _ = graph_store
+    spec = web_sources.save_source(store, kb, {'url': 'https://example.com/'})
+    monkeypatch.setattr(web_sources, 'sync', lambda *a, **kw: {'complete': False, 'pages': 1, 'chunks': 1, 'incomplete_reasons': ['page_limit']})
+    jobs = KnowledgeJobs(store)
+    try:
+        job = jobs.sync(kb, spec['id'])
+        for _ in range(200):
+            value = jobs.get(kb, job['id'])
+            if value['state'] == 'completed':
+                break
+            time.sleep(0.01)
+        assert value['state'] == 'completed'
+        assert value['stage'] == 'partial'
+        assert not value['result']['complete']
+    finally:
+        jobs.close()

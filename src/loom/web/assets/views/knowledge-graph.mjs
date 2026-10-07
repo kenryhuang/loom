@@ -137,6 +137,20 @@ export async function renderKnowledgeGraph(view, base) {
           `${source.last_sync_at}: ${r.pages} pages · ${r.updated} updated · ${r.unchanged} unchanged · ${r.removed} removed · ${r.complete ? "crawl complete" : "partial crawl; old pages retained"}`,
         ),
       );
+      if (r.missing_count || r.incomplete_reasons?.length || r.pending)
+        row.append(
+          element(
+            "p",
+            "small",
+            [
+              r.missing_count ? `${r.missing_count} URLs returned 404/410` : "",
+              ...(r.incomplete_reasons || []),
+              r.pending ? `${r.pending} URLs still queued` : "",
+            ]
+              .filter(Boolean)
+              .join(" · "),
+          ),
+        );
       for (const error of r.errors || [])
         row.append(element("p", "error small", `${error.url}: ${error.error}`));
       if (r.skipped?.length)
@@ -164,6 +178,9 @@ export async function renderKnowledgeGraph(view, base) {
       const stages = {
         queued: "Waiting to start",
         crawling: "Crawling pages",
+        crawl_retry: "Retrying webpage request",
+        partial:
+          "Partial sync — collected pages indexed; website crawl incomplete",
         diffing: "Checking changes",
         checking_embedding: "Checking embedding service",
         initializing: "Initializing LightRAG",
@@ -175,12 +192,20 @@ export async function renderKnowledgeGraph(view, base) {
         publishing: "Publishing index",
         completed: "Sync complete",
       };
+      const partial =
+        job.state === "completed" && job.result?.complete === false;
       const parts = [
-        job.state,
-        stages[job.stage] || job.stage || "Starting sync",
+        partial ? "partial" : job.state,
+        partial
+          ? stages.partial
+          : stages[job.stage] || job.stage || "Starting sync",
       ];
       if (job.visited !== undefined) parts.push(`${job.visited} URLs visited`);
       if (job.pages !== undefined) parts.push(`${job.pages} pages collected`);
+      if (active && job.missing_count)
+        parts.push(`${job.missing_count} URLs returned 404/410`);
+      if (active && job.request_errors)
+        parts.push(`${job.request_errors} request errors`);
       if (job.indexed !== undefined)
         parts.push(`${job.indexed}/${job.total} documents indexed`);
       if (job.llm_calls)
@@ -207,6 +232,14 @@ export async function renderKnowledgeGraph(view, base) {
           `${job.result.unchanged || 0} unchanged`,
           `${job.result.removed || 0} removed`,
         );
+      if (job.result?.incomplete_reasons?.length)
+        parts.push(job.result.incomplete_reasons.join(", "));
+      if (job.result?.errors?.length)
+        parts.push(`${job.result.errors.length} request errors`);
+      if (job.result?.missing_count)
+        parts.push(`${job.result.missing_count} URLs returned 404/410`);
+      if (job.result?.pending)
+        parts.push(`${job.result.pending} URLs still queued`);
       progress.textContent = parts.join(" · ");
       cancel.onclick = async () => {
         cancel.disabled = true;

@@ -476,7 +476,10 @@ export class KnowledgeView {
         }, 800);
       else if (job.state === "completed") {
         this.changed();
-        this.notice.textContent = `Indexed ${job.result.chunks} passages from ${job.document}.`;
+        this.notice.textContent =
+          job.result.complete === false
+            ? `Partial sync: ${job.result.pages} collected pages indexed; website crawl incomplete. See source details.`
+            : `Indexed ${job.result.chunks} passages from ${job.document}.`;
         await this.renderBase();
       }
     };
@@ -501,7 +504,7 @@ export class KnowledgeView {
     if (pending) poll(pending);
     else if (base.jobs?.[0]) {
       const job = base.jobs[0];
-      status.textContent = `${job.state}: ${job.error || `${job.result?.chunks || 0} indexed chunks`}`;
+      status.textContent = `${job.result?.complete === false ? "Partial sync — website crawl incomplete" : job.state}: ${job.error || `${job.result?.chunks || 0} indexed chunks`}`;
     }
     const search = element("form", "knowledge-search"),
       query = input("Test a query"),
