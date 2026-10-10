@@ -130,6 +130,9 @@ export class FeedView {
         if (record.node.open) record.view.renderDetails();
         this.detail(record);
       }
+    // Expanding a row lazily creates its per-check details.
+    for (const node of this.root.querySelectorAll("details"))
+      node.open = this.detailMode;
     this.detailsChanged();
   }
   older(events, snapshot) {
@@ -589,6 +592,7 @@ export class FeedView {
       const view = new ActivityRow(descriptor.key, {
         inspect: (trigger) => this.inspector.open(record, trigger),
         expand: () => this.detail(record),
+        loadArtifact: this.loadArtifact,
       });
       view.node.open = this.detailMode === true;
       view.summary.addEventListener("click", () => {
@@ -624,6 +628,10 @@ export class FeedView {
     const activity = this.presenters.present(descriptor, {
       workspace: this.snapshot?.task.workspace,
     });
+    if (activity.kind === "acceptance" && activity.state === "failed" && !record.failureExpanded) {
+      record.node.open = true;
+      record.failureExpanded = true;
+    }
     record.view.update(activity);
     if (!group.latestSeq || descriptor.seq >= group.latestSeq) {
       group.latestSeq = descriptor.seq;
@@ -658,7 +666,9 @@ export class FeedView {
         if (record.descriptor.artifact?.sha256 === digest) {
           record.descriptor = {
             ...record.descriptor,
-            details: { ...record.descriptor.details, ...detail },
+            details: record.descriptor.eventType === "artifact.created"
+              ? {...record.descriptor.details, artifact_content: detail}
+              : { ...record.descriptor.details, ...detail },
             hydrated: true,
           };
           record.loaded = true;

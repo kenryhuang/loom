@@ -114,7 +114,7 @@ def test_pause_can_interrupt_active_model_request(tmp_path):
         sid = create(service, tmp_path / "workspace", "slow-model")
         wait_state(service, sid, "running")
         deadline = time.monotonic() + 3
-        while not any(e["type"] == "llm.requested" for e in service.events(sid)):
+        while not any(e["type"] == "llm.requested" and e.get("payload", {}).get("usage_role") != "verification" for e in service.events(sid)):
             assert time.monotonic() < deadline
             time.sleep(0.02)
         command(service, sid, "pause")
@@ -127,17 +127,17 @@ def test_pause_can_interrupt_active_model_request(tmp_path):
 def test_active_time_budget_interrupts_model_and_resume_grants_another_allowance(tmp_path):
     service = LoomService(tmp_path / "data", provider_factory=resume_provider_factory).start()
     try:
-        sid = service.create("budget", {"objective": "slow-model", "workspace": str(tmp_path), "plan_mode": "off", "limits": {"max_duration_seconds": 1}})[
+        sid = service.create("budget", {"objective": "slow-model", "workspace": str(tmp_path), "plan_mode": "off", "limits": {"max_duration_seconds": 3}})[
             "session_id"
         ]
-        paused = wait_state(service, sid, "paused", timeout=3)
-        assert paused["run"]["active_seconds"] >= 1
+        paused = wait_state(service, sid, "paused", timeout=5)
+        assert paused["run"]["active_seconds"] >= 2.4  # Cooperative stopping reserves the final 20%.
         command(service, sid, "resume")
         done = wait_state(service, sid, "idle")
         assert done["run"]["id"] == paused["run"]["id"]
         assert done["run"]["time_budget_start_seconds"] == paused["run"]["active_seconds"]
         assert done["run"]["active_seconds"] > paused["run"]["active_seconds"]
-        assert done["task"]["limits"]["max_duration_seconds"] == 1
+        assert done["task"]["limits"]["max_duration_seconds"] == 3
     finally:
         service.close()
 
@@ -182,7 +182,7 @@ def test_increased_token_budget_resumes_same_run_without_repeating_model_request
         done = wait_state(service, sid, "idle")
         assert done["run"]["id"] == paused["run"]["id"]
         assert done["token_budget"] == {"limit": 20, "used": 10, "remaining": 10}
-        assert sum(e["type"] == "llm.requested" for e in service.events(sid)) == 1
+        assert sum(e["type"] == "llm.requested" and e.get("payload", {}).get("usage_role") != "verification" for e in service.events(sid)) == 1
         usage = [e for e in service.events(sid) if e["type"] == "run.usage.changed"]
         assert len(usage) == 1
         assert usage[0]["payload"]["total_tokens"] == 10
@@ -245,7 +245,7 @@ def test_route_failure_can_retry_and_new_guidance_is_applied(tmp_path, command_t
         assert "failure" not in done["run"]
         assert done["token_budget"]["used"] == 6
         events = service.events(sid, limit=1000)
-        assert sum(event["type"] == "llm.requested" for event in events) == 4
+        assert sum(event["type"] == "llm.requested" and event.get("payload", {}).get("usage_role") != "verification" for event in events) == 4
         if command_type == "submit_message":
             message = next(message for message in done["messages"] if message["command_id"] == receipt["command_id"])
             assert message["state"] == "applied"

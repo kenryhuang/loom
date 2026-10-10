@@ -18,7 +18,7 @@ from loom.service.contracts import ServiceError, canonical, new_id
 from loom.trace_analysis import build_episode_graph
 from loom.trace_analysis.links import tool_output
 
-VERSION = "session-trajectory.3.2"
+VERSION = "session-trajectory.3.3"
 
 
 def session_records(events, read_artifact):

@@ -216,14 +216,14 @@ async def test_knowledge_evidence_satisfies_research_contract_and_survives_resto
         "outputs": [{"kind": "report", "format": "markdown", "require_evidence_refs": True, "require_verified_sources": True}],
     })
     assembly = TaskAssembly(request, plan_mode="off")
-    assert assembly.completion_error()
+    assert assembly.output_error()
     await assembly.handlers()["knowledge_search"]({"query": "zzzznonexistent"})
-    assert assembly.completion_error()  # An empty search is not evidence.
+    assert assembly.output_error()  # An empty search is not evidence.
     result = await assembly.handlers()["knowledge_search"]({"query": "Alpha"})
     assert result.ok
-    assert assembly.completion_error() is None
+    assert assembly.output_error() is None
     restored = TaskAssembly(request, plan_mode="off")
     restored.restore(assembly.snapshot())
-    assert restored.completion_error() is None
+    assert restored.output_error() is None
     await assembly.close()
     await restored.close()

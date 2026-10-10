@@ -1,3 +1,5 @@
+import { presentAcceptance } from "./acceptance.mjs";
+import { eventPresentation, meaningfulFields } from "./event-details.mjs";
 import {
   compact,
   decode,
@@ -80,28 +82,19 @@ function base({ descriptor, data, input, output, name, workspace }) {
   };
 }
 const section = (label, value, kind = "text") => ({ label, value, kind });
-function usefulFields(value) {
-  if (!value || typeof value !== "object") return [];
-  return Object.entries(value)
-    .filter(
-      ([key, val]) =>
-        !/^(?:id|.*_id|metadata|usage|revision|artifact|schema|messages|tools)$/.test(
-          key,
-        ) && ["string", "number", "boolean"].includes(typeof val),
-    )
-    .slice(0, 6)
-    .map(([label, val]) => section(label.replace(/_/g, " "), String(val)));
-}
+const usefulFields = meaningfulFields;
 function generic(args) {
   const { descriptor: d, data, input, output } = args;
   const result = base(args);
   if (d.kind !== "tool") {
-    result.title = d.summary || "Activity";
+    const presentation = eventPresentation(d.eventType || d.summary, data);
+    if (presentation) return {...result, ...presentation, outcome: ""};
+    result.title = d.summary === d.eventType ? (d.summary || "Activity").replace(/[_.]+/g, " ") : d.summary || "Activity";
     result.outcome = "";
     result.sections =
       typeof data === "string"
         ? [section("", data, "markdown")]
-        : usefulFields(data.error || data);
+        : usefulFields(data);
   } else {
     result.sections = [
       ...usefulFields(input),
@@ -118,6 +111,7 @@ function generic(args) {
 }
 export function builtinPresenters() {
   return new ActivityPresenters()
+    .register(({descriptor}) => descriptor.kind === "acceptance", presentAcceptance)
     .register(
       ({ descriptor }) => ["model", "thought"].includes(descriptor.kind),
       (args) => {

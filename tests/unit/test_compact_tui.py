@@ -4,6 +4,7 @@ from textual.widgets import Markdown
 from loom.tui.plugin import TuiPlugin
 from loom.tui.tui_app import EventFeedWidget
 from loom.tui.tui_collector import TuiEvent, TuiEventCollector
+from tests.acceptance_fakes import FixtureVerifier
 
 
 @pytest.mark.asyncio
@@ -75,6 +76,7 @@ async def test_one_shot_task_delivers_final_report_to_tui_before_quitting(monkey
     report = "# 事件驱动架构\n\n组件通过事件解耦，适用于异步业务流程。"
 
     class Provider:
+        verification_provider = FixtureVerifier()
         model = "test"
 
         async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):

@@ -5,9 +5,12 @@ import shlex
 
 from loom.core import ok
 from loom.llm.api import LlmResponse, LlmToolCall, TokenUsage
+from tests.acceptance_fakes import FixtureVerifier
 
 
 class FakeProvider:
+    verification_provider = FixtureVerifier()
+
     model = "test-model"
 
     def __init__(self, state):
@@ -60,6 +63,8 @@ def provider_factory(state):
 
 
 class MissingRouteProvider:
+    verification_provider = FixtureVerifier()
+
     model = "missing-route-test"
 
     async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
@@ -71,6 +76,8 @@ def routing_failure_provider_factory(state):
 
 
 class TurnPromptProvider:
+    verification_provider = FixtureVerifier()
+
     """Echo the actual projected request and transcript, rather than task state."""
 
     model = "turn-prompt-test"
@@ -101,6 +108,8 @@ def turn_prompt_provider_factory(state):
 
 
 class BudgetWrapProvider:
+    verification_provider = FixtureVerifier()
+
     model = "budget-wrap-test"
 
     async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):

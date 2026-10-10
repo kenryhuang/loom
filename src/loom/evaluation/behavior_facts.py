@@ -29,7 +29,7 @@ def build_behavior_facts(store, *, legacy=None, task=None):
             current[key] = existing
             closed.discard(key)
         # Session bookkeeping and inputs awaiting application are not executions.
-        execution_event = event.event_type.startswith(("llm.", "tool.", "run.", "plan.", "workflow.")) or event.event_type in {
+        execution_event = event.event_type.startswith(("llm.", "tool.", "run.", "plan.", "workflow.", "acceptance.", "verification.")) or event.event_type in {
             "task.goal.revised",
             "verification.recorded",
             "artifact.version.recorded",
@@ -179,7 +179,7 @@ def build_behavior_facts(store, *, legacy=None, task=None):
             definition = p.get("task", p.get("metadata", p))
             if isinstance(definition, Mapping):
                 goal(ep, event, definition.get("objective"), "task_definition", "applied", full=True, criteria=definition.get("success_criteria", ()))
-        if event.event_type == "llm.requested" and ep:
+        if event.event_type == "llm.requested" and p.get("usage_role") != "verification" and ep:
             messages, path, _, _ = request_fields(event)
             eligible = [g for g in goals if g["episode_id"] == ep["id"] or (g["episode_id"] is None and g["state"] == "accepted")]
             candidates = request_goals(
@@ -253,6 +253,7 @@ def build_behavior_facts(store, *, legacy=None, task=None):
             goal(ep, event, task, "explicit_task", "applied", full=True)
 
     calls = []
+    event_by_line = {e.line_number: e for e in store.events}
     for row in legacy.trajectory:
         ref = row.get("request_ref") or row.get("response_ref")
         line = ref["line_number"] if ref else None
@@ -263,11 +264,21 @@ def build_behavior_facts(store, *, legacy=None, task=None):
             if g["episode_id"] == ep_id and g["applied_line"] is not None and g["applied_line"] <= (line or 0) and not g.get("covered_by_revision")
         ]
         active = max(applied, key=lambda g: g["applied_line"], default=None)
-        calls.append({**row, "episode_id": ep_id, "goal_revision_id": active["id"] if active else None})
+        request_event = event_by_line.get(line)
+        role = request_event.payload.get("usage_role", "solver") if request_event else "solver"
+        calls.append({**row, "episode_id": ep_id, "goal_revision_id": active["id"] if active else None, "usage_role": role})
+    tools_with_roles = []
+    for tool in legacy.tool_uses:
+        refs = tool.get("evidence_refs", [])
+        event = store.event(refs[0]) if refs else None
+        role = event.payload.get("metadata", {}).get("usage_role", "solver") if event else "solver"
+        tools_with_roles.append({**tool, "usage_role": role})
     segments = []
     for row in calls:
+        if row["usage_role"] == "verification":
+            continue
         # Contiguous bounded step windows own cost once, independent of overlapping candidate windows.
-        tools = [t for t in legacy.tool_uses if t["round_id"] == row["id"]]
+        tools = [t for t in tools_with_roles if t["round_id"] == row["id"] and t["usage_role"] != "verification"]
         refs = row["evidence_refs"] + [r for t in tools for r in t["evidence_refs"]]
         key = (row["episode_id"], row["goal_revision_id"], row["loop_id"], row["trace_id"], row["step_number"])
         if segments and segments[-1]["boundary_key"] == key and len(segments[-1]["round_ids"]) < 4:
@@ -297,7 +308,9 @@ def build_behavior_facts(store, *, legacy=None, task=None):
         )
     candidates = []
     signatures = defaultdict(list)
-    for tool in legacy.tool_uses:
+    for tool in tools_with_roles:
+        if tool["usage_role"] == "verification":
+            continue
         if tool.get("input_ref") and tool.get("raw_output_ref"):
             key = (
                 next((r["episode_id"] for r in calls if r["id"] == tool["round_id"]), None),
@@ -344,6 +357,11 @@ def build_behavior_facts(store, *, legacy=None, task=None):
         except (TypeError, ValueError):
             ep["duration_ms"] = None
     checks = _outcomes(store, episodes, goals, artifacts, receipts)
+    acceptance = [{"type": e.event_type, "episode_id": by_line.get(e.line_number), "line": e.line_number,
+                   "state": thaw_json(e.payload.get("acceptance", {})), "assurance": e.payload.get("assurance"),
+                   "evidence_refs": [asdict(store.ref(e))]} for e in store.events
+                  if e.event_type.startswith("acceptance.") and e.payload.get("acceptance")]
+    current_acceptance = next((row for row in reversed(acceptance) if episodes and row["episode_id"] == episodes[-1]["id"]), None)
     return {
         "analyzer_version": ANALYZER_VERSION,
         "episodes": episodes,
@@ -352,16 +370,19 @@ def build_behavior_facts(store, *, legacy=None, task=None):
         "plan_revisions": plans,
         "artifact_versions": artifacts,
         "verification_receipts": receipts,
+        "acceptance_history": acceptance,
         "model_calls": calls,
         "segments": segments,
         "candidate_windows": candidates,
-        "tool_uses": list(legacy.tool_uses),
+        "tool_uses": tools_with_roles,
         "behavior_graph": {"nodes": [], "edges": []},
         "token_ledger": list(legacy.token_ledger),
         "base": {
             "metrics": {
                 "model_calls": len(calls),
+                "verification_model_calls": sum(r["usage_role"] == "verification" for r in calls),
                 "tool_calls": len(legacy.tool_uses),
+                "verification_tool_calls": sum(t["usage_role"] == "verification" for t in tools_with_roles),
                 "steps": len(graph.steps),
                 "episodes": len(episodes),
                 "tokens": legacy.coverage.get("tokens", {}),
@@ -374,6 +395,7 @@ def build_behavior_facts(store, *, legacy=None, task=None):
             },
             "execution_status": episodes[-1]["execution_status"] if episodes else "not_started",
             "output_checks": receipts,
+            "runtime_acceptance": current_acceptance,
             "outcomes": checks,
             "task_completion": checks[-1]["status"] if checks else "unverified",
         },

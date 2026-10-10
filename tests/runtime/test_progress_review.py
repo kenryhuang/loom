@@ -8,6 +8,7 @@ from loom.runtime.workflow_routing import WorkflowRoutePhase, WorkflowRoutePolic
 from loom.tasks.request import TaskRequest, TaskRunOptions
 from loom.tasks.runner import make_task_context, run_generic_task
 from loom.tasks.tools import make_task_tools
+from tests.acceptance_fakes import FixtureVerifier
 
 
 def started(policy=None):
@@ -106,6 +107,7 @@ async def test_task_can_finish_at_progress_review_without_extra_model_request(tm
     (tmp_path / "evidence").write_text("Verified evidence")
 
     class Provider:
+        verification_provider = FixtureVerifier()
         model = "test"
         calls = 0
 

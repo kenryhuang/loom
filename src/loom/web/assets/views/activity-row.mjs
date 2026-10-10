@@ -1,4 +1,5 @@
 import { element, renderMarkdown } from "../markdown.mjs";
+import { verificationArtifactSections } from "../activity/event-details.mjs";
 
 const previewLimit = 6000;
 function preview(value) {
@@ -12,11 +13,47 @@ function safeLink(value) {
     return null;
   }
 }
-function renderSection(item) {
+function renderSection(item, loadArtifact) {
   const node = element("section", "activity-section");
   if (item.label) node.append(element("small", "activity-label", item.label));
   const value = item.value;
-  if (item.kind === "plan") {
+  if (item.kind === "acceptance-criterion") {
+    node.append(element("p", "", value.description || "No criterion description recorded"));
+    if (Array.isArray(value.scope) && value.scope.length)
+      node.append(element("p", "muted", `Scope: ${value.scope.join(", ")}`));
+    const methods = {semantic: "Review the result and supporting evidence", command: "Run a verification command",
+      artifact: "Check the deliverable", source: "Check source evidence", external: "External confirmation"};
+    if (value.verifier) node.append(element("p", "muted", `Verification: ${methods[value.verifier] || value.verifier}`));
+    const input = value.check?.input;
+    if (input?.command || Array.isArray(input?.argv))
+      node.append(element("pre", "", input.command || input.argv.join(" ")));
+    if (value.check?.path) node.append(element("p", "", `Deliverable: ${value.check.path}`));
+  } else if (item.kind === "acceptance-check") {
+    const row = element("details", "acceptance-check");
+    row.dataset.key = `criterion:${value.id}`;
+    row.open = ["failed", "blocked"].includes(value.status);
+    row.append(element("summary", "", `${value.status || "pending"} · ${value.description || value.id}`));
+    if (value.reason) row.append(element("p", "", value.reason));
+    if (value.evidence_ids?.length)
+      row.append(element("p", "muted", `Evidence: ${value.evidence_ids.join(", ")}`));
+    if (value.artifact?.sha256 && loadArtifact) {
+      const button = element("button", "quiet", "View verification evidence");
+      button.type = "button";
+      const evidence = element("div", "verification-evidence");
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          const content = await loadArtifact(value.artifact.sha256);
+          evidence.replaceChildren(renderVerificationArtifact(content) || element("pre", "activity-raw-content", JSON.stringify(content, null, 2)));
+        } catch (error) {
+          evidence.textContent = `Could not load evidence: ${error.message}`;
+          button.disabled = false;
+        }
+      });
+      row.append(button, evidence);
+    }
+    node.append(row);
+  } else if (item.kind === "plan") {
     const list = element("ul", "activity-plan");
     for (const entry of Array.isArray(value) ? value : []) {
       const row = element("li");
@@ -102,8 +139,23 @@ function renderSection(item) {
 }
 
 /** Stable summary, controls, and section nodes; closed rows do no detail work. */
+export function renderVerificationArtifact(value) {
+  const sections = verificationArtifactSections(value);
+  if (!sections) return null;
+  const root = element("div", "verification-evidence");
+  root.append(...sections.map(item => renderSection(item)));
+  const raw = element("details");
+  raw.append(element("summary", "", "Raw verification evidence"));
+  raw.addEventListener("toggle", () => {
+    if (raw.open && !raw.querySelector("pre")) raw.append(element("pre", "activity-raw-content", JSON.stringify(value, null, 2)));
+  });
+  root.append(raw);
+  return root;
+}
+
 export class ActivityRow {
-  constructor(key, { inspect, expand }) {
+  constructor(key, { inspect, expand, loadArtifact }) {
+    this.loadArtifact = loadArtifact;
     this.node = element("details", "event-row");
     this.node.dataset.key = key;
     this.summary = element("summary");
@@ -174,7 +226,7 @@ export class ActivityRow {
         previous.node.contains(selection.anchorNode)
       )
         return;
-      const node = renderSection(item);
+      const node = renderSection(item, this.loadArtifact);
       if (previous) previous.node.replaceWith(node);
       else this.content.append(node);
       this.sections[index] = { signature, node };

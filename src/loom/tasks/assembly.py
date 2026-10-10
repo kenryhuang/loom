@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import inspect
 import json
 import tempfile
 import time
@@ -13,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from loom.contexts.bounded import BoundedContextManager, ResearchContextManager
-from loom.core import Context, Observation, ToolRef, err, make_loom_error, new_trace_id, now_iso, ok, thaw_json
+from loom.core import Constraint, Context, Observation, StepResult, ToolRef, Trace, err, make_loom_error, new_trace_id, now_iso, ok, thaw_json
 from loom.execution.native import NativeToolExecutionRuntime
 from loom.llm.api import LlmToolCall
 from loom.runtime.execution_contracts import Invocation, validate_tool_input
@@ -32,7 +34,16 @@ from loom.workflows.legacy import LegacyPlanningWorkflow
 def normalize_task_spec(spec=None, *, workspace=None, plan_mode="auto"):
     legacy = spec is None
     spec = json_value({} if spec is None else spec)
-    if not isinstance(spec, dict) or set(spec) - {"schema_version", "session_environment", "context", "execution_runtime", "tools", "workflow", "outputs"}:
+    if not isinstance(spec, dict) or set(spec) - {
+        "schema_version",
+        "session_environment",
+        "context",
+        "execution_runtime",
+        "tools",
+        "workflow",
+        "outputs",
+        "acceptance",
+    }:
         raise ValueError("Unknown task plugin configuration")
     if spec.get("schema_version", 1) != 1:
         raise ValueError("Unsupported task specification schema")
@@ -84,6 +95,13 @@ def normalize_task_spec(spec=None, *, workspace=None, plan_mode="auto"):
         minimum = 1 if name in {"max_tools", "max_tool_schema_tokens"} else 0
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             raise ValueError("Invalid tool visibility budget limit")
+    from loom.tasks.acceptance import DEFAULTS as ACCEPTANCE_DEFAULTS
+
+    acceptance = spec.get("acceptance", {})
+    if not isinstance(acceptance, dict) or set(acceptance) - set(ACCEPTANCE_DEFAULTS):
+        raise ValueError("Invalid acceptance configuration")
+    if any(type(v) is not int or v < (0 if k in {"max_checks", "max_repairs"} else 1) or v > 100000 for k, v in acceptance.items()):
+        raise ValueError("Acceptance limits must be bounded integers (only max_checks and max_repairs may be zero)")
     return spec
 
 
@@ -166,7 +184,8 @@ class TaskAssembly:
         self.report_workspace = Path(workspace.uri) if workspace and workspace.access == "read-write" else None
         self.collections = [
             self.registry.create(
-                "tools", {"plugin": name},
+                "tools",
+                {"plugin": name},
                 # Read-only sessions retain report artifacts without receiving a file writer.
                 request=replace(self.tool_request, workspace=None) if name == "document_outputs" and self.report_workspace is None else self.tool_request,
             )
@@ -230,6 +249,8 @@ class TaskAssembly:
         )
         self.workflow.snapshot_plugins = self.snapshot
         self.workflow.completion_check = self.completion_error
+        self.workflow.completion_prepare = self.prepare_completion
+        self.workflow.prepare_acceptance = self.prepare_acceptance
         self.workflow.publish_artifact = self.publish_artifact
         self.normal_refs = tuple(binding.ref for binding in self.bindings.values())
         self.workflow.configure_normal_tool_refs(self.normal_refs)
@@ -238,6 +259,17 @@ class TaskAssembly:
         self._evidence = []
         self._verified_sources = {}
         self._workspace_reports = {}
+        from loom.llm import TokenUsage
+        from loom.tasks.acceptance import AcceptanceController
+
+        self.acceptance = AcceptanceController(self, self.spec.get("acceptance"))
+        self.acceptance_provider = None
+        self.acceptance_limits = {}
+        self._acceptance_cp = None
+        self._task_runtime = None
+        self._acceptance_evidence = []
+        self._local_usage = TokenUsage()
+        self._local_calls = 0
         plugins = [self.environment, self.context_manager, self.runtime, self.workflow, *self.collections]
         self.manifests = [asdict(plugin.manifest) for plugin in plugins]
         available = {f"{p.manifest.kind}/{p.manifest.plugin_id}" for p in plugins}
@@ -247,6 +279,7 @@ class TaskAssembly:
         if execution is not None:
             execution.binding_effects = {name: binding.effect_kind for name, binding in self.bindings.items()}
             execution.binding_effects.update({ref.id: "service_control" for ref in self.workflow.tool_refs()})
+            execution.binding_effects["revise_acceptance_plan"] = "service_control"
 
     def publish_artifact(self, value, kind):
         if self.execution:
@@ -274,6 +307,8 @@ class TaskAssembly:
                 "workflow": self.workflow.plugin_snapshot(),
                 "tools": {c.manifest.plugin_id: c.snapshot() for c in self.collections},
                 "evidence": self._evidence,
+                "acceptance": self.acceptance.snapshot(),
+                "acceptance_evidence": self._acceptance_evidence,
                 "verified_sources": self._verified_sources,
                 **({"workspace_reports": self._workspace_reports} if self._workspace_reports else {}),
                 "manifests": self.manifests,
@@ -295,6 +330,9 @@ class TaskAssembly:
             raise ValueError("Checkpoint tool collection set changed")
         for collection in self.collections:
             collection.restore(snapshot["tools"][collection.manifest.plugin_id])
+        if snapshot.get("acceptance"):
+            self.acceptance.restore(snapshot["acceptance"])
+        self._acceptance_evidence = snapshot.get("acceptance_evidence", [])
         self._evidence = snapshot.get("evidence", [])
         self._verified_sources = snapshot.get("verified_sources", {})
         self._workspace_reports = snapshot.get("workspace_reports", {})
@@ -341,8 +379,22 @@ class TaskAssembly:
                     report = value.get("report") or value.get("content")
                     if not isinstance(report, str) or not report.strip():
                         return ok(Observation(new_trace_id(), name, {"accepted": False, "reason": "Final report is required"}, now_iso()))
+                    if self.context is not None and self._task_runtime is not None and not await self.prepare_completion(report):
+                        return ok(
+                            Observation(
+                                new_trace_id(),
+                                name,
+                                {"accepted": False, "reason": self.acceptance.data["reason"], "acceptance": self.acceptance.public()},
+                                now_iso(),
+                                metadata={"controlFlow": {"stepBoundary": True, "reason": "acceptance_failed"}},
+                            )
+                        )
                     if reason := self.completion_error():
                         return ok(Observation(new_trace_id(), name, {"accepted": False, "reason": reason}, now_iso()))
+                if binding.effect_kind == "side_effecting" and not self.acceptance.verifying:
+                    invalidated = self.acceptance.invalidate(f"{name} may change verification inputs")
+                    if invalidated and self._task_runtime:
+                        await self.acceptance.emit(self._task_runtime, "acceptance.invalidated")
                 if binding.placement == "control":
                     return await self.entrypoints[binding.entrypoint_id](value, options)
                 metadata = (options or {}).get("metadata", {})
@@ -387,6 +439,12 @@ class TaskAssembly:
                             output = {"value": output}
                         result = ok(replace(result.value, value={**output, "artifact": ref}))
                     self.ingest_tool_result(name, result.value)
+                    if not self.acceptance.verifying:
+                        raw = json.dumps(thaw_json(result.value.value), ensure_ascii=False)
+                        self._acceptance_evidence = [
+                            *self._acceptance_evidence,
+                            {"id": f"tool:{call_id}", "tool": name, "input": value, "output": raw[:3000], "truncated": len(raw) > 3000},
+                        ][-8:]
                     result = ok(self.project_tool_result(name, result.value))
                 if journal_here and not persisted:
                     self.execution.operation_finish(call, {"ok": result.ok, "value": result.value, "error": result.error})
@@ -408,7 +466,36 @@ class TaskAssembly:
 
         if self.expose_artifacts:
             handlers["read_artifact"] = read_evidence
-        return self.workflow.wrap_tools(handlers)
+
+        async def revise_acceptance(value, _options=None):
+            try:
+                await self.acceptance.revise(thaw_json(value), self._task_runtime)
+                result = {"accepted": True, "acceptance": self.acceptance.public()}
+            except ValueError as exc:
+                result = {"accepted": False, "reason": str(exc)}
+            return ok(
+                Observation(
+                    new_trace_id(),
+                    "revise_acceptance_plan",
+                    result,
+                    now_iso(),
+                    metadata={"controlFlow": {"stepBoundary": True, "reason": "acceptance_revision"}},
+                )
+            )
+
+        handlers["revise_acceptance_plan"] = revise_acceptance
+        wrapped = self.workflow.wrap_tools(handlers)
+        for name in ("process_execute", "shell_execute"):
+            if name in handlers:
+                normal, checked = wrapped[name], handlers[name]
+
+                async def dispatch(value, options=None, normal=normal, checked=checked):
+                    if self.acceptance.verifying:
+                        return await checked(value, options)
+                    return await normal(value, options)
+
+                wrapped[name] = dispatch
+        return wrapped
 
     @staticmethod
     def artifact_tool_ref():
@@ -430,7 +517,25 @@ class TaskAssembly:
         )
 
     def context_tools(self):
-        return (*self.normal_refs, self.artifact_tool_ref()) if self.expose_artifacts else self.normal_refs
+        refs = (*self.normal_refs, self.artifact_tool_ref()) if self.expose_artifacts else self.normal_refs
+        return (
+            *refs,
+            ToolRef(
+                "revise_acceptance_plan",
+                "Add task-specific acceptance checks discovered during execution. "
+                "Keep existing required criteria unchanged; goal is host-owned and must be omitted from the submitted criteria.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "base_revision": {"type": "integer"},
+                        "reason": {"type": "string"},
+                        "criteria": {"type": "array", "items": {"type": "object"}},
+                        "unresolved_requirements": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["base_revision", "reason", "criteria"],
+                },
+            ),
+        )
 
     def project_tool_result(self, tool_id, observation):
         binding = self.bindings.get(tool_id)
@@ -450,8 +555,10 @@ class TaskAssembly:
         if not isinstance(output, dict):
             return
         if (
-            binding.artifact_kind == "report" and self.report_workspace is not None
-            and isinstance(output.get("path"), str) and isinstance(output.get("report"), str)
+            binding.artifact_kind == "report"
+            and self.report_workspace is not None
+            and isinstance(output.get("path"), str)
+            and isinstance(output.get("report"), str)
         ):
             self._workspace_reports[output["path"]] = {
                 "sha256": hashlib.sha256(output["report"].encode("utf-8")).hexdigest(),
@@ -480,6 +587,13 @@ class TaskAssembly:
                     self._verified_sources[source_url(url)] = artifact
 
     def completion_error(self):
+        if reason := self.output_error():
+            return reason
+        if self.acceptance.data["state"] != "passed":
+            return self.acceptance.data["reason"]
+        return self.output_error()
+
+    def output_error(self):
         missing = set(self.required_source_urls) - self._verified_sources.keys()
         if missing:
             return "Task requires successful retrieval of source URLs: " + ", ".join(sorted(missing))
@@ -514,25 +628,67 @@ class TaskAssembly:
         before = {path: self._workspace_reports[path]["sha256"] for path in scope}
         after = capture_manifest(self.report_workspace, scope)
         environment = config_digest({"task_spec": self.spec, "workspace": str(self.report_workspace)})
-        receipt = verification_receipt(criterion_id="workspace_report", goal_revision=getattr(self.execution, "goal_revision", None),
-            scope=scope, before=before, after=after, oracle="Workspace documents match the bytes saved by create_report",
-            environment=environment, passed=before == after, exclusive=False, coverage="partial")
+        receipt = verification_receipt(
+            criterion_id="workspace_report",
+            goal_revision=getattr(self.execution, "goal_revision", None),
+            scope=scope,
+            before=before,
+            after=after,
+            oracle="Workspace documents match the bytes saved by create_report",
+            environment=environment,
+            passed=before == after,
+            exclusive=False,
+            coverage="partial",
+        )
         for event in (receipt, artifact_boundary(scope=scope, manifest=after, environment=environment)):
-            emitted = await runtime.trace_sink.emit({**event, "run_id": runtime.run_id, "loop_id": runtime.loop_id,
-                                                    "trace_id": runtime.trace_id, "at": now_iso()})
+            emitted = await runtime.trace_sink.emit(
+                {**event, "run_id": runtime.run_id, "loop_id": runtime.loop_id, "trace_id": runtime.trace_id, "at": now_iso()}
+            )
             emitted.unwrap()
 
     def wrap_loop(self, definition):
         wrapped = self.workflow.wrap_loop(definition)
 
         async def task_step(context, runtime):
-            self.context = context
+            self.context, self._task_runtime = context, runtime
+            if not self.execution:
+                try:
+                    await self.acceptance.prepare(context, runtime)
+                except (ValueError, RuntimeError) as exc:
+                    return await self.acceptance_blocked_result(context, runtime, str(exc))
+                context = self.project_acceptance(context)
             result = await wrapped.step(context, runtime)
+            if not result.ok and result.error.code == "OUTPUT_CONTRACT_FAILED" and self.acceptance.data["state"] != "passed":
+                return await self.acceptance_blocked_result(context, runtime, self.acceptance.data["reason"])
+            if result.ok and not self.execution:
+                from loom.llm import TokenUsage
+
+                usage = (result.value.trace.metadata or {}).get("tokenUsage", {})
+                self._local_usage = TokenUsage(
+                    *(
+                        getattr(self._local_usage, k) + usage.get(k, usage.get(camel, 0))
+                        for k, camel in (("prompt_tokens", "promptTokens"), ("completion_tokens", "completionTokens"), ("total_tokens", "totalTokens"))
+                    )
+                )
             if result.ok:
                 control = result.value.control
-                completed = control is None or control.kind == "completed"
-                if completed and (reason := self.completion_error()):
-                    return err(make_loom_error("OUTPUT_CONTRACT_FAILED", reason, retryable=False))
+                new_observations = result.value.context.state.observations[len(context.state.observations) :]
+                rejected_finish = any(o.source == "finish" and thaw_json(o.value).get("accepted") is False for o in new_observations)
+                if rejected_finish and self.acceptance.data["state"] in {"needs_repair", "blocked"}:
+                    return await self.acceptance_blocked_result(result.value.context, runtime, self.acceptance.data["reason"], result.value)
+                if control is None:
+                    done = wrapped.done(result.value.context, runtime)
+                    done = await done if inspect.isawaitable(done) else done
+                    completed = done.ok and done.value
+                else:
+                    completed = control.kind == "completed"
+                if completed:
+                    from loom.tasks.runner import _report_from_run_result
+
+                    if not await self.prepare_completion(_report_from_run_result(result.value)):
+                        return await self.acceptance_blocked_result(result.value.context, runtime, self.acceptance.data["reason"], result.value)
+                    if reason := self.output_error():
+                        return await self.acceptance_blocked_result(result.value.context, runtime, reason, result.value)
                 if completed:
                     await self.record_report_verification(runtime)
                 updated = result.value.context
@@ -556,11 +712,168 @@ class TaskAssembly:
                     if self._workspace_reports:
                         ref = {**ref, "workspace_paths": list(self._workspace_reports)}
                     scratch["output_artifacts"] = [ref]
+                scratch["acceptance"] = self.acceptance.public()
                 scratch["execution_plugins"] = self.snapshot()
                 result = ok(replace(result.value, context=replace(updated, state=replace(updated.state, scratch=scratch))))
             return result
 
-        return replace(wrapped, step=task_step)
+        async def task_done(context, runtime):
+            if self.acceptance.data["state"] != "passed":
+                return ok(False)
+            result = wrapped.done(context, runtime)
+            return await result if inspect.isawaitable(result) else result
+
+        return replace(wrapped, step=task_step, done=task_done)
+
+    def configure_acceptance(self, provider, *, limits=None, verification_provider=None):
+        self.acceptance_provider = verification_provider or getattr(provider, "verification_provider", None) or provider
+        self.acceptance_limits = limits or {}
+
+    def project_acceptance(self, context):
+        plan = self.acceptance.data.get("plan")
+        constraint = Constraint(
+            "acceptance",
+            "Task acceptance contract: "
+            + json.dumps(plan, ensure_ascii=False)
+            + ". Complete these conditions before finish. The host will verify actual results; failure returns acceptance feedback.",
+        )
+        scratch = {**(context.state.scratch or {}), "acceptance": self.acceptance.public()}
+        return replace(
+            context,
+            identity=replace(context.identity, constraints=(*[c for c in context.identity.constraints if c.id != "acceptance"], constraint)),
+            state=replace(context.state, scratch=scratch),
+        )
+
+    def persist_acceptance(self):
+        if self.execution and self._acceptance_cp:
+            self._acceptance_cp["plugin_states"] = self.snapshot()
+            self.execution.boundary(self._acceptance_cp)
+
+    def acceptance_evidence(self):
+        return json_value(self._acceptance_evidence)
+
+    async def acceptance_model_request(self, runtime, stage, prompt, content, timeout):
+        from loom.evaluation.provider import evaluator_provider
+        from loom.llm import LlmMessage, TokenUsage, request_llm_response
+        from loom.tasks.acceptance import AcceptanceBlocked
+
+        if self.acceptance_provider is None:
+            raise AcceptanceBlocked("Acceptance model is unavailable")
+        cp = self._acceptance_cp
+        usage = cp["usage"] if cp else self._local_usage
+        calls = cp["llm_calls"] if cp else self._local_calls
+        token_limit = self.acceptance_limits.get("max_tokens") or (self.context.goal.budget.max_tokens if self.context else None)
+        if (token_limit is not None and usage.total_tokens >= token_limit) or calls >= self.acceptance_limits.get("max_llm_calls", 10000):
+            raise AcceptanceBlocked("Task model budget exhausted before acceptance verification")
+        if self.execution and (poll := getattr(self.execution, "poll_control", None)) and (directive := poll()):
+            raise AcceptanceBlocked(directive.get("reason", "Task interrupted"))
+        identifier = f"{runtime.trace_id}:acceptance:{self.acceptance.data['model_calls']}"
+        messages = [LlmMessage("system", prompt), LlmMessage("user", content, name="acceptance_contract")]
+        metadata = {
+            "run_id": runtime.run_id,
+            "loop_id": runtime.loop_id,
+            "trace_id": runtime.trace_id,
+            "llm_call_id": identifier,
+            "usage_role": "verification",
+            "acceptance_stage": stage,
+        }
+        if cp:
+            cp["llm_calls"] += 1
+            cp["plugin_states"] = self.snapshot()
+            self.execution.boundary(cp)
+        else:
+            self._local_calls += 1
+        (
+            await runtime.trace_sink.emit(
+                {"type": "llm.requested", **metadata, "model": self.acceptance_provider.model, "messages": tuple(messages), "tools": None, "at": now_iso()}
+            )
+        ).unwrap()
+        cap = min(self.acceptance.config["max_output_tokens"], max(1, token_limit - usage.total_tokens) if token_limit else 4096)
+        stream = not hasattr(self.acceptance_provider, "chat")
+        provider = evaluator_provider(self.acceptance_provider, output_tokens=cap, timeout_seconds=timeout, install_http=not stream)
+        timer = asyncio.timeout(timeout)
+        try:
+            async with timer:
+                task = asyncio.create_task(request_llm_response(provider, messages, tools=None, cancellation=runtime.cancellation, stream=stream))
+                try:
+                    while self.execution and getattr(self.execution, "poll_control", None) and not task.done():
+                        await asyncio.wait({task}, timeout=0.1)
+                        if directive := self.execution.poll_control():
+                            raise AcceptanceBlocked(directive.get("reason", "Task interrupted"))
+                    response = await task
+                finally:
+                    if not task.done():
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+            if timer.expired() or not response.ok:
+                raise AcceptanceBlocked("Acceptance model request timed out" if timer.expired() else response.error.message)
+            returned = response.value.usage
+            updated = TokenUsage(*(getattr(usage, k) + getattr(returned, k) for k in ("prompt_tokens", "completion_tokens", "total_tokens")))
+            if cp:
+                cp["usage"] = updated
+            else:
+                self._local_usage = updated
+            (await runtime.trace_sink.emit({"type": "llm.completed", **metadata, "response": response.value, "at": now_iso()})).unwrap()
+            return response.value
+        except (ValueError, TimeoutError) as exc:
+            (await runtime.trace_sink.emit({"type": "llm.failed", **metadata, "error": str(exc), "at": now_iso()})).unwrap()
+            raise AcceptanceBlocked(str(exc) or "Acceptance request timed out") from exc
+        finally:
+            if cp:
+                cp["plugin_states"] = self.snapshot()
+                self.execution.boundary(cp)
+
+    async def prepare_acceptance(self, context, runtime, checkpoint=None):
+        self.context, self._task_runtime = context, runtime
+        if checkpoint is not None:
+            self._acceptance_cp = checkpoint
+        await self.acceptance.prepare(context, runtime)
+        return self.project_acceptance(context)
+
+    async def prepare_completion(self, candidate):
+        from loom.observability.result_format import format_result_text
+        from loom.tasks.runner import _report_from_decision_output
+
+        candidate = _report_from_decision_output(thaw_json(candidate)) or format_result_text(thaw_json(candidate))
+        try:
+            if reason := self.output_error():
+                self.acceptance.data["attempts"] += 1
+                state = "blocked" if self.acceptance.data["attempts"] > self.acceptance.config["max_repairs"] else "needs_repair"
+                self.acceptance.data.update(state=state, reason=reason, candidate=str(candidate or ""))
+                await self.acceptance.emit(self._task_runtime, "acceptance.gate.blocked")
+                return False
+            return await self.acceptance.verify(self.context, self._task_runtime, str(candidate or ""))
+        except (ValueError, TypeError, RuntimeError, OSError) as exc:
+            self.acceptance.data.update(state="blocked", reason=str(exc))
+            if self._task_runtime:
+                await self.acceptance.emit(self._task_runtime, "acceptance.gate.blocked")
+            return False
+
+    async def acceptance_blocked_result(self, context, runtime, reason, previous=None):
+        from loom.runtime.control import StepControl
+
+        repair = self.acceptance.data["state"] == "needs_repair" and self.acceptance.data["attempts"] <= self.acceptance.config["max_repairs"]
+        self.acceptance.data.update(state="needs_repair" if repair else "blocked", reason=reason)
+        if repair and hasattr(self.workflow, "reopen_for_acceptance"):
+            self.workflow.reopen_for_acceptance()
+        await self.acceptance.emit(runtime, "acceptance.gate.blocked")
+        observation = Observation(new_trace_id(), "acceptance", self.acceptance.public(), now_iso())
+        scratch = {**(context.state.scratch or {}), "acceptance": self.acceptance.public(), "execution_plugins": self.snapshot()}
+        updated = replace(context, state=replace(context.state, observations=(*context.state.observations, observation), scratch=scratch))
+        trace = (
+            previous.trace
+            if previous
+            else Trace(runtime.trace_id, context.run_id, runtime.loop_id, "v1", 0, runtime.trace_id, now_iso(), now_iso(), 0, context.id, context.id, "paused")
+        )
+        return ok(
+            StepResult(
+                updated,
+                trace,
+                observation=observation,
+                output=self.acceptance.data.get("candidate"),
+                control=StepControl("continue" if repair else "paused", reason),
+            )
+        )
 
     async def close(self):
         try:

@@ -83,7 +83,7 @@ class DynamicWorkflowPolicy:
     def visible_tool_refs(self, refs):
         node = next((node for node in self.controller.nodes if node["id"] == self._active), None)
         if node and "allowed_tools" in node["executor_config"]:
-            refs = tuple(ref for ref in refs if ref.id in node["executor_config"]["allowed_tools"])
+            refs = tuple(ref for ref in refs if ref.id in node["executor_config"]["allowed_tools"] or ref.id == "revise_acceptance_plan")
         return (*refs, *self.tool_refs())
 
     def step_policy(self, _context):
@@ -94,6 +94,23 @@ class DynamicWorkflowPolicy:
 
     def unfinished(self):
         return any(node["status"] not in TERMINAL for node in self.controller.nodes)
+
+    def reopen_for_acceptance(self):
+        active = next((node for node in self.controller.nodes if node["id"] == self._active), None)
+        if active and active["status"] == "running" and active["executor_kind"] != "llm" and self.is_final_node():
+            active.update(status="succeeded", provenance="Executor returned; task acceptance requires repair")
+        if self.unfinished():
+            return
+        if len(self.controller.nodes) >= self.controller.max_nodes:
+            raise ValueError("Workflow node budget exhausted before acceptance repair")
+        nodes = [
+            *self.controller.nodes,
+            {
+                "id": f"acceptance-repair-{self.controller.revision + 1}",
+                "objective": "Resolve the recorded failed task acceptance conditions and submit the final deliverable",
+            },
+        ]
+        self.controller.propose({"base_revision": self.controller.revision, "reason": "Task acceptance requires repair", "nodes": nodes})
 
     def is_final_node(self):
         return not any(node["status"] not in TERMINAL and node["id"] != self._active for node in self.controller.nodes)
@@ -129,11 +146,17 @@ class DynamicWorkflowPolicy:
             result.unwrap()
 
     async def complete_active(self, evidence="", artifact_refs=()):
+        from loom.observability.result_format import format_result_text
+        from loom.tasks.runner import _report_from_decision_output
+
+        evidence = _report_from_decision_output(thaw_json(evidence)) or format_result_text(thaw_json(evidence))
         node = next((node for node in self.controller.nodes if node["id"] == self._active), None)
         if node is None or node["status"] != "running":
             raise ValueError("No running workflow node")
         if node.get("completion_criteria") and not evidence.strip():
             raise ValueError("Node completion requires evidence")
+        if self.is_final_node() and hasattr(self, "completion_prepare") and not await self.completion_prepare(evidence):
+            raise ValueError("Task acceptance conditions are not satisfied")
         if self.is_final_node() and (reason := getattr(self, "completion_check", lambda: None)()):
             raise ValueError(reason)
         artifact_refs = list(artifact_refs)
@@ -232,10 +255,11 @@ class DynamicWorkflowPolicy:
                         final_answer = control.kind == "completed" if control else decision and not (decision.metadata or {}).get("parseFallback")
                         if node["status"] == "running" and final_answer:
                             try:
-                                await self.complete_active(str(thaw_json(result.value.output) or ""))
+                                await self.complete_active(thaw_json(result.value.output) or "")
                             except ValueError as exc:
                                 return err(make_loom_error("OUTPUT_CONTRACT_FAILED", str(exc), retryable=False))
                 else:
+                    cp = None
                     if self.execution is not None:
                         cp = {
                             "schema_version": 1,
@@ -258,6 +282,11 @@ class DynamicWorkflowPolicy:
                             cp["context"] = prompt
                             cp["input_cursor"] = directive["inputs"][-1]["seq"]
                             self.execution.boundary(cp)
+                    if hasattr(self, "prepare_acceptance"):
+                        try:
+                            prompt = await self.prepare_acceptance(prompt, runtime, cp)
+                        except (ValueError, RuntimeError) as exc:
+                            return ok(self._node_result(prompt, runtime, str(exc), "paused"))
                     config = node["executor_config"]
                     if node["executor_kind"] == "tool":
                         result = await runtime.call_tool(
@@ -273,7 +302,7 @@ class DynamicWorkflowPolicy:
                         value = result.value
                         output = thaw_json(getattr(value, "value", getattr(value, "output", value)))
                         try:
-                            await self.complete_active(str(output), [output["artifact"]] if isinstance(output, dict) and "artifact" in output else [])
+                            await self.complete_active(output, [output["artifact"]] if isinstance(output, dict) and "artifact" in output else [])
                         except ValueError as exc:
                             return err(make_loom_error("OUTPUT_CONTRACT_FAILED", str(exc), retryable=False))
                         observation = value if isinstance(value, Observation) else Observation(new_trace_id(), "workflow_node", str(value), now_iso())

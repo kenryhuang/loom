@@ -10,6 +10,8 @@ Loom 是一个运行在本地的 AI Agent 任务执行框架，用于编程、�
 供后续任务检索。持久服务让你在 Web 和终端中查看同一个任务；断开界面后，
 任务仍可继续运行，重新连接时可以查看已保存的状态。
 
+运行时验收会根据任务和 workspace 生成条件，执行实际检查及独立语义审阅；失败时有限修复或暂停，并展示验证证据。详见[实现范围与配置](docs/superpowers/specs/2026-10-10-runtime-acceptance-gate-design.zh-CN.md)。
+
 ## 主要特点
 
 - **持久 Session**：保存对话、执行 checkpoint、工具结果、artifact 和事件历史，
@@ -177,6 +179,8 @@ uv run loom session budget SESSION_ID 20M
 default_model: main
 # 可选：为评估选择独立配置的模型别名。
 # evaluation_model: judge
+# 可选：运行时验收模型，默认使用任务模型。
+# verification_model: judge
 
 models:
   main:

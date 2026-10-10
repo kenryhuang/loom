@@ -10,6 +10,7 @@ const html = await readFile(
 );
 const catalog = {
   setup_recommendation: true,
+  acceptance: {required: true, defaults: {max_repairs: 2, max_model_calls: 6, max_seconds: 180}},
   models: [{ id: "main" }],
   templates: [
     {
@@ -91,6 +92,10 @@ test("recommendation is reviewable, tools can be changed, and workspace is expli
   assert.equal($("create-template").value, "coding");
   assert.deepEqual(view.collections(), ["filesystem", "task_control"]);
   assert.match($("setup-status").textContent, /Inspect source only/);
+  assert.equal($("setup-acceptance").hidden, false);
+  assert.match($("setup-acceptance-status").textContent, /recommended setup includes automatic task acceptance/);
+  assert.match($("setup-acceptance-status").textContent, /No workspace has been inspected/);
+  assert.match($("setup-acceptance-budget").textContent, /2 repair rounds.*6 planning\/review calls.*180s/);
   const payload = { knowledge_base_ids: [] };
   assert.throws(
     () => view.apply(payload, catalog.templates[1]),

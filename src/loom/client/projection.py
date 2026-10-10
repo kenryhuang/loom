@@ -25,6 +25,15 @@ class SessionProjection:
         if event["seq"] != self.cursor + 1:
             raise ServiceError("Event gap; reload snapshot", 409)
         data, kind = event["payload"], event["type"]
+        if data.get("acceptance"):
+            self.snapshot["acceptance"] = deepcopy(data["acceptance"])
+            self.snapshot["acceptance_run_id"] = event.get("run_id")
+        if kind == "workspace.probed":
+            self.snapshot["workspace_profile"] = deepcopy(data.get("profile"))
+        if kind == "verification.started":
+            self.snapshot["acceptance_current_check"] = data.get("description")
+        if kind in {"verification.completed", "acceptance.gate.passed", "acceptance.gate.blocked"}:
+            self.snapshot["acceptance_current_check"] = None
         if kind == "message.created":
             self.snapshot["messages"].append({**data, "seq": event["seq"]})
         elif kind == "command.applied":

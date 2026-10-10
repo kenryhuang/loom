@@ -10,10 +10,13 @@ from loom.llm.api import LlmResponse, LlmToolCall
 from loom.service.controller import LoomService
 from loom.tasks.assembly import default_plugin_registry
 from loom.tools.collections import ToolCollection
+from tests.acceptance_fakes import FixtureVerifier
 from tests.service.test_controller import command, wait_state
 
 
 class GeneralProvider:
+    verification_provider = FixtureVerifier()
+
     model = "general-test"
 
     def __init__(self, state):
@@ -37,6 +40,8 @@ def general_provider_factory(state):
 
 
 class WorkspaceReportProvider:
+    verification_provider = FixtureVerifier()
+
     model = "workspace-report-test"
 
     def __init__(self, state):
@@ -88,6 +93,8 @@ def test_durable_research_session_saves_workspace_report_and_artifacts(tmp_path)
 
 
 class PagedSourceProvider:
+    verification_provider = FixtureVerifier()
+
     model = "paged-source-test"
 
     def __init__(self, state):

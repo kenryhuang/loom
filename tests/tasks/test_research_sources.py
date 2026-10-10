@@ -14,9 +14,11 @@ from loom.tasks.evidence import PAGE_CHARS
 from loom.tasks.request import TaskRequest, TaskRunOptions
 from loom.tasks.runner import run_generic_task
 from loom.tools.collections import research_collection
+from tests.acceptance_fakes import FixtureVerifier
 
 
 class AnswerProvider:
+    verification_provider = FixtureVerifier()
     model = "test"
 
     async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
@@ -24,7 +26,7 @@ class AnswerProvider:
 
 
 SOURCE = "https://example.test/about/"
-HTML = '<html><head><title>hidden</title><style>hidden</style></head><body><h1>Python 用途</h1><p>免费 &amp; 开源</p><script>hidden</script></body></html>'
+HTML = "<html><head><title>hidden</title><style>hidden</style></head><body><h1>Python 用途</h1><p>免费 &amp; 开源</p><script>hidden</script></body></html>"
 
 
 def response(body, *, encoding="", content_type="text/html; charset=utf-8"):
@@ -92,13 +94,16 @@ async def test_decode_failure_is_explicit(monkeypatch, body, encoding):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error,code,retryable", [
-    (HTTPError(SOURCE, 401, "Unauthorized", {}, None), "HTTP_STATUS", False),
-    (HTTPError(SOURCE, 503, "Unavailable", {}, None), "HTTP_STATUS", True),
-    (TimeoutError("timed out"), "HTTP_TIMEOUT", True),
-    (URLError(TimeoutError("timed out")), "HTTP_TIMEOUT", True),
-    (URLError("DNS failed"), "HTTP_NETWORK_ERROR", True),
-])
+@pytest.mark.parametrize(
+    "error,code,retryable",
+    [
+        (HTTPError(SOURCE, 401, "Unauthorized", {}, None), "HTTP_STATUS", False),
+        (HTTPError(SOURCE, 503, "Unavailable", {}, None), "HTTP_STATUS", True),
+        (TimeoutError("timed out"), "HTTP_TIMEOUT", True),
+        (URLError(TimeoutError("timed out")), "HTTP_TIMEOUT", True),
+        (URLError("DNS failed"), "HTTP_NETWORK_ERROR", True),
+    ],
+)
 async def test_http_failures_are_known_tool_failures_not_execution_unknown(monkeypatch, error, code, retryable):
     def fail(*args, **kwargs):
         raise error
@@ -113,7 +118,7 @@ async def test_http_failures_are_known_tool_failures_not_execution_unknown(monke
     if isinstance(error, HTTPError):
         assert result.error.metadata["status_code"] == error.code
     assert next(iter(assembly.runtime.operations.values()))["status"] == "failed"
-    assert assembly.completion_error() and not assembly.snapshot()["verified_sources"]
+    assert assembly.output_error() and not assembly.snapshot()["verified_sources"]
     await assembly.close()
 
 
@@ -131,7 +136,7 @@ async def test_manual_links_and_memory_cannot_complete_research(monkeypatch):
     assert thaw_json(result.unwrap().value)["accepted"] is False
     assert not assembly.snapshot()["verified_sources"]
     result = await run_generic_task(assembly.request, provider=AnswerProvider())
-    assert not result.ok and result.error.code == "OUTPUT_CONTRACT_FAILED"
+    assert result.ok and result.value.run_result.metrics.outcome == "paused"
     await assembly.close()
 
 
@@ -142,13 +147,15 @@ async def test_verified_retrieval_is_retained_and_finish_accepts_report(monkeypa
     request = TaskRequest(f"读取 {SOURCE} 并总结", task_spec=spec)
     assembly = TaskAssembly(request)
     fetched = thaw_json((await assembly.handlers()["fetch_url"]({"url": SOURCE})).unwrap().value)
-    assert not assembly.completion_error()
+    assert not assembly.output_error()
     assert fetched["artifact"]["kind"] == "source"
     restored = TaskAssembly(request)
     restored.restore(assembly.snapshot())
     assert restored.snapshot()["verified_sources"][SOURCE] == fetched["artifact"]
-    assert not restored.completion_error()
-    assert thaw_json((await restored.handlers()["finish"]({"report": "Python 是免费开源的语言。"})).unwrap().value)["completed"]
+    assert not restored.output_error()
+    assert (
+        thaw_json((await restored.handlers()["finish"]({"report": "Python 是免费开源的语言。"})).unwrap().value)["accepted"] is False
+    )  # Retrieval alone is not task acceptance.
     await assembly.close()
     await restored.close()
 
@@ -182,7 +189,7 @@ async def test_source_journal_replay_restores_verified_proof_without_refetch(mon
     restored.restore(before)
     replayed = (await restored.handlers()["fetch_url"]({"url": SOURCE}, options)).unwrap()
     assert original == replayed and bridge.artifacts == 1
-    assert not restored.completion_error()
+    assert not restored.output_error()
     assert restored.snapshot()["verified_sources"][SOURCE]["sha256"] == "source-digest"
     await first.close()
     await restored.close()
@@ -196,6 +203,7 @@ async def test_401_followed_by_model_memory_stays_incomplete(monkeypatch):
     monkeypatch.setattr("loom.tools.collections.urlopen", fail)
 
     class Provider(AnswerProvider):
+        verification_provider = FixtureVerifier()
         calls = 0
 
         async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
@@ -206,8 +214,8 @@ async def test_401_followed_by_model_memory_stays_incomplete(monkeypatch):
 
     request = TaskRequest(f"读取 {SOURCE}", task_spec=load_task_spec("examples/task-specs/research.yaml"))
     result = await run_generic_task(request, provider=Provider(), options=TaskRunOptions(max_steps=3))
-    assert not result.ok and result.error.code == "OUTPUT_CONTRACT_FAILED"
-    assert SOURCE in result.error.message
+    assert result.ok and result.value.run_result.metrics.outcome == "paused"
+    assert SOURCE in result.value.run_result.context.state.scratch["acceptance"]["reason"]
 
 
 @pytest.mark.asyncio
@@ -228,10 +236,12 @@ async def test_large_node_evidence_keeps_full_artifact_and_a_bounded_note():
 
     assembly = TaskAssembly(TaskRequest("Explain a concept", task_spec={"workflow": {"plugin": "dynamic"}}))
     workflow = assembly.workflow
-    workflow.controller.nodes = workflow.controller.validate([
-        {"id": "prepare", "objective": "Prepare", "status": "running"},
-        {"id": "report", "objective": "Report", "dependencies": ["prepare"]},
-    ])
+    workflow.controller.nodes = workflow.controller.validate(
+        [
+            {"id": "prepare", "objective": "Prepare", "status": "running"},
+            {"id": "report", "objective": "Report", "dependencies": ["prepare"]},
+        ]
+    )
     workflow._active = "prepare"
     evidence = "Detailed evidence. " * 500
     result = await assembly.handlers()["complete_node"]({"evidence": evidence})
@@ -249,6 +259,7 @@ async def test_end_to_end_fetch_then_chinese_final_report(monkeypatch):
     serve(monkeypatch, response(gzip.compress(HTML.encode()), encoding="gzip"))
 
     class Provider(AnswerProvider):
+        verification_provider = FixtureVerifier()
         calls = 0
 
         async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
@@ -280,6 +291,7 @@ async def test_large_html_short_body_reaches_model_without_a_refetch_loop(monkey
     serve(monkeypatch, response(gzip.compress(html.encode()), encoding="gzip"))
 
     class Provider(AnswerProvider):
+        verification_provider = FixtureVerifier()
         calls = 0
 
         async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):

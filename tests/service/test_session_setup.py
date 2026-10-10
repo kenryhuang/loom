@@ -48,6 +48,12 @@ def test_setup_recommendation_does_not_create_a_session_and_manual_override_exec
     assert result["task_type"] == "coding"
     assert result["tool_collections"] == ["filesystem", "task_control"]
     assert result["usage"]["total_tokens"] == 30
+    assert result["acceptance"] == catalog["acceptance"]
+    assert result["acceptance"]["required"] is True
+    assert result["acceptance"]["plan_stage"] == "before_execution"
+    assert result["acceptance"]["verify_stage"] == "before_completion"
+    assert result["acceptance"]["defaults"]["max_repairs"] == 2
+    assert "Runtime acceptance is mandatory" in provider.calls[0][0].content
     assert service.store.list_sessions() == before
     supplied = json.loads(provider.calls[0][1].content)
     assert supplied["task_description"] == "Explain yakDB indexing"
@@ -71,6 +77,7 @@ def test_setup_recommendation_does_not_create_a_session_and_manual_override_exec
         proposal(tool_collections=["not_installed"]),
         proposal(external_tools=["fake-mcp"]),
         proposal(task_type="imaginary"),
+        proposal(acceptance={"required": False}),
         {"task_type": "coding"},
         proposal(collection_reasons={"shell": "not selected"}),
     ],

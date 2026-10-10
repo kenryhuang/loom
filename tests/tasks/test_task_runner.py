@@ -10,6 +10,7 @@ from loom.runtime import PlanMode
 from loom.tasks.profiles import select_task_profile
 from loom.tasks.request import TaskHarness, TaskRequest, TaskRunOptions
 from loom.tasks.runner import make_task_context, run_generic_task
+from tests.acceptance_fakes import FixtureVerifier
 
 
 class RecordingTraceSink:
@@ -122,6 +123,8 @@ def test_task_harness_rejects_unknown_allowed_tool(tmp_path):
 
 
 class FakeTaskProvider:
+    verification_provider = FixtureVerifier()
+
     model = "fake-task-model"
 
     def __init__(self) -> None:
@@ -164,6 +167,8 @@ class FakeTaskProvider:
 
 
 class MalformedThenFinalTaskProvider:
+    verification_provider = FixtureVerifier()
+
     model = "malformed-then-final-model"
 
     def __init__(self):
@@ -190,6 +195,8 @@ class MalformedThenFinalTaskProvider:
 
 
 class FakeEditTaskProvider:
+    verification_provider = FixtureVerifier()
+
     model = "fake-edit-task-model"
 
     def __init__(self) -> None:
@@ -250,6 +257,8 @@ class FakeEditTaskProvider:
 
 
 class StreamingTaskProvider:
+    verification_provider = FixtureVerifier()
+
     model = "fake-streaming-task-model"
 
     async def stream_chat(self, messages, tools=None, cancellation=None, tool_choice=None):
@@ -273,6 +282,8 @@ class StreamingTaskProvider:
 
 
 class ForcedPlanTaskProvider:
+    verification_provider = FixtureVerifier()
+
     model = "fake-plan-task-model"
 
     def __init__(self):
@@ -396,6 +407,8 @@ class ForcedPlanTaskProvider:
 
 
 class AutoBoundaryPlanProvider:
+    verification_provider = FixtureVerifier()
+
     model = "fake-auto-boundary-plan-model"
 
     def __init__(self):
@@ -466,6 +479,8 @@ class AutoBoundaryPlanProvider:
 
 
 class AutoReactTaskProvider:
+    verification_provider = FixtureVerifier()
+
     model = "fake-auto-react-model"
 
     def __init__(self):
@@ -511,6 +526,8 @@ class AutoReactTaskProvider:
 
 
 class AutoUpgradePlanProvider:
+    verification_provider = FixtureVerifier()
+
     model = "fake-auto-upgrade-plan-model"
 
     def __init__(self):
@@ -562,6 +579,8 @@ class AutoUpgradePlanProvider:
 
 
 class FailureReviewPlanProvider:
+    verification_provider = FixtureVerifier()
+
     model = "fake-failure-review-plan-model"
 
     def __init__(self):
@@ -622,6 +641,8 @@ class FailureReviewPlanProvider:
 
 
 class OneToolPerResponsePlanProvider:
+    verification_provider = FixtureVerifier()
+
     model = "fake-one-tool-per-response-plan-model"
 
     def __init__(self):
@@ -705,6 +726,8 @@ class OneToolPerResponsePlanProvider:
 
 
 class RecoveringForcedPlanProvider:
+    verification_provider = FixtureVerifier()
+
     model = "fake-recovering-plan-model"
 
     def __init__(self):
@@ -806,6 +829,8 @@ class RecoveringForcedPlanProvider:
 
 @dataclass(frozen=True)
 class OverlayRecordingProvider:
+    verification_provider = FixtureVerifier()
+
     api_key: str = "secret-key"
     model: str = "fixed-model"
     base_url: str = "https://provider.invalid/v1"
@@ -1195,6 +1220,6 @@ def test_run_generic_task_merges_harness_request_options_without_changing_provid
             "model": "fixed-model",
             "base_url": "https://provider.invalid/v1",
             "request_options": {"enable_thinking": True, "thinking_budget": 1024},
-            "tool_names": ("read_file",),
+            "tool_names": ("read_file", "revise_acceptance_plan"),
         }
     ]

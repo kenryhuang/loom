@@ -3,6 +3,8 @@ import test from "node:test";
 import { JSDOM } from "jsdom";
 import { FeedView } from "../../src/loom/web/assets/views/feed.mjs";
 import { builtinPresenters } from "../../src/loom/web/assets/activity/presenters.mjs";
+import { meaningfulFields } from "../../src/loom/web/assets/activity/event-details.mjs";
+import { renderVerificationArtifact } from "../../src/loom/web/assets/views/activity-row.mjs";
 import {
   outputValue,
   modelText,
@@ -26,6 +28,104 @@ const observation = (value) => ({
   source: "tool",
   at: "2026-10-06",
   value,
+});
+
+const evidenceArtifact = () => ({
+  goal: {objective: "Check planetary orbital speeds", requirements: [{description: "Explain deviations"}]},
+  plan: {criteria: [{id: "speed", description: "Compare orbital speeds with real values", verifier: "semantic", scope: ["src/data/planets.ts"]}]},
+  binding_before: {candidate: "internal-fingerprint"},
+  evidence: [
+    {id: "candidate", content: "# Orbital analysis\n\nEarth speed matches the expected value.", sha256: "internal-digest"},
+    {id: "tool:one", tool: "shell_execute", input: {command: "node check-speeds.js"},
+      output: JSON.stringify({stdout: "Earth: 29.78 km/s", stderr: "", exit_code: 0})},
+    {id: "tool:two", tool: "read_file", input: {path: "src/data/planets.ts"}, output: '{"content":"incomplete', truncated: true},
+  ],
+});
+
+test("verification artifacts lazily load readable goals, criteria, answers and actual tool output", async () => {
+  const loaded = [];
+  const {dom, root, feed} = setup({loadArtifact: async digest => {loaded.push(digest); return evidenceArtifact();}});
+  feed.append(event(1, "artifact.created", {artifact: {kind: "verification_evidence", sha256: "proof", relative_path: "artifacts/proof.json"}}));
+  assert.equal(loaded.length, 0);
+  assert.match(root.querySelector(".activity-title").textContent, /Verification evidence saved/);
+  feed.toggleAll();
+  await tick();
+  assert.deepEqual(loaded, ["proof"]);
+  const content = root.querySelector(".activity-content");
+  for (const text of ["Check planetary orbital speeds", "Compare orbital speeds", "src/data/planets.ts", "Orbital analysis", "node check-speeds.js", "Earth: 29.78 km/s", "Recorded output was truncated"])
+    assert.ok(content.textContent.includes(text), text);
+  assert.doesNotMatch(content.textContent, /internal-fingerprint|internal-digest|artifacts\/proof.json/);
+  assert.match(root.querySelector(".activity-subject").textContent, /1 checks · 3 evidence items/);
+  const descriptor = [...feed.groups.values()][0].records.values().next().value.descriptor;
+  assert.equal(descriptor.details.artifact.sha256, "proof");
+  assert.equal(descriptor.details.artifact_content.binding_before.candidate, "internal-fingerprint");
+  dom.window.close();
+});
+
+test("verification evidence dialogs use the same readable content and keep raw records optional", () => {
+  const {dom} = setup();
+  const view = renderVerificationArtifact(evidenceArtifact());
+  assert.match(view.textContent, /Check planetary orbital speeds/);
+  assert.match(view.textContent, /Earth: 29.78 km\/s/);
+  assert.equal(view.querySelector("details").open, false);
+  assert.doesNotMatch(view.textContent, /internal-fingerprint/);
+  assert.equal(renderVerificationArtifact({report: "Ordinary report"}), null);
+  const check = renderVerificationArtifact({criterion: {description: "Tests pass", verifier: "command", scope: []}, result: {status: "failed", reason: "Exit code 1"}, detail: {stderr: "Assertion failed"}});
+  assert.match(check.textContent, /Tests pass/);
+  assert.match(check.textContent, /Exit code 1/);
+  dom.window.close();
+});
+
+test("proposed acceptance plans show descriptions, scopes and checks instead of snapshot metadata", async () => {
+  const {dom, root, feed} = setup();
+  feed.append(event(1, "acceptance.plan.proposed", {
+    trace_id: "hidden-trace", at: "hidden-time", goal_digest: "hidden-digest",
+    acceptance: {reason: "Preparing plan", plan: {criteria: [{description: "Old criterion"}]}},
+    proposal: {criteria: [
+      {id: "planet-data-review", description: "Examine the default planetary orbital parameters <script>bad()</script>",
+        scope: ["src/data/planets.ts"], verifier: "semantic", check: {}},
+      {id: "tests", description: "Orbital regression tests pass", scope: ["tests/orbit.test.ts"], verifier: "command",
+        check: {input: {argv: ["npm", "test"]}}},
+    ], unresolved_requirements: ["Real-world source still needed"]},
+  }));
+  feed.toggleAll();
+  await tick();
+  const content = root.querySelector(".activity-content");
+  assert.match(root.querySelector(".activity-title").textContent, /Proposed acceptance plan/);
+  assert.match(content.textContent, /Examine the default planetary orbital parameters/);
+  assert.match(content.textContent, /Scope: src\/data\/planets.ts/);
+  assert.match(content.textContent, /Review the result and supporting evidence/);
+  assert.match(content.textContent, /npm test/);
+  assert.match(content.textContent, /Real-world source still needed/);
+  assert.doesNotMatch(content.textContent, /Old criterion|hidden-trace|hidden-time|hidden-digest/);
+  assert.equal(content.querySelector("script"), null);
+  dom.window.close();
+});
+
+test("other events expose nested objectives, errors and evidence with bounded metadata-free fallback", () => {
+  const presenters = builtinPresenters();
+  const show = (eventType, details) => presenters.present({eventType, details});
+  const workflow = show("workflow.node.started", {workflow: {active: "step", workflow: {nodes: [
+    {id: "step", objective: "Find the root cause", status: "running"},
+  ]}}, trace_id: "internal-trace"});
+  assert.equal(workflow.subject, "Find the root cause");
+  assert.match(JSON.stringify(workflow.sections), /Find the root cause/);
+  const workspace = show("workspace.probed", {profile: {workspace: "present", files: ["package.json"],
+    configuration: [{path: "package.json", excerpt: '"test": "vitest"', excerpt_sha256: "internal-digest"}], limitations: ["Inventory bounded"]}});
+  assert.match(JSON.stringify(workspace.sections), /vitest/);
+  assert.match(JSON.stringify(workspace.sections), /Inventory bounded/);
+  assert.doesNotMatch(JSON.stringify(workspace.sections), /internal-digest/);
+  const generic = show("custom.completed", {trace_id: "internal-trace", result: {
+    findings: [{description: "The configuration caused the timeout", evidence: {path: "config.yaml", reason: "Timeout is too short"}}],
+    error: {message: "Connection timed out", remediation: {description: "Increase the request timeout"}},
+  }});
+  assert.match(JSON.stringify(generic.sections), /The configuration caused the timeout/);
+  assert.match(JSON.stringify(generic.sections), /Increase the request timeout/);
+  assert.doesNotMatch(JSON.stringify(generic.sections), /internal-trace/);
+  const limited = meaningfulFields({metadata: {description: "Internal only"}, results: Array.from({length: 100}, () => ({description: "Finding"}))});
+  assert.match(limited.at(-1).value, /Preview shortened/);
+  assert.ok(limited.length <= 41);
+  assert.doesNotMatch(JSON.stringify(limited), /Internal only/);
 });
 
 test("real Observation envelopes decode into meaningful command, read and edit details", () => {

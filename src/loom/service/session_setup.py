@@ -8,6 +8,7 @@ from dataclasses import replace
 
 from loom.llm.api import LlmMessage
 from loom.service.contracts import ServiceError, object_value, text
+from loom.tasks.acceptance import DEFAULTS as ACCEPTANCE_DEFAULTS
 from loom.tasks.assembly import default_plugin_registry
 from loom.tasks.config import create_provider_from_task_config, load_task_config
 
@@ -33,7 +34,9 @@ def capability_catalog(service):
         label, description, workspace = COLLECTIONS.get(identifier, (identifier, "Installed tool collection", False))
         collections.append({"id": identifier, "label": label, "description": description, "requires_workspace": workspace})
     plugins = {kind: [row for row in registry.catalog(kind) if row["version"] == "1"] for kind in ("context", "workflow")}
-    return {"tool_collections": collections, "plugins": plugins, "external_tools": [], "setup_recommendation": True}
+    return {"tool_collections": collections, "plugins": plugins, "external_tools": [], "setup_recommendation": True,
+            "acceptance": {"required": True, "plan_stage": "before_execution", "verify_stage": "before_completion",
+                           "defaults": dict(ACCEPTANCE_DEFAULTS)}}
 
 
 class SessionSetup:
@@ -102,7 +105,11 @@ class SessionSetup:
                 "collection_reasons: {collection_id: short_reason}, knowledge_base_ids: [string], "
                 "knowledge_reasons: {base_id: short_reason}, plugins: {context: string, workflow: string}, "
                 "plugin_reasons: {context: short_reason, workflow: short_reason}}. Explain in the user's language. "
-                "Task type is a starting template; collections may be adjusted independently."
+                "Task type is a starting template; collections may be adjusted independently. "
+                "Runtime acceptance is mandatory for every task, independently of chosen collections or workflow. "
+                "Its plan is generated after session creation from the actual bound workspace, before execution. "
+                "It verifies completion with available checks and independent semantic review. Select tools needed for task-relevant checks, "
+                "but do not invent an acceptance plugin or claim that a plan or checks have already run."
             )
             messages = [
                 LlmMessage("system", system),
@@ -143,6 +150,7 @@ class SessionSetup:
             return {
                 **proposal,
                 "knowledge_bases": catalog["knowledge_bases"],
+                "acceptance": catalog["acceptance"],
                 "model": model or getattr(provider, "model", None),
                 "elapsed_seconds": round(time.monotonic() - started, 2),
                 "usage": {key: getattr(usage, key, 0) for key in ("prompt_tokens", "completion_tokens", "total_tokens")},

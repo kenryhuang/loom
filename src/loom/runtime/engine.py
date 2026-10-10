@@ -349,6 +349,15 @@ async def run(
         traces.append(stepped.value.trace)
         output = stepped.value.output
         steps += 1
+        control = stepped.value.control
+        if control is not None and control.kind in {"paused", "waiting_input", "stopped"}:
+            ended_at = now_iso()
+            emitted = await emit({"type": "run.suspended", "run_id": current.run_id, "loop_id": loop.id,
+                                  "at": ended_at, "reason": control.reason, "state": control.kind})
+            if not emitted.ok:
+                return emitted
+            return ok(RunResult(context=current, traces=tuple(traces), output=output,
+                metrics=RunMetrics(steps, started_at, ended_at, _duration_ms(started_ms), len(traces), control.kind)))
 
 
 async def step_stream(loop: LoopHandle, context: Context, **options: Any):

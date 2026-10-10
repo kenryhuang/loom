@@ -480,7 +480,7 @@ async function openArtifact(digest) {
     close.setAttribute("aria-label", "Close artifact");
     close.addEventListener("click", () => dialog.close());
     heading.append(element("h2", "", "Artifact"), close);
-    dialog.append(heading, renderResult(reportContent(value)));
+    dialog.append(heading, renderVerificationArtifact(value) || renderResult(reportContent(value)));
     dialog.addEventListener("close", () => dialog.remove(), { once: true });
     document.body.append(dialog);
     dialog.showModal();
@@ -610,3 +610,4 @@ window.addEventListener("pagehide", () => {
   controller?.disconnect();
 });
 $("auth-dialog").showModal();
+import { renderVerificationArtifact } from "./views/activity-row.mjs";

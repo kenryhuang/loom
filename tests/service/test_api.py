@@ -287,8 +287,8 @@ def test_semantic_api_validates_scope_and_runs_evaluation_without_task_events(ap
         model = "test"
 
         async def chat(self, messages, tools=None, cancellation=None):
-            return ok(LlmResponse(content=json.dumps({"diagnoses": [], "verification": [], "preserved_behaviors": [],
-                "verification_framework": [], "round_analyses": []}), usage=TokenUsage(10, 5, 15)))
+            return ok(LlmResponse(content=json.dumps({"summary": "No supported semantic conclusions", "finding_ids": [], "limitations": []}),
+                                  usage=TokenUsage(10, 5, 15)))
 
     service, server, client, path = api
     server.semantic.provider_factory = lambda model: Judge()

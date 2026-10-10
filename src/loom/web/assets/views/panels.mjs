@@ -89,6 +89,39 @@ export function builtinPanels() {
         },
       };
     })
+    .register("acceptance", (actions) => {
+      const root = panel("Task acceptance"), body = element("div");
+      root.append(body);
+      let signature;
+      return {element: root, update(state) {
+        const current = state.acceptance_run_id === state.run?.id ? state.acceptance : null;
+        const next = JSON.stringify([current, state.acceptance_current_check]);
+        if (signature === next) return;
+        signature = next;
+        body.replaceChildren();
+        if (!current) {body.append(element("p", "muted", "Acceptance will be prepared from the task and workspace.")); return;}
+        body.append(element("strong", "", (current.state === "not_ready" && !current.plan ? "Preparing plan" : ({not_ready: "Ready to work", verifying: "Verifying", passed: "Passed", needs_repair: "Needs repair", blocked: "Blocked"})[current.state]) || current.state),
+          element("p", "muted", current.reason));
+        if (state.acceptance_current_check) body.append(element("p", "", state.acceptance_current_check));
+        const results = new Map((current.results || []).map(r => [r.criterion_id, r]));
+        for (const c of current.plan?.criteria || []) {
+          const row = element("details"), result = results.get(c.id);
+          row.open = ["failed", "blocked"].includes(result?.status);
+          row.append(element("summary", "", `${result?.status || "pending"} · ${c.description}`));
+          if (result) row.append(element("p", "", result.reason));
+          row.append(element("small", "muted", `${c.verifier} · ${result?.assurance || "recorded check"}`));
+          if (result?.artifact?.sha256) {
+            const link = element("button", "output-link", "View verification evidence");
+            link.addEventListener("click", () => actions.artifact(result.artifact.sha256));
+            row.append(link);
+          }
+          body.append(row);
+        }
+        for (const missing of current.plan?.unresolved_requirements || []) body.append(element("p", "notice", missing));
+        const profile = state.workspace_profile;
+        if (profile) body.append(element("p", "muted small", `Workspace: ${profile.workspace} · ${profile.files?.length || 0} discovered entries · ${profile.limitations?.length || 0} probe limitations`));
+      }};
+    })
     .register("budget", (actions) => {
       const root = panel("Token budget"),
         text = element("div", "muted small"),

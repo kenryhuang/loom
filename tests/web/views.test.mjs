@@ -956,3 +956,84 @@ test("outputs show saved workspace paths while keeping artifact access", () => {
     dom.window.close();
   }
 });
+
+test("acceptance panel renders current checks, evidence links and clears previous run state", () => {
+  const dom = setup(), root = document.getElementById("panels"), opened = [];
+  const panels = new PanelsView(root, builtinPanels(), {artifact: id => opened.push(id)});
+  const current = {...state(), acceptance_run_id: "run", acceptance_current_check: "Checking regression",
+    acceptance: {state: "needs_repair", reason: "Test failed", plan: {criteria: [{id: "test", description: "Regression passes", verifier: "command"}]},
+      results: [{criterion_id: "test", status: "failed", reason: "Exit code 1", artifact: {sha256: "proof"}}]}};
+  panels.update(current);
+  const panel = root.querySelector('[data-panel="acceptance"]');
+  assert.match(panel.textContent, /Needs repair/);
+  assert.match(panel.textContent, /Checking regression/);
+  assert.match(panel.textContent, /Exit code 1/);
+  assert.equal(panel.querySelector("details").open, true);
+  panel.querySelector("button").click();
+  assert.deepEqual(opened, ["proof"]);
+  panels.update({...current, run: {id: "next"}});
+  assert.doesNotMatch(panel.textContent, /Regression passes/);
+  dom.window.close();
+});
+
+function verificationEvents({attempts = 1, failed = false, goal = "goal"} = {}) {
+  const criteria = ["data", "mechanics", "comparison", "goal"].map(id => ({id, description: `Check ${id}`, verifier: "semantic"}));
+  const results = criteria.map(c => ({criterion_id: c.id, status: failed && c.id === "goal" ? "failed" : "passed",
+    reason: `Reason for ${c.id}`, evidence_ids: [`source:${c.id}`], artifact: {sha256: "proof"}}));
+  const acceptance = {state: "verifying", attempts, revision: 1, goal_digest: goal, plan: {criteria}, results: []};
+  const events = [event(1, "acceptance.verifying", {acceptance})];
+  results.forEach((result, i) => events.push(event(i + 2, "verification.completed", {
+    acceptance: {...acceptance, results: results.slice(0, i + 1)}, result,
+  })));
+  events.push(event(6, failed ? "acceptance.gate.blocked" : "acceptance.gate.passed", {
+    acceptance: {...acceptance, state: failed ? "needs_repair" : "passed", results},
+  }));
+  return events;
+}
+
+test("acceptance feed aggregates live checks and replay into one expandable round with evidence", async () => {
+  const dom = setup(), root = document.getElementById("feed"), loaded = [];
+  const feed = new FeedView(root, {loadArtifact: async digest => {loaded.push(digest); return {evidence: "Verification evidence"};}});
+  const events = verificationEvents();
+  for (const e of events) feed.append(e);
+  assert.equal(root.querySelectorAll(".event-row").length, 1);
+  const row = root.querySelector(".event-row");
+  assert.match(row.querySelector("summary").textContent, /Acceptance passed.*4\/4 checks passed/);
+  assert.equal(row.open, false);
+  row.open = true;
+  row.dispatchEvent(new dom.window.Event("toggle"));
+  assert.equal(row.querySelectorAll(".acceptance-check").length, 4);
+  assert.match(row.textContent, /Reason for mechanics/);
+  assert.match(row.textContent, /source:comparison/);
+  row.querySelector(".acceptance-check button").click();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(loaded, ["proof"]);
+  assert.match(row.textContent, /Verification evidence/);
+  feed.toggleAll();
+  assert.equal(root.querySelectorAll("details:not([open])").length, 0);
+  feed.toggleAll();
+  assert.equal(root.querySelectorAll("details[open]").length, 0);
+
+  // Historical pages may arrive newest first, with different trace IDs.
+  feed.restore({snapshot: state(), events: events.map(e => ({...e, trace_id: `trace-${e.seq}`})).reverse()});
+  assert.equal(root.querySelectorAll(".event-row").length, 1);
+  assert.match(root.querySelector(".event-row summary").textContent, /Acceptance passed.*4\/4/);
+  assert.equal([...feed.groups.values()][0].records.values().next().value.descriptor.sources.length, 6);
+  dom.window.close();
+});
+
+test("failed acceptance expands by default and retries, changed goals and runs stay separate", () => {
+  const dom = setup(), root = document.getElementById("feed"), feed = new FeedView(root);
+  for (const e of verificationEvents({failed: true})) feed.append(e);
+  const row = root.querySelector(".event-row");
+  assert.equal(row.open, true);
+  assert.match(row.querySelector("summary").textContent, /needs attention.*3\/4/);
+  assert.equal(row.querySelector('[data-key="criterion:goal"]').open, true);
+  assert.equal(row.querySelector('[data-key="criterion:data"]').open, false);
+  for (const e of verificationEvents({attempts: 2})) feed.append({...e, seq: e.seq + 10});
+  assert.equal(root.querySelectorAll(".event-row").length, 2);
+  for (const e of verificationEvents({goal: "changed"})) feed.append({...e, seq: e.seq + 20});
+  for (const e of verificationEvents()) feed.append({...e, run_id: "next", seq: e.seq + 30});
+  assert.equal(root.querySelectorAll(".event-row").length, 4);
+  dom.window.close();
+});

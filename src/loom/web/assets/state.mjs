@@ -33,6 +33,13 @@ export class SessionProjection {
     const data = event.payload,
       kind = event.type,
       state = this.snapshot;
+    if (data.acceptance) {
+      state.acceptance = structuredClone(data.acceptance);
+      state.acceptance_run_id = event.run_id;
+    }
+    if (kind === "workspace.probed") state.workspace_profile = structuredClone(data.profile);
+    if (kind === "verification.started") state.acceptance_current_check = data.description;
+    if (["verification.completed", "acceptance.gate.passed", "acceptance.gate.blocked"].includes(kind)) state.acceptance_current_check = null;
     if (kind === "message.created")
       state.messages = [
         ...(state.messages || []),

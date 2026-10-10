@@ -23,6 +23,7 @@ disconnect while work continues, and return to its saved state.
   workspace, context management, execution runtime, and workflow separately.
 - **Plans and bounded context:** support dynamic workflows and Plan & Execute,
   with context compaction that retains full original content in artifacts.
+- **Runtime acceptance:** task- and workspace-aware acceptance criteria gate completion, with actual checks, independent semantic review, bounded repair and visible evidence. See the [implementation and configuration](docs/superpowers/specs/2026-10-10-runtime-acceptance-gate-design.md).
 - **Reports with saved documents:** research reports retain their sources and
   artifact. When a writable workspace is bound, `create_report` also writes the
   report there, and the UI shows its saved path.
@@ -194,6 +195,8 @@ For multiple models or provider-specific options, create a configuration file:
 default_model: main
 # Optional: select a separately configured judge model for evaluation.
 # evaluation_model: judge
+# Optional independent runtime acceptance model (otherwise uses the task model).
+# verification_model: judge
 
 models:
   main:

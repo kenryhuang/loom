@@ -13,9 +13,11 @@ from loom.llm.api import LlmResponse, LlmToolCall
 from loom.service.api import ServiceHTTPServer
 from loom.service.controller import LoomService
 from loom.web.frontend import builtin_templates
+from tests.acceptance_fakes import FixtureVerifier
 
 
 class BrowserProvider:
+    verification_provider = FixtureVerifier()
     model = "browser-smoke"
 
     def __init__(self, state):

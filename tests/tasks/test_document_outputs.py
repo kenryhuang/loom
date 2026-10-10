@@ -8,6 +8,7 @@ from loom.llm.api import LlmResponse, LlmToolCall
 from loom.tasks.assembly import TaskAssembly
 from loom.tasks.request import TaskRequest, TaskRunOptions
 from loom.tasks.runner import make_task_context, run_generic_task
+from tests.acceptance_fakes import FixtureVerifier
 
 
 def report_request(workspace=None, *, access="read-write"):
@@ -40,7 +41,7 @@ async def test_report_writes_utf8_document_and_keeps_full_artifact(tmp_path):
         binding = assembly.bindings["create_report"]
         assert binding.effect_kind == "side_effecting" and binding.resource_refs == ("reports",)
         assert "path" in binding.ref.input_schema["required"]
-        assert not assembly.completion_error()
+        assert not assembly.output_error()
         updated = "# Updated analysis\n"
         assert (await assembly.handlers()["create_report"]({"content": updated, "path": output["path"]})).ok
         assert (tmp_path / output["path"]).read_text() == updated
@@ -60,7 +61,7 @@ async def test_reports_without_writable_workspace_keep_artifact_only(tmp_path, m
         assert "path" not in output
         assert assembly.bindings["create_report"].effect_kind == "read_only"
         assert not assembly.bindings["create_report"].resource_refs
-        assert not assembly.workspace_report_required and not assembly.completion_error()
+        assert not assembly.workspace_report_required and not assembly.output_error()
         failed = await assembly.handlers()["create_report"]({"content": "# Analysis", "path": "analysis.md"})
         assert not failed.ok and "writable workspace" in failed.error.message
         assert not (tmp_path / "analysis.md").exists()
@@ -97,7 +98,7 @@ async def test_write_failure_does_not_publish_report_or_satisfy_completion(tmp_p
         failed = await assembly.handlers()["create_report"]({"content": "analysis", "path": "reports/analysis.md"})
         assert not failed.ok and failed.error.code == "TOOL_FAILED"
         assert assembly._local_artifacts is None
-        assert assembly.completion_error()
+        assert assembly.output_error()
         empty = await assembly.handlers()["create_report"]({"content": " ", "path": "empty.md"})
         assert not empty.ok and empty.error.code == "VALIDATION_FAILED"
         assert not (tmp_path / "empty.md").exists()
@@ -117,14 +118,14 @@ async def test_saved_report_contract_survives_restore_and_checks_document(tmp_pa
         assert rejected["accepted"] is False and "create_report" in rejected["reason"]
         assert (await assembly.handlers()["create_report"]({"content": "analysis", "path": "analysis.md"})).ok
         restored.restore(assembly.snapshot())
-        assert not restored.completion_error()
+        assert not restored.output_error()
         document = tmp_path / "analysis.md"
         document.write_text("changed")
-        assert "changed" in restored.completion_error()
+        assert "changed" in restored.output_error()
         document.unlink()
-        assert "unavailable" in restored.completion_error()
+        assert "unavailable" in restored.output_error()
         assert (await restored.handlers()["create_report"]({"content": "updated", "path": "analysis.md"})).ok
-        assert not restored.completion_error()
+        assert not restored.output_error()
     finally:
         await assembly.close()
         await restored.close()
@@ -162,7 +163,7 @@ async def test_workspace_report_journal_replay_does_not_rewrite_document(tmp_pat
         assert replayed == original and bridge.artifacts == 1
         assert (tmp_path / "analysis.md").read_text() == "external edit"
         assert restored.snapshot()["workspace_reports"]["analysis.md"]["artifact"]["sha256"] == "digest"
-        assert "changed" in restored.completion_error()
+        assert "changed" in restored.output_error()
     finally:
         await first.close()
         await restored.close()
@@ -174,6 +175,7 @@ async def test_research_finishes_with_saved_document_and_both_artifact_reference
     answer = "Analysis saved in reports/analysis.md."
 
     class Provider:
+        verification_provider = FixtureVerifier()
         model = "test"
         calls = 0
 
@@ -205,6 +207,7 @@ async def test_research_finishes_with_saved_document_and_both_artifact_reference
 @pytest.mark.asyncio
 async def test_direct_answer_cannot_bypass_workspace_document_contract(tmp_path):
     class Provider:
+        verification_provider = FixtureVerifier()
         model = "test"
 
         async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
@@ -213,5 +216,5 @@ async def test_direct_answer_cannot_bypass_workspace_document_contract(tmp_path)
     request = report_request(tmp_path)
     request = TaskRequest(request.objective, task_spec={**request.task_spec, "outputs": [{"kind": "report"}]})
     result = await run_generic_task(request, provider=Provider())
-    assert not result.ok and result.error.code == "OUTPUT_CONTRACT_FAILED"
-    assert "create_report" in result.error.message
+    assert result.ok and result.value.run_result.metrics.outcome == "paused"
+    assert "create_report" in result.value.run_result.context.state.scratch["acceptance"]["reason"]

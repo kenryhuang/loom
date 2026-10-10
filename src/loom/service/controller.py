@@ -237,6 +237,15 @@ class LoomService:
                     prefix = f"{event['llm_call_id']}:"
                     for field in ("streams", "stream_origins", "stream_offsets"):
                         run[field] = {k: v for k, v in run.get(field, {}).items() if not k.startswith(prefix)}
+                if event.get("acceptance") is not None:
+                    state["acceptance"] = event["acceptance"]
+                    state["acceptance_run_id"] = run["id"]
+                if event["type"] == "workspace.probed":
+                    state["workspace_profile"] = event.get("profile")
+                if event["type"] == "verification.started":
+                    state["acceptance_current_check"] = event.get("description")
+                elif event["type"] in {"verification.completed", "acceptance.gate.passed", "acceptance.gate.blocked"}:
+                    state["acceptance_current_check"] = None
                 if event["type"].startswith(("plan.", "workflow.")):
                     state["plan_run_id"] = run["id"]
                     state["task"]["plan_revision"] += 1
@@ -420,7 +429,7 @@ class LoomService:
                     emit("task.outputs.changed", {"artifacts": state["output_artifacts"]})
                 control = value.control
                 pending_control = state["control"]
-                if pending_control and control.kind in {"continue", "completed", "waiting_input"}:
+                if pending_control and control.kind in {"continue", "completed", "waiting_input", "paused"}:
                     control = replace(control, kind=pending_control["kind"], reason=pending_control.get("reason", ""))
                     cp = self._checkpoint_value(state)
                     if cp:

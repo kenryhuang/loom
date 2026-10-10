@@ -46,6 +46,7 @@ def test_top_level_package_api_is_intentionally_thin():
         "examples",
         "llm",
         "governance",
+        "knowledge",
         "observability",
         "optimize",
         "runtime",

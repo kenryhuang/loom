@@ -31,6 +31,9 @@ const acceptanceLabel = (outcome) =>
 export function renderBaseEvaluation(root, base, goals = [], plans = []) {
   const section = element("section", "trajectory-section");
   section.append(element("h3", "", "Task result"));
+  const acceptance = base.runtime_acceptance?.state;
+  if (acceptance) section.append(element("p", "", `Runtime acceptance: ${acceptance.state === "passed" ? "Passed" : acceptance.state}`),
+    element("p", "muted", acceptance.reason), element("small", "muted", "Recorded acceptance checks include model judgments; independent goal verification is reported separately."));
   const outcomes = base.outcomes || [];
   const objective = (row) =>
     row.objective ||

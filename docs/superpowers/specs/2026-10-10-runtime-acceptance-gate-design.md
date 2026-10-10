@@ -2,7 +2,35 @@
 
 [中文](2026-10-10-runtime-acceptance-gate-design.zh-CN.md)
 
-Status: design draft; runtime behavior has not changed. Date: 2026-10-10.
+Status: core runtime implementation; supported scope and remaining extensions are listed below. Date: 2026-10-10.
+
+## Implemented runtime contract (2026-10-10)
+
+The shared `TaskAssembly` now owns acceptance for one-shot, Web and TUI tasks. It probes the bound workspace, obtains a bounded JSON plan before execution, adds a mandatory independent full-goal semantic check, and gates final answers, `finish`, dynamic final nodes and restored completion checkpoints. Failed checks return repair feedback (up to two rounds); missing evidence, external conditions, invalid verifier output and exhausted budgets suspend with the candidate retained.
+
+Command checks use registered tools and the durable operation journal. Artifact checks support presence, nonempty text and literal assertions; source checks require recorded retrieval. Semantic review uses a separate tool-free call with its own output/time limits. Verification evidence is retained as artifacts, shown in the Web acceptance panel and TUI events, and recorded separately in Base Eval. A semantic pass is a model judgment, not independently established ground truth. Historical completed runs are not retroactively verified.
+
+Current scope differs from the broader target below: plan revisions may add criteria but cannot replace/remove existing obligations; external checks remain blocked (a trusted feedback ingestion API is not yet implemented). The probe inventories bounded files/configuration; it does not discover every dependency, git modification or remote environment. Freshness uses candidate, goal, plan, scoped file hashes and conservative task-tool write invalidation; concurrent out-of-scope changes are not proven absent. Review input is bounded and excessive evidence blocks instead of silently truncating the final deliverable. Verification calls share durable task token/model/time counters; existing cooperative task stopping provides headroom, without guaranteeing a reserved amount for arbitrary provider prompt usage. Per-criterion reuse and automatic verification-method replacement remain future extensions.
+
+Optional global configuration selects a model alias defined under `models` (defaults to the task model):
+
+```yaml
+verification_model: judge
+```
+
+Task specifications can override these independent acceptance limits:
+
+```json
+{"acceptance": {"max_checks": 8, "max_model_calls": 6, "max_seconds": 180,
+  "max_repairs": 2, "max_prompt_chars": 48000, "max_output_tokens": 4096,
+  "command_timeout_seconds": 60}}
+```
+
+`max_checks` bounds proposed criteria; the host adds the full-goal check. Model calls include acceptance planning and judging. Planning receives the registered command input schemas; malformed JSON or invalid check inputs receive one bounded correction attempt with validation feedback before suspension. This correction shares the existing time/model/token budgets and never executes an invalid proposal. Each model request is limited to 60 seconds or the remaining acceptance allowance. These limits do not extend the task budget. An interrupted command with an unknown journal outcome requires reconciliation, not automatic replay.
+
+New session setup and its LLM recommendation show acceptance as a mandatory runtime facility and expose its default limits. Setup does not inspect a workspace or generate an accepted plan: that happens after binding resources and starting execution. Both the session TUI and one-shot task TUI have a persistent acceptance area showing criteria, passed counts, the current check and failure reasons; session reconnect restores it from the current run snapshot. Detailed events remain in the expandable process history.
+
+The sections below retain the broader design target; use this implementation scope for currently supported behavior.
 
 ## 1. Objective
 

@@ -1,3 +1,5 @@
+import { isAcceptanceRound, acceptanceDescriptor } from "./activity/acceptance.mjs";
+
 /** Rendering descriptors are data; register new event types without changing the feed. */
 export class RendererRegistry {
   constructor() {
@@ -82,6 +84,12 @@ export function modelSummary(details, status, stage) {
 }
 export function builtinRenderers() {
   return new RendererRegistry()
+    .register("acceptance-round", isAcceptanceRound, acceptanceDescriptor)
+    .register("verification-artifact", event => event.type === "artifact.created" &&
+      ["verification_evidence", "verification"].includes(event.payload.artifact?.kind), event => ({
+        key: `event:${event.seq}`, kind: "artifact", summary: "Verification evidence saved",
+        artifact: event.payload.artifact, details: event.payload,
+      }))
     .register(
       "internal-lifecycle",
       (event) =>

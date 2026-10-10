@@ -326,6 +326,7 @@ class OptimizeTrialExecutor:
         if self.control is not None and self.control.cancel_requested:
             raise OptimizeControlInterrupt("user cancelled active trial")
         task_ok = run_result.ok
+        task_completed = task_ok and run_result.value.run_result.metrics.outcome == "pass"
         if not task_ok and run_result.error.retryable:
             return self._infrastructure(trial_id, side, run_result.error.code, started)
         if not trace_path.is_file():
@@ -381,7 +382,7 @@ class OptimizeTrialExecutor:
             trial_id,
             side,
             {
-                "task_success_rate": 1.0 if task_ok and verifier.value else 0.0,
+                "task_success_rate": 1.0 if task_completed and verifier.value else 0.0,
                 "total_tokens": float(total_tokens),
                 "wall_time_ms": float(elapsed_ms),
             },

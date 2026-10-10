@@ -73,6 +73,8 @@ PLAN_PRESENTATION_EVENTS = {
 }
 
 WORKFLOW_PRESENTATION_EVENTS = {
+    "workspace.probed", "acceptance.plan.accepted", "acceptance.plan.revised", "acceptance.verifying",
+    "verification.started", "verification.completed", "acceptance.gate.passed", "acceptance.gate.blocked",
     "workflow.routing.requested",
     "workflow.route.selected",
 }
@@ -440,6 +442,8 @@ def _strip_rich_markup(value: str) -> str:
 
 
 def _event_scope(event: TuiEvent) -> tuple[str, str]:
+    if event.event_type.startswith(("acceptance.", "verification.")) or event.event_type == "workspace.probed":
+        return "VERIFY", COLORS["teal"]
     if event.event_type.startswith("run."):
         return "LOOP", COLORS["green"]
     if event.event_type.startswith("step."):
@@ -569,6 +573,8 @@ def _event_status(event: TuiEvent) -> str:
     if event.event_type in PLAN_PRESENTATION_EVENTS:
         phase, _, _ = _plan_event_parts(event)
         return "done" if phase == "completed" else "running"
+    if event.event_type.startswith(("acceptance.", "verification.")):
+        return event.data.get("result", {}).get("status", event.data.get("acceptance", {}).get("state", "running"))
     if event.event_type in WORKFLOW_PRESENTATION_EVENTS:
         return "done" if event.event_type == "workflow.route.selected" else "running"
     if event.event_type in {"run.completed", "step.completed", "llm.completed", "tool.completed", "tool_selection.decided", "_tui_done"}:
@@ -715,6 +721,9 @@ def _format_event_detail(event: TuiEvent) -> str:
     if event.event_type in PLAN_PRESENTATION_EVENTS:
         _append_plan_detail(lines, event)
 
+    elif event.event_type.startswith(("acceptance.", "verification.")) or event.event_type == "workspace.probed":
+        lines.append("[bold]Task acceptance[/]")
+        lines.append(_safe_markup(json.dumps(data, ensure_ascii=False, indent=2)))
     elif event.event_type in WORKFLOW_PRESENTATION_EVENTS:
         _append_workflow_detail(lines, event)
 

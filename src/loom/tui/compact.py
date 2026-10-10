@@ -15,6 +15,8 @@ from textual.message import Message
 from textual.widgets import Button, Footer, Label, Markdown, Static
 
 from loom.observability.result_format import render_result_markdown
+from loom.tui.acceptance import ROUND_EVENTS, AcceptancePanel, round_details, round_summary
+from loom.tui.event_details import event_content, readable_event_details
 from loom.tui.event_summary import llm_response_text, summarize_event
 from loom.tui.tui_app import COLORS, EventFeedWidget, LoomTuiApp, LoopHeader, StatusBar, _event_tool_execution_key, _LlmStreamState, _ToolExecutionState
 from loom.tui.tui_collector import TuiEvent, _flatten
@@ -251,8 +253,10 @@ class CompactEventItem(Container):
                         detail = thought_text(self.event)
                     elif self.kind == "tool":
                         detail = tool_details(self.event)
+                    elif self.kind == "acceptance":
+                        detail = round_details(data["acceptance"])
                     else:
-                        detail = json.dumps(_flatten({k: v for k, v in data.items() if k not in {"view", "summary", "failed"}}), ensure_ascii=False, indent=2)
+                        detail = data.get("event_details") or readable_event_details(self.event.event_type, _flatten(data))
                     if self.detail_loading:
                         detail += "\n\nLoading full details…"
                     elif self.detail_error:
@@ -295,6 +299,7 @@ class CompactEventFeedWidget(EventFeedWidget):
         self.tool_items = {}
         self.modified_files = {}
         self.result_items = {}
+        self.acceptance_items = {}
 
     def all_items(self) -> list[CompactEventItem]:
         return [row for item in self._event_items for row in (item, *item.records)]
@@ -365,7 +370,8 @@ class CompactEventFeedWidget(EventFeedWidget):
             stream.absorb(event)
             self._present_thought(stream, key)
         elif item.kind not in {"tool", "result", "message"}:
-            item.set_event(replace(item.event, data={**event.data, "view": item.kind, "summary": item.event.data["summary"]}))
+            item.set_event(replace(item.event, data={**event.data, "view": item.kind, "summary": item.event.data["summary"],
+                "event_details": readable_event_details(event.event_type, _flatten(event.data))}))
         else:
             self.present(event)
         if item.group and preview is not None:
@@ -411,6 +417,7 @@ class CompactEventFeedWidget(EventFeedWidget):
                     states.pop(key, None)
         self.process_groups = {run: item for run, item in self.process_groups.items() if item in self._event_items}
         self.result_items = {run: item for run, item in self.result_items.items() if item in self._event_items}
+        self.acceptance_items = {key: item for key, item in self.acceptance_items.items() if item in retained}
         retained_runs = {item.event.run_id for item in self._event_items} | {self.current_run}
         self.modified_files = {run: files for run, files in self.modified_files.items() if run in retained_runs}
 
@@ -418,8 +425,14 @@ class CompactEventFeedWidget(EventFeedWidget):
         group = self._process_group(event)
         summary = summarize_event(event)
         detail = summary.description if summary else first_sentence(event.data.get("reason") or event.data.get("state") or "")
-        line = event.event_type + (" · " + first_sentence(detail) if detail else "")
-        self._append(replace(event, data={**event.data, "view": "event", "summary": line}), group=group)
+        title, sections = event_content(event.event_type, _flatten(event.data))
+        if title and sections:
+            detail = sections[0][1]
+        if event.event_type == "artifact.created" and event.data.get("artifact", {}).get("kind") in {"verification", "verification_evidence"}:
+            detail = ""
+        line = (title or event.event_type) + (" · " + first_sentence(detail) if detail else "")
+        self._append(replace(event, data={**event.data, "view": "event", "summary": line,
+            "event_details": readable_event_details(event.event_type, _flatten(event.data))}), group=group)
         if event.event_type == "llm.requested":
             group.set_preview("Thought: 思考中…")
         elif event.event_type == "run.completed" or event.data.get("state") == "completed":
@@ -485,6 +498,24 @@ class CompactEventFeedWidget(EventFeedWidget):
     def present(self, event: TuiEvent) -> None:
         kind, data = event.event_type, event.data
         run = event.run_id or self.current_run
+        if kind in ROUND_EVENTS and data.get("acceptance"):
+            value = data["acceptance"]
+            key = (run, value.get("goal_digest"), value.get("revision"), value.get("attempts"))
+            summary, failed = round_summary(value)
+            aggregate = replace(event, data={**data, "view": "acceptance", "summary": summary, "failed": failed})
+            group = self._process_group(event)
+            item = self.acceptance_items.get(key)
+            was_failed = bool(item and item.event.data.get("failed"))
+            if item is None or item not in group.records:
+                item = self._append(aggregate, group=group)
+                self.acceptance_items[key] = item
+            else:
+                item.set_event(aggregate)
+            if failed and not was_failed:
+                item.set_expanded(True)
+                group.set_expanded(True)
+            group.set_preview(summary)
+            return
         if kind == "run.started":
             self.current_run = run
         if kind == "run.result" and not self.session_mode:
@@ -512,7 +543,7 @@ class CompactEventFeedWidget(EventFeedWidget):
                 self._present_thought(stream, key)
             if not kind.endswith(".delta"):
                 self._process_event(event)
-            if kind == "llm.completed" and not self.session_mode:
+            if kind == "llm.completed" and not self.session_mode and data.get("usage_role") != "verification":
                 content = llm_response_text(event)
                 if content:
                     self._present_result(event, content)
@@ -583,6 +614,7 @@ class CompactLoomTuiApp(LoomTuiApp):
 
     def compose(self) -> ComposeResult:
         yield LoopHeader(id="loop_header")
+        yield AcceptancePanel(id="acceptance", show_pending=False)
         yield CompactEventFeedWidget(id="event_feed", session_mode=False)
         yield StatusBar(id="status")
         yield Footer()
@@ -592,4 +624,5 @@ class CompactLoomTuiApp(LoomTuiApp):
             super()._handle_event(event)
             return
         self._update_runtime_metrics(event)
+        self.query_one(AcceptancePanel).apply_event(event)
         self.query_one(CompactEventFeedWidget).present(event)

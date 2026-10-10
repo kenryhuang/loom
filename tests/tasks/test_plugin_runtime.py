@@ -20,9 +20,11 @@ from loom.tasks.assembly import TaskAssembly, default_plugin_registry, load_task
 from loom.tasks.request import TaskRequest, TaskRunOptions
 from loom.tasks.runner import make_task_context, run_generic_task
 from loom.tools.collections import ToolCollection
+from tests.acceptance_fakes import FixtureVerifier
 
 
 class AnswerProvider:
+    verification_provider = FixtureVerifier()
     model = "test"
 
     async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
@@ -107,6 +109,7 @@ async def test_workflow_revision_does_not_complete_the_running_node():
     root["status"] = "running"
 
     class Provider(AnswerProvider):
+        verification_provider = FixtureVerifier()
         calls = 0
 
         async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
@@ -138,7 +141,7 @@ async def test_workflow_revision_does_not_complete_the_running_node():
 async def test_direct_answer_cannot_bypass_output_contract():
     spec = {"workflow": {"plugin": "dynamic"}, "outputs": [{"kind": "report", "require_evidence_refs": True}]}
     result = await run_generic_task(TaskRequest("Research", task_spec=spec), provider=AnswerProvider())
-    assert not result.ok and result.error.code == "OUTPUT_CONTRACT_FAILED"
+    assert result.ok and result.value.run_result.metrics.outcome == "paused"
 
 
 @pytest.mark.asyncio
@@ -260,6 +263,7 @@ async def test_tool_collection_can_be_registered_without_changing_runner():
     registry.register("tools", "catalog", lambda config, request: collection)
 
     class Provider(AnswerProvider):
+        verification_provider = FixtureVerifier()
         async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
             if not any(message.role == "tool" for message in messages):
                 return ok(LlmResponse("", (LlmToolCall("lookup", "lookup", "{}"),)))

@@ -44,6 +44,21 @@ class EventSummary:
 
 def summarize_event(event: TuiEvent) -> EventSummary | None:
     """Return a concise semantic summary, or ``None`` for non-semantic data."""
+    if event.event_type.startswith(("acceptance.", "verification.")) or event.event_type == "workspace.probed":
+        value = event.data.get("acceptance", {})
+        title = {
+            "workspace.probed": "Workspace inspected",
+            "acceptance.plan.accepted": "Acceptance plan ready",
+            "acceptance.plan.revised": "Acceptance plan revised",
+            "acceptance.plan.rejected": "Invalid acceptance proposal",
+            "acceptance.plan.repairing": "Correcting acceptance plan",
+            "verification.started": "Verifying",
+            "verification.completed": "Verification result",
+            "acceptance.gate.passed": "Acceptance passed",
+            "acceptance.gate.blocked": "Acceptance needs attention",
+        }.get(event.event_type, "Task acceptance")
+        detail = event.data.get("description") or event.data.get("result", {}).get("reason") or value.get("reason", "")
+        return EventSummary(title, detail, "green" if value.get("state") == "passed" else "orange")
     if event.event_type == "message.created":
         title = "You" if event.data.get("role") == "user" else "Loom"
         status = event.data.get("state", "accepted")
@@ -62,6 +77,8 @@ def summarize_event(event: TuiEvent) -> EventSummary | None:
         return _observation_summary(event.data)
     if event.event_type.startswith("tool."):
         return _tool_summary(event.event_type, event.data, event.error)
+    if event.event_type == "llm.completed" and event.data.get("usage_role") == "verification":
+        return EventSummary("Acceptance model", event.data.get("acceptance_stage", "verification"), "teal")
     if event.event_type == "llm.completed":
         content = llm_response_text(event)
         if content:

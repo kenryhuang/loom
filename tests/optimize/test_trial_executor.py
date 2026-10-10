@@ -22,10 +22,12 @@ from loom.optimize.events import OptimizationEventEmitter
 from loom.optimize.task_sets import OptimizeTask, PreparedTask, VerifierSpec, WorkspaceSnapshot
 from loom.optimize.trial_executor import DurableBaselineRunCache, OptimizeTrialExecutor, TrialCheckpointError
 from loom.tasks import TaskHarness
+from tests.acceptance_fakes import FixtureVerifier
 
 
 @dataclass(frozen=True)
 class RecordingSolverProvider:
+    verification_provider = FixtureVerifier()
     model: str = "solver-model"
     request_options: dict[str, Any] = field(default_factory=lambda: {"enable_thinking": False})
     calls: list[dict[str, Any]] = field(default_factory=list)
@@ -59,6 +61,7 @@ class RecordingSolverProvider:
 
 @dataclass(frozen=True)
 class CancellableSolverProvider(RecordingSolverProvider):
+    verification_provider = FixtureVerifier()
     started: asyncio.Event = field(default_factory=asyncio.Event)
     cancelled: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -153,7 +156,7 @@ async def test_trial_executor_materializes_fresh_paired_workspaces_and_applies_o
     assert "Candidate overlay marker." not in provider.calls[0]["system"]
     assert provider.calls[0]["request_options"] == {"enable_thinking": False}
     assert provider.calls[1]["request_options"] == {"enable_thinking": True}
-    assert provider.calls[1]["tools"] == ("read_file",)
+    assert provider.calls[1]["tools"] == ("read_file", "revise_acceptance_plan")
     assert baseline.trace_ref is not None and artifacts.read_bytes(baseline.trace_ref).ok
     assert baseline.evaluation_ref is not None
     evaluation = json.loads(artifacts.read_bytes(baseline.evaluation_ref).unwrap())

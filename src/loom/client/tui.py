@@ -19,6 +19,7 @@ from textual.widgets import Button, Footer, Input, Label, ListItem, ListView, St
 from loom.client.budgets import parse_token_budget
 from loom.client.projection import SessionProjection
 from loom.service.contracts import LIMITS, ServiceError
+from loom.tui.acceptance import AcceptancePanel
 from loom.tui.compact import CompactEventFeedWidget, CompactEventItem
 from loom.tui.tui_app import COLORS, EventFeedWidget, LoomTuiApp, LoopHeader, StatusBar
 from loom.tui.tui_collector import TuiEvent
@@ -72,6 +73,7 @@ class SessionTuiApp(LoomTuiApp):
                 yield Static("", id="question")
                 yield Static("", id="budget")
                 yield Static("", id="plan")
+                yield AcceptancePanel(id="acceptance")
                 yield CompactEventFeedWidget(id="event_feed")
                 yield Static("", id="notice")
                 yield Input(placeholder="Add guidance or answer the pending question", id="message")
@@ -265,6 +267,7 @@ class SessionTuiApp(LoomTuiApp):
 
     def _refresh_state(self):
         state = self.projection.snapshot
+        self.query_one(AcceptancePanel).restore(state)
         task = state["task"]
         run = state.get("run") or {}
         group = self.query_one(CompactEventFeedWidget).process_groups.get(run.get("id", ""))
@@ -355,6 +358,11 @@ class SessionTuiApp(LoomTuiApp):
         try:
             raw = await asyncio.to_thread(self.client.artifact, sid, digest)
             value = json.loads(raw)
+            kind = item.event.event_type
+            if kind == "artifact.created":
+                value = {**item.event.data, "artifact_content": value}
+            else:
+                kind = value["type"]
             feed = self.query_one(CompactEventFeedWidget)
             if generation != self.subscription_generation or item not in feed.all_items():
                 return
@@ -364,7 +372,7 @@ class SessionTuiApp(LoomTuiApp):
                 item,
                 TuiEvent(
                     time.time(),
-                    value["type"],
+                    kind,
                     value,
                     run_id=item.event.run_id,
                     llm_call_id=value.get("llm_call_id"),

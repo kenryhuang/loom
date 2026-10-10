@@ -7,6 +7,7 @@ from loom.core import ok
 from loom.llm.api import LlmResponse, LlmToolCall
 from loom.service.contracts import ServiceError
 from loom.service.controller import LoomService
+from tests.acceptance_fakes import FixtureVerifier
 from tests.service.test_api import api  # noqa: F401
 
 # Imported fixture is injected by pytest.
@@ -14,6 +15,8 @@ from tests.service.test_controller import command, wait_state
 
 
 class KnowledgeProvider:
+    verification_provider = FixtureVerifier()
+
     model = "knowledge-test"
 
     def __init__(self, state):

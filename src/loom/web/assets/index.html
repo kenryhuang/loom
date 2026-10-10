@@ -323,6 +323,17 @@
             <select id="setup-workflow"></select>
             <p id="setup-workflow-reason" class="muted small"></p>
           </fieldset>
+          <fieldset id="setup-acceptance">
+            <legend>Task acceptance · Automatically enabled</legend>
+            <p>Every task must pass acceptance before it can complete.</p>
+            <ol>
+              <li>Before execution: inspect the bound workspace and establish task-specific acceptance criteria.</li>
+              <li>Before completion: run the relevant checks and an independent semantic review.</li>
+              <li>On failure: return check results for bounded repair; pause when evidence or budget is unavailable.</li>
+            </ol>
+            <p id="setup-acceptance-status" class="muted small" role="status">The acceptance plan is prepared after creation. No workspace has been inspected or checks run yet.</p>
+            <p id="setup-acceptance-budget" class="muted small"></p>
+          </fieldset>
           <details class="setup-external">
             <summary>External tools</summary>
             <p class="muted small">

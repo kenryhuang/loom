@@ -10,6 +10,7 @@ export class SessionSetupView {
     for (const id of ["create-objective", "create-model"])
       this.get(id).addEventListener("input", () => {
         this.abort?.abort();
+        this.renderAcceptance(this.catalog?.acceptance);
         this.get("setup-recommend").disabled = !(
           this.catalog?.setup_recommendation && this.catalog.models.length
         );
@@ -36,6 +37,16 @@ export class SessionSetupView {
       ? "Click Recommend with LLM to fill in the configuration below, then review it and create your session."
       : "Configure manually. LLM recommendations require a configured model and service support.";
     this.recommendation = null;
+    this.renderAcceptance(catalog.acceptance);
+  }
+  renderAcceptance(acceptance, recommended = false) {
+    this.get("setup-acceptance-status").textContent = (recommended
+      ? "This recommended setup includes automatic task acceptance. " : "") +
+      "The acceptance plan is prepared after creation from the task and bound workspace. No workspace has been inspected or checks run yet.";
+    const limits = acceptance?.defaults;
+    this.get("setup-acceptance-budget").textContent = limits
+      ? `Default limits: ${limits.max_repairs} repair rounds · ${limits.max_model_calls} planning/review calls · ${limits.max_seconds}s acceptance time. Calls share the task budget. Custom task specifications may override these defaults.`
+      : "Acceptance applies to every workflow and does not require an optional tool collection.";
   }
   fingerprint() {
     return JSON.stringify([
@@ -180,6 +191,7 @@ export class SessionSetupView {
           .join("\n");
       }
       this.recommendation = { fingerprint, result };
+      this.renderAcceptance(result.acceptance || this.catalog.acceptance, true);
       this.get("setup-status").textContent =
         `${result.rationale}\nReview the configuration below and make any changes before creating. Setup model: ${result.model} · ${result.usage.total_tokens || 0} reported tokens.`;
       if (
