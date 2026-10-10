@@ -550,6 +550,10 @@ class DefaultOptimizeCampaignServices:
         )
 
     def preflight(self) -> Result:
+        if self.loaded.meta.seed_analysis_version == "v3":
+            tasks = [task for split in (self.prepared.discovery, self.prepared.validation, self.prepared.holdout) for task in split.tasks]
+            if any(task.verifier is None for task in tasks):
+                return _runtime_error("BEHAVIOR_VERIFIER_REQUIRED", "v3 evolution requires frozen task verifiers covering goal outcomes and preserved behaviors")
         return ok(
             {
                 "trace_digest": _file_digest(self.trace_path),
@@ -566,6 +570,23 @@ class DefaultOptimizeCampaignServices:
     async def seed_evaluation(self) -> Result:
         self._check_control()
         path = self.root / "seed" / "evaluation" / "evaluation-bundle.json"
+        if self.loaded.meta.seed_analysis_version == "v3":
+            from loom.evaluation.behavior_contracts import SCHEMA_VERSION, validate_bundle
+
+            if path.is_file():
+                try:
+                    cached = validate_bundle(json.loads(path.read_text()))
+                    if cached["source_sha256"] == _file_digest(self.trace_path):
+                        return self._publish_seed_bundle(path, kind="evaluation_bundle", schema_version=SCHEMA_VERSION)
+                except (ValueError, KeyError):
+                    pass
+            analyzed = await analyze_evaluation_trace(
+                EvaluationConfig(self.trace_path, out_dir=path.parent, judge=True, analysis_version="v3"),
+                judge_provider=self.judge_provider,
+            )
+            if not analyzed.ok:
+                return analyzed
+            return self._publish_seed_bundle(path, kind="evaluation_bundle", schema_version=SCHEMA_VERSION)
         cached = load_evaluation_bundle(path) if path.is_file() else None
         if cached is not None and cached.ok:
             return self._publish_seed_bundle(path, kind="evaluation_bundle", schema_version="loom.evaluation.bundle.v1")
@@ -586,6 +607,17 @@ class DefaultOptimizeCampaignServices:
         self._check_control()
         bundle_path = Path(str(evaluation["bundle_path"]))
         path = self.root / "seed" / "evolution" / "evolution-bundle.json"
+        if self.loaded.meta.seed_analysis_version == "v3":
+            from loom.evaluation.behavior_contracts import validate_bundle
+            from loom.evolution.behavior import SCHEMA_VERSION
+
+            bundle = validate_bundle(json.loads(bundle_path.read_text()))
+            payload = {"schema_version": SCHEMA_VERSION, "source_evaluation_bundle": str(bundle_path),
+                       "source_sha256": bundle["source_sha256"], "proposals": bundle["proposals"],
+                       "summary": {"proposal_count": len(bundle["proposals"]), "validation_status": "not_run"}}
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            return self._publish_seed_bundle(path, kind="evolution_bundle", schema_version=SCHEMA_VERSION)
         if _valid_evolution_bundle(path, bundle_path):
             return self._publish_seed_bundle(path, kind="evolution_bundle", schema_version="loom.evolution.bundle.v1")
         analyzed = await analyze_evolution_trace(
@@ -1623,7 +1655,7 @@ def _campaign_spec(
         task_sets.discovery,
         task_sets.validation,
         task_sets.holdout,
-        _objective_specs(meta.objectives, minimum_pairs=meta.tasks.minimum_pairs),
+        _objective_specs(meta.objectives, minimum_pairs=meta.tasks.minimum_pairs, require_verified_outcomes=meta.seed_analysis_version == "v3"),
         CampaignBudget(
             meta.search.iterations,
             meta.search.candidates_per_iteration,
@@ -1661,13 +1693,14 @@ def _baseline_harness(loaded: LoadedOptimizeConfig) -> dict[str, Any]:
     }
 
 
-def _objective_specs(config, *, minimum_pairs: int) -> tuple[ObjectiveSpec, ...]:
+def _objective_specs(config, *, minimum_pairs: int, require_verified_outcomes: bool = False) -> tuple[ObjectiveSpec, ...]:
     return (
         ObjectiveSpec(
             "task_success_rate",
             ObjectiveDirection.MAXIMIZE,
             hard=True,
-            max_baseline_regression=config.max_regression_rate,
+            max_baseline_regression=0.0 if require_verified_outcomes else config.max_regression_rate,
+            absolute_limit=1.0 if require_verified_outcomes else None,
             min_valid_pairs=minimum_pairs,
             missing_policy="fail_closed",
         ),

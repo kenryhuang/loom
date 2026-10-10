@@ -22,10 +22,12 @@ from loom.tasks.config import create_provider_from_task_config, load_task_config
 VERSION = "session-semantic.1"
 RESOURCE_LIMITS = {"max_calls", "max_tokens", "max_seconds"}
 DEFAULTS = {"max_calls": 80, "max_tokens": 1000000, "max_seconds": 1800,
-            "max_evidence_chars": 400000, "max_prompt_chars": 100000, "batch_rounds": 8, "max_read_rounds": 4, "max_rounds": 10000}
+            "max_evidence_chars": 400000, "max_prompt_chars": 100000, "batch_rounds": 8, "max_read_rounds": 4, "max_rounds": 10000, "max_call_seconds": 120}
+V3_DEFAULTS = {**DEFAULTS, "max_calls": 24, "max_tokens": 120000, "max_seconds": 600,
+               "max_rounds": 8, "max_read_rounds": 1, "max_evidence_chars": 120000, "max_prompt_chars": 48000}
 BOUNDS = {"max_calls": (1, 500), "max_tokens": (100, 10000000), "max_seconds": (1, 7200),
           "max_evidence_chars": (1000, 5000000), "max_prompt_chars": (10000, 200000),
-          "batch_rounds": (1, 16), "max_read_rounds": (0, 10), "max_rounds": (1, 10000)}
+          "batch_rounds": (1, 16), "max_read_rounds": (0, 10), "max_rounds": (1, 10000), "max_call_seconds": (1, 600)}
 
 
 class SessionSemantic:
@@ -51,9 +53,10 @@ class SessionSemantic:
         elif self.config_path:
             loaded = load_task_config(self.config_path)
             if loaded.ok:
-                default = loaded.value.default_model
+                default = loaded.value.evaluation_model or loaded.value.default_model
                 models = [{"id": key, "label": f"{key} · {value.model}"} for key, value in loaded.value.models.items()]
-        return {"models": models, "default_model": default, "defaults": DEFAULTS, "bounds": BOUNDS}
+        return {"models": models, "default_model": default, "defaults": V3_DEFAULTS, "defaults_by_version": {"v2": DEFAULTS, "v3": V3_DEFAULTS},
+                "bounds": BOUNDS, "analysis_versions": ["v3", "v2"], "default_analysis_version": "v3"}
 
     def close(self):
         self.closed.set()
@@ -91,6 +94,14 @@ class SessionSemantic:
         result = self._public(body)
         if body.get("result"):
             result["evaluation"] = json.loads(self.store.artifacts.read(body["result"]["sha256"]))
+        elif body.get("analysis_version") == "v3" and body.get("checkpoint"):
+            # Expose validated local results while subsequent stages are still running.
+            from loom.evaluation.behavior_facts import build_behavior_facts
+            from loom.evaluation.behavior_judge import partial_semantic
+
+            source, factual = self.trajectory._data(self.trajectory._load(sid, aid))
+            facts = factual.get("behavior") or build_behavior_facts(source)
+            result["evaluation"] = self._result(body, source, factual, partial_semantic(facts, body["checkpoint"]))
         elif body["state"] not in {"queued", "running"} and body["checkpoint"].get("batches"):
             source, factual = self.trajectory._data(self.trajectory._load(sid, aid))
             outputs = [item["result"] for item in body["checkpoint"]["batches"].values()]
@@ -106,21 +117,36 @@ class SessionSemantic:
         return result
 
     def _result(self, body, source, factual, semantic):
+        if body.get("analysis_version") == "v3":
+            from loom.evaluation.behavior import evaluation_payload
+            from loom.evaluation.behavior_facts import build_behavior_facts
+
+            return evaluation_payload(source, factual.get("behavior") or build_behavior_facts(source), semantic, model=body["model"],
+                                      checkpoint_identity=body["checkpoint"].get("identity"))
         return {"semantic": semantic, "insights": build_insights(factual["summary"], semantic, factual["facts"]),
                 "proposals": proposals_from_diagnoses(semantic["diagnoses"], source_sha256=source.source_sha256,
                     evaluator={"model": body["model"], "prompt_version": PROMPT_VERSION}),
                 "source_sha256": source.source_sha256}
 
     def start(self, sid, aid, options):
-        if not isinstance(options, dict) or set(options) - {"model", "resume_id", *DEFAULTS}:
+        if not isinstance(options, dict) or set(options) - {"model", "resume_id", "analysis_version", *DEFAULTS}:
             raise ServiceError("Invalid evaluation options")
         resume_id = options.get("resume_id")
         if resume_id is not None and (not isinstance(resume_id, str) or not resume_id):
             raise ServiceError("Invalid resume_id")
         resumed = self._load(sid, aid, resume_id) if resume_id else None
-        settings = {**DEFAULTS, **(resumed["settings"] if resumed else {})}
+        version = options.get("analysis_version", resumed.get("analysis_version", "v2") if resumed else "v3")
+        if version not in {"v2", "v3"}:
+            raise ServiceError("analysis_version must be v2 or v3")
+        from loom.evaluation.behavior_contracts import ANALYZER_VERSION as V3_ANALYZER
+        from loom.evaluation.behavior_contracts import PROMPT_VERSION as V3_PROMPT
+
+        analyzer_version = V3_ANALYZER if version == "v3" else ANALYZER_VERSION
+        prompt_version = V3_PROMPT if version == "v3" else PROMPT_VERSION
+        settings = {**(V3_DEFAULTS if version == "v3" else DEFAULTS),
+                    **(resumed["settings"] if resumed else {})}
         for key, value in options.items():
-            if key in {"model", "resume_id"}:
+            if key in {"model", "resume_id", "analysis_version"}:
                 continue
             low, high = BOUNDS[key]
             if type(value) is not int or not low <= value <= high:
@@ -135,7 +161,7 @@ class SessionSemantic:
             raise ServiceError("Wait for factual analysis to complete", 409)
         digest = hashlib.sha256(Path(self.config_path).read_bytes()).hexdigest() if self.config_path else "test"
         identity = {"source": parent["source"]["sha256"], "model": model, "config": digest,
-                    "version": VERSION, "analyzer": ANALYZER_VERSION, "prompt": PROMPT_VERSION, "settings": settings,
+                    "version": VERSION, "analysis_version": version, "analyzer": analyzer_version, "prompt": prompt_version, "settings": settings,
                     "session": sid, "analysis": aid}
         key = hashlib.sha256(canonical(identity).encode()).hexdigest()
         with self.lock, self.store.transaction() as db:
@@ -151,7 +177,8 @@ class SessionSemantic:
                 if resumed["state"] in {"queued", "running", "completed"}:
                     raise ServiceError("Only stopped evaluations can be resumed", 409)
                 if (model != resumed["model"] or digest != resumed["config_digest"]
-                        or resumed["analyzer_version"] != ANALYZER_VERSION or resumed["prompt_version"] != PROMPT_VERSION
+                        or resumed.get("analysis_version", "v2") != version
+                        or resumed["analyzer_version"] != analyzer_version or resumed["prompt_version"] != prompt_version
                         or any(settings[k] != resumed["settings"].get(k, DEFAULTS[k]) for k in DEFAULTS if k not in RESOURCE_LIMITS)):
                     raise ServiceError("Resume must keep the same model, snapshot and analysis settings; only resource limits may change")
                 if any(settings[k] < resumed["settings"][k] for k in RESOURCE_LIMITS):
@@ -164,7 +191,7 @@ class SessionSemantic:
                 raise ServiceError("Evaluation queue is full", 429)
             body = previous or {"id": new_id("evaluation"), "session_id": sid, "analysis_id": aid,
                                 "source_cursor": parent["source_cursor"], "model": model, "settings": settings,
-                                "config_digest": digest, "analyzer_version": ANALYZER_VERSION, "prompt_version": PROMPT_VERSION,
+                                "config_digest": digest, "analysis_version": version, "analyzer_version": analyzer_version, "prompt_version": prompt_version,
                                 "created_at": now_iso(), "checkpoint": {}, "usage": {"calls": 0, "total_tokens": 0, "unreported_calls": 0},
                                 "elapsed_seconds": 0}
             consumed = {"max_calls": body["usage"]["calls"], "max_tokens": body["usage"]["total_tokens"],
@@ -173,6 +200,7 @@ class SessionSemantic:
             if exhausted:
                 limits = ", ".join(f"{k} > {consumed[k]}" for k in exhausted)
                 raise ServiceError(f"Budget exhausted. Increase total limits ({limits}) to resume saved batches", 409)
+            body.pop("result", None)
             body.update(state="queued", error=None, settings=settings)
             db.execute("INSERT OR REPLACE INTO semantic_jobs VALUES(?,?,?,?)", (body["id"], sid, key, canonical(body)))
             self.cancels[body["id"]] = threading.Event()
@@ -212,19 +240,27 @@ class SessionSemantic:
                     body["usage"]["calls"] += 1
                     body["usage"]["unreported_calls"] += 1
                     body["stage"] = event.get("analysis_stage")
-                    body["current_call"] = {"stage": body["stage"], "state": "waiting", "started_at": now_iso(),
+                    body["current_call"] = {"stage": body["stage"], "activity": event.get("evaluation_activity", "review"),
+                                            "output_token_limit": event.get("output_token_limit"),
+                                            "timeout_seconds": event.get("timeout_seconds"), "state": "waiting", "started_at": now_iso(),
                                             "started_elapsed_seconds": prior_elapsed + round(time.monotonic() - started, 2)}
-                    progress("call.started", f"Requesting evaluator: {body['stage']} (call {body['usage']['calls']})")
+                    progress("call.started", f"{event.get('activity_label', body['stage'])} (call {body['usage']['calls']})")
                 elif event["type"] == "llm.completed":
                     usage = event["response"].usage
                     for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
                         body["usage"][key] = body["usage"].get(key, 0) + getattr(usage, key, 0)
                     body["usage"]["unreported_calls"] -= 1
                     body["current_call"]["state"] = "received"
+                    body["current_call"]["duration_seconds"] = round(prior_elapsed + time.monotonic() - started -
+                        body["current_call"]["started_elapsed_seconds"], 2)
                     progress("call.completed", f"Response received: {body.get('stage')} · {usage.total_tokens} reported tokens")
                 elif event["type"] == "llm.failed":
                     body["current_call"]["state"] = "failed"
                     progress("call.failed", f"Evaluator request failed: {body.get('stage')}")
+                elif event["type"] == "evaluation.activity":
+                    body["stage"] = event["stage"]
+                    body["activity"] = event["activity"]
+                    progress(event["activity"], event["message"])
                 else:
                     return ok(None)
                 persist()
@@ -232,6 +268,23 @@ class SessionSemantic:
 
         async def run(source, facts, provider):
             def checkpoint(value):
+                if body.get("analysis_version") == "v3":
+                    body["checkpoint"] = value
+                    body["scanned_pages"] = sum(k.startswith("scan:") for k in value.get("stages", {}))
+                    body["scan_pages"] = value.get("scan_pages", 0)
+                    body["stage_timings"] = value.get("stage_usage", {})
+                    body["completed_batches"] = len(value.get("stages", {}))
+                    assessments = [row for key, stage in value.get("stages", {}).items() if key.startswith("focus:")
+                                   for row in stage["result"].get("assessments", [])]
+                    reviewed = {row["segment_id"] for row in assessments}
+                    body["reviewed_segments"] = len(reviewed)
+                    body["supported_segments"] = len({row["segment_id"] for row in assessments if row["status"] != "unknown"})
+                    body["selected_segments"] = len(value.get("selected", []))
+                    body["reviewed_rounds"] = len({rid for segment in facts["segments"] if segment["id"] in reviewed for rid in segment["round_ids"]})
+                    body["scan_complete"] = value.get("scan_complete", False)
+                    body["synthesis_complete"] = "synthesis" in value.get("stages", {})
+                    persist()
+                    return
                 previous_batches = body.get("completed_batches", 0)
                 body["checkpoint"] = value
                 body["completed_batches"] = len(value.get("batches", {}))
@@ -240,9 +293,19 @@ class SessionSemantic:
                 if body["completed_batches"] > previous_batches:
                     progress("batch.saved", f"Saved {body['completed_batches']} batches · {body['reviewed_rounds']} rounds reviewed")
                 persist()
-            task = asyncio.create_task(judge_effectiveness(source, facts, provider, event_sink=Sink(),
-                **{key: settings[key] for key in ("max_read_rounds", "max_evidence_chars", "max_prompt_chars", "batch_rounds")},
-                checkpoint=body["checkpoint"], save_checkpoint=checkpoint, repair_invalid=True))
+            if body.get("analysis_version") == "v3":
+                from loom.evaluation.behavior_judge import judge_behavior
+
+                work = judge_behavior(source, facts, provider, event_sink=Sink(), checkpoint=body["checkpoint"], save_checkpoint=checkpoint,
+                    **{key: settings[key] for key in ("max_calls", "max_tokens", "max_read_rounds", "max_evidence_chars", "max_prompt_chars")},
+                    max_segments=settings["max_rounds"], max_call_seconds=settings.get("max_call_seconds", 120),
+                    time_budget_seconds=settings["max_seconds"],
+                    remaining_seconds=lambda: settings["max_seconds"] - prior_elapsed - (time.monotonic() - started))
+            else:
+                work = judge_effectiveness(source, facts, provider, event_sink=Sink(),
+                    **{key: settings[key] for key in ("max_read_rounds", "max_evidence_chars", "max_prompt_chars", "batch_rounds")},
+                    checkpoint=body["checkpoint"], save_checkpoint=checkpoint, repair_invalid=True)
+            task = asyncio.create_task(work)
             heartbeat = time.monotonic()
             try:
                 while not task.done():
@@ -281,31 +344,43 @@ class SessionSemantic:
                 if not created.ok:
                     raise ValueError(created.error.message)
                 provider = created.value
-            facts = FactAnalysis(**result["facts"])
-            selected = facts.trajectory[:settings.get("max_rounds", 10000)]
-            body["selected_rounds"] = len(selected)
-            selected_facts = replace(facts, trajectory=selected)
-            if len(selected) < len(facts.trajectory):
-                runs = {row["run_id"] for row in selected}
-                selected_facts = replace(selected_facts, task_contracts=tuple(t for t in facts.task_contracts if t.get("run_id") in runs))
-            judged = asyncio.run(run(source, selected_facts, provider))
-            if not judged.ok:
-                raise ValueError(judged.error.message)
-            semantic = asdict(judged.value)
-            semantic["coverage"]["scope"] = {"selected_rounds": len(selected), "source_rounds": len(facts.trajectory),
-                                             "selection": "First recorded rounds in source order"}
-            if len(selected) < len(facts.trajectory):
-                semantic["coverage"]["status"] = "incomplete"
-                semantic["coverage"]["limitations"].append("Only the selected prefix was reviewed; remaining rounds are unknown.")
-                semantic["verification"] = [dict(row, status="unverified", limitation="Review scope excludes later task execution")
-                                            if row["status"] == "supported" else row for row in semantic["verification"]]
-            verified = {row["criterion_id"]: row for row in semantic["verification"]}
-            semantic["verification"] = [verified.get(row["criterion_id"], row) for row in unverified_criteria(facts)]
+            if body.get("analysis_version") == "v3":
+                from loom.evaluation.behavior_facts import build_behavior_facts
+
+                behavior = result.get("behavior") or build_behavior_facts(source)
+                body["total_segments"] = len(behavior["segments"])
+                judged = asyncio.run(run(source, behavior, provider))
+                if not judged.ok:
+                    raise ValueError(judged.error.message)
+                semantic = judged.value
+            else:
+                facts = FactAnalysis(**result["facts"])
+                selected = facts.trajectory[:settings.get("max_rounds", 10000)]
+                body["selected_rounds"] = len(selected)
+                selected_facts = replace(facts, trajectory=selected)
+                if len(selected) < len(facts.trajectory):
+                    runs = {row["run_id"] for row in selected}
+                    selected_facts = replace(selected_facts, task_contracts=tuple(t for t in facts.task_contracts if t.get("run_id") in runs))
+                judged = asyncio.run(run(source, selected_facts, provider))
+                if not judged.ok:
+                    raise ValueError(judged.error.message)
+                semantic = asdict(judged.value)
+                semantic["coverage"]["scope"] = {"selected_rounds": len(selected), "source_rounds": len(facts.trajectory),
+                                                 "selection": "First recorded rounds in source order"}
+                if len(selected) < len(facts.trajectory):
+                    semantic["coverage"]["status"] = "incomplete"
+                    semantic["coverage"]["limitations"].append("Only the selected prefix was reviewed; remaining rounds are unknown.")
+                    semantic["verification"] = [dict(row, status="unverified", limitation="Review scope excludes later task execution")
+                                                if row["status"] == "supported" else row for row in semantic["verification"]]
+                verified = {row["criterion_id"]: row for row in semantic["verification"]}
+                semantic["verification"] = [verified.get(row["criterion_id"], row) for row in unverified_criteria(facts)]
             payload = self._result(body, source, result, semantic)
             ref = self.store.artifacts.publish(payload, "trajectory_evaluation")
             with self.store.transaction() as db:
                 db.execute("INSERT OR IGNORE INTO artifacts VALUES(?,?,?)", (body["session_id"], ref["sha256"], canonical(ref)))
             body.update(state="completed", completed_at=now_iso(), result=ref)
+            if body.get("analysis_version") == "v3" and semantic["coverage"]["status"] != "complete":
+                body.update(state="budget_exhausted", error="Evaluation budget reached; focused stages remain unfinished")
         except InterruptedError as exc:
             body.update(state="interrupted" if self.closed.is_set() else "cancelled", error=str(exc))
         except Exception as exc:

@@ -40,10 +40,17 @@ class EvaluationConfig:
     judge_max_evidence_chars: int = 80000
     judge_max_prompt_chars: int = 100000
     judge_batch_rounds: int = 8
+    judge_max_calls: int = 40
+    judge_max_tokens: int = 300000
+    judge_max_segments: int = 24
 
     def __post_init__(self) -> None:
-        if self.analysis_version not in {"v1", "v2"}:
-            raise ValueError("analysis_version must be v1 or v2")
+        if self.analysis_version not in {"v1", "v2", "v3"}:
+            raise ValueError("analysis_version must be v1, v2 or v3")
+        if self.analysis_version == "v3":
+            for name in ("judge_max_calls", "judge_max_tokens", "judge_max_segments", "judge_max_evidence_chars", "judge_max_prompt_chars"):
+                if type(getattr(self, name)) is not int or getattr(self, name) < 1:
+                    raise ValueError(f"{name} must be a positive integer")
         object.__setattr__(self, "trace_path", Path(self.trace_path))
         object.__setattr__(self, "out_dir", Path(self.out_dir))
         if self.config_path is not None:
@@ -74,6 +81,10 @@ class JudgeRunResult:
 
 
 async def analyze_trace(config: EvaluationConfig, *, judge_provider: Any | None = None, event_sink: Any | None = None) -> Result:
+    if config.analysis_version == "v3":
+        from loom.evaluation.behavior import analyze_behavior
+
+        return await analyze_behavior(config, judge_provider=judge_provider, event_sink=event_sink)
     if config.analysis_version == "v2":
         from loom.evaluation.effectiveness import analyze_effectiveness
 
@@ -388,7 +399,7 @@ def _create_judge_provider(config: EvaluationConfig) -> Result:
     loaded = load_task_config(config.config_path)
     if not loaded.ok:
         return loaded
-    return create_provider_from_task_config(loaded.value, model_name=config.model_name)
+    return create_provider_from_task_config(loaded.value, model_name=config.model_name or loaded.value.evaluation_model)
 
 
 async def run_evaluation_trace_with_tui(
@@ -411,12 +422,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze Loom trace JSONL with evidence-backed effectiveness diagnostics or legacy v1 scoring.")
     parser.add_argument("--trace-path", required=True, type=Path)
     parser.add_argument("--out-dir", default=Path(".loom/evaluation"), type=Path)
-    parser.add_argument("--analysis-version", choices=("v1", "v2"), default="v2", help="v2: five-dimensional evidence analysis; v1: legacy scores.")
+    parser.add_argument("--analysis-version", choices=("v1", "v2", "v3"), default="v2", help="v3: behavior evaluation (opt-in); v2: effectiveness analysis; v1: legacy scores.")
     parser.add_argument("--task", help="Explicit task text for v2 analysis, recorded separately from trace-derived requirements.")
     parser.add_argument("--judge-max-read-rounds", type=int, default=6, help="Maximum evidence expansion rounds per semantic batch.")
     parser.add_argument("--judge-max-evidence-chars", type=int, default=80000, help="Total expanded evidence character budget.")
     parser.add_argument("--judge-max-prompt-chars", type=int, default=100000, help="Maximum prompt characters per judge call.")
     parser.add_argument("--judge-batch-rounds", type=int, default=8, help="Maximum source LLM rounds per semantic batch.")
+    parser.add_argument("--judge-max-calls", type=int, default=40, help="v3 cumulative evaluator call budget.")
+    parser.add_argument("--judge-max-tokens", type=int, default=300000, help="v3 cumulative reported-token admission threshold.")
+    parser.add_argument("--judge-max-segments", type=int, default=24, help="v3 maximum focused behavior segments.")
     parser.add_argument("--judge", action="store_true", help="Run semantic trace analysis (legacy step judge in v1).")
     parser.add_argument(
         "--stream",
@@ -444,6 +458,9 @@ def _config_from_options(args: argparse.Namespace) -> EvaluationConfig:
         judge_max_evidence_chars=args.judge_max_evidence_chars,
         judge_max_prompt_chars=args.judge_max_prompt_chars,
         judge_batch_rounds=args.judge_batch_rounds,
+        judge_max_calls=args.judge_max_calls,
+        judge_max_tokens=args.judge_max_tokens,
+        judge_max_segments=args.judge_max_segments,
     )
 
 

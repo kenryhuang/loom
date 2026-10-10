@@ -112,6 +112,7 @@ class MetaHarnessConfig:
     budgets: BudgetConfig = field(default_factory=BudgetConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     governance: GovernanceConfig = field(default_factory=GovernanceConfig)
+    seed_analysis_version: str = "v1"
 
 
 @dataclass(frozen=True, slots=True)

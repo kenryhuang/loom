@@ -195,6 +195,16 @@ async def import_experience(store, campaign_id: str, path: str | Path, *, operat
     elif schema == "loom.evolution.bundle.v1":
         if not isinstance(payload.get("summary"), Mapping):
             return err(make_loom_error("VALIDATION_FAILED", "Evolution bundle summary is missing", retryable=False))
+    elif schema == "loom.evaluation.bundle.v3":
+        from loom.evaluation.behavior_contracts import validate_bundle
+
+        try:
+            validate_bundle(payload)
+        except ValueError as exc:
+            return err(make_loom_error("VALIDATION_FAILED", str(exc), retryable=False))
+    elif schema == "loom.evolution.hypotheses.v2":
+        if not isinstance(payload.get("proposals"), list):
+            return err(make_loom_error("VALIDATION_FAILED", "Behavior hypotheses missing", retryable=False))
     elif schema == "loom.research.reference.v1":
         pass
     else:

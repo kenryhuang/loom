@@ -70,6 +70,7 @@ class TaskRunnerConfig:
     task: TaskDefaults = field(default_factory=TaskDefaults)
     run: RunDefaults = field(default_factory=RunDefaults)
     models: Mapping[str, ModelConfig] = field(default_factory=dict)
+    evaluation_model: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "models", dict(self.models))
@@ -196,7 +197,10 @@ def _parse_task_config(payload: Mapping[str, Any], path: Path) -> Result:
     if default_model is not None and not isinstance(default_model, str):
         return err(make_loom_error("VALIDATION_FAILED", "default_model must be a string", retryable=False, metadata={"path": str(path)}))
 
-    return ok(TaskRunnerConfig(default_model=default_model, task=task.value, run=run.value, models=models))
+    evaluation_model = payload.get("evaluation_model")
+    if evaluation_model is not None and (not isinstance(evaluation_model, str) or evaluation_model not in models):
+        return err(make_loom_error("VALIDATION_FAILED", "evaluation_model must name a configured model", retryable=False))
+    return ok(TaskRunnerConfig(default_model=default_model, task=task.value, run=run.value, models=models, evaluation_model=evaluation_model))
 
 
 def _parse_task_defaults(payload: Any, path: Path) -> Result:

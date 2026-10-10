@@ -33,6 +33,7 @@ class EvidenceStore:
 
     def __init__(self, path: Path, data: bytes):
         self.path = path
+        self.source_bytes = data
         self.source_sha256 = hashlib.sha256(data).hexdigest()
         self._by_line: dict[int, NormalizedEvent] = {}
         self.coverage: dict[str, Any] = {"hash_mismatches": [], "missing_hash_lines": [], "repeated_record_lines": []}

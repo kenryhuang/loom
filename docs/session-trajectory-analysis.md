@@ -1,5 +1,10 @@
 # Session trajectory analysis
 
+For the planned base/deep evaluation and Evolve refactor, see the
+[v3 design](superpowers/specs/2026-10-08-behavior-evaluation-evolution-design.md)
+([中文](superpowers/specs/2026-10-08-behavior-evaluation-evolution-design.zh-CN.md)).
+The behavior documented below is the current implementation.
+
 Open a session in the web client and choose the **Trajectory** tab below its header.
 The route is `/web/#/sessions/<session-id>/trajectory`; authentication stays in
 the current browser tab. The **Conversation** tab returns to the same session while preserving analysis

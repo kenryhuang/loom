@@ -504,6 +504,24 @@ class TaskAssembly:
                     return f"Saved report changed since create_report: {path}. Save its final content again using create_report"
         return None
 
+    async def record_report_verification(self, runtime):
+        """Record the existing output gate's bounded oracle, without claiming the task goal passed."""
+        if not self._workspace_reports or runtime.trace_sink is None:
+            return
+        from loom.evaluation.verification_receipts import artifact_boundary, capture_manifest, verification_receipt
+
+        scope = sorted(self._workspace_reports)
+        before = {path: self._workspace_reports[path]["sha256"] for path in scope}
+        after = capture_manifest(self.report_workspace, scope)
+        environment = config_digest({"task_spec": self.spec, "workspace": str(self.report_workspace)})
+        receipt = verification_receipt(criterion_id="workspace_report", goal_revision=getattr(self.execution, "goal_revision", None),
+            scope=scope, before=before, after=after, oracle="Workspace documents match the bytes saved by create_report",
+            environment=environment, passed=before == after, exclusive=False, coverage="partial")
+        for event in (receipt, artifact_boundary(scope=scope, manifest=after, environment=environment)):
+            emitted = await runtime.trace_sink.emit({**event, "run_id": runtime.run_id, "loop_id": runtime.loop_id,
+                                                    "trace_id": runtime.trace_id, "at": now_iso()})
+            emitted.unwrap()
+
     def wrap_loop(self, definition):
         wrapped = self.workflow.wrap_loop(definition)
 
@@ -515,6 +533,8 @@ class TaskAssembly:
                 completed = control is None or control.kind == "completed"
                 if completed and (reason := self.completion_error()):
                     return err(make_loom_error("OUTPUT_CONTRACT_FAILED", reason, retryable=False))
+                if completed:
+                    await self.record_report_verification(runtime)
                 updated = result.value.context
                 ingested = self.context_manager.ingest(updated, result.value)
                 if not isinstance(ingested, Context) or any(

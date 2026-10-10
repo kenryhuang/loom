@@ -1,3 +1,4 @@
+import { renderBaseEvaluation } from "./behavior-evaluation.mjs";
 import { element } from "../markdown.mjs";
 import { EvaluationView } from "./evaluation.mjs";
 
@@ -225,6 +226,17 @@ export class TrajectoryView {
     for (const [label, value] of [
       ["Model calls", data.rounds.length],
       ["Tool calls", data.tools.length],
+      ...(data.base?.metrics
+        ? [
+            ["Steps", data.base.metrics.steps],
+            [
+              "Recorded duration (seconds)",
+              data.base.metrics.duration_ms == null
+                ? null
+                : Math.round(data.base.metrics.duration_ms / 1000),
+            ],
+          ]
+        : []),
       ["Recorded tokens", data.tokens.known_total_tokens],
       [
         "Tool failures",
@@ -243,9 +255,16 @@ export class TrajectoryView {
       element(
         "p",
         "muted small",
-        "Recorded facts · Use Deep evaluation tab for semantic judgments. Runtime completion does not independently verify task completion.",
+        "Execution metrics and goal acceptance. Use Deep evaluation to inspect intent, planning and progress.",
       ),
     );
+    if (data.base)
+      renderBaseEvaluation(
+        this.body,
+        data.base,
+        data.goal_revisions,
+        data.plan_revisions,
+      );
     const missing = data.rounds.filter(
       (row) => row.usage.total_tokens == null,
     ).length;

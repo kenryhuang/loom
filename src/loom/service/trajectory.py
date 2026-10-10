@@ -18,7 +18,7 @@ from loom.service.contracts import ServiceError, canonical, new_id
 from loom.trace_analysis import build_episode_graph
 from loom.trace_analysis.links import tool_output
 
-VERSION = "session-trajectory.2"
+VERSION = "session-trajectory.3.2"
 
 
 def session_records(events, read_artifact):
@@ -40,7 +40,8 @@ def session_records(events, read_artifact):
         trace = payload.get("trace")
         trace = trace if isinstance(trace, dict) else {}
         payload = {**payload, "type": event["type"], "run_id": event.get("run_id"),
-                   "at": payload.get("at", event.get("at")), "session_seq": event["seq"]}
+                   "at": payload.get("at", event.get("at")), "session_seq": event["seq"],
+                   "command_id": event.get("command_id") or payload.get("command_id")}
         for name, nested in (("trace_id", "id"), ("loop_id", "loop_id"), ("step_number", "step_number")):
             if payload.get(name) is None:
                 payload[name] = trace.get(nested, event.get(name))
@@ -116,7 +117,13 @@ def analyze_session_trace(source, coverage):
                     "unscoped_model_events": sum(e.event_type in {"llm.requested", "llm.completed", "llm.failed"} for e in graph.orphaned_events)},
                "task_contracts": list(facts.task_contracts), "verification_count": len(facts.verification_evidence),
                "source_sha256": source.source_sha256}
-    return {"summary": summary, "facts": asdict(facts)}
+    from loom.evaluation.behavior_facts import build_behavior_facts
+
+    behavior = build_behavior_facts(source, legacy=facts)
+    summary["base"] = behavior["base"]
+    summary["goal_revisions"] = behavior["goal_revisions"]
+    summary["plan_revisions"] = behavior["plan_revisions"]
+    return {"summary": summary, "facts": asdict(facts), "behavior": behavior}
 
 
 class SessionTrajectory:

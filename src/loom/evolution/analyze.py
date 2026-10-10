@@ -92,6 +92,18 @@ async def analyze_trace(config: AnalyzeConfig, provider: Any = None, event_sink:
         return await _finish_analysis_error(event_sink, run_id, loop_id, started, config_error)
 
     if config.evaluation_bundle_path is not None:
+        try:
+            payload = json.loads(config.evaluation_bundle_path.read_text())
+            if isinstance(payload, dict) and payload.get("schema_version") == "loom.evaluation.bundle.v3":
+                from loom.evolution.behavior import write_behavior_evolution
+
+                result = write_behavior_evolution(config, payload)
+                emitted = await _emit_event(event_sink, {"type": "run.completed", "run_id": run_id, "loop_id": loop_id,
+                    "outcome": "pass", "at": now_iso(), "schema_version": "loom.evolution.hypotheses.v2", "proposal_count": len(result.proposals)})
+                return ok(result) if emitted.ok else emitted
+        except (OSError, ValueError, TypeError) as exc:
+            return await _finish_analysis_error(event_sink, run_id, loop_id, started,
+                make_loom_error("VALIDATION_FAILED", f"Could not analyze evaluation bundle: {exc}", retryable=False))
         return await _analyze_evaluation_bundle(config, event_sink=event_sink, run_id=run_id, loop_id=loop_id, started=started)
 
     trace_path = config.trace_path

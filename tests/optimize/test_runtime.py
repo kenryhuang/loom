@@ -69,3 +69,11 @@ def test_objective_constraints_become_fail_closed_hard_gates():
         "total_tokens",
         "wall_time_ms",
     )
+
+
+def test_behavior_seed_requires_absolute_quality_before_efficiency():
+    objectives = _objective_specs(ObjectiveConfig("total_tokens"), minimum_pairs=5, require_verified_outcomes=True)
+    assert objectives[0].id == "task_success_rate"
+    assert objectives[0].absolute_limit == 1.0
+    assert objectives[0].max_baseline_regression == 0.0
+    assert objectives[0].hard and objectives[0].missing_policy == "fail_closed"

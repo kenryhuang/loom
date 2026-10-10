@@ -365,3 +365,13 @@ def test_create_provider_from_task_config_rejects_missing_model_name():
 
     assert not result.ok
     assert result.error.code == "VALIDATION_FAILED"
+
+
+def test_evaluation_model_is_independent_and_must_exist(tmp_path):
+    path = tmp_path / 'config.yaml'
+    path.write_text('default_model: main\nevaluation_model: judge\nmodels:\n  main:\n    model: solver\n  judge:\n    model: evaluator\n')
+    config = load_task_config(path).unwrap()
+    assert config.default_model == 'main'
+    assert config.evaluation_model == 'judge'
+    path.write_text('evaluation_model: missing\n')
+    assert not load_task_config(path).ok

@@ -234,7 +234,7 @@ test("raising a stopped evaluation's time budget sends its checkpoint identity",
   });
   await view.open();
   await view.follow(job.id);
-  assert.match(root.textContent, /Increase the exhausted total budget/);
+  assert.match(root.textContent, /increase the exhausted total budget/);
   view.fields.max_seconds.value = "7200";
   await view.run();
   assert.equal(starts[0][2].resume_id, "saved");
@@ -279,4 +279,160 @@ test("progress distinguishes saved coverage from an in-flight evaluator call", (
   );
   abort.abort();
   dom.window.close();
+});
+
+test("v3 renders supported coverage separately and uses the goal outcome", async () => {
+  const dom = new JSDOM('<section id="root"></section>');
+  globalThis.document = dom.window.document;
+  const abort = new AbortController();
+  const view = new EvaluationView(document.querySelector("#root"), {
+    api: {},
+    sessionId: "s",
+    analysisId: "a",
+    signal: abort.signal,
+    evidence: () => {},
+  });
+  view.results = document.createElement("div");
+  view.root.append(view.results);
+  const dimensions = Object.fromEntries(
+    [
+      "intent_alignment",
+      "plan_quality",
+      "progress_effectiveness",
+      "investigation_efficiency",
+      "adaptation_recovery",
+    ].map((d) => [
+      d,
+      { attempted: 2, supported: 0, unknown: 2, unselected: 5 },
+    ]),
+  );
+  view.render({
+    schema_version: "loom.evaluation.bundle.v3",
+    base: {
+      task_completion: "achieved",
+      outcomes: [
+        {
+          status: "achieved",
+          objective: "Deliver report",
+          execution_status: "completed",
+          criteria: [],
+          verification_count: 1,
+        },
+      ],
+    },
+    facts: { goal_revisions: [], plan_revisions: [] },
+    proposals: [],
+    semantic: {
+      coverage: {
+        status: "complete",
+        scan_complete: true,
+        synthesis_complete: true,
+        attempted_segments: 2,
+        supported_segments: 0,
+        source_segments: 7,
+        dimensions,
+        limitations: [],
+      },
+      summary: "<script>untrusted</script>",
+      diagnoses: [],
+      assessments: [],
+      preserved_behaviors: [],
+      behavior_graph: { nodes: [], edges: [] },
+    },
+  });
+  assert.match(view.root.textContent, /Goal acceptance: Verified/);
+  assert.match(view.root.textContent, /2 attempted · 0 supported/);
+  assert.match(view.root.textContent, /5 unselected/);
+  assert.equal(view.root.querySelector("script"), null);
+  abort.abort();
+});
+
+test("base results distinguish execution from acceptance and collapse internal provenance", async () => {
+  const { renderBaseEvaluation } =
+    await import("../../src/loom/web/assets/views/behavior-evaluation.mjs");
+  const dom = new JSDOM('<section id="root"></section>');
+  globalThis.document = dom.window.document;
+  const root = document.querySelector("#root");
+  const outcome = (id, objective, execution_status) => ({
+    episode_id: id,
+    objective,
+    execution_status,
+    status: "unverified",
+    goal_coverage: "complete",
+    verification_count: 0,
+    explanation: "No goal acceptance checks were recorded.",
+    criteria: [{ description: objective, status: "unverified" }],
+  });
+  renderBaseEvaluation(root, {
+    execution_status: "suspended",
+    outcomes: [
+      outcome("episode:internal1", "Diagnose startup", "completed"),
+      outcome("episode:internal2", "Investigate model speed", "suspended"),
+    ],
+  });
+  const visible = root.cloneNode(true);
+  for (const details of visible.querySelectorAll("details")) {
+    const summary = details.querySelector("summary")?.cloneNode(true);
+    details.replaceChildren(...(summary ? [summary] : []));
+  }
+  assert.match(visible.textContent, /Investigate model speed/);
+  assert.match(visible.textContent, /Execution: Waiting to resume/);
+  assert.match(visible.textContent, /Goal acceptance: Not assessed/);
+  assert.match(visible.textContent, /No goal acceptance checks were recorded/);
+  assert.match(visible.textContent, /Previous tasks · 1/);
+  assert.doesNotMatch(
+    visible.textContent,
+    /episode:|unverified|goal coverage|Current loop state/,
+  );
+  assert.equal(root.querySelectorAll("details[open]").length, 0);
+  assert.match(root.textContent, /episode:internal1/);
+  assert.match(root.textContent, /Execution: Completed/);
+});
+
+test("new v3 evaluation uses version defaults instead of legacy resume settings", async () => {
+  const dom = new JSDOM('<section id="root"></section>');
+  globalThis.document = dom.window.document;
+  const abort = new AbortController(), starts = [];
+  const v3 = {...settings, max_calls: 24, max_tokens: 120000, max_seconds: 600, max_call_seconds: 120, max_rounds: 8, max_read_rounds: 1};
+  const legacy = {...v3, max_calls: 80, max_tokens: 1000000, max_rounds: 10000, max_read_rounds: 4};
+  const old = {id: "old", model: "judge", analysis_version: "v2", state: "budget_exhausted", settings: legacy, usage: {calls: 8, total_tokens: 262867}};
+  const api = {
+    evaluations: async () => ({models: [{id: "judge", label: "Judge"}], default_model: "judge", analysis_versions: ["v3", "v2"], default_analysis_version: "v3", defaults: v3, defaults_by_version: {v3, v2: legacy}, bounds: Object.fromEntries(Object.keys(v3).map(k => [k, [1, 10000000]])), jobs: [old]}),
+    evaluation: async () => old,
+    startEvaluation: async (...args) => {starts.push(args); return old;},
+  };
+  const view = new EvaluationView(document.querySelector("#root"), {api, sessionId: "s", analysisId: "a", signal: abort.signal});
+  await view.open();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(view.version.value, "v2");
+  view.fresh.click();
+  assert.equal(view.version.value, "v3");
+  assert.equal(Number(view.fields.max_tokens.value), 120000);
+  await view.run();
+  assert.equal(starts[0][2].analysis_version, "v3");
+  assert.equal(starts[0][2].max_read_rounds, 1);
+  assert.equal(starts[0][2].max_call_seconds, 120);
+  assert.equal(starts[0][2].resume_id, undefined);
+  abort.abort();
+});
+
+test("v3 progress shows evidence work, phase timing and selected coverage", () => {
+  const dom = new JSDOM('<section id="root"></section>');
+  globalThis.document = dom.window.document;
+  const abort = new AbortController();
+  const view = new EvaluationView(document.querySelector("#root"), {signal: abort.signal});
+  view.progress = document.createElement("section");
+  view.root.append(view.progress);
+  view.renderProgress({id: "v3", state: "running", analysis_version: "v3", stage: "focus:segment:1", scan_complete: true,
+    settings: {max_call_seconds: 120}, reviewed_segments: 1, selected_segments: 2, total_segments: 10, scanned_pages: 1, scan_pages: 1,
+    usage: {calls: 3, total_tokens: 1200}, elapsed_seconds: 30,
+    current_call: {stage: "focus:segment:1", activity: "read_evidence", state: "waiting", started_elapsed_seconds: 10},
+    stage_timings: {scan: {elapsed_seconds: 5}, focus: {elapsed_seconds: 6}}, progress: []});
+  assert.match(view.root.textContent, /Reviewing additional evidence/);
+  assert.match(view.root.textContent, /20s \/ 120s call limit/);
+  assert.match(view.root.textContent, /1 \/ 2 selected segments/);
+  assert.match(view.root.textContent, /5s in model calls/);
+  assert.match(view.root.textContent, /3. Summarize/);
+  assert.equal(view.root.querySelector("progress").max, 2);
+  abort.abort();
 });

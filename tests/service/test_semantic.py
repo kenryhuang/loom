@@ -85,7 +85,7 @@ def evaluation(tmp_path):
 def test_semantic_runs_real_judge_pipeline_persists_and_keeps_solver_untouched(evaluation, tmp_path):
     store, trajectory, semantic, provider, sid, aid = evaluation
     cursor = store.snapshot(sid)["event_cursor"]
-    job = semantic.start(sid, aid, {})
+    job = semantic.start(sid, aid, {"analysis_version": "v2", })
     result = wait_job(semantic, sid, aid, job["id"])
     assert result["state"] == "completed", result
     assert provider.calls == 1
@@ -95,7 +95,7 @@ def test_semantic_runs_real_judge_pipeline_persists_and_keeps_solver_untouched(e
     assert result["evaluation"]["proposals"][0]["state"] == "proposed"
     assert result["evaluation"]["proposals"][0]["validation_status"] == "not_run"
     assert result["evaluation"]["semantic"]["round_analyses"][0]["dimensions"]["context_effectiveness"]["status"] == "unknown"
-    assert semantic.start(sid, aid, {})["id"] == job["id"]
+    assert semantic.start(sid, aid, {"analysis_version": "v2", })["id"] == job["id"]
     assert store.snapshot(sid)["event_cursor"] == cursor
     other = store.create("other", {"objective": "Other", "workspace": str(tmp_path)})["session_id"]
     with pytest.raises(ServiceError):
@@ -107,7 +107,7 @@ def test_semantic_runs_real_judge_pipeline_persists_and_keeps_solver_untouched(e
     restored = SessionSemantic(trajectory, provider_factory=lambda model: provider)
     try:
         assert restored.get(sid, aid, job["id"])["evaluation"] == result["evaluation"]
-        assert restored.start(sid, aid, {})["id"] == job["id"]
+        assert restored.start(sid, aid, {"analysis_version": "v2", })["id"] == job["id"]
     finally:
         restored.close()
 
@@ -115,14 +115,14 @@ def test_semantic_runs_real_judge_pipeline_persists_and_keeps_solver_untouched(e
 def test_cancel_resume_reuses_completed_batches(evaluation):
     _, _, semantic, provider, sid, aid = evaluation
     provider.block_after = 1
-    job = semantic.start(sid, aid, {"batch_rounds": 1})
+    job = semantic.start(sid, aid, {"analysis_version": "v2", "batch_rounds": 1})
     assert provider.blocked.wait(5)
     semantic.cancel(sid, aid, job["id"])
     stopped = wait_job(semantic, sid, aid, job["id"])
     assert stopped["state"] == "cancelled", stopped
     assert stopped["completed_batches"] == 1
     provider.block_after = None
-    assert semantic.start(sid, aid, {"batch_rounds": 1})["id"] == job["id"]
+    assert semantic.start(sid, aid, {"analysis_version": "v2", "batch_rounds": 1})["id"] == job["id"]
     done = wait_job(semantic, sid, aid, job["id"])
     assert done["state"] == "completed", done
     assert provider.calls == 4  # first batch, cancelled second, resumed second, synthesis
@@ -132,7 +132,7 @@ def test_cancel_resume_reuses_completed_batches(evaluation):
 
 def test_call_budget_stops_before_another_provider_call(evaluation):
     _, _, semantic, provider, sid, aid = evaluation
-    job = semantic.start(sid, aid, {"batch_rounds": 1, "max_calls": 1})
+    job = semantic.start(sid, aid, {"analysis_version": "v2", "batch_rounds": 1, "max_calls": 1})
     done = wait_job(semantic, sid, aid, job["id"])
     assert done["state"] == "budget_exhausted"
     assert "budget" in done["error"].lower()
@@ -166,7 +166,7 @@ def test_insights_keep_unknown_costs_and_revision_scopes_explicit():
 
 def test_prefix_evaluation_never_claims_full_source_review(evaluation):
     _, _, semantic, provider, sid, aid = evaluation
-    job = semantic.start(sid, aid, {"max_rounds": 1})
+    job = semantic.start(sid, aid, {"analysis_version": "v2", "max_rounds": 1})
     done = wait_job(semantic, sid, aid, job["id"])
     assert done["state"] == "completed", done
     assert provider.calls == 1
@@ -180,15 +180,15 @@ def test_prefix_evaluation_never_claims_full_source_review(evaluation):
 
 def test_increasing_total_budget_resumes_same_job_without_repeating_saved_batches(evaluation):
     _, _, semantic, provider, sid, aid = evaluation
-    job = semantic.start(sid, aid, {"batch_rounds": 1, "max_calls": 1})
+    job = semantic.start(sid, aid, {"analysis_version": "v2", "batch_rounds": 1, "max_calls": 1})
     stopped = wait_job(semantic, sid, aid, job["id"])
     assert stopped["state"] == "budget_exhausted"
     with pytest.raises(ServiceError, match="Increase total limits"):
-        semantic.start(sid, aid, {"resume_id": job["id"]})
+        semantic.start(sid, aid, {"analysis_version": "v2", "resume_id": job["id"]})
     assert provider.calls == 1
     with pytest.raises(ServiceError, match="analysis settings"):
-        semantic.start(sid, aid, {"resume_id": job["id"], "max_calls": 10, "batch_rounds": 2})
-    resumed = semantic.start(sid, aid, {"resume_id": job["id"], "max_calls": 10})
+        semantic.start(sid, aid, {"analysis_version": "v2", "resume_id": job["id"], "max_calls": 10, "batch_rounds": 2})
+    resumed = semantic.start(sid, aid, {"analysis_version": "v2", "resume_id": job["id"], "max_calls": 10})
     assert resumed["id"] == job["id"]
     done = wait_job(semantic, sid, aid, job["id"])
     assert done["state"] == "completed", done
@@ -198,16 +198,16 @@ def test_increasing_total_budget_resumes_same_job_without_repeating_saved_batche
 
 def test_exhausted_time_is_rejected_before_any_new_model_call(evaluation):
     _, _, semantic, provider, sid, aid = evaluation
-    job = semantic.start(sid, aid, {"max_calls": 1, "batch_rounds": 1})
+    job = semantic.start(sid, aid, {"analysis_version": "v2", "max_calls": 1, "batch_rounds": 1})
     wait_job(semantic, sid, aid, job["id"])
     body = semantic._load(sid, aid, job["id"])
     body["elapsed_seconds"] = 1801
     body["error"] = "Evaluation time budget reached; completed batches retained"
     semantic._save(body)
     with pytest.raises(ServiceError, match="max_seconds > 1801"):
-        semantic.start(sid, aid, {"resume_id": job["id"], "max_calls": 10})
+        semantic.start(sid, aid, {"analysis_version": "v2", "resume_id": job["id"], "max_calls": 10})
     assert provider.calls == 1
-    semantic.start(sid, aid, {"resume_id": job["id"], "max_calls": 10, "max_seconds": 3600})
+    semantic.start(sid, aid, {"analysis_version": "v2", "resume_id": job["id"], "max_calls": 10, "max_seconds": 3600})
     done = wait_job(semantic, sid, aid, job["id"])
     assert done["state"] == "completed"
     assert provider.calls == 3
@@ -216,7 +216,7 @@ def test_exhausted_time_is_rejected_before_any_new_model_call(evaluation):
 def test_progress_is_durable_and_heartbeats_while_evaluator_waits(evaluation):
     _, _, semantic, provider, sid, aid = evaluation
     provider.block_after = 1
-    job = semantic.start(sid, aid, {"batch_rounds": 1})
+    job = semantic.start(sid, aid, {"analysis_version": "v2", "batch_rounds": 1})
     assert provider.blocked.wait(5)
     before = semantic.get(sid, aid, job["id"])
     assert before["state"] == "running"
@@ -236,3 +236,78 @@ def test_progress_is_durable_and_heartbeats_while_evaluator_waits(evaluation):
     done = wait_job(semantic, sid, aid, job["id"])
     assert done["progress"][-1]["kind"] == "cancelled"
     assert done["current_call"]["state"] == "interrupted"
+
+
+class BehaviorProvider:
+    model = "behavior-fixture"
+
+    async def chat(self, messages, tools=None, cancellation=None):
+        payload = json.loads(messages[1].content)
+        if payload['stage'].startswith('scan:'):
+            value = {'candidate_segment_ids': [s['id'] for s in payload['segment_index']], 'control_segment_ids': []}
+        elif payload['stage'].startswith('focus:'):
+            value = {'assessments': [], 'diagnoses': [], 'preserved_behaviors': []}
+        else:
+            value = {'summary': 'No supported semantic conclusions', 'finding_ids': [], 'limitations': []}
+        return ok(LlmResponse(content=json.dumps(value), usage=TokenUsage(10, 5, 15)))
+
+
+def test_behavior_version_is_default_and_resume_keeps_cumulative_stages(evaluation):
+    store, trajectory, semantic, _, sid, aid = evaluation
+    semantic.provider_factory = lambda model: BehaviorProvider()
+    assert semantic.options()['default_analysis_version'] == 'v3'
+    cursor = store.snapshot(sid)['event_cursor']
+    job = semantic.start(sid, aid, {'max_calls': 2})
+    partial = wait_job(semantic, sid, aid, job['id'])
+    assert partial['state'] == 'budget_exhausted', partial
+    assert partial['usage']['calls'] == 2
+    assert partial['evaluation']['schema_version'] == 'loom.evaluation.bundle.v3'
+    with pytest.raises(ServiceError, match='same model'):
+        semantic.start(sid, aid, {'analysis_version': 'v2', 'resume_id': job['id'], 'max_calls': 10})
+    resumed = semantic.start(sid, aid, {'analysis_version': 'v3', 'resume_id': job['id'], 'max_calls': 10})
+    final = wait_job(semantic, sid, aid, resumed['id'])
+    assert final['state'] == 'completed', final
+    assert final['usage']['calls'] == 4
+    assert final['evaluation']['semantic']['coverage']['supported_segments'] == 0
+    assert final['evaluation']['semantic']['coverage']['scan_complete']
+    assert final['evaluation']['semantic']['coverage']['synthesis_complete']
+    assert store.snapshot(sid)['event_cursor'] == cursor
+
+
+def test_running_behavior_job_exposes_saved_partial_findings(evaluation):
+    _, _, semantic, _, sid, aid = evaluation
+    blocked = threading.Event()
+
+    class SlowSynthesis(BehaviorProvider):
+        async def chat(self, messages, tools=None, cancellation=None):
+            if json.loads(messages[1].content)['stage'] == 'synthesis':
+                blocked.set()
+                await asyncio.sleep(60)
+            return await super().chat(messages, tools, cancellation)
+
+    semantic.provider_factory = lambda model: SlowSynthesis()
+    job = semantic.start(sid, aid, {})
+    assert blocked.wait(5)
+    current = semantic.get(sid, aid, job['id'])
+    assert current['state'] == 'running'
+    assert current['analysis_version'] == 'v3'
+    assert current['settings']['max_call_seconds'] == 120
+    assert current['settings']['max_seconds'] == 600
+    assert current['scanned_pages'] == current['scan_pages'] == 1
+    assert current['evaluation']['semantic']['coverage']['attempted_segments'] == 1
+    assert not current['evaluation']['semantic']['coverage']['synthesis_complete']
+    assert 'stage.saved' in {row['kind'] for row in current['progress']}
+    semantic.cancel(sid, aid, job['id'])
+    done = wait_job(semantic, sid, aid, job['id'])
+    assert done['state'] == 'cancelled'
+    assert done['evaluation']['semantic']['coverage']['attempted_segments'] == 1
+
+
+def test_catalog_uses_independent_evaluation_model(evaluation, tmp_path):
+    _, _, semantic, _, _, _ = evaluation
+    config = tmp_path / 'config.yaml'
+    config.write_text('default_model: main\nevaluation_model: judge\nmodels:\n  main:\n    model: solver\n  judge:\n    model: evaluator\n')
+    semantic.provider_factory = None
+    semantic.config_path = config
+    assert semantic.options()['default_model'] == 'judge'
+    assert semantic.options()['defaults'] == semantic.options()['defaults_by_version']['v3']

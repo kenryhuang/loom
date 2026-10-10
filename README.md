@@ -31,7 +31,7 @@ disconnect while work continues, and return to its saved state.
   and resuming from completed document checkpoints.
 - **Observable execution:** inspect model/tool activity and stored evidence;
   analyze traces or session trajectories. Advanced evaluation and Meta-Harness
-  commands support experiments and governed optimization.
+  commands support experiments and governed optimization. Opt-in [behavior evaluation v3](docs/behavior-evaluation-v3.md) separates goal verification from intent, planning, progress, reasoning efficiency, and recovery.
 
 The current general task runtime executes tools on the host OS. Loom targets
 macOS/Linux and a single local user; Docker/VM task backends are not implemented.
@@ -192,6 +192,8 @@ For multiple models or provider-specific options, create a configuration file:
 
 ```yaml
 default_model: main
+# Optional: select a separately configured judge model for evaluation.
+# evaluation_model: judge
 
 models:
   main:

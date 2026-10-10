@@ -27,7 +27,7 @@ _REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhi
 _CANDIDATE_KINDS = frozenset({"declarative_patch", "executable_component"})
 _APPROVAL_KINDS = frozenset({"medium", "high", "executable"})
 _OBJECTIVE_METRICS = frozenset({"task_success_rate", "total_tokens", "wall_time_ms"})
-_META_FIELDS = frozenset({"proposer_model", "solver_model", "judge_model", "search", "tasks", "objectives", "budgets", "execution", "governance"})
+_META_FIELDS = frozenset({"proposer_model", "solver_model", "judge_model", "search", "tasks", "objectives", "budgets", "execution", "governance", "seed_analysis_version"})
 
 
 class _OptimizeConfigError(ValueError):
@@ -83,7 +83,10 @@ def _parse_meta(value: Mapping[str, Any], models: Mapping[str, Any]) -> MetaHarn
         raise _OptimizeConfigError("meta_harness.budgets.max_candidates", "candidate search exceeds max_candidates")
     if "executable_component" in search.candidate_kinds and "executable" not in governance.require_approval_for:
         raise _OptimizeConfigError("meta_harness.governance.require_approval_for", "executable candidates require approval")
-    return MetaHarnessConfig(proposer, solver, judge, search, tasks, objectives, budgets, execution, governance)
+    version = value.get("seed_analysis_version", "v1")
+    if version not in {"v1", "v3"}:
+        raise _OptimizeConfigError("meta_harness.seed_analysis_version", "Expected v1 or v3")
+    return MetaHarnessConfig(proposer, solver, judge, search, tasks, objectives, budgets, execution, governance, version)
 
 
 def _parse_search(value: Mapping[str, Any]) -> SearchConfig:

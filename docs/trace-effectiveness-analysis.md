@@ -1,5 +1,10 @@
 # Trace effectiveness analysis
 
+The opt-in v3 implementation separates base outcomes, behavioral deep evaluation,
+and Evolve experiments. See the [v3 design](superpowers/specs/2026-10-08-behavior-evaluation-evolution-design.md)
+or its [Chinese version](superpowers/specs/2026-10-08-behavior-evaluation-evolution-design.zh-CN.md).
+See the [v3 usage and rollout status](behavior-evaluation-v3.md). The legacy implementation described below remains v2.
+
 `loom.evaluation.analyze` defaults to v2 on the CLI. It reads a recorded trace;
 it does not replay the agent's tools or execute the commands found in the trace.
 

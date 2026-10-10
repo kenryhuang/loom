@@ -1,3 +1,4 @@
+import { renderBehaviorEvaluation } from "./behavior-evaluation.mjs";
 import { element } from "../markdown.mjs";
 
 const DIMENSIONS = {
@@ -7,6 +8,14 @@ const DIMENSIONS = {
   token_efficiency: "Token efficiency",
   verify_gate: "Verification",
 };
+const stageLabel = (stage) => {
+  if (stage?.startsWith("scan:")) return "Scanning behavior index";
+  if (stage?.startsWith("focus:")) return "Analyzing behavior segment";
+  if (stage === "synthesis") return "Summarizing findings";
+  return stage || "Preparing";
+};
+const activityLabel = (call) =>
+  ({ read_evidence: "Reviewing additional evidence", repair: "Correcting evaluator output" })[call?.activity] || stageLabel(call?.stage);
 const count = (value) => Number(value || 0).toLocaleString();
 const button = (text, action) => {
   const node = element("button", "quiet", text);
@@ -59,6 +68,7 @@ export class EvaluationView {
         this.signal,
       );
       if (this.signal.aborted) return;
+      this.catalog = catalog;
       this.model = element("select");
       for (const model of catalog.models) {
         const option = element("option", "", model.label);
@@ -69,12 +79,30 @@ export class EvaluationView {
       const modelLabel = element("label", "", "Judge model");
       modelLabel.append(this.model);
       this.form.append(modelLabel);
+      this.version = element("select");
+      for (const version of catalog.analysis_versions || ["v2"]) {
+        const option = element(
+          "option",
+          "",
+          version === "v3"
+            ? "v3 · Behavior evaluation"
+            : "v2 · Legacy effectiveness",
+        );
+        option.value = version;
+        this.version.append(option);
+      }
+      this.version.value = catalog.default_analysis_version || "v2";
+      const versionLabel = element("label", "", "Analysis version");
+      versionLabel.append(this.version);
+      this.form.append(versionLabel);
+      this.version.addEventListener("change", () => this.applyDefaults());
       this.fields = {};
       for (const [key, label] of [
         ["max_calls", "Max calls"],
-        ["max_rounds", "Round limit (from start)"],
+        ["max_rounds", "Review limit (v2: first rounds; v3: focused segments)"],
         ["max_tokens", "Token threshold"],
         ["max_seconds", "Total time budget (seconds)"],
+        ["max_call_seconds", "Per-call timeout (seconds, v3)"],
         ["max_evidence_chars", "Evidence characters"],
       ]) {
         if (catalog.defaults[key] == null) continue;
@@ -107,7 +135,21 @@ export class EvaluationView {
         }
       });
       this.cancel.hidden = true;
-      this.form.append(this.start, this.cancel);
+      this.fresh = button("New behavior evaluation", () => {
+        clearTimeout(this.timer);
+        ++this.generation;
+        this.job = null;
+        this.version.value = this.catalog.default_analysis_version || "v2";
+        this.model.value = this.catalog.default_model;
+        this.applyDefaults();
+        this.start.textContent = "Run deep evaluation";
+        this.start.disabled = false;
+        this.results.replaceChildren();
+        this.progress.hidden = true;
+        this.settingsPanel.open = true;
+        this.status.textContent = "Ready for a new evaluation. Saved evaluations remain in history.";
+      });
+      this.form.append(this.start, this.cancel, this.fresh);
       this.root.insertBefore(
         element(
           "p",
@@ -145,6 +187,11 @@ export class EvaluationView {
       this.fail(error);
     }
   }
+  applyDefaults() {
+    const defaults = this.catalog.defaults_by_version?.[this.version.value] || this.catalog.defaults;
+    for (const [key, input] of Object.entries(this.fields)) input.value = defaults[key];
+    this.start.textContent = "Run deep evaluation";
+  }
   fail(error) {
     if (this.signal.aborted) return;
     this.status.textContent = error.message;
@@ -160,14 +207,18 @@ export class EvaluationView {
           this.job.state,
         );
       const options = {
-        ...(resumable ? this.job.settings : {}),
+        ...(resumable && this.version.value === (this.job.analysis_version || "v2")
+          ? this.job.settings
+          : this.catalog.defaults_by_version?.[this.version.value] || {}),
         model: this.model.value,
+        analysis_version: this.version.value,
       };
       for (const [key, input] of Object.entries(this.fields))
         options[key] = Number(input.value);
       if (
         resumable &&
         options.model === this.job.model &&
+        this.version.value === (this.job.analysis_version || "v2") &&
         Object.keys(this.job.settings).every(
           (key) =>
             ["max_seconds", "max_tokens", "max_calls"].includes(key) ||
@@ -205,6 +256,7 @@ export class EvaluationView {
       if (active && !wasActive && this.settingsPanel)
         this.settingsPanel.open = false;
       this.start.disabled = active;
+      this.fresh.disabled = active;
       this.start.textContent = [
         "failed",
         "cancelled",
@@ -217,16 +269,23 @@ export class EvaluationView {
       this.cancel.disabled = false;
       this.model.value = job.model;
       this.model.disabled = active;
+      this.version.value = job.analysis_version || "v2";
+      this.version.disabled = active;
       for (const [key, input] of Object.entries(this.fields)) {
         input.value = job.settings[key];
         input.disabled = active;
       }
       const usage = job.usage;
-      this.status.textContent = `${job.state} · ${job.stage || "Preparing"} · ${job.reviewed_rounds || 0} / ${job.total_rounds ?? "?"} rounds reviewed · ${job.completed_batches || 0} saved batches · ${count(usage.calls)} calls · ${count(usage.total_tokens)} reported tokens${usage.unreported_calls ? ` · ${usage.unreported_calls} calls without final usage` : ""}${job.error ? ` · ${job.error}` : ""}`;
-      this.status.textContent += ` · ${count(Math.ceil(job.elapsed_seconds || 0))} / ${count(job.settings.max_seconds)} reported seconds used`;
-      if (job.state === "budget_exhausted")
-        this.status.textContent +=
-          " · Increase the exhausted total budget, then Resume evaluation; saved batches will be reused. Usage for the unfinished call is unknown.";
+      const behavior = job.analysis_version === "v3";
+      if (behavior) {
+        const state = ({running: "Behavior review in progress", queued: "Waiting to start", completed: "Behavior review completed", budget_exhausted: "Partial behavior review saved"})[job.state] || `Behavior review ${job.state}`;
+        this.status.textContent = `${state} · ${stageLabel(job.stage)} · ${job.reviewed_segments || 0} / ${job.selected_segments ?? "?"} selected segments reviewed.`;
+        if (job.state === "budget_exhausted") this.status.textContent += " Results are available below. Resume is optional; completed stages will be reused.";
+      } else {
+        this.status.textContent = `${job.state} · ${job.stage || "Preparing"} · ${job.reviewed_rounds || 0} / ${job.total_rounds ?? "?"} rounds reviewed · ${job.completed_batches || 0} saved batches · ${count(usage.calls)} calls · ${count(usage.total_tokens)} reported tokens${job.error ? ` · ${job.error}` : ""}`;
+        if (job.state === "budget_exhausted") this.status.textContent += " · Saved batches retained. Start a new behavior evaluation for bounded review, or increase the exhausted total budget and resume v2.";
+      }
+      if (usage.unreported_calls) this.status.textContent += ` ${usage.unreported_calls} calls without final usage; their usage is unknown.`;
       this.renderProgress(job);
       if (job.evaluation) this.render(job.evaluation);
       if (active)
@@ -239,8 +298,13 @@ export class EvaluationView {
     if (!this.progress) return;
     this.progress.hidden = false;
     const active = ["queued", "running"].includes(job.state);
-    const total = job.selected_rounds ?? job.total_rounds;
-    const reviewed = job.reviewed_rounds || 0;
+    const behavior = job.analysis_version === "v3";
+    const total = behavior
+      ? (job.scan_complete ? job.selected_segments : job.total_segments)
+      : (job.selected_rounds ?? job.total_rounds);
+    const reviewed = behavior
+      ? job.reviewed_segments || 0
+      : job.reviewed_rounds || 0;
     const call = job.current_call;
     const heading = element("div", "evaluation-progress-heading");
     heading.append(
@@ -254,15 +318,34 @@ export class EvaluationView {
     stop.hidden = !active;
     heading.append(stop);
     const coverage = element("progress");
-    coverage.setAttribute("aria-label", "Reviewed round coverage");
+    coverage.setAttribute(
+      "aria-label",
+      behavior ? "Reviewed segment coverage" : "Reviewed round coverage",
+    );
     if (total != null && total > 0) {
       coverage.max = total;
       coverage.value = Math.min(reviewed, total);
     }
+    const phases = element("div", "evaluation-progress-metrics");
+    if (behavior) {
+      for (const [family, label, detail] of [
+        ["scan", "1. Scan", `${job.scanned_pages || 0} / ${job.scan_pages ?? "?"} pages`],
+        ["focus", "2. Analyze", `${reviewed} / ${job.selected_segments ?? "?"} selected segments`],
+        ["synthesis", "3. Summarize", job.synthesis_complete ? "Saved" : "Pending"],
+      ]) {
+        const phase = element("div", "trajectory-metric");
+        phase.append(element("strong", "", label), element("p", "", detail),
+          element("small", "muted", `${Math.ceil(job.stage_timings?.[family]?.elapsed_seconds || 0)}s in model calls`));
+        phases.append(phase);
+      }
+    }
     const metrics = element("div", "evaluation-progress-metrics");
     for (const [label, value] of [
-      ["Rounds reviewed", `${reviewed} / ${total ?? "?"}`],
-      ["Saved batches", job.completed_batches || 0],
+      [
+        behavior ? "Segments reviewed" : "Rounds reviewed",
+        `${reviewed} / ${total ?? "?"}`,
+      ],
+      [behavior ? "Saved stages" : "Saved batches", job.completed_batches || 0],
       ["Evaluator calls", count(job.usage.calls)],
       ["Reported tokens", count(job.usage.total_tokens)],
       ["Elapsed (reported)", `${Math.ceil(job.elapsed_seconds || 0)}s`],
@@ -291,11 +374,11 @@ export class EvaluationView {
           (job.elapsed_seconds || 0) - (call.started_elapsed_seconds || 0),
         ),
       );
-      current.textContent = `${call.stage || job.stage} · Waiting for evaluator response · ${seconds}s. Round coverage advances after a batch is saved.`;
+      current.textContent = `${activityLabel(call)} · Waiting for evaluator response · ${seconds}s${behavior ? ` / ${call.timeout_seconds ?? job.settings.max_call_seconds ?? 120}s call limit` : ""}. ${behavior ? "Segment coverage advances after a focused review is saved." : "Round coverage advances after a batch is saved."}`;
     } else if (active && !call && job.usage.unreported_calls) {
       current.textContent = `${job.stage || "Evaluating"} · Waiting for evaluator response. Coverage and token usage are confirmed after the response is saved.`;
     } else
-      current.textContent = `${job.stage || "Preparing"} · ${job.error || (active ? "Processing evaluation" : "Saved progress retained")}`;
+      current.textContent = `${stageLabel(job.stage)} · ${job.error || (active ? "Processing evaluation" : "Saved progress retained")}`;
     const log = element("ol", "evaluation-progress-log");
     log.setAttribute("aria-label", "Evaluation activity");
     if (!job.progress) {
@@ -332,7 +415,7 @@ export class EvaluationView {
       !previous ||
       previous.scrollHeight - previous.scrollTop - previous.clientHeight < 30;
     const scroll = previous?.scrollTop || 0;
-    this.progress.replaceChildren(heading, coverage, metrics, current, log);
+    this.progress.replaceChildren(heading, phases, coverage, metrics, current, log);
     log.scrollTop = bottom ? log.scrollHeight : scroll;
   }
   refs(root, refs = []) {
@@ -355,6 +438,10 @@ export class EvaluationView {
   }
   render(data) {
     this.results.replaceChildren();
+    if (data.schema_version === "loom.evaluation.bundle.v3") {
+      renderBehaviorEvaluation(this, data);
+      return;
+    }
     const { semantic, insights, proposals } = data;
     this.results.append(
       element(

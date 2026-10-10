@@ -24,7 +24,7 @@ Loom 是一个运行在本地的 AI Agent 任务执行框架，用于编程、�
 - **本地知识库**：支持关键词、向量混合、YakDB 和 LightRAG。
   LightRAG 支持网站同步、图谱浏览、索引进度展示和按已完成文档续跑。
 - **可追踪的执行过程**：查看模型与工具活动、原始证据，分析 trace 和 Session 轨迹；
-  高级评估及 Meta-Harness 命令支持实验和受治理约束的优化。
+  高级评估及 Meta-Harness 命令支持实验和受治理约束的优化。可选的 [行为评估 v3](docs/behavior-evaluation-v3.zh-CN.md) 将目标验收与意图、计划、推进、推理效率及恢复能力分开评估。
 
 当前通用任务执行后端使用本机 OS。项目面向 macOS/Linux 和单个本地用户；
 Docker/VM 任务执行后端尚未实现。
@@ -175,6 +175,8 @@ uv run loom session budget SESSION_ID 20M
 
 ```yaml
 default_model: main
+# 可选：为评估选择独立配置的模型别名。
+# evaluation_model: judge
 
 models:
   main:

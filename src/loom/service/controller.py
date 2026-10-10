@@ -171,12 +171,16 @@ class LoomService:
                         or (old["state"] == "stopped" and any(m["role"] == "user" and m["seq"] > state["input_cursor"] for m in state["messages"]))
                     )
                 )
+            if not state["run"].get("task_episode_id"):
+                state["run"]["task_episode_id"] = (old.get("task_episode_id") if old and old["state"] != "completed"
+                                                   and not state["run"].get("reset_planning") else None) or new_id("episode")
             state["epoch"] += 1
             state["run"].update(state="running", attempt_id=new_id("attempt"), process=None)
             state["run"].pop("reason", None)
             state["task"]["state"] = "running"
             state["task"]["revision"] += 1
-            emit("run.started", {"epoch": state["epoch"]})
+            emit("run.started", {"epoch": state["epoch"], "task_episode_id": state["run"]["task_episode_id"],
+                                 "attempt_id": state["run"]["attempt_id"]})
             emit("task.state.changed", {"state": "running", "revision": state["task"]["revision"]})
             descriptor = json.loads(canonical(state))
             descriptor["checkpoint_value"] = encode(self._checkpoint_value(state))
@@ -295,8 +299,11 @@ class LoomService:
                     state["task"]["goal_revision"] += 1
                     state["task"]["objective"] = value["context"].goal.objective
                     state["task"]["revision"] += 1
+                    applied_inputs = [m for m in state["messages"] if m["role"] == "user" and state["input_cursor"] < m["seq"] <= cursor]
                     state["input_cursor"] = cursor
-                    emit("task.goal.revised", {"objective": state["task"]["objective"], "goal_revision": state["task"]["goal_revision"]})
+                    emit("task.goal.revised", {"objective": state["task"]["objective"], "goal_revision": state["task"]["goal_revision"],
+                                              "input_cursor": cursor, "applied_command_ids": [m["command_id"] for m in applied_inputs],
+                                              "task_episode_id": run.get("task_episode_id")})
                     for message in state["messages"]:
                         if message["role"] == "user" and message["seq"] <= cursor:
                             self.store.applied(db, state, message["command_id"])
