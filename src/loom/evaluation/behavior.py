@@ -62,6 +62,10 @@ def render_report(payload):
         lines.extend([f"### {o['episode_id']}", "", f"{o['status']} · goal coverage: {o['goal_coverage']}", ""])
         lines.extend(f"- {c['status']}: {c['description']}" for c in o["criteria"])
         lines.append("")
+    if base.get("statistics"):
+        from loom.evaluation.base_report import render_base_report
+
+        lines = lines[:4] + render_base_report(base)
     lines.extend(
         [
             "## Deep evaluation",

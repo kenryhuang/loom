@@ -1,6 +1,7 @@
 import { renderBaseEvaluation } from "./behavior-evaluation.mjs";
 import { element } from "../markdown.mjs";
 import { EvaluationView } from "./evaluation.mjs";
+import { renderVerificationArtifact } from "./activity-row.mjs";
 
 const number = (value) => (value == null ? "—" : value.toLocaleString());
 const option = (label, value) => {
@@ -251,7 +252,7 @@ export class TrajectoryView {
       cards.append(card);
     }
     this.body.append(
-      cards,
+      ...(data.base?.statistics ? [] : [cards]),
       element(
         "p",
         "muted small",
@@ -264,6 +265,7 @@ export class TrajectoryView {
         data.base,
         data.goal_revisions,
         data.plan_revisions,
+        {evidence: ref => this.showEvidence(ref), artifact: digest => this.showArtifact(digest)},
       );
     const missing = data.rounds.filter(
       (row) => row.usage.total_tokens == null,
@@ -535,6 +537,22 @@ export class TrajectoryView {
   }
   evidenceButton(label, ref) {
     return button(label, () => this.showEvidence(ref, label));
+  }
+  async showArtifact(digest) {
+    this.dialog?.remove();
+    const dialog = element("dialog", "trajectory-evidence"), content = element("div", "", "Loading artifact…");
+    this.dialog = dialog;
+    dialog.append(button("Close", () => dialog.close()), element("h2", "", "Recorded artifact"), content);
+    dialog.addEventListener("close", () => dialog.remove(), {once: true});
+    document.body.append(dialog); dialog.showModal();
+    const signal = this.abort.signal;
+    try {
+      const value = await this.api.artifact(this.sessionId, digest, signal);
+      if (!signal.aborted && this.dialog === dialog)
+        content.replaceChildren(renderVerificationArtifact(value) || readableEvidence(JSON.stringify(value)));
+    } catch (error) {
+      if (!signal.aborted && this.dialog === dialog) content.textContent = error.message;
+    }
   }
   async showEvidence(ref, label = "Recorded evidence") {
     this.dialog?.remove();

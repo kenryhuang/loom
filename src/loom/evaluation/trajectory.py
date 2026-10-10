@@ -134,6 +134,8 @@ def _task_contracts(store: EvidenceStore, graph: EpisodeGraph, task: str | None)
 
 
 def build_fact_analysis(store: EvidenceStore, graph: EpisodeGraph, task: str | None = None) -> FactAnalysis:
+    from loom.evaluation.base_metrics import tool_result
+
     trajectory, tool_uses, owners, bases = [], [], {}, {}
     for item in graph.llm_rounds:
         request, response = item.requested_event, item.completed_event
@@ -156,9 +158,10 @@ def build_fact_analysis(store: EvidenceStore, graph: EpisodeGraph, task: str | N
         input_ref = asdict(store.ref(input_event, "input")) if input_event and "input" in input_event.payload else None
         output_ref = asdict(store.ref(event, path)) if event and path else None
         text = text_value(output) if path else ""
+        status = tool_result(tool, graph.events)[0]
         tool_uses.append({"id": tool.id, "round_id": owners.get(tool.id), "run_id": tool.run_id, "loop_id": tool.loop_id,
                           "trace_id": tool.trace_id, "step_number": tool.step_number, "tool_id": tool.tool_id,
-                          "tool_call_id": tool.tool_call_id, "status": tool.status,
+                          "tool_call_id": tool.tool_call_id, "status": {"success": "complete", "incomplete": "partial"}.get(status, status),
                           "link_basis": bases.get(tool.id, "unlinked"), "input_ref": input_ref,
                           "raw_output_ref": output_ref, "output_excerpt": text[:600], "output_char_length": len(text) if path else None,
                           "output_excerpt_truncated": len(text) > 600,

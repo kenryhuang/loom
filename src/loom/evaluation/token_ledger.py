@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from typing import Any
 
+from loom.core import thaw_json
 from loom.evaluation.evidence_store import EvidenceStore
 from loom.trace_analysis.schemas import EpisodeGraph, NormalizedEvent
 
@@ -43,7 +44,7 @@ def _parse(value: Any) -> tuple[dict, bool]:
 def build_token_ledger(store: EvidenceStore, graph: EpisodeGraph) -> tuple[tuple[dict, ...], dict]:
     rows, registered = [], set()
     completions: dict[tuple, list] = {}
-    for event in store.events:
+    for event in graph.events:
         if event.event_type == "llm.completed":
             completions.setdefault(_key(event), []).append(event)
     for round_item in graph.llm_rounds:
@@ -67,7 +68,8 @@ def build_token_ledger(store: EvidenceStore, graph: EpisodeGraph) -> tuple[tuple
             usage, path = _usage(event)
             parsed, conflict = _parse(usage)
             samples.append((parsed, conflict))
-            refs.append(asdict(store.ref(event, path)))
+            if store is not None:
+                refs.append(asdict(store.ref(event, path)))
         fields = {name: None for name in _FIELDS}
         status = "unknown"
         if samples:
@@ -85,13 +87,13 @@ def build_token_ledger(store: EvidenceStore, graph: EpisodeGraph) -> tuple[tuple
                      "accounting_basis": "provider_reported", "character_token_estimate": None})
     auxiliary = []
     orphan_lines = {event.line_number for event in graph.orphaned_events}
-    for event in store.events:
+    for event in graph.events:
         if event.event_type.startswith("llm.") and event.line_number not in registered:
             usage, path = _usage(event)
             if path is not None or event.line_number in orphan_lines:
                 auxiliary.append({"llm_call_id": event.llm_call_id, "run_id": event.run_id,
-                                  "event_type": event.event_type, "usage": store.resolve(store.ref(event, path)) if path else None,
-                                  "ref": asdict(store.ref(event, path)), "accounting_status": "unattributed"})
+                                  "event_type": event.event_type, "usage": thaw_json(usage) if path else None,
+                                  "ref": asdict(store.ref(event, path)) if store is not None else None, "accounting_status": "unattributed"})
     complete = bool(rows) and all(r["usage_status"] == "complete" for r in rows) and not auxiliary
     coverage = {"status": "complete" if complete else "incomplete", "call_count": len(rows),
                 "auxiliary_usage": auxiliary, "unmeasured_costs": ["cache usage when not reported", "source-level token attribution"],

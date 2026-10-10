@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from loom.core import JsonValue
+from loom.evaluation.base_metrics import model_status, tool_result
 from loom.evaluation.episodes import EpisodeGraph
+from loom.evaluation.token_ledger import build_token_ledger
 from loom.evaluation.token_usage import total_tokens_for_events
 
 
@@ -23,8 +25,8 @@ class MetricResult:
 
 def calculate_metrics(graph: EpisodeGraph) -> tuple[MetricResult, ...]:
     partial_count = _partial_count(graph)
-    llm_failed_count = sum(1 for item in graph.llm_rounds if item.status == "failed")
-    tool_failure_count = sum(1 for item in graph.tool_calls if item.status == "failed")
+    llm_failed_count = sum(1 for item in graph.llm_rounds if model_status(item, graph.events) == "failed")
+    tool_failure_count = sum(1 for item in graph.tool_calls if tool_result(item, graph.events)[0] == "failed")
     orphaned_count = len(graph.orphaned_events)
     return (
         _metric("run", "all", "trace.completeness", _trace_completeness(graph), "ratio", "info", graph.event_hashes),
@@ -70,15 +72,14 @@ def _partial_count(graph: EpisodeGraph) -> int:
     )
 
 
-def _tool_success_rate(graph: EpisodeGraph) -> float:
-    if not graph.tool_calls:
-        return 1.0
-    complete = sum(1 for item in graph.tool_calls if item.status == "complete")
-    return complete / len(graph.tool_calls)
+def _tool_success_rate(graph: EpisodeGraph) -> float | None:
+    counts = [tool_result(item, graph.events)[0] for item in graph.tool_calls]
+    resolved = sum(s in {"success", "failed"} for s in counts)
+    return counts.count("success") / resolved if resolved else None
 
 
 def _total_tokens(graph: EpisodeGraph) -> int:
-    return total_tokens_for_events(graph.events)
+    return build_token_ledger(None, graph)[1]["known_total_tokens"] if graph.llm_rounds else total_tokens_for_events(graph.events)
 
 
 def _severity_for_count(value: int) -> str:

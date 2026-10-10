@@ -18,7 +18,7 @@ from loom.service.contracts import ServiceError, canonical, new_id
 from loom.trace_analysis import build_episode_graph
 from loom.trace_analysis.links import tool_output
 
-VERSION = "session-trajectory.3.3"
+VERSION = "session-trajectory.4.0"
 
 
 def session_records(events, read_artifact):
@@ -82,10 +82,8 @@ def analyze_session_trace(source, coverage):
         terminal = episode.completed_event or episode.failed_event
         output, _ = tool_output(terminal) if terminal else (None, None)
         output = output if isinstance(output, Mapping) else {}
-        failed = episode.failed_event is not None or output.get("ok") is False or (
-            output.get("exit_code") is not None and output.get("exit_code") != 0 and output.get("status") != "no_match")
         tools.append({key: row[key] for key in ("id", "round_id", "run_id", "tool_id", "tool_call_id", "input_ref", "raw_output_ref")} |
-                     {"status": "failed" if failed else row["status"], "exit_code": output.get("exit_code"),
+                     {"status": row["status"], "exit_code": output.get("exit_code"),
                       "seq": (terminal or episode.started_event).payload["session_seq"], "at": (terminal or episode.started_event).at,
                       "output_excerpt": row["output_excerpt"], "injection_count": len(row["injections"])})
     rounds = []
@@ -119,7 +117,12 @@ def analyze_session_trace(source, coverage):
                "source_sha256": source.source_sha256}
     from loom.evaluation.behavior_facts import build_behavior_facts
 
-    behavior = build_behavior_facts(source, legacy=facts)
+    behavior = build_behavior_facts(source, legacy=facts, source_coverage=coverage)
+    call_metrics = {row["id"]: row for row in behavior["base"]["statistics"]["calls"]["tools"]}
+    for row in tools:
+        measured = call_metrics[row["id"]]
+        row.update(status={"success": "complete", "incomplete": "partial"}.get(measured["status"], measured["status"]),
+                   duration_ms=measured["duration_ms"], failure_reason=measured["failure_reason"])
     summary["base"] = behavior["base"]
     summary["goal_revisions"] = behavior["goal_revisions"]
     summary["plan_revisions"] = behavior["plan_revisions"]
@@ -181,6 +184,16 @@ class SessionTrajectory:
                     "SELECT body FROM events WHERE session_id=? AND seq<=? AND json_extract(body,'$.type') NOT LIKE 'llm.%.delta' "
                     "AND json_extract(body,'$.type') NOT LIKE 'llm.stream.%' AND json_extract(body,'$.type') NOT LIKE 'llm.tool_call.%' ORDER BY seq",
                     (body["session_id"], body["source_cursor"]))]
+                event_counts = {row[0]: row[1] for row in db.execute(
+                    "SELECT json_extract(body,'$.type'),COUNT(*) FROM events WHERE session_id=? AND seq<=? GROUP BY json_extract(body,'$.type')",
+                    (body["session_id"], body["source_cursor"]))}
+                counts_by_run = {}
+                for run, kind, count in db.execute(
+                    "SELECT json_extract(body,'$.run_id'),json_extract(body,'$.type'),COUNT(*) FROM events WHERE session_id=? AND seq<=? "
+                    "GROUP BY json_extract(body,'$.run_id'),json_extract(body,'$.type')",
+                    (body["session_id"], body["source_cursor"])):
+                    if run is not None:
+                        counts_by_run.setdefault(run, {})[kind] = count
                 owned = {row[0] for row in db.execute("SELECT digest FROM artifacts WHERE session_id=?", (body["session_id"],))}
 
             def read(digest):
@@ -189,6 +202,7 @@ class SessionTrajectory:
                 return json.loads(self.store.artifacts.read(digest))
 
             records, coverage = session_records(events, read)
+            coverage.update(raw_event_count=sum(event_counts.values()), event_type_counts=event_counts, event_counts_by_run=counts_by_run)
             source = evidence_store(records)
             result = analyze_session_trace(source, coverage)
             refs = {"source": self.store.artifacts.publish(records, "trajectory_source"),

@@ -1,4 +1,5 @@
 import { element } from "../markdown.mjs";
+import { renderBaseStatistics } from "./base-evaluation.mjs";
 
 export const BEHAVIOR_DIMENSIONS = {
   intent_alignment: "Intent alignment",
@@ -28,7 +29,8 @@ const acceptanceLabel = (outcome) =>
   })[outcome.status] ||
   (outcome.verification_count ? "Needs verification" : "Not assessed");
 
-export function renderBaseEvaluation(root, base, goals = [], plans = []) {
+export function renderBaseEvaluation(root, base, goals = [], plans = [], actions = {}) {
+  if (!actions.compact && renderBaseStatistics(root, base, actions)) return;
   const section = element("section", "trajectory-section");
   section.append(element("h3", "", "Task result"));
   const acceptance = base.runtime_acceptance?.state;
@@ -142,6 +144,7 @@ export function renderBehaviorEvaluation(view, data) {
     base,
     facts.goal_revisions,
     facts.plan_revisions,
+    {evidence: ref => view.evidence(ref), compact: true},
   );
   const c = semantic.coverage;
   view.results.append(

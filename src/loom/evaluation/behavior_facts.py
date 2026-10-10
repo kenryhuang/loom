@@ -14,7 +14,7 @@ from loom.evaluation.trajectory import build_fact_analysis
 from loom.trace_analysis import build_episode_graph
 
 
-def build_behavior_facts(store, *, legacy=None, task=None):
+def build_behavior_facts(store, *, legacy=None, task=None, source_coverage=None):
     graph = build_episode_graph(store.events)
     legacy = legacy or build_fact_analysis(store, graph, task=task)
     episodes, goals, plans, artifacts, receipts = [], [], [], [], []
@@ -362,6 +362,9 @@ def build_behavior_facts(store, *, legacy=None, task=None):
                    "evidence_refs": [asdict(store.ref(e))]} for e in store.events
                   if e.event_type.startswith("acceptance.") and e.payload.get("acceptance")]
     current_acceptance = next((row for row in reversed(acceptance) if episodes and row["episode_id"] == episodes[-1]["id"]), None)
+    from loom.evaluation.base_metrics import build_base_statistics
+
+    statistics = build_base_statistics(store, graph, legacy.token_ledger, coverage=source_coverage, acceptance=current_acceptance)
     return {
         "analyzer_version": ANALYZER_VERSION,
         "episodes": episodes,
@@ -378,12 +381,13 @@ def build_behavior_facts(store, *, legacy=None, task=None):
         "behavior_graph": {"nodes": [], "edges": []},
         "token_ledger": list(legacy.token_ledger),
         "base": {
+            "statistics": statistics,
             "metrics": {
                 "model_calls": len(calls),
                 "verification_model_calls": sum(r["usage_role"] == "verification" for r in calls),
                 "tool_calls": len(legacy.tool_uses),
                 "verification_tool_calls": sum(t["usage_role"] == "verification" for t in tools_with_roles),
-                "steps": len(graph.steps),
+                "steps": statistics["basic"]["steps"],
                 "episodes": len(episodes),
                 "tokens": legacy.coverage.get("tokens", {}),
                 "runtime_outcomes": [
@@ -391,7 +395,7 @@ def build_behavior_facts(store, *, legacy=None, task=None):
                     for e in store.events
                     if e.event_type in {"run.completed", "run.failed", "run.stopped", "run.state.changed"}
                 ],
-                "duration_ms": sum(ep["duration_ms"] for ep in episodes) if episodes and all(ep["duration_ms"] is not None for ep in episodes) else None,
+                "duration_ms": statistics["timing"]["wall_ms"],
             },
             "execution_status": episodes[-1]["execution_status"] if episodes else "not_started",
             "output_checks": receipts,

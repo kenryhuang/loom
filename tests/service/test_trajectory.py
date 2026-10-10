@@ -62,6 +62,11 @@ def test_analysis_restores_source_links_usage_and_pins_evidence_across_updates_a
         assert analysis["task_completion"] == "unverified"
         assert analysis["tools"][0]["round_id"] == analysis["rounds"][0]["id"]
         assert analysis["tools"][0]["status"] == "failed"
+        statistics = analysis["base"]["statistics"]
+        assert statistics["basic"]["events"]["raw"] == statistics["basic"]["events"]["analyzed"] + 1
+        assert statistics["tools"]["failed"] == 1
+        assert statistics["models"]["total_tokens"]["known"] == 15
+        assert statistics["by_run"]["run"]["models"]["calls"] == 1
         assert analysis["failures"][0]["message"] == "No route"
         ref = analysis["rounds"][0]["request_ref"]
         first = manager.evidence(sid, job["id"], ref["line_number"], "messages.0.content", 0, 100)

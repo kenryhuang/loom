@@ -4,7 +4,7 @@ import hashlib
 import json
 
 SCHEMA_VERSION = "loom.evaluation.bundle.v3"
-ANALYZER_VERSION = "behavior-evaluation.3.3"
+ANALYZER_VERSION = "behavior-evaluation.3.4"
 PROMPT_VERSION = "behavior-rubric.3.2"
 CHECKPOINT_VERSION = "behavior-checkpoint.1"
 DIMENSIONS = ("intent_alignment", "plan_quality", "progress_effectiveness", "investigation_efficiency", "adaptation_recovery")
