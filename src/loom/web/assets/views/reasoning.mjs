@@ -156,10 +156,12 @@ export class ReasoningView {
       previous = row;
     }
     rowIndex++;
-    const width = 990, height = Math.max(100, rowIndex * 185 + 45);
+    // Leave at least 200px between cards for relationship labels; use spare panel width.
+    const width = Math.max(1260, scroll.clientWidth), laneSpacing = (width - 300) / 2;
+    const height = Math.max(100, rowIndex * 185 + 45);
     graph.style.width = `${width}px`; graph.style.height = `${height}px`;
     ["Judgment / hypothesis / conclusion", "Action / verification / outcome", "Observation / report"].forEach((name, col) => {
-      const title = element("div", "reasoning-column", name); title.style.left = `${col * 330 + 10}px`; graph.append(title);
+      const title = element("div", "reasoning-column", name); title.style.left = `${col * laneSpacing + 10}px`; graph.append(title);
     });
     const edges = svg("svg", {width, height, "aria-hidden": "true"}); graph.append(edges);
     const defs = svg("defs"), marker = svg("marker", {id: "reasoning-arrow", viewBox: "0 0 10 10", refX: 9, refY: 5,
@@ -182,7 +184,7 @@ export class ReasoningView {
       this.refs(detail, row.refs); this.selected = row.id;
     };
     for (const row of shown) {
-      const x = (row.column ?? 0) * 330 + 10, y = row.layoutRow * 185 + 40;
+      const x = (row.column ?? 0) * laneSpacing + 10, y = row.layoutRow * 185 + 40;
       positions.set(row.id, {x, y});
       const node = button("", () => inspect(row)); node.className = `reasoning-node ${row.kind === "claim" ? "reasoning-claim" : ""} ${row.is_endpoint ? "reasoning-outcome" : ""} ${row.kind === "question" ? "reasoning-question" : ""}`;
       if (row.is_endpoint) node.dataset.outcome = "true";

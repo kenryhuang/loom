@@ -1805,7 +1805,7 @@ dialog h1 {
 .reasoning-toolbar { align-items: end; flex-wrap: wrap; margin-bottom: 1rem; }
 .reasoning-toolbar label { display: grid; gap: .35rem; min-width: 140px; max-width: 320px; font-size: .8rem; color: var(--muted); }
 .reasoning-toolbar select, .reasoning-toolbar button { min-height: 40px; max-width: 100%; }
-.reasoning-graph-scroll { overflow: auto; max-height: 650px; border: 1px solid var(--line); border-radius: 8px; }
+.reasoning-graph-scroll { overflow: auto; scrollbar-gutter: stable; max-height: 650px; border: 1px solid var(--line); border-radius: 8px; }
 .reasoning-graph { position: relative; }
 .reasoning-graph > svg { position: absolute; inset: 0; pointer-events: none; }
 .reasoning-lane { position: absolute; left: 8px; right: 8px; height: 150px; border-top: 1px solid var(--line); font-size: .75rem; color: var(--muted); padding-top: 5px; }
@@ -1823,7 +1823,7 @@ dialog h1 {
   .reasoning-window-bar { grid-template-columns: 75px minmax(40px, 1fr) 25px 70px; gap: 5px; }
   .evaluation-tabs { flex-wrap: wrap; }
 }
-.reasoning-edge-label { fill: var(--accent); font-size: 10px; text-anchor: middle; }
+.reasoning-edge-label { fill: var(--accent); font-size: 12px; text-anchor: middle; paint-order: stroke fill; stroke: var(--panel); stroke-width: 4px; stroke-linejoin: round; }
 
 .reasoning-question { display: flex; gap: 12px; align-items: baseline; padding: 12px; margin-bottom: 14px; border-left: 3px solid var(--accent); background: var(--bg); overflow-wrap: anywhere; }
 .reasoning-notice { padding: 10px 12px; border-left: 3px solid var(--accent); font-size: .85rem; }
