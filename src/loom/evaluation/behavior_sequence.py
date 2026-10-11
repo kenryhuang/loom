@@ -103,8 +103,13 @@ def _resource(tool, inp, out):
     operation = "read" if name == "read_file" else "write" if name in {"write_file", "edit_file", "create_report"} else None
     if name == "shell_execute":
         # Only the unambiguous single-file cat form. Never execute or broadly parse shell.
+        command = inp.get("command")
+        # Historical/invalid calls can contain argv arrays or null. Passing those to
+        # shlex would treat them as streams (and null could read the analyzer's stdin).
+        if not isinstance(command, str):
+            return None
         try:
-            words = shlex.split(inp.get("command", ""), posix=True)
+            words = shlex.split(command, posix=True)
         except ValueError:
             words = []
         if len(words) == 2 and words[0] == "cat" and not words[1].startswith("-") and not any(c in words[1] for c in "$`*?;|&<>\n"):

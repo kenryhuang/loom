@@ -95,6 +95,19 @@ def test_shell_cat_and_file_read_share_recorded_resource_identity():
     assert len(facts["sequence"]["repetitions"]) == 1
 
 
+@pytest.mark.parametrize("command", [["cat", "a.txt"], [], None, {"argv": ["cat", "a.txt"]}, 42, True])
+@pytest.mark.parametrize("failed", [False, True])
+def test_non_string_shell_commands_remain_opaque_without_breaking_trace_analysis(command, failed):
+    shell = action(2, "shell_execute", {"command": command}, {"stdout": "same", "exit_code": 0})
+    if failed:
+        shell[-1] = {**shell[-1], "type": "tool.failed", "error": {"message": "Invalid command input"}}
+        shell[-1].pop("output")
+    facts = build_behavior_facts(source([*action(1), *shell, *action(3)]))
+    assert facts["reasoning_activity"]["acquisitions"][1]["classification"] == "unknown"
+    assert len(facts["tool_uses"]) == 3
+    assert facts["sequence"]["repetitions"][0]["status"] == "needs_context"
+
+
 def test_repeated_reads_do_not_cross_applied_goal_boundary():
     facts = build_behavior_facts(source([*action(1), {"type": "task.goal.revised", "objective": "A different goal", "input_cursor": 2},
                                         *action(2)]))

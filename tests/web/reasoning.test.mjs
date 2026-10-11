@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {JSDOM} from "jsdom";
-import {ReasoningView, processGroups, boundedGraph} from "../../src/loom/web/assets/views/reasoning.mjs";
+import {ReasoningView, processGroups, boundedGraph, groupReasoningCycles} from "../../src/loom/web/assets/views/reasoning.mjs";
 
 export function fixture() {
   const scoped = {episode_id: "ep", goal_revision_id: "goal", role: "solver"};
@@ -128,5 +128,83 @@ test("outcome stays visible and role highlighting never breaks the complete grap
   role.dispatchEvent(new dom.window.Event("change"));
   assert.equal(root.querySelectorAll(".reasoning-node").length, 5);
   assert.equal(root.querySelectorAll('.reasoning-outcome.reasoning-context-node').length, 0);
+  dom.window.close();
+});
+
+function roundFixture() {
+  const p = fixture(), scope = {episode_id: 'ep', goal_revision_id: 'goal', role: 'solver', question_ids: ['goal']};
+  const rounds = Array.from({length: 3}, (_, i) => {
+    const round = {...scope, round_id: `round-${i}`}, call = `call-${i}`;
+    return [
+      {...round, id: `judgment-${i}`, kind: 'model_response', phase: 'judgment', column: 0, line: i * 3 + 2, label: `Decision ${i}`, evidence_refs: [{line_number: i * 3 + 2}]},
+      {...round, id: `action-${i}`, kind: 'collection', phase: 'collect', column: 1, line: i * 3 + 3, label: `Read ${i}`, tool_call_id: call},
+      {...round, id: `result-${i}`, kind: 'observation', phase: 'observation', column: 2, line: i * 3 + 4, label: `Result ${i}`, tool_call_id: call},
+    ];
+  }).flat();
+  p.graph.nodes = [{...scope, id: 'start', kind: 'question', phase: 'question', column: 1, line: 1, label: 'Investigate'},
+    ...rounds, {...scope, id: 'end', kind: 'terminal', phase: 'outcome', column: 1, line: 12, label: 'Task completed', is_endpoint: true, terminal: true}];
+  p.graph.relations = p.graph.nodes.slice(1).map((n, i) => ({source: p.graph.nodes[i].id, target: n.id, kind: 'continues', layer: 'flow', basis: 'recorded'}));
+  return p;
+}
+
+test('continuous complete rounds collapse with boundary edges and expand losslessly', () => {
+  const p = roundFixture(), original = structuredClone(p.graph);
+  const compact = groupReasoningCycles(p.graph.nodes, p.graph.relations);
+  assert.equal(compact.nodes.length, 3);
+  const block = compact.nodes[1];
+  assert.equal(block.round_label, 'Rounds 1–3');
+  assert.equal(block.round_count, 3);
+  assert.equal(block.call_count, 3);
+  assert.equal(block.members.length, 9);
+  assert.deepEqual(compact.relations.map(r => [r.source, r.target]), [['start', block.id], [block.id, 'end']]);
+  const open = groupReasoningCycles(p.graph.nodes, p.graph.relations, new Set([block.id]));
+  assert.deepEqual(open.nodes.map(n => n.id), p.graph.nodes.map(n => n.id));
+  assert.deepEqual(open.relations, p.graph.relations);
+  assert.deepEqual(open.nodes.filter(n => n.column === 0).map(n => n.round_number), [1, 2, 3]);
+  assert.deepEqual(p.graph, original);
+});
+
+test('parallel calls count once each and semantic links survive across folded boundaries', () => {
+  const p = roundFixture(), extra = p.graph.nodes.slice(2, 4).map(n => ({...n, id: n.id + '-parallel', tool_call_id: 'parallel'}));
+  p.graph.nodes.splice(4, 0, ...extra);
+  p.graph.relations.push({source: 'result-0', target: 'end', kind: 'supports', layer: 'reasoning', basis: 'inferred'});
+  const compact = groupReasoningCycles(p.graph.nodes, p.graph.relations), block = compact.nodes[1];
+  assert.equal(block.round_count, 3); assert.equal(block.call_count, 4);
+  assert.ok(compact.relations.some(r => r.source === block.id && r.target === 'end' && r.kind === 'supports' && r.layer === 'reasoning'));
+  const open = groupReasoningCycles(p.graph.nodes, p.graph.relations, new Set([block.id]));
+  assert.equal(open.nodes.length, p.graph.nodes.length);
+});
+
+test('verification, rejection, delivery and unfinished rounds are folding boundaries', () => {
+  for (const barrier of [
+    {kind: 'check', phase: 'verification'}, {kind: 'observation', phase: 'rejection'}, {kind: 'action', phase: 'delivery'},
+  ]) {
+    const p = roundFixture(); Object.assign(p.graph.nodes[5], barrier);
+    assert.equal(groupReasoningCycles(p.graph.nodes, p.graph.relations).blocks.length, 0);
+  }
+  const incomplete = roundFixture(); incomplete.graph.nodes.splice(6, 1);
+  assert.equal(groupReasoningCycles(incomplete.graph.nodes, incomplete.graph.relations).blocks.length, 0);
+  const revised = roundFixture(); revised.graph.nodes.slice(4, 7).forEach(n => n.goal_revision_id = 'new-goal');
+  assert.equal(groupReasoningCycles(revised.graph.nodes, revised.graph.relations).blocks.length, 0);
+});
+
+test('cycle block expands inline, exposes source details and collapses while retaining the outcome', () => {
+  const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
+  const root = document.querySelector('main'), refs = [];
+  new ReasoningView(root, {baseProcess: roundFixture(), evidence: r => refs.push(r), onEvaluate() {}, onRefresh() {}});
+  assert.equal(root.querySelectorAll('.reasoning-node').length, 3);
+  const block = root.querySelector('.reasoning-cycle-block');
+  assert.match(block.textContent, /Rounds 1–3 · 3 rounds/);
+  assert.equal(block.getAttribute('aria-expanded'), 'false'); block.click();
+  assert.equal(root.querySelectorAll('.reasoning-node').length, 11);
+  assert.equal(root.querySelectorAll('.reasoning-cycle-frame').length, 1);
+  assert.equal(root.querySelector('.reasoning-cycle-toggle').getAttribute('aria-expanded'), 'true');
+  const judgment = [...root.querySelectorAll('.reasoning-node')].find(n => n.textContent.includes('Decision 0'));
+  assert.match(judgment.textContent, /Round 1/); judgment.click();
+  [...root.querySelectorAll('button')].find(n => n.textContent === 'Evidence 2').click();
+  assert.deepEqual(refs, [{line_number: 2}]);
+  root.querySelector('.reasoning-cycle-toggle').click();
+  assert.equal(root.querySelectorAll('.reasoning-node').length, 3);
+  assert.ok(root.querySelector('[data-outcome="true"]'));
   dom.window.close();
 });

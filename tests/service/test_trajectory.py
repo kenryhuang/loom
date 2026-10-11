@@ -12,7 +12,7 @@ def session(store, path, name="first"):
     return store.create(name, {"objective": "Inspect files", "workspace": str(path)})["session_id"]
 
 
-def append_trace(store, sid):
+def append_trace(store, sid, *, command="never execute this"):
     def append(state, emit, db):
         state["run"] = {"id": "run", "state": "running"}
         emit("run.started", {})
@@ -25,7 +25,7 @@ def append_trace(store, sid):
         emit("llm.completed", {"trace_id": "trace", "loop_id": "loop", "llm_call_id": "trace-llm-1",
                                "response": {"content": "Read source", "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}})
         tool = {"trace_id": "trace", "loop_id": "loop", "step_number": 0,
-                "tool_id": "shell_execute", "tool_call_id": "trace-json-0-1", "input": {"command": "never execute this"}}
+                "tool_id": "shell_execute", "tool_call_id": "trace-json-0-1", "input": {"command": command}}
         emit("tool.started", tool)
         emit("tool.completed", {**tool, "output": {"ok": False, "exit_code": 2, "stderr": "Read failed"}})
         emit("run.failed", {"code": "WORKFLOW_ROUTE_FAILED", "message": "No route"})
@@ -41,6 +41,25 @@ def finished(manager, sid, identifier):
             return result
         time.sleep(.02)
     pytest.fail("Analysis did not finish")
+
+
+@pytest.mark.parametrize("command", [["ls", "-la"], None])
+def test_historical_non_string_shell_command_does_not_fail_session_analysis(tmp_path, command):
+    store = SessionStore(tmp_path / "data")
+    sid = session(store, tmp_path)
+    append_trace(store, sid, command=command)
+    manager = SessionTrajectory(store)
+    try:
+        result = finished(manager, sid, manager.start(sid)["id"])
+        assert len(result["analysis"]["tools"]) == 1
+        tool = result["analysis"]["tools"][0]
+        assert tool["status"] == "failed"
+        assert result["analysis"]["reasoning_process"]["coverage"]["classification"]["by_class"] == {"unknown": 1}
+        ref = tool["input_ref"]
+        evidence = manager.evidence(sid, result["id"], ref["line_number"], ref["field_path"], 0, 1000)
+        assert json.loads(evidence["content"]) == {"command": command}
+    finally:
+        manager.close()
 
 
 def test_analysis_restores_source_links_usage_and_pins_evidence_across_updates_and_restart(tmp_path):

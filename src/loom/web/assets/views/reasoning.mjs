@@ -22,6 +22,64 @@ export function processGroups(nodes) {
   return {rows, owners: new Map(rows.map(n => [n.id, n.id]))};
 }
 
+// Visual compression of recorded rounds, independent of Deep's assessed investigation cycles.
+export function groupReasoningCycles(nodes, relations, expanded = new Set()) {
+  const ordinals = new Map(), chunks = [];
+  for (const n of nodes) {
+    if (n.round_id && n.column === 0 && !ordinals.has(n.round_id)) ordinals.set(n.round_id, ordinals.size + 1);
+    const last = chunks.at(-1);
+    if (n.round_id && last?.[0].round_id === n.round_id && last[0].episode_id === n.episode_id
+      && last[0].goal_revision_id === n.goal_revision_id) last.push(n);
+    else chunks.push([n]);
+  }
+  const complete = chunk => {
+    const allowed = new Set(["model_response", "claim", "action", "collection", "observation"]);
+    const barriers = new Set(["completion_attempt", "delivery", "report", "rejection", "failure"]);
+    if (!chunk[0].round_id || chunk.some(n => !allowed.has(n.kind) || barriers.has(n.phase))) return false;
+    const actions = chunk.filter(n => n.column === 1), results = chunk.filter(n => n.kind === "observation");
+    return chunk.some(n => n.column === 0) && actions.length > 0 && results.length > 0
+      && actions.every(a => a.tool_call_id && results.some(r => r.tool_call_id === a.tool_call_id))
+      && results.every(r => actions.some(a => a.tool_call_id === r.tool_call_id));
+  };
+  const groups = [];
+  for (const chunk of chunks) {
+    const prior = groups.at(-1), first = chunk[0];
+    if (complete(chunk) && prior?.complete && prior.nodes[0].episode_id === first.episode_id
+      && prior.nodes[0].goal_revision_id === first.goal_revision_id) {
+      prior.nodes.push(...chunk); prior.rounds.push(first.round_id);
+    } else groups.push({nodes: [...chunk], rounds: first.round_id ? [first.round_id] : [], complete: complete(chunk)});
+  }
+  const shown = [], owners = new Map(), blocks = [];
+  for (const group of groups) {
+    const members = group.nodes;
+    if (!group.complete || group.rounds.length < 2) {
+      shown.push(...members.map(n => ({...n, round_number: ordinals.get(n.round_id)})));
+      for (const n of members) owners.set(n.id, n.id);
+      continue;
+    }
+    const first = members[0], last = members.at(-1), firstRound = ordinals.get(group.rounds[0]), lastRound = ordinals.get(group.rounds.at(-1));
+    const id = `cycle:${first.id}:${last.id}`, open = expanded.has(id);
+    const block = {...first, id, kind: "cycle_block", phase: "reasoning_loop", column: 1, round_id: null,
+      label: members.findLast(n => n.column === 0)?.label || "Recorded reasoning rounds",
+      round_label: `Rounds ${firstRound}–${lastRound}`, round_count: group.rounds.length,
+      call_count: new Set(members.filter(n => n.column === 1).map(n => n.tool_call_id)).size,
+      end_line: last.line, members, expanded: open, status: "recorded_rounds", basis: "recorded",
+      evidence_refs: members.flatMap(n => n.evidence_refs || []),
+      question_ids: [...new Set(members.flatMap(n => n.question_ids || []))]};
+    blocks.push(block);
+    shown.push(...(open ? members.map(n => ({...n, cycle_id: id, round_number: ordinals.get(n.round_id)})) : [block]));
+    for (const n of members) owners.set(n.id, open ? n.id : id);
+  }
+  const edges = new Map();
+  for (const r of relations) {
+    const source = owners.get(r.source) || r.source, target = owners.get(r.target) || r.target;
+    if (source === target) continue;
+    const key = `${source}:${target}:${r.kind}:${r.layer || r.basis}`;
+    edges.set(key, {...r, source, target});
+  }
+  return {nodes: shown, relations: [...edges.values()], blocks};
+}
+
 const relationLabel = r => ({emits: "chooses action", selects: "chooses action", returns: "returns result",
   next_round: "next reasoning round", continues_after_failure: "continues after rejection / failure", continues: "proceeds to",
   ends: "ends with", omitted_phases: "via hidden phases"}[r.kind] || label(r.kind));
@@ -56,7 +114,7 @@ function missingReason(p, job) {
 export class ReasoningView {
   constructor(root, {baseProcess, evidence, onEvaluate, onRefresh}) {
     Object.assign(this, {root, baseProcess, evidence, onEvaluate, onRefresh});
-    this.limit = 200; this.role = "all"; this.update(null);
+    this.limit = 200; this.role = "all"; this.expandedCycles = new Set(); this.update(null);
   }
   update(data, job) {
     const signature = JSON.stringify([data, this.baseProcess, job?.state, job?.stage]);
@@ -131,7 +189,8 @@ export class ReasoningView {
     const graphPanel = panel(root, "Evidence & decision process", true);
     const projected = p.graph;
     const eligible = (projected?.nodes || []).filter(n => n.episode_id === scope.episode_id && n.goal_revision_id === scope.goal_revision_id);
-    const visible = boundedGraph(eligible, projected?.relations || [], this.limit);
+    const bounded = boundedGraph(eligible, projected?.relations || [], this.limit);
+    const visible = groupReasoningCycles(bounded.nodes, bounded.relations, this.expandedCycles);
     const {rows: shown, owners} = processGroups(visible.nodes), positions = new Map();
     const outcome = eligible.findLast(n => n.is_endpoint);
     const outcomeStrip = element("div", "reasoning-outcome-summary");
@@ -148,17 +207,17 @@ export class ReasoningView {
     const scroll = element("div", "reasoning-graph-scroll"), graph = element("div", "reasoning-graph");
     scroll.setAttribute("aria-label", "Reasoning process graph"); scroll.tabIndex = 0; scroll.append(graph); graphPanel.append(scroll);
     // Preserve source order even when a tool's return encloses verification phases.
-    let rowIndex = -1, previous = null;
+    let nextY = 40, previous = null;
     for (const row of shown) {
+      if (row.cycle_id && row.cycle_id !== previous?.cycle_id) nextY += 55;
       const sameRound = row.round_id && row.round_id === previous?.round_id;
-      if (!sameRound || (row.column ?? 0) <= (previous?.column ?? 0) || row.is_endpoint) rowIndex++;
-      row.layoutRow = rowIndex;
+      if (sameRound && (row.column ?? 0) > (previous?.column ?? 0) && !row.is_endpoint) row.layoutY = previous.layoutY;
+      else { row.layoutY = nextY; nextY += 185; }
       previous = row;
     }
-    rowIndex++;
     // Leave at least 200px between cards for relationship labels; use spare panel width.
     const width = Math.max(1260, scroll.clientWidth), laneSpacing = (width - 300) / 2;
-    const height = Math.max(100, rowIndex * 185 + 45);
+    const height = Math.max(100, nextY + 5);
     graph.style.width = `${width}px`; graph.style.height = `${height}px`;
     ["Judgment / hypothesis / conclusion", "Action / verification / outcome", "Observation / report"].forEach((name, col) => {
       const title = element("div", "reasoning-column", name); title.style.left = `${col * laneSpacing + 10}px`; graph.append(title);
@@ -167,6 +226,22 @@ export class ReasoningView {
     const defs = svg("defs"), marker = svg("marker", {id: "reasoning-arrow", viewBox: "0 0 10 10", refX: 9, refY: 5,
       markerWidth: 5, markerHeight: 5, orient: "auto-start-reverse"});
     marker.append(svg("path", {d: "M 0 0 L 10 5 L 0 10 z", fill: "currentColor"})); defs.append(marker); edges.append(defs);
+    const toggleCycle = id => {
+      const top = scroll.scrollTop, left = scroll.scrollLeft;
+      if (this.expandedCycles.has(id)) this.expandedCycles.delete(id); else this.expandedCycles.add(id);
+      this.render();
+      const nextScroll = this.root.querySelector('.reasoning-graph-scroll');
+      nextScroll.scrollTop = top; nextScroll.scrollLeft = left;
+    };
+    for (const block of visible.blocks.filter(b => b.expanded)) {
+      const members = shown.filter(n => n.cycle_id === block.id), top = members[0].layoutY - 55;
+      const frame = element("div", "reasoning-cycle-frame");
+      frame.style.top = `${top}px`; frame.style.height = `${members.at(-1).layoutY + 165 - top}px`;
+      graph.append(frame);
+      const header = button(`${block.round_label} · ${block.round_count} rounds · ${block.call_count} tool calls · Collapse`, () => toggleCycle(block.id));
+      header.className = "reasoning-cycle-toggle"; header.style.top = `${top + 5}px`;
+      header.setAttribute("aria-expanded", "true"); header.dataset.cycleId = block.id; graph.append(header);
+    }
     const detail = panel(root, "Selected evidence", true); detail.classList.add("reasoning-selection");
     const inspect = row => {
       detail.replaceChildren(element("h3", "", label(row.phase)), element("p", "reasoning-content", row.label));
@@ -184,16 +259,23 @@ export class ReasoningView {
       this.refs(detail, row.refs); this.selected = row.id;
     };
     for (const row of shown) {
-      const x = (row.column ?? 0) * laneSpacing + 10, y = row.layoutRow * 185 + 40;
-      positions.set(row.id, {x, y});
-      const node = button("", () => inspect(row)); node.className = `reasoning-node ${row.kind === "claim" ? "reasoning-claim" : ""} ${row.is_endpoint ? "reasoning-outcome" : ""} ${row.kind === "question" ? "reasoning-question" : ""}`;
+      const cycle = row.kind === "cycle_block", x = cycle ? 10 : (row.column ?? 0) * laneSpacing + 10, y = row.layoutY;
+      positions.set(row.id, {x, y, width: cycle ? width - 20 : 280, cycle});
+      const node = button("", () => cycle ? toggleCycle(row.id) : inspect(row)); node.className = `reasoning-node ${cycle ? "reasoning-cycle-block" : ""} ${row.kind === "claim" ? "reasoning-claim" : ""} ${row.is_endpoint ? "reasoning-outcome" : ""} ${row.kind === "question" ? "reasoning-question" : ""}`;
+      if (cycle) {
+        node.style.width = `${width - 20}px`; node.setAttribute("aria-expanded", "false"); node.dataset.cycleId = row.id;
+      }
       if (row.is_endpoint) node.dataset.outcome = "true";
       const highlighted = (this.role === "all" || row.role === this.role || row.role === "process")
         && (!this.question || row.question_ids?.includes(this.question) || row.role === "process");
       node.classList.toggle("reasoning-context-node", !highlighted);
       node.style.left = `${x}px`; node.style.top = `${y}px`;
-      node.append(badge(label(row.phase)), element("strong", "", row.label),
-        element("small", "muted", `${label(row.status || row.interpretation_basis)} · L${row.line}`));
+      if (cycle) {
+        node.append(badge(`${row.round_label} · ${row.round_count} rounds`),
+          element("span", "reasoning-cycle-pattern", "Judgment → Action → Observation ↻"), element("strong", "", row.label),
+          element("small", "muted", `${row.call_count} tool calls · L${row.line}–${row.end_line} · Click to expand`));
+      } else node.append(badge(label(row.phase)), element("strong", "", row.label),
+        element("small", "muted", `${row.round_number ? `Round ${row.round_number} · ` : ""}${label(row.status || row.interpretation_basis)} · L${row.line}`));
       node.title = row.label; graph.append(node);
     }
     const drawn = new Set();
@@ -201,9 +283,9 @@ export class ReasoningView {
       const from = owners.get(rel.source), to = owners.get(rel.target), a = positions.get(from), b = positions.get(to);
       const key = `${from}:${to}:${rel.kind}`;
       if (!a || !b || from === to || drawn.has(key)) continue; drawn.add(key);
-      const across = b.x > a.x;
-      const sx = across ? a.x + 280 : a.x + 140, sy = across ? a.y + 70 : a.y + 150;
-      const tx = across ? b.x : b.x + 140, ty = across ? b.y + 70 : b.y;
+      const across = !a.cycle && !b.cycle && b.x > a.x;
+      const sx = across ? a.x + a.width : a.x + a.width / 2, sy = across ? a.y + 70 : a.y + 150;
+      const tx = across ? b.x : b.x + b.width / 2, ty = across ? b.y + 70 : b.y;
       const path = svg("path", {d: across ? `M ${sx} ${sy} C ${sx + 25} ${sy}, ${tx - 25} ${ty}, ${tx} ${ty}`
         : `M ${sx} ${sy} C ${sx} ${sy + 30}, ${tx} ${ty - 30}, ${tx} ${ty}`,
         class: rel.basis === "inferred" ? "reasoning-edge inferred" : "reasoning-edge", "marker-end": "url(#reasoning-arrow)"});
@@ -216,7 +298,7 @@ export class ReasoningView {
     const prior = shown.find(r => r.id === this.selected); if (prior) inspect(prior);
     else detail.append(element("p", "muted", "Select a phase to read its full content and source evidence."));
     table(disclosure(graphPanel, `Process ledger · ${shown.length} phases`), ["Line", "Phase", "Content", "Evidence"],
-      shown.map(r => [r.line, label(r.phase), r.label, button("Inspect", () => inspect(r))]));
+      shown.map(r => [r.line, label(r.phase), r.label, button(r.kind === "cycle_block" ? "Expand rounds" : "Inspect", () => r.kind === "cycle_block" ? toggleCycle(r.id) : inspect(r))]));
     const measure = solver.unknown_calls || solver.mixed_calls ? "tool_calls" : "reads";
     const intervals = panel(root, measure === "reads" ? "Known reads between evidence milestones" : "Tool calls between evidence milestones", true);
     const windows = p.windows.filter(w => w.scope_id === scope.id && w.series === "evidence");

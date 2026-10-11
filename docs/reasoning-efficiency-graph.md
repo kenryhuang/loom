@@ -249,3 +249,8 @@ Role/question selection highlights context instead of disconnecting the graph. L
 Saved snapshots are reprojected on read from their **same pinned source and saved judgments**, using `loom.reasoning-activity.v3` and `loom.reasoning-graph.v3`. Analysis/evaluation IDs, usage and immutable artifacts remain unchanged. This deterministic presentation upgrade makes no model calls and creates no new semantic judgments; acquiring new evidence relationships still requires Deep evaluation.
 
 The orbital-realism regression now retains the complete closing path: L65 public conclusion → L68 `complete_node` → L69 rejection → L72 revised completion statement → L75 `finish` → L82–86 acceptance checks → L89 report → L93 task completion. Regression tests require all nodes to connect to their scope boundaries, preserve parallel branches and reject fabricated successful outcomes.
+
+
+### Collapsible recorded rounds
+
+Consecutive complete judgment → action → observation rounds now collapse into one visual loop block by default. The block shows its scope-local round range, number of rounds, unique tool-call count and latest public judgment. Clicking expands the original three-lane graph inside a common frame; each phase retains its round number and source inspection. Parallel calls count separately within their existing round. Verification, lifecycle changes, completion attempts, delivery, rejection/failure and incomplete rounds break a group. External execution and reasoning links attach to the collapsed block and return to their exact nodes on expansion. This is presentation-only grouping, independent of semantically assessed investigation cycles; metrics, saved graphs and JSON exports retain the full data.

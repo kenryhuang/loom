@@ -1839,3 +1839,8 @@ dialog h1 {
 .reasoning-node.reasoning-outcome { border: 3px double var(--accent); background: var(--panel); }
 .reasoning-context-node { opacity: .55; }
 .reasoning-edge:not(.inferred) { stroke: #8caccb; }
+.reasoning-cycle-block { border: 1px solid var(--accent); background: var(--panel); padding: 12px 18px; }
+.reasoning-cycle-block strong { -webkit-line-clamp: 2; }
+.reasoning-cycle-pattern { color: var(--accent); font-size: .9rem; }
+.reasoning-cycle-frame { position: absolute; left: 3px; right: 3px; border: 1px solid var(--line); border-radius: 10px; pointer-events: none; }
+.reasoning-cycle-toggle { position: absolute; left: 15px; max-width: calc(100% - 30px); min-height: 36px; color: var(--accent); font-size: .85rem; }
