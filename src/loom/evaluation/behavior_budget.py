@@ -60,10 +60,10 @@ def scan_pages(facts, checkpoint, max_prompt_chars):
 
 def synthesis_inputs(local, max_prompt_chars):
     """Bound summary input independently of saved local judgments and their full provenance."""
-    fields = ('diagnoses', 'assessments', 'progress', 'plan_assessments', 'fact_assessments', 'preserved_behaviors')
+    fields = ('diagnoses', 'assessments', 'progress', 'plan_assessments', 'fact_assessments', 'preserved_behaviors', 'reasoning_transitions')
     keep = {'id', 'dimension', 'dimensions', 'segment_id', 'status', 'epistemic_status', 'observation', 'mechanism',
             'rationale', 'kind', 'label', 'line', 'plan_snapshot_id', 'node_id', 'fact_id', 'fact_kind', 'fact_label',
-            'fact_line', 'fact_ids', 'unknown_reason', 'behavior'}
+            'fact_line', 'fact_ids', 'unknown_reason', 'behavior', 'claim_id', 'question_id', 'claim_type', 'evidence_use'}
     groups = {}
     for field in fields:
         groups[field] = []
@@ -73,6 +73,11 @@ def synthesis_inputs(local, max_prompt_chars):
                                               for r in row.get(name, [])})
             compact['text_truncated'] = any(isinstance(v, str) and len(v) > 600 for k, v in row.items() if k in keep)
             groups[field].append(compact)
+    process = local.get('reasoning_process', {})
+    fields = (*fields, 'reasoning_metrics')
+    groups['reasoning_metrics'] = [dict(id=q['endpoint']['id'], question=q['label'][:300], kind=q['endpoint']['kind'],
+                                       status=q['endpoint']['status'], cost=q['endpoint']['cost'])
+                                    for q in process.get('questions', [])]
     coverage = {k: v for k, v in local['coverage'].items() if k not in {'limitations', 'pending_segments', 'unselected_segments'}}
     coverage.update(pending_count=len(local['coverage'].get('pending_segments', [])),
                     unselected_count=len(local['coverage'].get('unselected_segments', [])))

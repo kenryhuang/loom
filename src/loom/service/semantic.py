@@ -104,6 +104,17 @@ class SessionSemantic:
         result = self._public(body)
         if body.get("result"):
             result["evaluation"] = json.loads(self.store.artifacts.read(body["result"]["sha256"]))
+            semantic = result['evaluation'].get('semantic', {})
+            process = semantic.get('reasoning_process')
+            if body.get('analysis_version') == 'v3' and process:
+                from loom.evaluation.reasoning_graph import VERSION as graph_version
+
+                if process.get('graph', {}).get('schema_version') != graph_version:
+                    from loom.evaluation.reasoning_metrics import build_reasoning_process
+
+                    _, factual = self.trajectory._data(self.trajectory._load(sid, aid))
+                    semantic['reasoning_process'] = build_reasoning_process(factual['behavior'], semantic)
+                    semantic['reasoning_process']['graph']['projection_basis'] = 'pinned_source_and_saved_judgments_no_model_call'
         elif body.get("analysis_version") == "v3" and body.get("checkpoint"):
             # Expose validated local results while subsequent stages are still running.
             from loom.evaluation.behavior_judge import partial_semantic

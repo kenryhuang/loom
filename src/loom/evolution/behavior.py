@@ -34,6 +34,12 @@ def proposals_from_behavior(semantic, *, source_sha256, evaluator):
     result = []
     for (pattern, mechanism, surface), rows in groups.items():
         first = rows[0]
+        process = semantic.get("reasoning_process", {})
+        cited_lines = {ref.get("line_number") for row in rows for ref in row.get("supporting_refs", [])}
+        windows = [w for w in process.get("windows", []) if w["series"] == "evidence" and any(
+            line is not None and w["start_line"] <= line <= w["end_line"]
+            and (not w["cost"].get("exclusive_start") or line > w["start_line"]) for line in cited_lines)]
+        metric_ids = list(dict.fromkeys(process["metrics"][w["scope_id"]]["evidence"]["id"] for w in windows))
         ready = all(first.get(k) for k in ("predicted_endpoint", "validation", "preserve", "alternatives"))
         result.append(
             {
@@ -57,6 +63,8 @@ def proposals_from_behavior(semantic, *, source_sha256, evaluator):
                 "evaluator": evaluator,
                 "validation_status": "not_run",
                 "quality_gate": {"goal_outcome": "non_inferiority", "preserved_behaviors": "required", "efficiency": "secondary"},
+                "reasoning_links": {"metric_ids": metric_ids, "window_ids": [w["id"] for w in windows],
+                                    "basis": "shared_source_interval_not_causal_attribution"},
                 "expected_savings": None,
             }
         )

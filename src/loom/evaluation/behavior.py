@@ -30,6 +30,10 @@ class BehaviorResult:
 
 
 def evaluation_payload(source, facts, semantic, *, model=None, checkpoint_identity=None):
+    from loom.evaluation.reasoning_metrics import build_reasoning_process
+
+    if facts.get("reasoning_activity"):
+        semantic = {**semantic, "reasoning_process": build_reasoning_process(facts, semantic)}
     evaluator = {"model": model, "analyzer_version": ANALYZER_VERSION, "prompt_version": PROMPT_VERSION}
     if checkpoint_identity:
         evaluator.update(resolved_model=checkpoint_identity.get("model"), model_options_digest=checkpoint_identity.get("model_options_digest"))
@@ -113,6 +117,17 @@ def render_report(payload):
         for row in metric.get("observations", []):
             lines.append(f"- {name}: lines {row['start_line']}–{row['end_line']} · {row['known_tokens']} known tokens · "
                          f"{row['model_calls']} model calls · {row['tool_calls']} tools · overlapping endpoints are not additive")
+    process = semantic.get("reasoning_process", {})
+    if process:
+        lines.extend(["", "## Reasoning efficiency", ""])
+        for scope in process["scopes"]:
+            metric = process["metrics"][scope["id"]]["evidence"]
+            lines.append(f"- {scope['label']}: {metric['mean']} known reads per reviewed evidence window; "
+                         f"n={metric['n']}, open/censored={metric['open_windows']}, partial={metric['partial_windows']}")
+        for q in process["questions"]:
+            endpoint = q["endpoint"]
+            lines.append(f"- {q['label']}: {endpoint['kind']} · {endpoint['status']} · "
+                         f"{(endpoint.get('cost') or {}).get('model_calls', 'unmeasured')} solver calls")
     for limitation in semantic["coverage"]["limitations"]:
         lines.extend([f"- Limitation: {limitation}"])
     return "\n".join(lines) + "\n"

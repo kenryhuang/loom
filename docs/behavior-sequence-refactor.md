@@ -2,6 +2,8 @@
 
 [中文](behavior-sequence-refactor.zh-CN.md)
 
+Implemented extension: [Reasoning efficiency process graph](reasoning-efficiency-graph.md), covering acquisition windows, evidence adoption, cause/conclusion latency and visualization. See its implementation notes for the new tab and versioned contracts.
+
 ## Design
 
 Base records facts; Deep interprets behavior; Acceptance verifies deliverables; Evolve reuses supported diagnoses. A completed node or changed output does not establish task success. Offline analysis uses the immutable trace only.

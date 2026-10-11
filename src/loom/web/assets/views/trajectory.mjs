@@ -1,6 +1,7 @@
 import { renderBaseEvaluation } from "./behavior-evaluation.mjs";
 import { renderBehaviorSequence } from "./behavior-sequence.mjs";
 import { element } from "../markdown.mjs";
+import { ReasoningView } from "./reasoning.mjs";
 import { EvaluationView } from "./evaluation.mjs";
 import { renderVerificationArtifact } from "./activity-row.mjs";
 
@@ -132,8 +133,10 @@ export class TrajectoryView {
     tabs.setAttribute("role", "tablist");
     tabs.setAttribute("aria-label", "Evaluation views");
     this.deepPanel = element("section", "trajectory-evaluation");
-    const panels = [this.body, this.deepPanel];
-    this.tabs = ["Trace analysis", "Deep evaluation"].map((label, index) => {
+    this.reasoningPanel = element("section", "trajectory-reasoning");
+    this.reasoningPanel.append(element("p", "muted", "Preparing reasoning activity…"));
+    const panels = [this.body, this.deepPanel, this.reasoningPanel];
+    this.tabs = ["Trace analysis", "Deep evaluation", "Reasoning efficiency"].map((label, index) => {
       const tab = button(label, () => this.selectTab(index));
       tab.id = `evaluation-tab-${index}`;
       tab.setAttribute("role", "tab");
@@ -147,7 +150,8 @@ export class TrajectoryView {
           return;
         event.preventDefault();
         const next =
-          event.key === "Home" ? 0 : event.key === "End" ? 1 : 1 - index;
+          event.key === "Home" ? 0 : event.key === "End" ? panels.length - 1
+            : (index + (event.key === "ArrowRight" ? 1 : -1) + panels.length) % panels.length;
         this.selectTab(next);
         this.tabs[next].focus();
       });
@@ -157,7 +161,7 @@ export class TrajectoryView {
     this.deepPanel.append(
       element("p", "muted", "Preparing snapshot for evaluation…"),
     );
-    this.root.append(tabs, heading, this.body, this.deepPanel);
+    this.root.append(tabs, heading, this.body, this.deepPanel, this.reasoningPanel);
     this.traceHeading = heading;
     this.selectTab(this.selectedTab || 0);
     try {
@@ -186,6 +190,7 @@ export class TrajectoryView {
       this.deepPanel.replaceChildren(
         element("p", "notice error", error.message),
       );
+      this.reasoningPanel.replaceChildren(element("p", "notice error", error.message));
       this.onError(error);
     } finally {
       if (!signal.aborted) this.refresh.disabled = false;
@@ -195,6 +200,7 @@ export class TrajectoryView {
     this.selectedTab = index;
     this.body.hidden = index !== 0;
     this.deepPanel.hidden = index !== 1;
+    this.reasoningPanel.hidden = index !== 2;
     this.traceHeading.hidden = index !== 0;
     this.status.hidden = index !== 0 || !this.status.textContent;
     this.tabs.forEach((tab, i) => {
@@ -210,17 +216,23 @@ export class TrajectoryView {
     for (const [index, id] of runIds.entries()) this.runFilter.append(option(`Run ${index + 1} · ${id}`, id));
     if (runIds.includes(this.selectedRun)) this.runFilter.value = this.selectedRun;
     this.runFilter.disabled = false;
+    this.reasoningView = new ReasoningView(this.reasoningPanel, {
+      baseProcess: data.reasoning_process, evidence: ref => this.showEvidence(ref),
+      onEvaluate: () => this.selectTab(1), onRefresh: () => this.open(this.api, this.sessionId, this.cursor),
+    });
     if (this.api.evaluations) {
       const evaluation = element("section", "trajectory-evaluation");
       this.deepPanel.replaceChildren(evaluation);
-      new EvaluationView(evaluation, {
+      this.evaluationView = new EvaluationView(evaluation, {
         api: this.api,
         sessionId: this.sessionId,
         analysisId: this.job.id,
         signal: this.abort.signal,
         evidence: (ref) => this.showEvidence(ref),
         onError: this.onError,
-      }).open();
+        onResult: (result, job) => this.reasoningView.update(result, job),
+      });
+      this.evaluationView.open();
     } else {
       this.deepPanel.textContent =
         "Deep evaluation is unavailable on this service.";

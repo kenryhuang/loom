@@ -16,6 +16,9 @@ from loom.evaluation.evidence_review import EvidenceReview
 from loom.evaluation.evidence_store import text_value
 from loom.evaluation.focus_evidence import focus_evidence_refs
 from loom.evaluation.provider import evaluator_provider
+from loom.evaluation.reasoning_metrics import build_reasoning_process
+from loom.evaluation.reasoning_process import RUBRIC as REASONING_RUBRIC
+from loom.evaluation.reasoning_process import delivered_context, reasoning_context, validate_transitions
 from loom.llm import LlmMessage, request_llm_response
 from loom.llm.request_options import materialize_request_options
 
@@ -78,6 +81,7 @@ Cite both first_line and line when judging repeated content. For plan bindings/c
 For progress landmarks, include fact_ids linking the host observations used to infer useful progress.
 For diagnoses, include fact_ids linking the specific host observations behind the mechanism. Facts alone do not prove causality.
 """
+RUBRIC += REASONING_RUBRIC
 
 
 def empty_semantic(facts):
@@ -89,6 +93,8 @@ def empty_semantic(facts):
         "progress": [],
         "plan_assessments": [],
         "fact_assessments": [],
+        "reasoning_transitions": [],
+        "reasoning_diagnostics": [],
         "behavior_graph": {"nodes": [], "edges": []},
         "summary": "",
         "evidence_packets": [],
@@ -112,7 +118,8 @@ def partial_semantic(facts, checkpoint):
     for key, stage in stages.items():
         if not key.startswith("focus:"):
             continue
-        for field in ("diagnoses", "assessments", "preserved_behaviors", "progress", "plan_assessments", "fact_assessments"):
+        for field in ("diagnoses", "assessments", "preserved_behaviors", "progress", "plan_assessments", "fact_assessments",
+                      "reasoning_transitions", "reasoning_diagnostics"):
             result[field].extend(stage["result"].get(field, []))
         result["coverage"]["limitations"].extend(stage["result"].get("limitations", []))
         for field in ("nodes", "edges"):
@@ -187,10 +194,12 @@ def partial_semantic(facts, checkpoint):
             "round_ids": sorted(owners),
             "basis": "Deduplicated primary cost owners of evidence-supported ineffective progress assessments; not predicted savings",
         }
+    if facts.get("reasoning_activity"):
+        result["reasoning_process"] = build_reasoning_process(facts, result)
     return result
 
 
-def _validate_focus(value, review, selected, facts=None):
+def _validate_focus(value, review, selected, facts=None, reasoning=None):
     if not isinstance(value, dict):
         raise ValueError("Focus response must be an object")
 
@@ -383,7 +392,9 @@ def _validate_focus(value, review, selected, facts=None):
             limitations.append(f"{', '.join(selected)}: omitted {len(rejected)} invalid {label}(s); "
                                "no conclusion was accepted from those entries (invalid fields: "
                                + ", ".join(sorted({key for issue in rejected for key in issue["invalid_fields"]})) + ").")
-    return {"assessments": list(assessments.values()), "diagnoses": diagnoses, "preserved_behaviors": preserved,
+    transitions, reasoning_issues = validate_transitions(value, review, selected, facts or {}, reasoning)
+    return {"reasoning_transitions": transitions, "reasoning_diagnostics": reasoning_issues,
+            "assessments": list(assessments.values()), "diagnoses": diagnoses, "preserved_behaviors": preserved,
             "behavior_graph": graph, "progress": progress, "plan_assessments": plan_assessments,
             'fact_assessments': list(fact_assessments.values()), "validation_issues": issues, "limitations": limitations}
 
@@ -416,6 +427,7 @@ async def judge_behavior(
         "source": store.source_sha256,
         "analyzer": ANALYZER_VERSION,
         "prompt": PROMPT_VERSION,
+        "reasoning_classifier": facts.get("reasoning_activity", {}).get("schema_version"),
         "model": getattr(provider, "model", type(provider).__name__),
         "semantic_settings": [max_evidence_chars, max_prompt_chars, max_read_rounds, max_segments, max_call_seconds],
         "model_options_digest": stable_id(
@@ -467,12 +479,12 @@ async def judge_behavior(
             payload = {**payload, 'quote_delivery': {'requested': len(inherited), 'delivered': len(packets)}}
         initial_chars = 0
         unique_initial = {json.dumps(r, sort_keys=True): r for r in initial_refs}
-        for index, ref in enumerate(unique_initial.values()):
+        for ref in unique_initial.values():
             remaining = min(max_evidence_chars - usage["evidence_chars"], min(12000, max_prompt_chars // 3) - initial_chars)
             if remaining <= 0:
                 break
-            # Share the initial allowance across actions/results, including later rounds.
-            limit = min(1800, max(1, remaining // (len(unique_initial) - index)))
+            # Prioritized public assertions/actions/results receive useful excerpts before ancillary navigation.
+            limit = min(900, remaining)
             preview = store.read(ref, max_chars=limit)
             candidate = {"stage": key, **payload, "evidence_packets": [*packets, preview]}
             if len(RUBRIC) + len(json.dumps(candidate, ensure_ascii=False)) > max_prompt_chars - 1000:
@@ -481,9 +493,12 @@ async def judge_behavior(
             packets.append(packet)
             usage["evidence_chars"] += packet["returned_chars"]
             initial_chars += packet["returned_chars"]
+        if 'reasoning_context' in payload:
+            payload = {**payload, 'reasoning_context': delivered_context(payload['reasoning_context'], review)}
         content = {"stage": key, **payload, "evidence_packets": packets}
         messages = [LlmMessage("system", RUBRIC), LlmMessage("user", json.dumps(content, ensure_ascii=False))]
         repaired = False
+        reasoning_repair = None
         operation = "review"
         for read in range(max_read_rounds + 2):
             # Keep synthesis reserve independent of earlier stage consumption.
@@ -591,7 +606,10 @@ async def judge_behavior(
                     if not evidence:
                         raise ValueError("Evaluation prompt budget reached while reading evidence; saved stages retained")
                     operation = "read_evidence"
-                    messages.append(LlmMessage("user", json.dumps({"evidence_packets": evidence}, ensure_ascii=False)))
+                    extra = {"evidence_packets": evidence}
+                    if 'reasoning_context' in payload:
+                        extra['reasoning_context'] = delivered_context(payload['reasoning_context'], review)
+                    messages.append(LlmMessage("user", json.dumps(extra, ensure_ascii=False)))
                     continue
                 if key.startswith("scan:"):
                     allowed = {s["id"] for s in facts["segments"]}
@@ -599,7 +617,35 @@ async def judge_behavior(
                         if not isinstance(value.get(field), list) or any(s not in allowed for s in value[field]):
                             raise ValueError("Invalid scan selection")
                 elif key.startswith("focus:"):
-                    value = _validate_focus(value, review, selected, facts)
+                    if reasoning_repair is not None:
+                        transitions, issues = validate_transitions(value, review, selected, facts, payload.get('reasoning_context'))
+                        retained = {t['id']: t for t in reasoning_repair['reasoning_transitions']}
+                        retained.update({t['id']: t for t in transitions})
+                        value = {**reasoning_repair, 'reasoning_transitions': list(retained.values())[:4],
+                                 'reasoning_diagnostics': issues or (reasoning_repair['reasoning_diagnostics'] if not transitions else [])}
+                    else:
+                        raw_reasoning = value.get('reasoning_transitions', [])
+                        value = _validate_focus(value, review, selected, facts, payload.get("reasoning_context"))
+                        if (value['reasoning_diagnostics'] and read < max_read_rounds + 1
+                                and usage['calls'] < max_calls - 2 and usage['total_tokens'] < max_tokens - 16000):
+                            # Preserve valid Deep judgments before a bounded optional repair. Never restart the full review.
+                            reasoning_repair = value
+                            cp['stages'][key] = dict(result=value, evidence_packets=[], delivered_packets=packets,
+                                                     payload_version=PROMPT_VERSION, claim_lineage=[])
+                            await persist()
+                            operation = 'repair'
+                            repair = dict(stage=key, segments=payload['segments'], reasoning_context=delivered_context(payload['reasoning_context'], review),
+                                          evidence_packets=packets, proposed=raw_reasoning, errors=value['reasoning_diagnostics'])
+                            messages = [LlmMessage('system', REASONING_RUBRIC + '\nReturn ONLY {"reasoning_transitions": [...]}. '
+                                'Repair the rejected entries; include previously valid entries unchanged. Match EVERY observation ID to its own '
+                                'result_citations and EVERY action ID to its input_citations in evidence_refs. Results after assertion time cannot '
+                                'support that assertion. A plan to check something is a proposed decision, NOT a supported conclusion. '
+                                'Use ONLY delivered evidence IDs (e.g. e1), not navigation pointer objects. New claims may be proposed or supported; '
+                                'verified_within_scope requires a previously supported claim_id in manifest. '
+                                'Never move an assertion to a later event to force support. Omit unsubstantiated links.'),
+                                LlmMessage('user', json.dumps(repair, ensure_ascii=False))]
+                            await activity(key, 'output.repair', 'Repairing reasoning citations; other judgments already saved')
+                            continue
                 else:
                     allowed = {d["id"] for s in cp["stages"].values() for d in s["result"].get("diagnoses", [])}
                     if (
@@ -626,7 +672,7 @@ async def judge_behavior(
                         if d["epistemic_status"] != "unknown"
                     ]
                     claims += [(stable_id("preserved", p["behavior"]), p["evidence_refs"]) for p in value["preserved_behaviors"]]
-                    for field in ("assessments", "progress", "plan_assessments", "fact_assessments"):
+                    for field in ("assessments", "progress", "plan_assessments", "fact_assessments", "reasoning_transitions"):
                         claims += [(stable_id(field, row), row["evidence_refs"]) for row in value[field]
                                    if row.get("status") != "unknown"]
                     for claim_id, refs in claims:
@@ -684,16 +730,39 @@ async def judge_behavior(
     cp["limitations"] = [limitation for limitation in cp["limitations"] if "budget reached" not in limitation]
     def focus_inputs(s):
         context = focus_context(facts, s)
-        context["context_segments"] = [compact_segment(row) for row in context["context_segments"]]
+        def navigation(row):
+            return {k: v for k, v in compact_segment(row).items() if k not in {'navigation', 'evidence_refs'}}
+        context["context_segments"] = [navigation(row) for row in context["context_segments"]]
+        # These duplicate behavior facts and can consume the entire prompt before any source is delivered.
+        context['activity_signal_coverage'] = {'available': len(context['activity_signals']), 'included': 0,
+                                               'basis': 'signals represented by behavior_facts; source available on demand'}
+        context['activity_signals'] = []
         related = [w for w in facts["candidate_windows"] if s["id"] in w["segment_ids"]]
         anchors = [r for w in related[:3] for r in w.get("evidence_refs", [])[:2]]
         anchors += [t["raw_output_ref"] for t in facts["tool_uses"] if t["round_id"] in s["round_ids"] and t.get("raw_output_ref")]
         anchors += [r for p in context["plans"] for r in p["evidence_refs"][:1]]
         anchors = [r for f in context['behavior_facts'] for r in f['evidence_refs'][:2]] + anchors
-        payload = {"segments": [compact_segment(s)],
-                   "goals": [g for g in facts["goal_revisions"] if g["episode_id"] == s["episode_id"]],
+        prior = [r for key, stage in cp.get("stages", {}).items() if key.startswith("focus:")
+                 for r in stage["result"].get("reasoning_transitions", [])]
+        reasoning, reasoning_anchors = reasoning_context(facts, s, prior)
+        anchors += reasoning_anchors
+        payload = {"reasoning_context": reasoning, "segments": [{**navigation(s), 'evidence_refs': s['evidence_refs'][:8]}],
+                   "goals": [{k: g.get(k) for k in ('id', 'objective', 'applied_line', 'visible_line', 'state')}
+                             for g in facts["goal_revisions"] if g["episode_id"] == s["episode_id"]],
                    **context, "candidate_windows": related[:8]}
-        return payload, focus_evidence_refs(store, s, anchors)
+        def compact(value):
+            if isinstance(value, dict):
+                return {k: compact(v) for k, v in value.items() if v is not None}
+            if isinstance(value, list):
+                return [compact(v) for v in value]
+            return value
+        observations = sorted(reasoning['observations'], key=lambda r: r.get('result_line') or r['line'], reverse=True)
+        last_assertion = max((r['line'] for r in reasoning['assertions']), default=0)
+        priority = [r['request_ref'] for r in reasoning['actions'] if r.get('request_ref')
+                    and r['line'] >= min((a['line'] for a in reasoning['assertions']), default=0) and r.get('classification') != 'control']
+        priority += [r['result_ref'] for r in observations if r.get('result_ref') and r.get('classification') != 'control'
+                     and r['result_line'] < last_assertion]
+        return compact(payload), focus_evidence_refs(store, s, anchors, priority=priority)
 
     # Include a control, then prioritize suspicious segments. The cap is an upper limit,
     # not a promise to review eight expensive segments regardless of remaining resources.
@@ -706,8 +775,9 @@ async def judge_behavior(
                                  max_tokens=max_tokens, max_read_rounds=max_read_rounds)
     cp["selected"] = selected
     await persist()
-    for sid in selected:
-        payload, anchors = prepared[sid]
+    source_order = {s["id"]: i for i, s in enumerate(facts["segments"])}
+    for sid in sorted(selected, key=lambda sid: source_order[sid]):
+        payload, anchors = focus_inputs(next(s for s in facts["segments"] if s["id"] == sid))
         try:
             await stage(
                 f"focus:{sid}",

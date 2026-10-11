@@ -26,7 +26,7 @@ const button = (text, action) => {
 };
 
 export class EvaluationView {
-  constructor(root, { api, sessionId, analysisId, signal, evidence, onError }) {
+  constructor(root, { api, sessionId, analysisId, signal, evidence, onError, onResult }) {
     Object.assign(this, {
       root,
       api,
@@ -35,6 +35,7 @@ export class EvaluationView {
       signal,
       evidence,
       onError,
+      onResult,
     });
     this.generation = 0;
     this.timer = null;
@@ -146,6 +147,7 @@ export class EvaluationView {
         for (const field of Object.values(this.fields)) field.disabled = false;
         if (this.history) this.history.value = "";
         this.renderedData = null;
+        this.onResult?.(null);
         this.results.replaceChildren(element("p", "empty-state", "No evaluation selected"));
         this.progress.hidden = true;
         this.settingsPanel.open = false;
@@ -250,6 +252,7 @@ export class EvaluationView {
       );
       if (this.signal.aborted || generation !== this.generation) return;
       if (this.job?.id !== job.id) {
+        this.onResult?.(null, job);
         this.results.replaceChildren();
         this.renderedData = null;
       }
@@ -407,6 +410,7 @@ export class EvaluationView {
   }
   render(data) {
     const signature = JSON.stringify(data);
+    this.onResult?.(data, this.job);
     if (signature === this.renderedData) return;
     const opened = new Set([...this.results.querySelectorAll("details[open][data-detail]")].map(n => n.dataset.detail));
     const filters = [...this.results.querySelectorAll("[data-deep-filter]")].map(n => [n.dataset.deepFilter, n.value]);

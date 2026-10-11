@@ -18,7 +18,7 @@ from loom.service.contracts import ServiceError, canonical, new_id
 from loom.trace_analysis import build_episode_graph
 from loom.trace_analysis.links import tool_output
 
-VERSION = "session-trajectory.4.3"
+VERSION = "session-trajectory.4.5"
 
 
 def session_records(events, read_artifact):
@@ -127,6 +127,9 @@ def analyze_session_trace(source, coverage):
     summary["goal_revisions"] = behavior["goal_revisions"]
     summary["plan_revisions"] = behavior["plan_revisions"]
     summary["sequence"] = behavior["sequence"]
+    from loom.evaluation.reasoning_metrics import build_reasoning_process
+
+    summary["reasoning_process"] = build_reasoning_process(behavior)
     return {"summary": summary, "facts": asdict(facts), "behavior": behavior}
 
 
@@ -244,6 +247,15 @@ class SessionTrajectory:
                 return cached
         source = evidence_store(json.loads(self.store.artifacts.read(body["source"]["sha256"])))
         result = json.loads(self.store.artifacts.read(body["result"]["sha256"]))
+        from loom.evaluation.reasoning_graph import VERSION as graph_version
+
+        if result.get('summary', {}).get('reasoning_process', {}).get('graph', {}).get('schema_version') != graph_version:
+            from loom.evaluation.behavior_facts import build_behavior_facts
+            from loom.evaluation.reasoning_metrics import build_reasoning_process
+
+            # Read-time presentation upgrade of the pinned source. Keep snapshot IDs and Deep history.
+            result['behavior'] = build_behavior_facts(source, source_coverage=result['summary'].get('coverage'))
+            result['summary']['reasoning_process'] = build_reasoning_process(result['behavior'])
         return self._remember(body["id"], source, result)
 
     def get(self, sid, identifier):

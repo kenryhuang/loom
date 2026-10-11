@@ -235,7 +235,7 @@ def build_behavior_facts(store, *, legacy=None, task=None, source_coverage=None)
         ]
         active = max(applied, key=lambda g: g["applied_line"], default=None)
         request_event = event_by_line.get(line)
-        role = request_event.payload.get("usage_role", "solver") if request_event else "solver"
+        role = (request_event.payload.get("usage_role") or request_event.payload.get("metadata", {}).get("usage_role", "solver")) if request_event else "solver"
         calls.append({**row, "episode_id": ep_id, "goal_revision_id": active["id"] if active else None, "usage_role": role})
     tools_with_roles = []
     for tool in legacy.tool_uses:
@@ -348,7 +348,7 @@ def build_behavior_facts(store, *, legacy=None, task=None, source_coverage=None)
     from loom.evaluation.base_metrics import build_base_statistics
 
     statistics = build_base_statistics(store, graph, legacy.token_ledger, coverage=source_coverage, acceptance=current_acceptance)
-    return {
+    result = {
         "analyzer_version": ANALYZER_VERSION,
         "episodes": episodes,
         "event_episode_ids": {str(line): ep for line, ep in by_line.items()},
@@ -395,6 +395,10 @@ def build_behavior_facts(store, *, legacy=None, task=None, source_coverage=None)
             "episode_identity": "mixed_recorded_and_inferred",
         },
     }
+    from loom.evaluation.reasoning_activity import build_reasoning_activity
+
+    result["reasoning_activity"] = build_reasoning_activity(store, result)
+    return result
 
 
 def _outcomes(store, episodes, goals, artifacts, receipts):

@@ -155,7 +155,8 @@ export function renderDeepDashboard(view, data, dimensions) {
     card.append(header, element("p", "deep-observation", row.hypothesis));
     const more = detail(card, "Validation & evidence", `proposal-${row.id || i}`);
     fields(more, [["Predicted endpoint", row.predicted_endpoint || "Unspecified"], ["Validation", row.validation || "Needs design"],
-      ["Preserve", row.preserve?.join("; ")]]);
+      ["Preserve", row.preserve?.join("; ")],
+      ["Reasoning intervals", row.reasoning_links?.window_ids?.length ? `${row.reasoning_links.window_ids.length} cited intervals · shared source association` : null]]);
     view.refs(more, row.supporting_refs || []); evolve.append(card);
   }
 

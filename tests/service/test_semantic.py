@@ -311,3 +311,38 @@ def test_catalog_uses_independent_evaluation_model(evaluation, tmp_path):
     semantic.config_path = config
     assert semantic.options()['default_model'] == 'judge'
     assert semantic.options()['defaults'] == semantic.options()['defaults_by_version']['v3']
+
+
+def test_saved_graph_upgrade_keeps_snapshot_judgments_and_usage_without_llm_calls(evaluation):
+    import copy
+
+    store, trajectory, semantic, _, sid, aid = evaluation
+    semantic.provider_factory = lambda model: BehaviorProvider()
+    job = semantic.start(sid, aid, {})
+    original = wait_job(semantic, sid, aid, job['id'])
+    assert original['state'] == 'completed'
+    body = semantic._load(sid, aid, job['id'])
+    old = copy.deepcopy(original['evaluation'])
+    old['semantic']['reasoning_process']['graph'] = {'schema_version': 'loom.reasoning-graph.v2', 'nodes': [], 'relations': []}
+    body['result'] = store.artifacts.publish(old, 'trajectory_evaluation')
+    semantic._save(body)
+    snapshot = trajectory._load(sid, aid)
+    _, data = trajectory._data(snapshot)
+    old_base = copy.deepcopy(data)
+    old_base['summary']['reasoning_process']['graph']['schema_version'] = 'loom.reasoning-graph.v2'
+    snapshot['result'] = store.artifacts.publish(old_base, 'trajectory_analysis')
+    trajectory._save(snapshot)
+    trajectory.cache.clear()
+    def forbidden(_):
+        pytest.fail('Projection upgrade must not start an evaluator')
+    semantic.provider_factory = forbidden
+    upgraded = semantic.get(sid, aid, job['id'])
+    graph = upgraded['evaluation']['semantic']['reasoning_process']['graph']
+    assert graph['schema_version'] == 'loom.reasoning-graph.v3'
+    assert graph['boundaries']
+    assert upgraded['usage'] == original['usage']
+    assert upgraded['analysis_id'] == aid
+    assert upgraded['evaluation']['semantic']['assessments'] == original['evaluation']['semantic']['assessments']
+    assert upgraded['evaluation']['semantic']['reasoning_transitions'] == original['evaluation']['semantic']['reasoning_transitions']
+    assert json.loads(store.artifacts.read(body['result']['sha256']))['semantic']['reasoning_process']['graph']['schema_version'].endswith('.v2')
+    assert trajectory.start(sid)['id'] == aid
