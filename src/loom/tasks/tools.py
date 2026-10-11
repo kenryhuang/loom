@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import signal
@@ -42,6 +43,9 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
                     "content": content,
                     "bytes_read": min(len(raw), max_bytes),
                     "truncated": len(raw) > max_bytes,
+                    "resource": {"path": str(path), "after_sha256": hashlib.sha256(raw).hexdigest(),
+                                 "returned_sha256": hashlib.sha256(raw[:max_bytes]).hexdigest(),
+                                 "byte_range": [0, min(len(raw), max_bytes)]},
                 },
                 now_iso(),
             )
@@ -81,6 +85,8 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
                     "first_changed_line": value.first_changed_line,
                     "diff": value.diff,
                     "diff_truncated": value.diff_truncated,
+                    "resource": {"path": str(resolved.value), "before_sha256": value.before_sha256,
+                                 "after_sha256": value.after_sha256},
                 },
                 now_iso(),
             )
@@ -93,6 +99,15 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
             return resolved
         content = str(data.get("content", ""))
         path = resolved.value
+        before = None
+        before_state = "unavailable"
+        try:
+            before = await asyncio.to_thread(path.read_bytes)
+            before_state = "recorded"
+        except FileNotFoundError:
+            before_state = "absent"
+        except OSError:
+            pass
         try:
             await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
             await asyncio.to_thread(path.write_text, content, encoding="utf-8")
@@ -102,7 +117,10 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
             Observation(
                 new_trace_id(),
                 "write_file",
-                {"path": _relative_to_root(root, path), "bytes_written": len(content.encode("utf-8"))},
+                {"path": _relative_to_root(root, path), "bytes_written": len(content.encode("utf-8")),
+                 "resource": {"path": str(path), "before_sha256": hashlib.sha256(before).hexdigest() if before is not None else None,
+                              "before_state": before_state,
+                              "after_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()}},
                 now_iso(),
             )
         )
@@ -265,7 +283,7 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
             if value["exit_code"] == 0
             else "nonzero_exit"
         )
-        value.update(ok=status in {"succeeded", "no_match"}, status=status)
+        value.update(ok=status in {"succeeded", "no_match"}, status=status, resolved_cwd=str(cwd_result.value))
         if no_match:
             value["matched"] = False
         return ok(Observation(new_trace_id(), source, value, now_iso()))

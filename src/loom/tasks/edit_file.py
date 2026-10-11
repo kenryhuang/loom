@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import os
 import stat
 import tempfile
@@ -41,6 +42,8 @@ class FileEditResult:
     first_changed_line: int
     diff: str
     diff_truncated: bool
+    before_sha256: str
+    after_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +240,8 @@ def apply_file_edits(
             plan.first_changed_line,
             plan.diff,
             plan.diff_truncated,
+            hashlib.sha256(raw).hexdigest(),
+            hashlib.sha256(encoded).hexdigest(),
         )
     )
 

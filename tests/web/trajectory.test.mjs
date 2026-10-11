@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
+import { statistics } from "./fixtures/base-statistics.mjs";
 import { TrajectoryView } from "../../src/loom/web/assets/views/trajectory.mjs";
 
 const ref = (line_number) => ({ line_number, field_path: null });
@@ -89,7 +90,10 @@ test("trajectory renders measured facts, filters calls and reads paginated evide
     },
   };
   await view.open(api, "one", 10);
-  assert.match(root.textContent, /Use Deep evaluation/);
+  assert.doesNotMatch(root.textContent, /Use Deep evaluation|Recorded calls, context|Execution metrics and goal acceptance/);
+  assert.equal(view.refresh.parentElement, view.runFilter.parentElement);
+  assert.equal(view.status.hidden, true);
+  assert.equal(root.querySelectorAll('[aria-label="Filter trajectory by run"]').length, 1);
   assert.equal(root.querySelectorAll('[role="tab"]').length, 2);
   assert.equal(view.deepPanel.hidden, true);
   const signal = view.abort.signal;
@@ -180,4 +184,29 @@ test("sessions without model events have an explicit empty analysis", async () =
   assert.match(root.textContent, /No model calls have been recorded/);
   view.close();
   dom.window.close();
+});
+
+
+test("one run selector scopes statistics and call explorer together and survives refresh", async () => {
+  const {dom, root, view} = setup(), data = fixture();
+  const all = statistics(), other = statistics();
+  other.basic.events.raw = 7; other.basic.acceptance = null;
+  all.by_run = {run: statistics(), other};
+  data.analysis.base = {statistics: all};
+  data.analysis.run_ids.push("other");
+  data.analysis.rounds.push({...data.analysis.rounds[0], id: "round-other", run_id: "other"});
+  const api = {startTrajectory: async () => data, trajectory: async () => data};
+  await view.open(api, "one", 10);
+  view.runFilter.value = "other";
+  view.runFilter.dispatchEvent(new dom.window.Event("change"));
+  assert.equal(root.querySelectorAll(".dashboard-toolbar select").length, 1);
+  assert.match(root.querySelector(".trace-dashboard").textContent, /Raw events7/);
+  assert.match(root.querySelector(".trace-dashboard").textContent, /No checks recorded/);
+  assert.equal(root.querySelectorAll(".trajectory-round").length, 1);
+  assert.equal(root.querySelector(".trajectory-round").dataset.roundId, "round-other");
+  await view.open(api, "one", 10);
+  assert.equal(view.runFilter.value, "other");
+  assert.match(root.querySelector(".trace-dashboard").textContent, /Raw events7/);
+  assert.equal(root.querySelector(".trajectory-round").dataset.roundId, "round-other");
+  view.close(); dom.window.close();
 });

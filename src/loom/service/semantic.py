@@ -30,6 +30,16 @@ BOUNDS = {"max_calls": (1, 500), "max_tokens": (100, 10000000), "max_seconds": (
           "batch_rounds": (1, 16), "max_read_rounds": (0, 10), "max_rounds": (1, 10000), "max_call_seconds": (1, 600)}
 
 
+def _behavior_facts(source, factual, body):
+    from loom.evaluation.behavior_contracts import ANALYZER_VERSION as current_version
+    from loom.evaluation.behavior_facts import build_behavior_facts
+
+    existing = factual.get("behavior")
+    if existing and (body.get("analyzer_version") != current_version or existing.get("analyzer_version") == current_version):
+        return existing
+    return build_behavior_facts(source, source_coverage=factual.get("summary", {}).get("coverage"))
+
+
 class SessionSemantic:
     def __init__(self, trajectory, config_path=None, *, provider_factory=None):
         self.trajectory, self.store = trajectory, trajectory.store
@@ -96,11 +106,11 @@ class SessionSemantic:
             result["evaluation"] = json.loads(self.store.artifacts.read(body["result"]["sha256"]))
         elif body.get("analysis_version") == "v3" and body.get("checkpoint"):
             # Expose validated local results while subsequent stages are still running.
-            from loom.evaluation.behavior_facts import build_behavior_facts
             from loom.evaluation.behavior_judge import partial_semantic
 
             source, factual = self.trajectory._data(self.trajectory._load(sid, aid))
-            facts = factual.get("behavior") or build_behavior_facts(source)
+            facts = _behavior_facts(source, factual, body)
+            factual = {**factual, "behavior": facts}
             result["evaluation"] = self._result(body, source, factual, partial_semantic(facts, body["checkpoint"]))
         elif body["state"] not in {"queued", "running"} and body["checkpoint"].get("batches"):
             source, factual = self.trajectory._data(self.trajectory._load(sid, aid))
@@ -119,9 +129,8 @@ class SessionSemantic:
     def _result(self, body, source, factual, semantic):
         if body.get("analysis_version") == "v3":
             from loom.evaluation.behavior import evaluation_payload
-            from loom.evaluation.behavior_facts import build_behavior_facts
 
-            return evaluation_payload(source, factual.get("behavior") or build_behavior_facts(source), semantic, model=body["model"],
+            return evaluation_payload(source, _behavior_facts(source, factual, body), semantic, model=body["model"],
                                       checkpoint_identity=body["checkpoint"].get("identity"))
         return {"semantic": semantic, "insights": build_insights(factual["summary"], semantic, factual["facts"]),
                 "proposals": proposals_from_diagnoses(semantic["diagnoses"], source_sha256=source.source_sha256,
@@ -345,9 +354,8 @@ class SessionSemantic:
                     raise ValueError(created.error.message)
                 provider = created.value
             if body.get("analysis_version") == "v3":
-                from loom.evaluation.behavior_facts import build_behavior_facts
-
-                behavior = result.get("behavior") or build_behavior_facts(source)
+                behavior = _behavior_facts(source, result, body)
+                result = {**result, "behavior": behavior}
                 body["total_segments"] = len(behavior["segments"])
                 judged = asyncio.run(run(source, behavior, provider))
                 if not judged.ok:

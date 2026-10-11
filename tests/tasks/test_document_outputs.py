@@ -37,7 +37,10 @@ async def test_report_writes_utf8_document_and_keeps_full_artifact(tmp_path):
         assert output["artifact"]["kind"] == "report"
         assert assembly.read_artifact(output["artifact"]["sha256"]) == {
             "report": content, "sources": ["source:book"], "path": "reports/ai-study.md", "bytes_written": len(content.encode("utf-8")),
+            "resource": output["resource"],
         }
+        assert output["resource"]["before_state"] == "absent"
+        assert output["resource"]["path"] == str(tmp_path / "reports/ai-study.md")
         binding = assembly.bindings["create_report"]
         assert binding.effect_kind == "side_effecting" and binding.resource_refs == ("reports",)
         assert "path" in binding.ref.input_schema["required"]

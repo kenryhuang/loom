@@ -50,7 +50,7 @@ def proposals_from_behavior(semantic, *, source_sha256, evaluator):
                 "alternatives": first.get("alternatives", []),
                 "preserve": list(dict.fromkeys(r.get("preserve", "") for r in rows if r.get("preserve"))),
                 "finding_ids": [r["id"] for r in rows],
-                "affected_scopes": [r["segment_id"] for r in rows],
+                "affected_scopes": list(dict.fromkeys(s for r in rows for s in r.get("segment_ids", [r["segment_id"]]))),
                 "supporting_refs": [ref for r in rows for ref in r["supporting_refs"]],
                 "counterevidence_refs": [ref for r in rows for ref in r.get("counterevidence_refs", [])],
                 "source_sha256": source_sha256,

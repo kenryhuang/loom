@@ -7,7 +7,10 @@ import time
 from dataclasses import asdict
 
 from loom.core import new_loop_id, new_run_id, now_iso, ok
+from loom.evaluation.behavior_budget import compact_segment, scan_pages, select_affordable, synthesis_inputs
 from loom.evaluation.behavior_contracts import ANALYZER_VERSION, CHECKPOINT_VERSION, DIMENSIONS, PATTERNS, PROMPT_VERSION, STATUSES, stable_id
+from loom.evaluation.behavior_progress import PLAN_STATUSES, PROGRESS_KINDS, merge_findings, merge_graph, node_identity, progress_timeline
+from loom.evaluation.behavior_sequence import focus_context
 from loom.evaluation.evidence_review import EvidenceReview
 from loom.evaluation.evidence_store import text_value
 from loom.evaluation.provider import evaluator_provider
@@ -25,7 +28,8 @@ References in indexes are navigation, not read evidence. Cite only exact returne
 You may request {"read_evidence":[EvidencePointer,...]} for original source ranges. Do not make absence claims from truncated text.
 For scan return {"candidate_segment_ids":[],"control_segment_ids":[],"rationale":"..."}; select both suspicious and effective segments.
 For focus return {"assessments":[{"segment_id":"...","dimension":"...","status":"effective|ineffective|mixed|unknown",
-"rationale":"...","evidence_refs":[]}],"diagnoses":[],"preserved_behaviors":[],"behavior_graph":{"nodes":[],"edges":[]}}.
+"rationale":"...","evidence_refs":[]}],"diagnoses":[],"preserved_behaviors":[],"progress":[],"plan_assessments":[],
+"behavior_graph":{"nodes":[],"edges":[]}}.
 Each diagnosis requires dimension, segment_id, pattern_type, mechanism_id (stable causal category), observation, mechanism,
 improvement_hypothesis, predicted_endpoint, validation (concrete matched-task check), intervention_surface, preserve,
 alternatives (array of plausible explanations), supporting_refs, counterevidence_refs, epistemic_status (observed|inferred|hypothesis|unknown).
@@ -38,6 +42,22 @@ For synthesis return {"summary":"...","finding_ids":[],"limitations":[]} referen
 Synthesis may reconcile findings, not invent new claims or erase local findings. Unknown evidence remains unknown.
 Be concise: at most 3 diagnoses per segment, 2 supporting quotes per diagnosis, and short rationales.
 Request only evidence needed to resolve a specific uncertainty; return unknown when bounded evidence is insufficient.
+Cross-step context and activity signals are navigation, not proof of relevance or progress. Review only the primary segment;
+use neighboring steps and repeated-operation endpoints to explain causes. Judge against the plan active at action time,
+not a later revision. Distinguish execution plans from acceptance criteria; justified replanning may be effective.
+Return progress (empty only when unsupported): [{segment_id, kind, label, evidence_refs}] with kind information_gain|hypothesis_eliminated|
+decision|artifact_change|blocker_resolution|verification. Each landmark needs delivered evidence in the primary segment
+showing a meaningful change. A new tool output or an agent's claim alone does not establish useful progress.
+Return plan_assessments: [{segment_id, plan_snapshot_id, node_id, status, rationale, evidence_refs}], where status is
+followed|justified_change|unjustified_deviation|incomplete|unknown. Cite actual actions and results, not just completion flags.
+Use only exact plans[].id as plan_snapshot_id and that snapshot's nodes[].id as node_id, with a primary-round binding.
+If no execution plan is bound to the primary segment, return plan_assessments: []. Never invent a plan/node ID or use
+null/"none"/"N/A" placeholders, even for unknown. Discuss informal planning in the plan_quality assessment instead.
+Return at most four progress landmarks and four plan assessments per focus. Prefer consequential changes over narration.
+Repeated reads may follow mutations, truncation or lost context. Ten tools without a recognizable new result only nominate
+a low_progress_window; negative results and parallel experiments can be useful. Do not equate tool count with wasted effort.
+Keep one diagnosis per mechanism and supporting evidence; use dimensions (array) for additional affected dimensions.
+For graph nodes reuse the same precise evidence ranges and labels when referring to the same earlier fact across steps.
 """
 
 
@@ -47,6 +67,8 @@ def empty_semantic(facts):
         "diagnoses": [],
         "assessments": [],
         "preserved_behaviors": [],
+        "progress": [],
+        "plan_assessments": [],
         "behavior_graph": {"nodes": [], "edges": []},
         "summary": "",
         "evidence_packets": [],
@@ -70,8 +92,9 @@ def partial_semantic(facts, checkpoint):
     for key, stage in stages.items():
         if not key.startswith("focus:"):
             continue
-        for field in ("diagnoses", "assessments", "preserved_behaviors"):
+        for field in ("diagnoses", "assessments", "preserved_behaviors", "progress", "plan_assessments"):
             result[field].extend(stage["result"].get(field, []))
+        result["coverage"]["limitations"].extend(stage["result"].get("limitations", []))
         for field in ("nodes", "edges"):
             result["behavior_graph"][field].extend(stage["result"].get("behavior_graph", {}).get(field, []))
         result["evidence_packets"].extend(stage.get("evidence_packets", []))
@@ -90,6 +113,7 @@ def partial_semantic(facts, checkpoint):
     reviewed = {a["segment_id"] for a in result["assessments"]}
     coverage["pending_segments"] = [sid for sid in checkpoint.get("selected", []) if sid not in reviewed]
     coverage["unselected_segments"] = [s["id"] for s in facts["segments"] if s["id"] not in checkpoint.get("selected", [])]
+    coverage["selection_budget"] = dict(checkpoint.get("selection_budget", {}))
     for d in DIMENSIONS:
         rows = [a for a in result["assessments"] if a["dimension"] == d]
         coverage["dimensions"][d] = {
@@ -107,6 +131,9 @@ def partial_semantic(facts, checkpoint):
     if coverage["scan_complete"] and coverage["synthesis_complete"] and coverage["attempted_segments"] == coverage["selected_segments"]:
         coverage["status"] = "complete"
     result["usage"] = dict(checkpoint.get("usage", {}))
+    result["diagnoses"] = merge_findings(result["diagnoses"])
+    result["behavior_graph"] = merge_graph(result["behavior_graph"])
+    result["progress"] = progress_timeline(facts, result["progress"])
     result["efficiency"] = {
         name: {"status": "unknown", "value": None, "basis": "No validated causal/visibility endpoints"}
         for name in (
@@ -135,7 +162,7 @@ def partial_semantic(facts, checkpoint):
     return result
 
 
-def _validate_focus(value, review, selected):
+def _validate_focus(value, review, selected, facts=None):
     if not isinstance(value, dict):
         raise ValueError("Focus response must be an object")
 
@@ -147,7 +174,7 @@ def _validate_focus(value, review, selected):
     def visible(items):
         return bool(items) and all(review.covers(r) for r in items)
 
-    for field in ("assessments", "diagnoses", "preserved_behaviors"):
+    for field in ("assessments", "diagnoses", "preserved_behaviors", "progress", "plan_assessments"):
         if not isinstance(value.get(field, []), list) or any(not isinstance(row, dict) for row in value.get(field, [])):
             raise ValueError(f"{field} must be an array of objects")
     if not isinstance(value.get("behavior_graph", {}), dict):
@@ -156,20 +183,30 @@ def _validate_focus(value, review, selected):
         rows = value.get("behavior_graph", {}).get(field, [])
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise ValueError(f"Graph {field} must be an array of objects")
-    assessments = {}
-    for a in value.get("assessments", []):
-        if a.get("segment_id") not in selected or a.get("dimension") not in DIMENSIONS or a.get("status") not in STATUSES:
-            raise ValueError("Invalid behavior assessment scope, dimension or status")
-        if not isinstance(a.get("rationale"), str):
-            raise ValueError("Assessment rationale must be a string")
+    assessments, issues = {}, []
+    rejected_assessments = {}
+    for index, a in enumerate(value.get("assessments", [])):
         evidence = refs(a.get("evidence_refs", []))
+        invalid = [key for key, allowed in (("segment_id", selected), ("dimension", DIMENSIONS), ("status", STATUSES))
+                   if not isinstance(a.get(key), str) or a[key] not in allowed]
+        if not isinstance(a.get("rationale"), str):
+            invalid.append("rationale")
+        if invalid:
+            issues.append({"field": f"assessments[{index}]", "invalid_fields": invalid, "action": "omitted",
+                           "reason": "Requires a selected segment, supported dimension/status and string rationale"})
+            if "segment_id" not in invalid and "dimension" not in invalid:
+                rejected_assessments[a["segment_id"], a["dimension"]] = ", ".join(invalid)
+            continue
         a = {**a, "evidence_refs": evidence}
         if a["status"] != "unknown" and not visible(evidence):
             a.update(status="unknown", rationale="Evidence exceeds delivered source ranges")
         assessments[a["segment_id"], a["dimension"]] = a
     for sid in selected:
         for d in DIMENSIONS:
-            assessments.setdefault((sid, d), {"segment_id": sid, "dimension": d, "status": "unknown", "rationale": "Not assessed", "evidence_refs": []})
+            reason = rejected_assessments.get((sid, d))
+            assessments.setdefault((sid, d), {"segment_id": sid, "dimension": d, "status": "unknown",
+                                             "rationale": f"Evaluator assessment omitted: invalid {reason}" if reason else "Not assessed",
+                                             "evidence_refs": []})
     diagnoses = []
     for d in value.get("diagnoses", []):
         if d.get("segment_id") not in selected or d.get("dimension") not in DIMENSIONS or d.get("pattern_type") not in PATTERNS:
@@ -189,6 +226,10 @@ def _validate_focus(value, review, selected):
         if not visible(support) or any(not review.covers(r) for r in counter):
             d["epistemic_status"] = "unknown"
         d["id"] = stable_id("finding", d["segment_id"], d["dimension"], d["pattern_type"], d["mechanism_id"])
+        dimensions = d.get("dimensions", [d["dimension"]])
+        if not isinstance(dimensions, list) or any(x not in DIMENSIONS for x in dimensions):
+            raise ValueError("Invalid diagnosis dimensions")
+        d["dimensions"] = list(dict.fromkeys([d["dimension"], *dimensions]))
         diagnoses.append(d)
     preserved = []
     for p in value.get("preserved_behaviors", []):
@@ -200,7 +241,8 @@ def _validate_focus(value, review, selected):
     graph = {"nodes": [], "edges": []}
     for n in value.get("behavior_graph", {}).get("nodes", []):
         evidence = refs(n.get("evidence_refs", []))
-        if n.get("kind") not in {"problem", "hypothesis", "evidence", "decision"} or not isinstance(n.get("id"), str):
+        if (n.get("kind") not in {"problem", "hypothesis", "evidence", "decision"} or not isinstance(n.get("id"), str)
+                or not isinstance(n.get("label", ""), str)):
             raise ValueError("Invalid behavior graph node")
         if visible(evidence):
             graph["nodes"].append({**n, "evidence_refs": evidence})
@@ -212,11 +254,56 @@ def _validate_focus(value, review, selected):
         if e.get("from") in ids and e.get("to") in ids and visible(evidence):
             # A judge's relationship is always an inference, never a deterministic recorded fact.
             graph["edges"].append({**e, "basis": "inferred", "evidence_refs": evidence})
-    namespace = ":".join(selected)
-    mapping = {n["id"]: stable_id("node", namespace, n["id"]) for n in graph["nodes"]}
+    mapping = {n["id"]: node_identity(n) for n in graph["nodes"]}
     graph["nodes"] = [{**n, "id": mapping[n["id"]]} for n in graph["nodes"]]
     graph["edges"] = [{**e, "from": mapping[e["from"]], "to": mapping[e["to"]]} for e in graph["edges"]]
-    return {"assessments": list(assessments.values()), "diagnoses": diagnoses, "preserved_behaviors": preserved, "behavior_graph": graph}
+    progress, plan_assessments = [], []
+    segments = {s["id"]: s for s in (facts or {}).get("segments", [])}
+    for p in value.get("progress", []):
+        if p.get("segment_id") not in selected or p.get("kind") not in PROGRESS_KINDS or not isinstance(p.get("label"), str):
+            raise ValueError("Invalid progress landmark")
+        evidence = refs(p.get("evidence_refs", []))
+        primary_lines = {r["line_number"] for r in segments.get(p["segment_id"], {}).get("evidence_refs", [])}
+        anchors = [r["line_number"] for r in evidence if r["line_number"] in primary_lines]
+        if visible(evidence) and anchors:
+            progress.append({"segment_id": p["segment_id"], "kind": p["kind"], "label": p["label"],
+                             "evidence_refs": evidence, "line": max(anchors), "basis": "inferred"})
+    plans = {p["id"]: p for p in (facts or {}).get("plan_revisions", [])}
+    for index, p in enumerate(value.get("plan_assessments", [])):
+        # Source integrity remains strict, even for an unusable optional plan judgment.
+        evidence = refs(p.get("evidence_refs", []))
+        invalid = [k for k in ("segment_id", "plan_snapshot_id", "node_id", "status", "rationale")
+                   if not isinstance(p.get(k), str) or not p[k].strip()]
+        plan = plans.get(p["plan_snapshot_id"], {}) if "plan_snapshot_id" not in invalid else {}
+        segment = segments.get(p["segment_id"], {}) if "segment_id" not in invalid else {}
+        if "segment_id" not in invalid and p["segment_id"] not in selected:
+            invalid.append("segment_id")
+        if "status" not in invalid and p["status"] not in PLAN_STATUSES:
+            invalid.append("status")
+        if not plan or plan.get("episode_id") != segment.get("episode_id"):
+            invalid.append("plan_snapshot_id")
+        if "node_id" not in invalid and p["node_id"] not in {n["id"] for n in plan.get("nodes", [])}:
+            invalid.append("node_id")
+        if invalid:
+            # Never fabricate a binding or discard unrelated, valid segment findings.
+            issues.append({"field": f"plan_assessments[{index}]", "invalid_fields": sorted(set(invalid)),
+                           "action": "omitted", "reason": "Requires a recorded same-episode plan/node, selected segment, valid status and rationale"})
+            continue
+        primary_lines = {r["line_number"] for r in segment.get("evidence_refs", [])}
+        supported = visible(evidence) and any(r["line_number"] in primary_lines for r in evidence)
+        active_plans = {c.get("plan_snapshot_id") for c in (facts or {}).get("model_calls", []) if c["id"] in segment.get("round_ids", [])}
+        supported = supported and p["plan_snapshot_id"] in active_plans
+        plan_assessments.append({**p, "evidence_refs": evidence, "status": p["status"] if supported else "unknown"})
+    limitations = []
+    for field, label in (("assessments", "behavior assessment"), ("plan_assessments", "optional plan assessment")):
+        rejected = [issue for issue in issues if issue["field"].startswith(field + "[")]
+        if rejected:
+            limitations.append(f"{', '.join(selected)}: omitted {len(rejected)} invalid {label}(s); "
+                               "no conclusion was accepted from those entries (invalid fields: "
+                               + ", ".join(sorted({key for issue in rejected for key in issue["invalid_fields"]})) + ").")
+    return {"assessments": list(assessments.values()), "diagnoses": diagnoses, "preserved_behaviors": preserved,
+            "behavior_graph": graph, "progress": progress, "plan_assessments": plan_assessments,
+            "validation_issues": issues, "limitations": limitations}
 
 
 async def judge_behavior(
@@ -291,11 +378,17 @@ async def judge_behavior(
             # Re-present exact source ranges, not broader earlier reads. These quotes actually enter this prompt.
             packets.append(review.present(packet["returned_ref"], max_chars=max(1, packet["returned_chars"])))
         initial_chars = 0
-        for ref in initial_refs:
+        unique_initial = {json.dumps(r, sort_keys=True): r for r in initial_refs}
+        for ref in unique_initial.values():
             remaining = min(max_evidence_chars - usage["evidence_chars"], min(12000, max_prompt_chars // 3) - initial_chars)
             if remaining <= 0:
                 break
-            packet = review.present(ref, max_chars=min(1200, remaining))
+            limit = min(1200, remaining)
+            preview = store.read(ref, max_chars=limit)
+            candidate = {"stage": key, **payload, "evidence_packets": [*packets, preview]}
+            if len(RUBRIC) + len(json.dumps(candidate, ensure_ascii=False)) > max_prompt_chars - 1000:
+                break
+            packet = review.present(ref, max_chars=limit)
             packets.append(packet)
             usage["evidence_chars"] += packet["returned_chars"]
             initial_chars += packet["returned_chars"]
@@ -305,15 +398,15 @@ async def judge_behavior(
         operation = "review"
         for read in range(max_read_rounds + 2):
             # Keep synthesis reserve independent of earlier stage consumption.
-            reserve_calls = 0 if key == "synthesis" else max(1, int(max_calls * 0.2))
-            reserve_tokens = 0 if key == "synthesis" else int(max_tokens * 0.2)
             family = key.split(":")[0]
-            allocation = {"scan": 0.15, "focus": 0.60, "synthesis": 0.20}[family]
+            reserve_calls = 0 if family == "synthesis" else 1
+            reserve_tokens = 0 if family == "synthesis" else min(12000, int(max_tokens * 0.1))
+            if family == "scan":
+                reserve_calls += min(2, max_segments, max(0, max_calls - 3))
+                reserve_tokens += min(16000, int(max_tokens * 0.2))
             stage_usage = cp["stage_usage"].setdefault(family, {"calls": 0, "total_tokens": 0})
-            if stage_usage["calls"] >= max(1, int(max_calls * allocation)) or stage_usage["total_tokens"] >= max_tokens * allocation:
-                raise ValueError(f"Evaluation {family} stage budget reached; stage checkpoints retained")
             if usage["calls"] >= max_calls - reserve_calls or usage["total_tokens"] >= max_tokens - reserve_tokens:
-                raise ValueError("Evaluation budget reached; stage checkpoints retained")
+                raise ValueError(f"Evaluation total budget reached at {family}; remaining capacity reserved for downstream stages")
             if sum(len(m.content or "") for m in messages) > max_prompt_chars:
                 raise ValueError(f"Evaluation prompt budget reached at {key}; no source content was silently discarded")
             seconds = max_call_seconds
@@ -347,6 +440,7 @@ async def judge_behavior(
                 raise ValueError(sent.error.message)
             usage["calls"] += 1
             stage_usage["calls"] += 1
+            stage_usage["request_chars"] = stage_usage.get("request_chars", 0) + sum(len(m.content or "") for m in messages)
             usage["unreported_calls"] += 1
             await persist()
             call_started = time.monotonic()
@@ -372,6 +466,7 @@ async def judge_behavior(
             await emit({"type": "llm.completed", **base, "response": response.value})
             usage["unreported_calls"] -= 1
             stage_usage["total_tokens"] += getattr(response.value.usage, "total_tokens", 0)
+            stage_usage["prompt_tokens"] = stage_usage.get("prompt_tokens", 0) + getattr(response.value.usage, "prompt_tokens", 0)
             for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
                 usage[name] += getattr(response.value.usage, name, 0)
             await persist()
@@ -394,10 +489,18 @@ async def judge_behavior(
                         remaining = max_evidence_chars - usage["evidence_chars"]
                         if remaining <= 0:
                             raise ValueError("Evidence character budget reached")
-                        packet = review.present(ref, max_chars=min(12000, remaining))
+                        room = max_prompt_chars - sum(len(m.content or "") for m in messages) - 1000
+                        room -= len(json.dumps({"evidence_packets": evidence}, ensure_ascii=False))
+                        limit = min(12000, remaining, max(1, room // 2))
+                        preview = store.read(ref, max_chars=limit)
+                        if len(json.dumps(preview, ensure_ascii=False)) > room:
+                            break
+                        packet = review.present(ref, max_chars=limit)
                         evidence.append(packet)
                         packets.append(packet)
                         usage["evidence_chars"] += packet["returned_chars"]
+                    if not evidence:
+                        raise ValueError("Evaluation prompt budget reached while reading evidence; saved stages retained")
                     operation = "read_evidence"
                     messages.append(LlmMessage("user", json.dumps({"evidence_packets": evidence}, ensure_ascii=False)))
                     continue
@@ -407,7 +510,7 @@ async def judge_behavior(
                         if not isinstance(value.get(field), list) or any(s not in allowed for s in value[field]):
                             raise ValueError("Invalid scan selection")
                 elif key.startswith("focus:"):
-                    value = _validate_focus(value, review, selected)
+                    value = _validate_focus(value, review, selected, facts)
                 else:
                     allowed = {d["id"] for s in cp["stages"].values() for d in s["result"].get("diagnoses", [])}
                     if (
@@ -458,59 +561,60 @@ async def judge_behavior(
         raise ValueError("Evaluation evidence read budget reached")
 
     # Bounded pages scan the complete index, not repeated global indexes in every focused review.
-    index = [
-        {
-            "id": s["id"],
-            "episode_id": s["episode_id"],
-            "goal_revision_id": s["goal_revision_id"],
-            "evidence_refs": s["evidence_refs"],
-            "navigation": s.get("navigation", []),
-        }
-        for s in facts["segments"]
-    ]
-    pages, page = [], []
-    limit = max(1000, max_prompt_chars // 3)
-    for row in index:
-        if page and len(json.dumps(page + [row])) > limit:
-            pages.append(page)
-            page = []
-        page.append(row)
-    if page:
-        pages.append(page)
+    pages = scan_pages(facts, cp, max_prompt_chars)
+    index = [s for page in pages for s in page]
     cp["scan_pages"] = len(pages)
     await persist()
     choices = [sid for window in facts["candidate_windows"] for sid in window["segment_ids"]]
     controls = []
     for n, page in enumerate(pages):
+        page_ids = {s["id"] for s in page}
+        candidates = [w for w in facts["candidate_windows"] if page_ids.intersection(w["segment_ids"])]
+        page_windows = [{"pattern_type": w["pattern_type"], "status": w["status"], "basis": w["basis"],
+                         "segment_ids": [sid for sid in w["segment_ids"] if sid in page_ids]} for w in candidates[:32]]
         scanned = await stage(
             f"scan:{n}",
             {
                 "segment_index": page,
-                "candidate_windows": facts["candidate_windows"],
+                "candidate_windows": page_windows,
+                "candidate_window_index_coverage": {"included": len(page_windows), "total_on_page": len(candidates)},
                 "goals": [{k: g[k] for k in ("id", "objective", "state", "applied_line", "visible_line")} for g in facts["goal_revisions"]],
             },
-            initial_refs=[r for s in page for r in s["evidence_refs"][:1]],
         )
         choices.extend(scanned["candidate_segment_ids"])
         controls.extend(scanned["control_segment_ids"])
     cp["scan_complete"] = True
     cp["limitations"] = [limitation for limitation in cp["limitations"] if "budget reached" not in limitation]
-    # Include a systematic control even when the judge only nominates suspicious segments.
+    def focus_inputs(s):
+        context = focus_context(facts, s)
+        context["context_segments"] = [compact_segment(row) for row in context["context_segments"]]
+        related = [w for w in facts["candidate_windows"] if s["id"] in w["segment_ids"]]
+        anchors = [r for w in related[:3] for r in w.get("evidence_refs", [])[:2]]
+        anchors += [t["raw_output_ref"] for t in facts["tool_uses"] if t["round_id"] in s["round_ids"] and t.get("raw_output_ref")]
+        anchors += [r for p in context["plans"] for r in p["evidence_refs"][:1]]
+        payload = {"segments": [compact_segment(s)],
+                   "goals": [g for g in facts["goal_revisions"] if g["episode_id"] == s["episode_id"]],
+                   **context, "candidate_windows": related[:8]}
+        return payload, anchors + s["evidence_refs"]
+
+    # Include a control, then prioritize suspicious segments. The cap is an upper limit,
+    # not a promise to review eight expensive segments regardless of remaining resources.
     fallback = [index[-1]["id"]] if index else []
-    selected = list(dict.fromkeys(controls[: max(1, max_segments // 4)] + fallback + choices))[:max_segments]
+    candidates = list(dict.fromkeys((controls[:1] or fallback) + choices + fallback + controls[1:]))
+    prepared = {s["id"]: focus_inputs(s) for s in facts["segments"] if s["id"] in candidates[:max_segments] or s["id"] in cp.get("selected", [])}
+    sizes = {sid: len(RUBRIC) + len(json.dumps(p, ensure_ascii=False)) + min(12000, max_prompt_chars // 3)
+             for sid, (p, _) in prepared.items()}
+    selected = select_affordable(candidates, sizes, cp, max_segments=max_segments, max_calls=max_calls,
+                                 max_tokens=max_tokens, max_read_rounds=max_read_rounds)
     cp["selected"] = selected
     await persist()
     for sid in selected:
-        s = next(s for s in facts["segments"] if s["id"] == sid)
+        payload, anchors = prepared[sid]
         try:
             await stage(
                 f"focus:{sid}",
-                {
-                    "segments": [s],
-                    "goals": [g for g in facts["goal_revisions"] if g["episode_id"] == s["episode_id"]],
-                    "plans": [p for p in facts["plan_revisions"] if p["episode_id"] == s["episode_id"]],
-                },
-                initial_refs=s["evidence_refs"],
+                payload,
+                initial_refs=anchors,
                 selected=[sid],
             )
         except ValueError as exc:
@@ -520,9 +624,10 @@ async def judge_behavior(
             await persist()
             break
     local = partial_semantic(facts, cp)
+    synthesis, quotes = synthesis_inputs(local, max_prompt_chars)
     await stage(
         "synthesis",
-        {"diagnoses": local["diagnoses"], "preserved_behaviors": local["preserved_behaviors"], "coverage": local["coverage"]},
-        inherited=local["evidence_packets"],
+        synthesis,
+        inherited=quotes,
     )
     return ok(partial_semantic(facts, cp))

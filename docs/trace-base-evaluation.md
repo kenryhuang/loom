@@ -25,3 +25,12 @@ The report has five sections, with all-source and per-run views:
 - Acceptance shows recorded conditions, reasons and method; a semantic check remains a model judgment. An evidence artifact is not itself a passed verdict. Prior semantic outcome fields remain available to Deep evaluation without a second unverified headline in the factual UI.
 
 The shared implementation lives in `evaluation/base_metrics.py`; token accounting uses `evaluation/token_ledger.py`. The service version and behavior analyzer version change when these semantics change, so cached reports are regenerated on the next analysis request. Existing saved reports remain readable.
+
+## Dashboard presentation
+
+Trace analysis uses a single run selector beside Refresh analysis. The selector scopes both the statistical panels and
+call explorer, and persists across refresh. The default view contains Basic info, a dedicated Acceptance panel, Tool calls,
+Runtime cost, Model & token cost, Outputs and Data quality. Time and token splits use stacked charts; acceptance uses a
+completion ring and a condition table with evidence links. Tool/model grouping switches the displayed table rather than
+adding parallel tables. Behavior facts retain their explicit all-run scope and are collapsed, along with event breakdowns,
+measurement notes and detailed coverage. The call explorer is the sole per-call detail view. No aggregation semantics change.

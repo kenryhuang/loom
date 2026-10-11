@@ -18,7 +18,7 @@ from loom.service.contracts import ServiceError, canonical, new_id
 from loom.trace_analysis import build_episode_graph
 from loom.trace_analysis.links import tool_output
 
-VERSION = "session-trajectory.4.0"
+VERSION = "session-trajectory.4.1"
 
 
 def session_records(events, read_artifact):
@@ -126,6 +126,7 @@ def analyze_session_trace(source, coverage):
     summary["base"] = behavior["base"]
     summary["goal_revisions"] = behavior["goal_revisions"]
     summary["plan_revisions"] = behavior["plan_revisions"]
+    summary["sequence"] = behavior["sequence"]
     return {"summary": summary, "facts": asdict(facts), "behavior": behavior}
 
 

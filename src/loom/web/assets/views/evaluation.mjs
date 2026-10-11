@@ -280,7 +280,11 @@ export class EvaluationView {
       if (behavior) {
         const state = ({running: "Behavior review in progress", queued: "Waiting to start", completed: "Behavior review completed", budget_exhausted: "Partial behavior review saved"})[job.state] || `Behavior review ${job.state}`;
         this.status.textContent = `${state} · ${stageLabel(job.stage)} · ${job.reviewed_segments || 0} / ${job.selected_segments ?? "?"} selected segments reviewed.`;
-        if (job.state === "budget_exhausted") this.status.textContent += " Results are available below. Resume is optional; completed stages will be reused.";
+        this.status.textContent += ` ${count(usage.calls)} / ${count(job.settings.max_calls)} calls · ${count(usage.total_tokens)} / ${count(job.settings.max_tokens)} reported tokens.`;
+        if (job.error) this.status.textContent += ` ${job.error}`;
+        if (job.state === "budget_exhausted") this.status.textContent += job.reviewed_segments
+          ? " Reviewed results are available below. Completed stages will be reused on resume."
+          : " No focused review has completed. Saved scan pages will be reused on resume.";
       } else {
         this.status.textContent = `${job.state} · ${job.stage || "Preparing"} · ${job.reviewed_rounds || 0} / ${job.total_rounds ?? "?"} rounds reviewed · ${job.completed_batches || 0} saved batches · ${count(usage.calls)} calls · ${count(usage.total_tokens)} reported tokens${job.error ? ` · ${job.error}` : ""}`;
         if (job.state === "budget_exhausted") this.status.textContent += " · Saved batches retained. Start a new behavior evaluation for bounded review, or increase the exhausted total budget and resume v2.";

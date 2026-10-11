@@ -4,8 +4,8 @@ import hashlib
 import json
 
 SCHEMA_VERSION = "loom.evaluation.bundle.v3"
-ANALYZER_VERSION = "behavior-evaluation.3.4"
-PROMPT_VERSION = "behavior-rubric.3.2"
+ANALYZER_VERSION = "behavior-evaluation.3.5"
+PROMPT_VERSION = "behavior-rubric.3.3"
 CHECKPOINT_VERSION = "behavior-checkpoint.1"
 DIMENSIONS = ("intent_alignment", "plan_quality", "progress_effectiveness", "investigation_efficiency", "adaptation_recovery")
 PATTERNS = (
@@ -18,6 +18,7 @@ PATTERNS = (
     "premature_closure",
     "causal_recovery",
     "discriminative_investigation",
+    "low_progress_window",
     "other",
 )
 STATUSES = ("effective", "ineffective", "mixed", "unknown")

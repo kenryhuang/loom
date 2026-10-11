@@ -1,4 +1,5 @@
 import { renderBaseEvaluation } from "./behavior-evaluation.mjs";
+import { renderBehaviorSequence } from "./behavior-sequence.mjs";
 import { element } from "../markdown.mjs";
 import { EvaluationView } from "./evaluation.mjs";
 import { renderVerificationArtifact } from "./activity-row.mjs";
@@ -100,36 +101,32 @@ export class TrajectoryView {
   snapshotLabel() {
     if (!this.job || !this.status) return;
     const stale = this.cursor > this.job.source_cursor;
-    this.status.textContent =
-      this.job.state === "completed"
-        ? `Snapshot through event ${this.job.source_cursor}${stale ? " · New events available — refresh analysis to include them." : " · Up to date."}`
-        : `Analyzing snapshot through event ${this.job.source_cursor}…`;
+    this.status.textContent = this.job.state === "completed"
+      ? (stale ? "New events available" : "") : "Analyzing…";
+    this.status.title = `Snapshot through event ${this.job.source_cursor}`;
+    this.refresh.title = this.status.title;
+    this.status.hidden = this.selectedTab !== 0 || (this.job.state === "completed" && !stale);
   }
   async open(api, sessionId, cursor = 0) {
+    const selectedRun = this.sessionId === sessionId ? this.runFilter?.value || "" : "";
     this.close();
+    this.selectedRun = selectedRun;
     this.api = api;
     this.sessionId = sessionId;
     this.cursor = cursor;
     this.abort = new AbortController();
     const signal = this.abort.signal;
     this.root.hidden = false;
-    const heading = element("div", "trajectory-heading");
-    const title = element("div");
-    title.append(
-      element("h2", "", "Trace analysis"),
-      element(
-        "p",
-        "muted small",
-        "Recorded calls, context and execution evidence.",
-      ),
-    );
-    this.refresh = button("Refresh analysis", () =>
-      this.open(api, sessionId, this.cursor),
-    );
+    const heading = element("div", "trajectory-heading dashboard-toolbar");
+    this.runFilter = element("select");
+    this.runFilter.setAttribute("aria-label", "Filter trajectory by run");
+    this.runFilter.append(option("All runs", ""));
+    this.runFilter.disabled = true;
+    this.refresh = button("Refresh analysis", () => this.open(api, sessionId, this.cursor));
     this.refresh.disabled = true;
-    heading.append(title, this.refresh);
-    this.status = element("p", "muted small", "Preparing analysis…");
+    this.status = element("span", "dashboard-sync", "Preparing analysis…");
     this.status.setAttribute("role", "status");
+    heading.append(this.runFilter, this.status, this.refresh);
     this.body = element("div", "trajectory-body");
     const tabs = element("div", "evaluation-tabs");
     tabs.setAttribute("role", "tablist");
@@ -160,7 +157,7 @@ export class TrajectoryView {
     this.deepPanel.append(
       element("p", "muted", "Preparing snapshot for evaluation…"),
     );
-    this.root.append(tabs, heading, this.status, this.body, this.deepPanel);
+    this.root.append(tabs, heading, this.body, this.deepPanel);
     this.traceHeading = heading;
     this.selectTab(this.selectedTab || 0);
     try {
@@ -199,7 +196,7 @@ export class TrajectoryView {
     this.body.hidden = index !== 0;
     this.deepPanel.hidden = index !== 1;
     this.traceHeading.hidden = index !== 0;
-    this.status.hidden = index !== 0;
+    this.status.hidden = index !== 0 || !this.status.textContent;
     this.tabs.forEach((tab, i) => {
       tab.setAttribute("aria-selected", String(i === index));
       tab.tabIndex = i === index ? 0 : -1;
@@ -208,6 +205,11 @@ export class TrajectoryView {
   render() {
     const data = this.analysis;
     this.body.replaceChildren();
+    this.runFilter.replaceChildren(option("All runs", ""));
+    const runIds = [...new Set([...data.run_ids, ...Object.keys(data.base?.statistics?.by_run || {})])];
+    for (const [index, id] of runIds.entries()) this.runFilter.append(option(`Run ${index + 1} · ${id}`, id));
+    if (runIds.includes(this.selectedRun)) this.runFilter.value = this.selectedRun;
+    this.runFilter.disabled = false;
     if (this.api.evaluations) {
       const evaluation = element("section", "trajectory-evaluation");
       this.deepPanel.replaceChildren(evaluation);
@@ -251,26 +253,20 @@ export class TrajectoryView {
       );
       cards.append(card);
     }
-    this.body.append(
-      ...(data.base?.statistics ? [] : [cards]),
-      element(
-        "p",
-        "muted small",
-        "Execution metrics and goal acceptance. Use Deep evaluation to inspect intent, planning and progress.",
-      ),
-    );
+    if (!data.base?.statistics) this.body.append(cards);
     if (data.base)
       renderBaseEvaluation(
         this.body,
         data.base,
         data.goal_revisions,
         data.plan_revisions,
-        {evidence: ref => this.showEvidence(ref), artifact: digest => this.showArtifact(digest)},
+        {evidence: ref => this.showEvidence(ref), artifact: digest => this.showArtifact(digest), scope: this.runFilter},
       );
+    renderBehaviorSequence(this.body, data.sequence, {evidence: ref => this.showEvidence(ref)});
     const missing = data.rounds.filter(
       (row) => row.usage.total_tokens == null,
     ).length;
-    if (missing)
+    if (missing && !data.base?.statistics)
       this.body.append(
         element(
           "p",
@@ -279,8 +275,8 @@ export class TrajectoryView {
         ),
       );
     if (
-      data.coverage.missing_artifacts.length ||
-      data.coverage.unscoped_model_events
+      !data.base?.statistics && (data.coverage.missing_artifacts.length ||
+      data.coverage.unscoped_model_events)
     )
       this.body.append(
         element(
@@ -301,7 +297,7 @@ export class TrajectoryView {
       tasks.append(
         element("p", "", task.objective || "Task objective not recorded"),
       );
-    this.body.append(tasks);
+    if (data.task_contracts.length) this.body.append(tasks);
     if (data.failures.length) {
       const errors = element("details", "trajectory-section");
       errors.append(
@@ -322,11 +318,6 @@ export class TrajectoryView {
       this.body.append(errors);
     }
     const filters = element("div", "trajectory-filters");
-    this.runFilter = element("select");
-    this.runFilter.setAttribute("aria-label", "Filter trajectory by run");
-    this.runFilter.append(option("All runs", ""));
-    for (const [index, id] of data.run_ids.entries())
-      this.runFilter.append(option(`Run ${index + 1} · ${id}`, id));
     this.statusFilter = element("select");
     this.statusFilter.setAttribute("aria-label", "Filter trajectory by status");
     for (const [label, value] of [
@@ -340,9 +331,14 @@ export class TrajectoryView {
     this.search.setAttribute("aria-label", "Search trajectory");
     for (const field of [this.runFilter, this.statusFilter, this.search])
       field.addEventListener("input", () => this.renderRounds());
-    filters.append(this.runFilter, this.statusFilter, this.search);
+    this.runFilter.addEventListener("change", () => this.renderRounds());
+    const callSection = element("section", "dashboard-panel dashboard-calls");
+    const callHeading = element("header", "dashboard-panel-heading");
+    callHeading.append(element("h3", "", "Call explorer"));
+    filters.append(this.statusFilter, this.search);
     this.timeline = element("div", "trajectory-timeline");
-    this.body.append(filters, this.timeline);
+    callSection.append(callHeading, filters, this.timeline);
+    this.body.append(callSection);
     this.renderRounds();
     const unlinked = data.tools.filter((tool) => !tool.round_id);
     if (unlinked.length) {

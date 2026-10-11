@@ -2,6 +2,13 @@
 
 [中文说明](behavior-evaluation-v3.zh-CN.md)
 
+The [cross-step refactor design and delivery plan](behavior-sequence-refactor.md) describes analyzer 3.5 / rubric 3.3.
+Base now shows execution-plan associations, repeated resource observations, activity signals and low-progress candidates.
+Deep reviews bounded neighboring steps and emits cited progress landmarks and plan-adherence assessments. Endpoint costs
+retain per-subject observations; overlapping windows are not additive. New file operations record version/range metadata,
+including workspace reports. Older traces retain explicit coverage limitations. Start a new evaluation for the new rubric;
+historical reports remain readable, but checkpoints from an earlier rubric cannot be resumed with different semantics.
+
 V3 separates **Base evaluation** (recorded calls, steps, tokens and independently verified goal outcomes) from **Deep evaluation** (intent, plan quality, progress, investigation efficiency and recovery). It is the default for new Web/service evaluations. Human calibration gates in the [design](superpowers/specs/2026-10-08-behavior-evaluation-evolution-design.md) remain pending; the default change is an operational choice, not a claim of measured accuracy or savings.
 
 ## Use it
@@ -45,7 +52,7 @@ Saved v2 jobs keep their original version and settings. **New behavior evaluatio
 - Source quotes and exact delivered ranges accompany findings into synthesis. If synthesis fails, saved local findings remain available.
 - Endpoint metrics require cited causal or visibility endpoints. Unsupported cause claims, unseen evidence and unrelated later successes cannot manufacture recovery or adoption metrics. Some endpoints, including plan-response lag, remain unknown when no reliable binding is present. Overlapping causal windows are not additive; redundant cost deduplicates primary call owners. Inferred costs are not predicted savings.
 
-The stage admission policy assigns 15% of calls/tokens to scanning, 60% to focus, 20% to synthesis and at most 5% of calls to repair (one repair per stage response). Very small call budgets use minimum stage allowances but still obey the global limit. Output caps are 2048 tokens for scan/synthesis and 4096 for focus for the built-in provider; smaller configured output limits are honored. Evaluation disables configured `enable_thinking` and lowers configured `reasoning_effort` to `low`, without changing the solver provider. Token thresholds are checked before calls; in-flight usage can exceed them. Interrupted calls retain unknown usage instead of recording zero. Resume preserves cumulative usage and completed stages.
+Stages share the total call/token budget instead of fixed percentage ceilings. One call and up to 12,000 tokens are reserved for synthesis; scan also leaves capacity for focused review. Compact navigation pages preserve saved scan pages and repack only the unscanned suffix. Focus scope is planned from remaining capacity and observed token density; the configured segment count is an upper bound, with budget-planned sampling disclosed in coverage. Synthesis receives validated findings and bounded cited excerpts instead of all focus context. Repairs remain limited to 5% of calls and one repair per stage response. Output caps are 2048 tokens for scan/synthesis and 4096 for focus for the built-in provider; smaller configured output limits are honored. Evaluation disables configured `enable_thinking` and lowers configured `reasoning_effort` to `low`, without changing the solver provider. Token thresholds are checked before calls; in-flight usage can exceed them. Interrupted calls retain unknown usage instead of recording zero. Resume preserves cumulative usage and completed stages.
 
 ## Evolve and optimization
 

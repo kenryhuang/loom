@@ -95,11 +95,12 @@ test("browser app connects to real service, answers input, creates sessions, con
     assert.ok($("event-feed").querySelector(".task-block .result"));
     $("nav-evaluation").click();
     await until(() =>
-      $("trajectory-page").querySelector(".trajectory-metrics"),
+      $("trajectory-page").querySelector(".trace-dashboard"),
     );
     assert.equal(location.hash, `#/evaluation/${questionId}`);
     assert.equal($("conversation-page").hidden, true);
-    assert.match($("trajectory-page").textContent, /Use Deep evaluation/);
+    assert.match($("trajectory-page").textContent, /Basic info/);
+    assert.doesNotMatch($("trajectory-page").textContent, /Use Deep evaluation/);
     history.back();
     await until(() => !$("conversation-page").hidden);
     assert.equal($("trajectory-page").hidden, true);

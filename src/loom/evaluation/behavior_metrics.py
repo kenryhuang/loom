@@ -12,38 +12,42 @@ def endpoint_metrics(facts, graph, assessments=()):
     )
     result = {name: {"status": "unknown", "value": None, "basis": "No validated causal/visibility endpoints"} for name in names}
     nodes = {n["id"]: n for n in graph["nodes"]}
-    calls = {c["id"]: c for c in facts["model_calls"]}
-    ledger = {r["round_id"]: r for r in facts["token_ledger"]}
+    from loom.evaluation.behavior_progress import interval_cost
 
     def line(node):
         return max((r["line_number"] for r in node.get("evidence_refs", [])), default=None)
 
+    def goal_at(line_number, episode_id):
+        return max((g for g in facts.get("goal_revisions", []) if g["episode_id"] == episode_id
+                    and g.get("applied_line") is not None and g["applied_line"] <= line_number),
+                   key=lambda g: g["applied_line"], default=None)
+
     def cost(start, end, basis, refs):
-        if start is None or end is None or end < start:
-            return {"status": "unknown", "value": None, "basis": "Missing or reversed endpoints"}
         ep_id = facts.get("event_episode_ids", {}).get(str(end))
-        ids = [
-            c["id"]
-            for c in calls.values()
-            if c["episode_id"] == ep_id and start <= (c.get("request_ref") or c.get("response_ref") or {}).get("line_number", -1) <= end
-        ]
-        values = [ledger.get(i, {}).get("total_tokens") for i in ids]
-        return {
-            "status": "inferred" if all(v is not None for v in values) else "partial",
-            "known_tokens": sum(v or 0 for v in values),
-            "model_calls": len(ids),
-            "round_ids": ids,
-            "start_line": start,
-            "end_line": end,
-            "evidence_refs": refs,
-            "basis": basis,
-        }
+        if ep_id is None or facts.get("event_episode_ids", {}).get(str(start)) != ep_id:
+            return {"status": "unknown", "basis": "Missing or cross-episode endpoints"}
+        start_goal, end_goal = goal_at(start, ep_id), goal_at(end, ep_id)
+        if start_goal and end_goal and start_goal["id"] != end_goal["id"]:
+            return {"status": "unknown", "basis": "Endpoints cross an applied goal revision"}
+        value = interval_cost(facts, start, end, ep_id)
+        if value["status"] == "measured":
+            value["status"] = "inferred"
+        return {**value, "evidence_refs": refs, "basis": basis, "goal_revision_id": end_goal["id"] if end_goal else None}
+
+    observations = {name: [] for name in names}
+
+    def record(name, value, subject):
+        if value.get("status") != "unknown":
+            value["subject_id"] = subject
+            if value not in observations[name]:
+                observations[name].append(value)
 
     support = {}
     for edge in graph["edges"]:
         a, b = nodes.get(edge["from"]), nodes.get(edge["to"])
         if edge["kind"] == "supports" and a and b and a["kind"] == "evidence" and b["kind"] == "hypothesis":
-            support[b["id"]] = max(line(a) or 0, line(b) or 0, max((r["line_number"] for r in edge["evidence_refs"]), default=0))
+            endpoint = max(line(a) or 0, line(b) or 0, max((r["line_number"] for r in edge["evidence_refs"]), default=0))
+            support[b["id"]] = min(support.get(b["id"], endpoint), endpoint)
     for edge in graph["edges"]:
         a, b = nodes.get(edge["from"]), nodes.get(edge["to"])
         if not a or not b:
@@ -53,21 +57,22 @@ def endpoint_metrics(facts, graph, assessments=()):
         episode = next((ep for ep in facts["episodes"] if ep["id"] == ep_id), None)
         if episode is None:
             continue
+        active_goal = goal_at(endpoint, ep_id)
+        origin = max(episode["start_line"], active_goal["applied_line"] if active_goal else episode["start_line"])
         refs = a["evidence_refs"] + b["evidence_refs"] + edge["evidence_refs"]
         if edge["kind"] == "refutes" and a["kind"] == "evidence":
-            prior = result["cost_to_discriminative_evidence"].get("end_line")
-            if prior is None or endpoint < prior:
-                result["cost_to_discriminative_evidence"] = cost(
-                    episode["start_line"], endpoint, "First cited evidence eliminating a hypothesis; causal classification is inferred", refs
-                )
+            record("cost_to_discriminative_evidence", cost(
+                origin, endpoint, "Cited evidence eliminating a hypothesis; causal classification is inferred", refs
+            ), b["id"])
         if edge["kind"] == "resolves" and a["kind"] == "hypothesis" and b["kind"] == "problem" and a["id"] in support:
             endpoint = support[a["id"]]
-            result["cost_to_supported_cause"] = cost(
-                episode["start_line"], endpoint, "Cited hypothesis resolves the problem; inferred cause, not a proven counterfactual", refs
-            )
-            result["causal_recovery_cost"] = cost(line(b), endpoint, "Problem-to-resolution edge; never the first unrelated success after a failure", refs)
+            record("cost_to_supported_cause", cost(
+                origin, endpoint, "Cited hypothesis resolves the problem; inferred cause, not a proven counterfactual", refs
+            ), b["id"])
+            record("causal_recovery_cost", cost(line(b), endpoint, "Problem-to-resolution edge; never an unrelated later success", refs), b["id"])
         if edge["kind"] == "verifies" and a["kind"] == "evidence" and b["kind"] == "hypothesis" and b["id"] in support:
-            result["cause_to_verification"] = cost(support[b["id"]], endpoint, "Supported cause-to-verification endpoints; oracle scope still applies", refs)
+            record("cause_to_verification", cost(support[b["id"]], endpoint,
+                                                 "Supported cause-to-verification endpoints; oracle scope still applies", refs), b["id"])
         if edge["kind"] == "uses" and a["kind"] == "decision" and b["kind"] == "evidence":
             evidence_lines = {r["line_number"] for r in b["evidence_refs"]}
             visible = [
@@ -78,9 +83,9 @@ def endpoint_metrics(facts, graph, assessments=()):
                 if injection.get("raw_output_preserved") and injection.get("source_identity") == "tool_call_id"
             ]
             if visible:
-                result["evidence_adoption_lag"] = cost(
+                record("evidence_adoption_lag", cost(
                     min(visible), endpoint, "Recorded full tool-output visibility to cited decision; use relationship inferred", refs
-                )
+                ), b["id"])
     for goal in facts.get("goal_revisions", []):
         if goal.get("applied_line") is None:
             continue
@@ -98,10 +103,14 @@ def endpoint_metrics(facts, graph, assessments=()):
         ]
         if plans:
             plan = min(plans, key=lambda p: p["line"])
-            result["plan_response_lag"] = cost(
+            record("plan_response_lag", cost(
                 goal["applied_line"],
                 plan["line"],
                 "Applied revision to accepted plan judged effective for that revision; inferred semantic alignment",
                 goal["evidence_refs"] + plan["evidence_refs"],
-            )
+            ), goal["id"])
+    for name, rows in observations.items():
+        rows.sort(key=lambda r: (r["end_line"], r["start_line"], r["subject_id"]))
+        if rows:
+            result[name] = {**rows[0], "observations": rows, "aggregation": "earliest cited endpoint; all per-subject observations retained, not additive"}
     return result

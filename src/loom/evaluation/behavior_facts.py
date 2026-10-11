@@ -8,6 +8,7 @@ from datetime import datetime
 from loom.core import thaw_json
 from loom.evaluation.behavior_contracts import ANALYZER_VERSION, outcome, stable_id
 from loom.evaluation.behavior_goals import request_goals
+from loom.evaluation.behavior_sequence import PLAN_EVENTS, build_sequence, plan_snapshot
 from loom.evaluation.context_analysis import request_fields
 from loom.evaluation.evidence_store import text_value
 from loom.evaluation.trajectory import build_fact_analysis
@@ -210,40 +211,9 @@ def build_behavior_facts(store, *, legacy=None, task=None, source_coverage=None)
                     if row:
                         row["visible_line"] = event.line_number
                 visible_messages.add((ep["id"], content))
-        if event.event_type in {"plan.submitted", "plan.updated", "workflow.revised", "plan.entered", "workflow.node.completed"}:
-            plans.append(
-                {
-                    "id": stable_id("plan", store.source_sha256, event.line_number),
-                    "episode_id": ep["id"],
-                    "kind": event.event_type,
-                    "line": event.line_number,
-                    "revision": p.get("revision", p.get("plan_revision")),
-                    "state": "declared_complete"
-                    if event.event_type == "workflow.node.completed"
-                    else "accepted"
-                    if event.event_type in {"plan.submitted", "plan.updated", "workflow.revised"}
-                    else "proposed",
-                    "acceptance_basis": "runtime_transition" if event.event_type != "plan.entered" else "planning_started",
-                    "evidenced_done": "unknown",
-                    "definition": thaw_json(p),
-                    "evidence_refs": [asdict(store.ref(event))],
-                }
-            )
-            plan = plans[-1]
-            previous = next((r for r in reversed(plans[:-1]) if r["episode_id"] == ep["id"]), None)
-            plan["supersedes"] = previous["id"] if previous else None
-            definition = p.get("plan", p.get("workflow", {}))
-            plan["nodes"] = [
-                {
-                    "id": n.get("id"),
-                    "description": n.get("step", n.get("description", n.get("title"))),
-                    "dependencies": thaw_json(n.get("dependencies", n.get("depends_on", ()))),
-                    "declared_status": n.get("status", "unknown"),
-                    "evidenced_done": "unknown",
-                }
-                for n in definition.get("items", definition.get("nodes", ()))
-                if isinstance(n, Mapping)
-            ]
+        if event.event_type in PLAN_EVENTS and ep:
+            previous = next((r for r in reversed(plans) if r["episode_id"] == ep["id"]), None)
+            plans.append(plan_snapshot(store, event, ep["id"], previous))
         if event.event_type in {"artifact.version.recorded", "verification.recorded"}:
             row = {**thaw_json(p), "episode_id": ep["id"], "line": event.line_number, "evidence_refs": [asdict(store.ref(event))]}
             (artifacts if event.event_type == "artifact.version.recorded" else receipts).append(row)
@@ -306,21 +276,22 @@ def build_behavior_facts(store, *, legacy=None, task=None, source_coverage=None)
                 "excerpt_only": True,
             }
         )
-    candidates = []
+    sequence = build_sequence(store, plans, calls, tools_with_roles, segments, by_line)
+    candidates = list(sequence["candidate_windows"])
     signatures = defaultdict(list)
     for tool in tools_with_roles:
         if tool["usage_role"] == "verification":
             continue
         if tool.get("input_ref") and tool.get("raw_output_ref"):
             key = (
-                next((r["episode_id"] for r in calls if r["id"] == tool["round_id"]), None),
+                next(((r["episode_id"], r["goal_revision_id"]) for r in calls if r["id"] == tool["round_id"]), None),
                 tool["tool_id"],
                 text_value(store.resolve(tool["input_ref"])),
                 text_value(store.resolve(tool["raw_output_ref"])),
             )
             signatures[key].append(tool)
     for values in signatures.values():
-        if len(values) > 1:
+        if len(values) > 1 and not any(t["tool_id"] == "read_file" for t in values):
             ids = {t["round_id"] for t in values}
             candidates.append(
                 {
@@ -369,6 +340,7 @@ def build_behavior_facts(store, *, legacy=None, task=None, source_coverage=None)
         "analyzer_version": ANALYZER_VERSION,
         "episodes": episodes,
         "event_episode_ids": {str(line): ep for line, ep in by_line.items()},
+        "event_times": {str(e.line_number): e.at for e in store.events},
         "goal_revisions": goals,
         "plan_revisions": plans,
         "artifact_versions": artifacts,
@@ -376,6 +348,7 @@ def build_behavior_facts(store, *, legacy=None, task=None, source_coverage=None)
         "acceptance_history": acceptance,
         "model_calls": calls,
         "segments": segments,
+        "sequence": sequence,
         "candidate_windows": candidates,
         "tool_uses": tools_with_roles,
         "behavior_graph": {"nodes": [], "edges": []},

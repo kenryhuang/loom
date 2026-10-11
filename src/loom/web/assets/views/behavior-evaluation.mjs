@@ -1,5 +1,6 @@
 import { element } from "../markdown.mjs";
 import { renderBaseStatistics } from "./base-evaluation.mjs";
+import { renderProgressTimeline } from "./behavior-sequence.mjs";
 
 export const BEHAVIOR_DIMENSIONS = {
   intent_alignment: "Intent alignment",
@@ -167,6 +168,9 @@ export function renderBehaviorEvaluation(view, data) {
   }
   view.results.append(element("p", "muted", `${c.pending_segments?.length || 0} selected segments pending · ${c.unselected_segments?.length ?? Math.max(0, c.source_segments - c.attempted_segments)} segments outside this review.`));
   if (semantic.summary) view.results.append(element("p", "", semantic.summary));
+  if (c.selection_budget?.budget_limited) view.results.append(element("p", "notice",
+    `Budget-planned sample: ${c.selection_budget.selected_segments} focused segments (configured maximum ${c.selection_budget.requested_max_segments}). `
+    + "Other segments remain unreviewed; pipeline completion does not mean full semantic coverage."));
   for (const limit of c.limitations)
     view.results.append(element("p", "notice", limit));
   const dims = element("div", "evaluation-dimensions");
@@ -184,6 +188,7 @@ export function renderBehaviorEvaluation(view, data) {
     dims.append(card);
   }
   view.results.append(dims);
+  renderProgressTimeline(view.results, semantic, facts, {evidence: ref => view.evidence(ref)});
   const findings = view.section(
     `Behavior findings · ${semantic.diagnoses.length}`,
     true,
@@ -194,7 +199,7 @@ export function renderBehaviorEvaluation(view, data) {
       element(
         "h3",
         "",
-        `${BEHAVIOR_DIMENSIONS[d.dimension]} · ${d.epistemic_status}`,
+        `${(d.dimensions || [d.dimension]).map(d => BEHAVIOR_DIMENSIONS[d]).join(" / ")} · ${d.epistemic_status}`,
       ),
       element("p", "", d.observation),
       element("p", "", `Mechanism: ${d.mechanism}`),
@@ -219,14 +224,30 @@ export function renderBehaviorEvaluation(view, data) {
     "Reasoning efficiency · measured endpoints",
     true,
   );
-  for (const [name, metric] of Object.entries(semantic.efficiency || {}))
+  for (const [name, metric] of Object.entries(semantic.efficiency || {})) {
     efficiency.append(
       element(
         "p",
         "",
-        `${name.replaceAll("_", " ")}: ${metric.status}${metric.known_tokens != null ? ` · ${metric.known_tokens} known tokens` : ""} · ${metric.basis}`,
+        `${name.replaceAll("_", " ")}: ${metric.status}${metric.known_tokens != null ? ` · ${metric.known_tokens} known tokens` : ""}`
+          + `${metric.tool_calls != null ? ` · ${metric.tool_calls} tools · ${metric.model_calls} model calls` : ""}`
+          + `${metric.elapsed_ms != null ? ` · ${(metric.elapsed_ms / 1000).toFixed(1)}s elapsed` : ""}`
+          + `${metric.observations ? ` · ${metric.observations.length} endpoints (not additive)` : ""} · ${metric.basis}`,
       ),
     );
+    if (metric.observations?.length) {
+      const endpoints = element("details", "trajectory-section");
+      endpoints.append(element("summary", "", `View ${metric.observations.length} source-linked endpoints`));
+      for (const row of metric.observations) {
+        const subject = semantic.behavior_graph.nodes.find(n => n.id === row.subject_id)?.label
+          || facts.goal_revisions?.find(g => g.id === row.subject_id)?.objective || "Recorded endpoint";
+        endpoints.append(element("p", "", `${subject} · lines ${row.start_line}–${row.end_line} · ${row.known_tokens} known tokens`
+          + ` · ${row.model_calls} model calls · ${row.tool_calls} tools`));
+        view.refs(endpoints, row.evidence_refs);
+      }
+      efficiency.append(endpoints);
+    }
+  }
   const assessments = view.section(
     `Segment assessments · ${semantic.assessments.length}`,
     c.status !== "complete" && !semantic.diagnoses.length,

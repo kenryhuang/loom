@@ -66,6 +66,18 @@ def render_report(payload):
         from loom.evaluation.base_report import render_base_report
 
         lines = lines[:4] + render_base_report(base)
+    sequence = payload["facts"].get("sequence", {})
+    if sequence:
+        lines.extend(["## Behavior facts", "", "Recorded signals and repeated observations are not judgments of progress or waste.", ""])
+        for row in sequence["plan_execution"]:
+            lines.append(f"- Plan: {row['description'] or 'Description missing'} · declared {row['declared_status']} · "
+                         f"{len(row['round_ids'])} model calls · {len(row['tool_ids'])} tools")
+        for row in sequence["repetitions"]:
+            lines.append(f"- Repeated observation: {row['path']} · lines {row['first_line']}–{row['line']} · {row['status']}")
+        for row in sequence["candidate_windows"]:
+            if row["pattern_type"] == "low_progress_window":
+                lines.append(f"- Low-progress candidate: {row['tool_calls']} tools · {row['basis']}")
+        lines.append("")
     lines.extend(
         [
             "## Deep evaluation",
@@ -80,6 +92,17 @@ def render_report(payload):
     )
     for d in semantic["diagnoses"]:
         lines.extend([f"### {d['dimension']} · {d['epistemic_status']}", "", d["observation"], "", d["mechanism"], ""])
+    for row in semantic.get("progress", []):
+        cost = row["since_previous_progress"]
+        lines.extend([f"- Step {row['step_number']} · {row['kind']}: {row['label']} (source line {row['line']})",
+                      f"  Since previous selected landmark: {cost.get('tool_calls', '?')} tools, "
+                      f"{cost.get('known_tokens', '?')} known tokens. Unreviewed progress may exist."])
+    for row in semantic.get("plan_assessments", []):
+        lines.append(f"- Plan adherence: {row['node_id']} · {row['status']} · {row['rationale']}")
+    for name, metric in semantic.get("efficiency", {}).items():
+        for row in metric.get("observations", []):
+            lines.append(f"- {name}: lines {row['start_line']}–{row['end_line']} · {row['known_tokens']} known tokens · "
+                         f"{row['model_calls']} model calls · {row['tool_calls']} tools · overlapping endpoints are not additive")
     for limitation in semantic["coverage"]["limitations"]:
         lines.extend([f"- Limitation: {limitation}"])
     return "\n".join(lines) + "\n"

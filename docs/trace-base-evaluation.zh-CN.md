@@ -26,3 +26,11 @@ Base evaluation 对固定的 trace 快照做事实统计，不调用模型，也
 - 验收展示已记录的检查内容、理由、方法和结果。模型检查仍然是模型判断；保存了证据不等于验收通过。Base 页面不再并列展示一个默认的 unverified 结论。
 
 统计实现集中在 `evaluation/base_metrics.py`，token 复用 `evaluation/token_ledger.py`。本次更新提升服务分析与行为分析版本，重新请求分析时生成新缓存，历史报告仍可读取。
+
+## 仪表盘展示
+
+Trace analysis 顶部统一放置 Run 筛选与 Refresh analysis；筛选同时影响统计面板和调用明细，刷新后保留。
+默认展示基础指标、独立 Acceptance、工具调用、运行耗时、模型与 token 消耗、输出和数据完整性。
+耗时与 token 使用堆叠分布图，Acceptance 使用进度环及可查看证据的条件表。
+工具和模型分组切换同一张表，避免重复平铺。行为事实明确标为全部运行范围，默认折叠；事件分类、测量说明和完整覆盖指标也按需展开。
+调用明细只在 Call explorer 中呈现。本次改动不改变统计口径。

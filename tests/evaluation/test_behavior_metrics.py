@@ -47,3 +47,27 @@ def test_root_cause_claim_and_supporting_experiment_are_different_endpoints():
 def test_later_success_does_not_imply_causal_recovery():
     graph = {"nodes": [node("failure", "problem", 1), node("unrelated", "evidence", 10)], "edges": []}
     assert endpoint_metrics(facts(), graph)["causal_recovery_cost"]["status"] == "unknown"
+
+
+def test_multiple_cause_endpoints_are_preserved_and_independent_of_edge_order():
+    graph = {"nodes": [node("p1", "problem", 1), node("p2", "problem", 2), node("h1", "hypothesis", 3),
+                       node("h2", "hypothesis", 5), node("e1", "evidence", 5), node("e2", "evidence", 10)],
+             "edges": [edge("e1", "supports", "h1", 5), edge("e2", "supports", "h2", 10),
+                       edge("h1", "resolves", "p1", 5), edge("h2", "resolves", "p2", 10)]}
+    first = endpoint_metrics(facts(), graph)["cost_to_supported_cause"]
+    graph["edges"].reverse()
+    assert endpoint_metrics(facts(), graph)["cost_to_supported_cause"] == first
+    assert first["end_line"] == 5
+    assert len(first["observations"]) == 2
+
+
+def test_causal_recovery_does_not_cross_goal_revisions():
+    data = facts()
+    data["goal_revisions"] = [{"id": "g1", "episode_id": "episode", "applied_line": 1},
+                              {"id": "g2", "episode_id": "episode", "applied_line": 4}]
+    graph = {"nodes": [node("problem", "problem", 1), node("hypothesis", "hypothesis", 5), node("evidence", "evidence", 10)],
+             "edges": [edge("evidence", "supports", "hypothesis", 10), edge("hypothesis", "resolves", "problem", 10)]}
+    result = endpoint_metrics(data, graph)
+    assert result["causal_recovery_cost"]["status"] == "unknown"
+    assert result["cost_to_supported_cause"]["start_line"] == 4
+    assert result["cost_to_supported_cause"]["goal_revision_id"] == "g2"
