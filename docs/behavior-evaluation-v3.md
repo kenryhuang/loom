@@ -87,3 +87,14 @@ uv run python -m loom.evaluation.calibration --corpus calibration.json --out cal
 The corpus is a JSON array. Each record identifies `episode_id`, `family` (`coding`, `research`, `general`), `split`, two `reviewer_ids`, `adjudicated`, `used_for_prompt_development`, `repeat_runs`, `evidence_audit_passed`, and `unsupported_achieved`. `findings` contain category (`intent`, `plan`, `cycle`, `evidence_adoption`), `human_present` and `v3_present`; `outcomes` contain `sufficient_evidence`, `human_status`, `v3_status`. Cost comparison uses `v2_tokens`, `v3_tokens`, `v2_supported_coverage`, `v3_supported_coverage`.
 
 The report includes raw counts, uncertainty intervals, separate quality/cost gates and an explicit blocked rollout for missing annotations. It conservatively requires 30 independently reviewed held-out episodes across all three families. Review identity/independence must be established by the corpus owner. The tool does not perform human annotation or automatically change defaults.
+
+## Deep evaluation dashboard
+
+The Web view shares Trace analysis panels and typography. Saved evaluations, the judge model and run/resume/cancel actions
+stay in the toolbar; budget settings and activity logs are collapsed by default. Stage progress and used/limit budget gauges
+are shown once. Coverage distinguishes supported, evidence-insufficient, pending and unselected segments; dimension rows
+show actual judgments separately from support coverage. Completion is never presented as a positive behavior verdict.
+Findings show observations and mechanisms, with evidence, counterevidence and alternatives available on expansion. Progress,
+plan judgments, efficiency endpoints and evolution hypotheses use timelines and tables. Repeated judgments of the same plan
+item share a row, retaining individual assessments and evidence. Empty result panels collapse. Polling preserves expanded
+results, assessment filters and activity-log state. Legacy results retain their reader under the shared run controls.

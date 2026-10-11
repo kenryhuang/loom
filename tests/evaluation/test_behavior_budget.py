@@ -72,3 +72,20 @@ def test_synthesis_reuses_only_bounded_cited_evidence_not_all_focus_context():
     assert "validation" not in payload["diagnoses"][0]
     assert len(packets) == 1 and packets[0]["returned_ref"] == ref
     assert packets[0]["returned_chars"] <= 600
+
+
+def test_synthesis_compacts_fact_interpretations_and_reports_sampling_without_mutating_results():
+    local = {'coverage': {'unselected_segments': ['s'] * 1000}, 'diagnoses': [], 'preserved_behaviors': [],
+             'fact_assessments': [{'fact_id': str(i), 'status': 'effective', 'rationale': 'Concrete observation ' * 100,
+                                   'evidence_refs': [{'source_sha256': 'a' * 64, 'line_number': i + 1}],
+                                   'proposed_rationale': 'Unused diagnostic text' * 1000} for i in range(100)]}
+    before = copy.deepcopy(local)
+    payload, quotes = synthesis_inputs(local, 18000)
+    import json
+
+    assert len(json.dumps(payload, ensure_ascii=False)) <= 18000 * .65
+    assert 0 < payload['input_coverage']['fact_assessments']['included'] < 100
+    assert payload['input_coverage']['fact_assessments']['available'] == 100
+    assert all('evidence_refs' not in row and row['source_lines'] for row in payload['fact_assessments'])
+    assert len(quotes) <= 20
+    assert local == before

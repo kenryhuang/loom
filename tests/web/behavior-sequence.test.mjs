@@ -33,7 +33,7 @@ test("semantic landmarks show measured interval cost, plan judgments, and incomp
       since_previous_progress: {status: "partial", tool_calls: 3, model_calls: 2, known_tokens: 30, unmeasured_model_calls: 1, elapsed_ms: 5000}}],
     plan_assessments: [{plan_snapshot_id: "p", node_id: "n", status: "justified_change", rationale: "New evidence changed the investigation"}],
   }, {plan_revisions: [{id: "p", nodes: [{id: "n", description: "Investigate startup"}]}]});
-  assert.match(root.textContent, /3 tools · 2 model calls · 30 known tokens/);
+  assert.deepEqual([...root.querySelectorAll("table tbody tr")[0].cells].map(cell => cell.textContent), ["3", "2", "30", "5 s", "1"]);
   assert.match(root.textContent, /includes waits/);
   assert.match(root.textContent, /unreviewed progress/);
   assert.match(root.textContent, /Investigate startup/);
@@ -42,4 +42,40 @@ test("semantic landmarks show measured interval cost, plan judgments, and incomp
   renderBehaviorSequence(root, undefined);
   renderProgressTimeline(root, {}, {});
   assert.match(root.textContent, /No cited progress landmarks/);
+});
+
+test("computed coverage, milestones and repeats render independently of deep evaluation", () => {
+  const dom = new JSDOM("<main></main>"); globalThis.document = dom.window.document;
+  const root = document.querySelector("main"), reads = [], ref = {line_number: 20};
+  renderBehaviorSequence(root, {
+    plan_execution: [], repetitions: [{path: "shell_execute output", kind: "same_tool_result", first_line: 5, line: 20,
+      status: "needs_context", basis: "Identical actual output", evidence_refs: [ref],
+      cost: {known_tool_ms: 1200, associated_known_tokens: 30}}],
+    observation_coverage: {solver_tool_calls: 4, completed_tool_calls: 4, comparable_result_calls: 4, resource_identity_calls: 0},
+    repetition_cost: {tool_calls: 1, known_tool_ms: 1200, unmeasured_tool_calls: 0, associated_known_tokens: 30},
+    observations: [{id: "verified", kind: "verification_result", line: 20, label: "Acceptance passed", status: "passed",
+      assurance: "model_judgment", goal_binding: "matched", evidence_refs: [ref],
+      since_previous_observation: {tool_calls: 1, known_tokens: 15}}],
+    milestones: [{kind: "first_acceptance_pass", observation_id: "verified", line: 20,
+      cost: {tool_calls: 4, model_calls: 4, known_tokens: 60, elapsed_ms: 5000}}],
+    plan_bindings: [{node_id: "verify", status: "bound", unmet_dependencies: ["inspect"], evidence_refs: [ref]}],
+    plan_summary: {bound: 1, dependency_violations: 1, calls_after_declared_completion: 0, nodes_without_recorded_calls: 1},
+  }, {evidence: r => reads.push(r)});
+  assert.match(root.textContent, /4 \/ 4/); assert.match(root.textContent, /0 \/ 4/);
+  assert.match(root.textContent, /Recorded milestones/); assert.match(root.textContent, /5 s/);
+  assert.match(root.textContent, /model judgment · matched/);
+  assert.match(root.textContent, /Dependencies not recorded complete1/);
+  assert.match(root.textContent, /Identical returned result/);
+  root.querySelector("button").click(); assert.deepEqual(reads, [ref]); dom.window.close();
+});
+
+test("deep judgments link to deterministic facts and preserve unsupported status", () => {
+  const dom = new JSDOM("<main></main>"); globalThis.document = dom.window.document;
+  const root = document.querySelector("main"), reads = [], ref = {line_number: 20};
+  renderProgressTimeline(root, {fact_assessments: [{fact_id: "repeat", status: "unknown", rationale: "Earlier endpoint not read", evidence_refs: [ref]}]},
+    {sequence: {observations: [{id: "repeat", kind: "same_tool_result", label: "shell_execute output"}]}}, {evidence: r => reads.push(r)});
+  assert.match(root.textContent, /Identical returned result · shell_execute output/);
+  assert.match(root.textContent, /Earlier endpoint not read/);
+  assert.match(root.textContent, /unknown/);
+  root.querySelector("button").click(); assert.deepEqual(reads, [ref]); dom.window.close();
 });

@@ -352,7 +352,7 @@ def test_session_transport_messages_are_not_goals_and_bookkeeping_is_not_a_task(
     assert [o["objective"] for o in outcomes] == ["Diagnose startup", "Investigate model speed"]
     assert [o["execution_status"] for o in outcomes] == ["completed", "suspended"]
     assert all(o["goal_coverage"] == "complete" and len(o["criteria"]) == 1 for o in outcomes)
-    assert all(o["status"] == "unverified" and "No goal acceptance checks" in o["explanation"] for o in outcomes)
+    assert all(o["status"] == "unverified" and "No independent verification receipts" in o["explanation"] for o in outcomes)
     assert len(facts["goal_revisions"]) == 4
     first_goals = [g for g in facts["goal_revisions"] if g["objective"] == "Diagnose startup"]
     assert {g["episode_id"] for g in first_goals} == {facts["episodes"][0]["id"]}

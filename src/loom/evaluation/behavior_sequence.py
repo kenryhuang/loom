@@ -50,21 +50,24 @@ def bind_execution(plans, calls, tools):
     rows = {}
     for plan in plans:
         for node in plan["nodes"]:
-            key = plan["episode_id"], plan["plan_id"], node["id"]
-            row = rows.setdefault(key, {"id": stable_id("execution", *key), "episode_id": key[0], "plan_id": key[1],
-                                      "node_id": key[2], "round_ids": [], "tool_ids": [], "steps": [], "revisions": [],
+            key = plan["episode_id"], plan.get('goal_revision_id'), plan["plan_id"], node["id"]
+            row = rows.setdefault(key, {"id": stable_id("execution", *key), "episode_id": key[0], 'goal_revision_id': key[1], "plan_id": key[2],
+                                      "node_id": key[3], "round_ids": [], "tool_ids": [], "steps": [], "revisions": [], 'effective': False,
                                       "evidence_refs": [], "evidenced_done": "unknown", "association_basis": "active_plan_snapshot"})
             row.update(description=node["description"], dependencies=node["dependencies"], declared_status=node["declared_status"])
+            row['effective'] = row['effective'] or plan['state'] in {'accepted', 'declared_complete'}
             row["revisions"].append(plan["id"])
             row["evidence_refs"].extend(plan["evidence_refs"])
     for call in calls:
         line = (call.get("request_ref") or call.get("response_ref") or {}).get("line_number", 0)
-        active = next((p for p in reversed(plans) if p["episode_id"] == call["episode_id"] and p["line"] <= line and p["nodes"]), None)
+        active = next((p for p in reversed(plans) if p["episode_id"] == call["episode_id"] and p["line"] <= line
+                       and p["state"] in {"accepted", "declared_complete"}
+                       and p.get("goal_revision_id") == call.get("goal_revision_id")), None)
         call["plan_snapshot_id"] = active["id"] if active else None
         call["plan_node_id"] = active["active_node_ids"][0] if active and len(active["active_node_ids"]) == 1 else None
         if call["usage_role"] == "verification" or call["plan_node_id"] is None:
             continue
-        row = rows.get((call["episode_id"], active["plan_id"], call["plan_node_id"]))
+        row = rows.get((call["episode_id"], active.get('goal_revision_id'), active["plan_id"], call["plan_node_id"]))
         if row is None:
             continue
         row["round_ids"].append(call["id"])
@@ -78,6 +81,10 @@ def bind_execution(plans, calls, tools):
 def _unwrap(value):
     while isinstance(value, Mapping) and "value" in value and ("ok" in value or "source" in value):
         value = value["value"]
+    if isinstance(value, str):
+        return {'content': value}
+    if isinstance(value, list | tuple):
+        return {'results': thaw_json(value)}
     return thaw_json(value) if isinstance(value, Mapping) else {}
 
 
@@ -196,8 +203,8 @@ def build_sequence(store, plans, calls, tools, segments, by_line, *, low_progres
         elif t["tool_id"] in {"shell_execute", "process_execute", "write_file", "edit_file", "create_report"}:
             barriers[scope] += 1
         # Compare useful payload, not volatile process duration/observation IDs.
-        result = {k: out[k] for k in ("stdout", "stderr", "exit_code", "content", "results") if k in out}
-        signature = (scope, t["tool_id"], text_value(result))
+        result = {k: out[k] for k in ("stdout", "stderr", "exit_code", "status", "ok", "content", "results", "error") if k in out}
+        signature = (scope, text_value(result))
         if resource is None and result and signature not in outputs:
             signal("tool_result_observed", line, ep, t["tool_id"], [ref], round_id=t["round_id"], step_number=t["step_number"])
             changed = True
@@ -245,9 +252,17 @@ def focus_context(facts, segment, *, max_neighbors=4):
     sequence = facts.get("sequence", {})
     plans = [{k: p[k] for k in ("id", "plan_id", "revision", "line", "nodes", "active_node_ids", "evidence_refs")}
              for p in facts["plan_revisions"] if p["id"] in plan_ids]
-    signals = [s for s in sequence.get("signals", []) if s.get("round_id") in round_ids]
+    selected_ids = {s["id"] for s in [segment, *selected]}
+    signals = [s for s in sequence.get("signals", []) if s.get("round_id") in round_ids
+               or selected_ids.intersection(s.get("segment_ids", []))]
+    from loom.evaluation.behavior_observations import focus_observations
+
+    observations = focus_observations(facts, segment)
     primary_plans = {c.get("plan_snapshot_id") for c in calls if c["id"] in segment["round_ids"]} - {None}
     return {"context_segments": selected, "plans": plans, "activity_signals": signals[:24],
+            "behavior_facts": observations,
+            "fact_coverage": {"included": len(observations), "available": sum(segment["id"] in r.get("segment_ids", [])
+                              for r in sequence.get("observations", []))},
             "round_plan_bindings": [{"round_id": c["id"], "plan_snapshot_id": c.get("plan_snapshot_id"),
                                      "plan_node_id": c.get("plan_node_id")} for c in calls],
             "context_limitations": ["Context segments are navigation, not reviewed coverage; read source evidence before citing."]

@@ -276,7 +276,19 @@ def build_behavior_facts(store, *, legacy=None, task=None, source_coverage=None)
                 "excerpt_only": True,
             }
         )
+    from loom.evaluation.behavior_observations import enrich_sequence, goal_at
+
+    for plan in plans:
+        active = goal_at(goals, plan["episode_id"], plan["line"])
+        if active is None:
+            first = min((g for g in goals if g['episode_id'] == plan['episode_id'] and g.get('applied_line') is not None
+                         and not g.get('covered_by_revision')), key=lambda g: g['applied_line'], default=None)
+            if first and first['origin'] in {'request_user_message', 'current_request', 'runtime_goal'}:
+                active = first
+                plan['goal_association_basis'] = 'first_recorded_request_goal'
+        plan["goal_revision_id"] = active["id"] if active else None
     sequence = build_sequence(store, plans, calls, tools_with_roles, segments, by_line)
+    enrich_sequence(store, sequence, plans, calls, tools_with_roles, segments, by_line, goals, episodes, list(legacy.token_ledger))
     candidates = list(sequence["candidate_windows"])
     signatures = defaultdict(list)
     for tool in tools_with_roles:
@@ -456,7 +468,7 @@ def _outcomes(store, episodes, goals, artifacts, receipts):
         reason = (
             "No applied task goal was recorded for this execution."
             if not active
-            else "No goal acceptance checks were recorded. Execution status and goal acceptance are reported separately."
+            else "No independent verification receipts were recorded. Runtime acceptance is reported separately."
             if not checks
             else "Recorded checks do not yet establish all requirements against the final output."
             if result["status"] == "unverified"

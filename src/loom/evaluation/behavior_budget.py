@@ -59,17 +59,44 @@ def scan_pages(facts, checkpoint, max_prompt_chars):
 
 
 def synthesis_inputs(local, max_prompt_chars):
-    fields = ("id", "dimension", "dimensions", "observation", "mechanism", "epistemic_status", "supporting_refs", "counterevidence_refs")
-    diagnoses = [{k: d[k] for k in fields if k in d} for d in local["diagnoses"]]
-    refs = [r for d in diagnoses for r in d["supporting_refs"][:1]]
-    refs += [r for p in local["preserved_behaviors"] for r in p["evidence_refs"][:1]]
-    refs = list({json.dumps(r, sort_keys=True): r for r in refs}.values())
-    # Re-present concise ranges already validated in focus, not every request/context read.
+    """Bound summary input independently of saved local judgments and their full provenance."""
+    fields = ('diagnoses', 'assessments', 'progress', 'plan_assessments', 'fact_assessments', 'preserved_behaviors')
+    keep = {'id', 'dimension', 'dimensions', 'segment_id', 'status', 'epistemic_status', 'observation', 'mechanism',
+            'rationale', 'kind', 'label', 'line', 'plan_snapshot_id', 'node_id', 'fact_id', 'fact_kind', 'fact_label',
+            'fact_line', 'fact_ids', 'unknown_reason', 'behavior'}
+    groups = {}
+    for field in fields:
+        groups[field] = []
+        for row in local.get(field, []):
+            compact = {k: (v[:600] if isinstance(v, str) else v) for k, v in row.items() if k in keep}
+            compact['source_lines'] = sorted({r['line_number'] for name in ('evidence_refs', 'supporting_refs', 'counterevidence_refs')
+                                              for r in row.get(name, [])})
+            compact['text_truncated'] = any(isinstance(v, str) and len(v) > 600 for k, v in row.items() if k in keep)
+            groups[field].append(compact)
+    coverage = {k: v for k, v in local['coverage'].items() if k not in {'limitations', 'pending_segments', 'unselected_segments'}}
+    coverage.update(pending_count=len(local['coverage'].get('pending_segments', [])),
+                    unselected_count=len(local['coverage'].get('unselected_segments', [])))
+    payload = {**groups, 'coverage': coverage,
+               'input_coverage': {field: {'available': len(rows), 'included': len(rows)} for field, rows in groups.items()},
+               'evidence_scope': 'Summarize supplied validated judgments only. Summary input may be sampled; all local results remain saved. '
+                                 'source_lines are navigation; quotes are bounded excerpts, not complete focus coverage.'}
+    # Reserve space for exact quotes and their pointer metadata. Never remove saved checkpoint results.
+    limit = max(1000, int(max_prompt_chars * .65))
+    while len(json.dumps(payload, ensure_ascii=False)) > limit and any(groups.values()):
+        field = max(fields, key=lambda f: len(json.dumps(groups[f], ensure_ascii=False)))
+        groups[field].pop()
+        payload['input_coverage'][field]['included'] = len(groups[field])
+    refs = []
+    for field, rows in groups.items():
+        for row in local.get(field, [])[:len(rows)]:
+            if row.get('status') == 'unknown' or row.get('epistemic_status') == 'unknown':
+                continue
+            refs += row.get('evidence_refs', row.get('supporting_refs', []))[:1]
+    refs = list({json.dumps(r, sort_keys=True): r for r in refs}.values())[:20]
     quote_limit = min(6000, max_prompt_chars // 5)
     per_quote = min(600, max(1, quote_limit // max(1, len(refs))))
-    packets = [{"returned_ref": r, "returned_chars": per_quote} for r in refs[:quote_limit]]
-    return {"diagnoses": diagnoses, "preserved_behaviors": local["preserved_behaviors"], "coverage": local["coverage"],
-            "evidence_scope": "Bounded excerpts of validated local evidence; synthesize local findings only, never new claims"}, packets
+    packets = [{'returned_ref': r, 'returned_chars': per_quote} for r in refs]
+    return payload, packets
 
 
 def select_affordable(candidates, prompt_sizes, checkpoint, *, max_segments, max_calls, max_tokens, max_read_rounds):

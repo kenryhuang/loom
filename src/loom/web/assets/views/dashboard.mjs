@@ -63,3 +63,12 @@ export function distribution(root, title, entries, format = number) {
   });
   chart.append(bar, legend); root.append(chart); return chart;
 }
+
+export function resultPanel(root, title, count, wide = false, key = title) {
+  if (count > 0) return panel(root, title, wide);
+  const node = disclosure(root, title);
+  node.classList.add("dashboard-panel");
+  if (wide) node.classList.add("dashboard-wide");
+  node.dataset.detail = key;
+  return node;
+}

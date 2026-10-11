@@ -85,3 +85,10 @@ uv run python -m loom.evaluation.calibration --corpus calibration.json --out cal
 corpus 是 JSON 数组。每条记录包含 `episode_id`、`family`（`coding`、`research`、`general`）、`split`、两位 `reviewer_ids`、`adjudicated`、`used_for_prompt_development`、`repeat_runs`、`evidence_audit_passed`、`unsupported_achieved`。`findings` 包含 category（`intent`、`plan`、`cycle`、`evidence_adoption`）、`human_present`、`v3_present`；`outcomes` 包含 `sufficient_evidence`、`human_status`、`v3_status`。成本比较使用 `v2_tokens`、`v3_tokens`、`v2_supported_coverage`、`v3_supported_coverage`。
 
 报告展示原始计数、不确定性区间及独立质量/成本门槛；缺少人工标注时明确阻止切换默认版本。工具保守要求至少 30 个覆盖三个任务类型、经过独立复核的 held-out episode。语料负责人需确保复核身份及独立性；工具不会自行生成标注，也不会自动修改默认版本。
+
+## Deep evaluation 仪表盘
+
+Web 页面沿用 Trace analysis 的面板与排版。历史记录、评估模型、运行/续跑/取消操作集中在顶部；预算设置和活动日志默认折叠。
+阶段进度和预算消耗只展示一次。覆盖率区分有证据支持、证据不足、待评审及未选中片段；五个行为维度分别展示实际判断与证据覆盖率，不把评估完成当作行为表现良好。
+行为发现直接展示观察和机制，证据、反证及其他解释按需展开。进展、计划判断、效率端点与改进假设采用时间线和表格；同一计划项的多次判断归到一行，保留各次判断及证据。
+空结果板块默认折叠。后台更新保留已展开的结果、判断筛选和日志状态。历史 v2 结果继续兼容，共用顶部操作与预算面板。

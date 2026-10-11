@@ -74,6 +74,14 @@ def render_report(payload):
                          f"{len(row['round_ids'])} model calls · {len(row['tool_ids'])} tools")
         for row in sequence["repetitions"]:
             lines.append(f"- Repeated observation: {row['path']} · lines {row['first_line']}–{row['line']} · {row['status']}")
+        if sequence.get('observation_coverage'):
+            c = sequence['observation_coverage']
+            lines.append(f"- Comparable results: {c['comparable_result_calls']}/{c['completed_tool_calls']} completed tools; "
+                         f"resource identity: {c['resource_identity_calls']}/{c['solver_tool_calls']} tool calls")
+        for row in sequence.get('milestones', []):
+            cost = row['cost']
+            lines.append(f"- {row['kind']} · line {row['line']} · {cost['tool_calls']} tools / {cost['model_calls']} model calls / "
+                         f"{cost['known_tokens']} known tokens from goal · elapsed {cost['elapsed_ms']} ms")
         for row in sequence["candidate_windows"]:
             if row["pattern_type"] == "low_progress_window":
                 lines.append(f"- Low-progress candidate: {row['tool_calls']} tools · {row['basis']}")
@@ -99,6 +107,8 @@ def render_report(payload):
                       f"{cost.get('known_tokens', '?')} known tokens. Unreviewed progress may exist."])
     for row in semantic.get("plan_assessments", []):
         lines.append(f"- Plan adherence: {row['node_id']} · {row['status']} · {row['rationale']}")
+    for row in semantic.get('fact_assessments', []):
+        lines.append(f"- Fact interpretation: {row.get('fact_label', row['fact_id'])} · {row['status']} · {row['rationale']}")
     for name, metric in semantic.get("efficiency", {}).items():
         for row in metric.get("observations", []):
             lines.append(f"- {name}: lines {row['start_line']}–{row['end_line']} · {row['known_tokens']} known tokens · "

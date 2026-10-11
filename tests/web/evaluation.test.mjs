@@ -112,6 +112,10 @@ test("deep evaluation selects budgets, renders uncertainty and evidence, and res
     evidence: (r) => reads.push(r),
   });
   await view.open();
+  assert.equal(view.settingsPanel.open, false);
+  assert.equal(view.start.closest("details"), null);
+  view.fields.max_calls.dispatchEvent(new dom.window.Event("invalid"));
+  assert.equal(view.settingsPanel.open, true);
   view.fields.max_calls.value = "3";
   await view.run();
   await new Promise((r) => setTimeout(r, 0));
@@ -234,7 +238,7 @@ test("raising a stopped evaluation's time budget sends its checkpoint identity",
   });
   await view.open();
   await view.follow(job.id);
-  assert.match(root.textContent, /increase the exhausted total budget/);
+  assert.match(root.textContent, /Adjust the exhausted total budget/);
   view.fields.max_seconds.value = "7200";
   await view.run();
   assert.equal(starts[0][2].resume_id, "saved");
@@ -340,9 +344,10 @@ test("v3 renders supported coverage separately and uses the goal outcome", async
       behavior_graph: { nodes: [], edges: [] },
     },
   });
-  assert.match(view.root.textContent, /Goal acceptance: Verified/);
-  assert.match(view.root.textContent, /2 attempted · 0 supported/);
-  assert.match(view.root.textContent, /5 unselected/);
+  assert.match(view.root.textContent, /Independent verificationVerified/);
+  assert.match(view.root.textContent, /Reviewed2Evidence supported0/);
+  assert.match(view.root.textContent, /No evidence-supported judgments/);
+  assert.match(view.root.textContent, /Unselected5/);
   assert.equal(view.root.querySelector("script"), null);
   abort.abort();
 });
@@ -429,10 +434,10 @@ test("v3 progress shows evidence work, phase timing and selected coverage", () =
     current_call: {stage: "focus:segment:1", activity: "read_evidence", state: "waiting", started_elapsed_seconds: 10},
     stage_timings: {scan: {elapsed_seconds: 5}, focus: {elapsed_seconds: 6}}, progress: []});
   assert.match(view.root.textContent, /Reviewing additional evidence/);
-  assert.match(view.root.textContent, /20s \/ 120s call limit/);
-  assert.match(view.root.textContent, /1 \/ 2 selected segments/);
-  assert.match(view.root.textContent, /5s in model calls/);
-  assert.match(view.root.textContent, /3. Summarize/);
+  assert.match(view.root.textContent, /20s \/ 120s/);
+  assert.match(view.root.textContent, /1 \/ 2 segments/);
+  assert.match(view.root.textContent, /Scan1 \/ 1 pages5 s/);
+  assert.match(view.root.textContent, /Summarize/);
   assert.equal(view.root.querySelector("progress").max, 2);
   abort.abort();
 });

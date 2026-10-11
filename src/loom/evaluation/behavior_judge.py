@@ -9,10 +9,12 @@ from dataclasses import asdict
 from loom.core import new_loop_id, new_run_id, now_iso, ok
 from loom.evaluation.behavior_budget import compact_segment, scan_pages, select_affordable, synthesis_inputs
 from loom.evaluation.behavior_contracts import ANALYZER_VERSION, CHECKPOINT_VERSION, DIMENSIONS, PATTERNS, PROMPT_VERSION, STATUSES, stable_id
+from loom.evaluation.behavior_observations import focus_observations
 from loom.evaluation.behavior_progress import PLAN_STATUSES, PROGRESS_KINDS, merge_findings, merge_graph, node_identity, progress_timeline
 from loom.evaluation.behavior_sequence import focus_context
 from loom.evaluation.evidence_review import EvidenceReview
 from loom.evaluation.evidence_store import text_value
+from loom.evaluation.focus_evidence import focus_evidence_refs
 from loom.evaluation.provider import evaluator_provider
 from loom.llm import LlmMessage, request_llm_response
 from loom.llm.request_options import materialize_request_options
@@ -24,12 +26,17 @@ No formal plan is acceptable for simple tasks. Negative results, discriminative 
 Do not call repetition waste without ruling out changed conditions, bounded retry policy or useful information gain.
 Separate information availability from actual model visibility and adoption. Do not infer causal recovery from temporal proximity.
 Use context/tool/token/verification evidence as supporting lenses. Never produce an aggregate score.
-References in indexes are navigation, not read evidence. Cite only exact returned_ref ranges in delivered evidence_packets.
+References in indexes are navigation, not read evidence. In every evidence_refs/supporting_refs/counterevidence_refs array,
+prefer delivered evidence_id strings (e.g. ["e1", "e3"]). The host resolves these to exact delivered source ranges.
+Exact returned_ref pointers are also accepted. Never copy broader navigation pointers or invent evidence IDs.
 You may request {"read_evidence":[EvidencePointer,...]} for original source ranges. Do not make absence claims from truncated text.
 For scan return {"candidate_segment_ids":[],"control_segment_ids":[],"rationale":"..."}; select both suspicious and effective segments.
 For focus return {"assessments":[{"segment_id":"...","dimension":"...","status":"effective|ineffective|mixed|unknown",
-"rationale":"...","evidence_refs":[]}],"diagnoses":[],"preserved_behaviors":[],"progress":[],"plan_assessments":[],
+"rationale":"...","evidence_refs":[]}],"diagnoses":[],"preserved_behaviors":[],"progress":[],"plan_assessments":[],"fact_assessments":[],
 "behavior_graph":{"nodes":[],"edges":[]}}.
+For each primary segment return exactly one assessment for EACH of the five dimensions, even when unknown.
+Every non-unknown assessment needs citations and a specific observation explaining the judgment. For unknown explain
+the specific missing evidence or why the dimension is not applicable (e.g. no recovery opportunity); never omit a dimension.
 Each diagnosis requires dimension, segment_id, pattern_type, mechanism_id (stable causal category), observation, mechanism,
 improvement_hypothesis, predicted_endpoint, validation (concrete matched-task check), intervention_surface, preserve,
 alternatives (array of plausible explanations), supporting_refs, counterevidence_refs, epistemic_status (observed|inferred|hypothesis|unknown).
@@ -45,7 +52,7 @@ Request only evidence needed to resolve a specific uncertainty; return unknown w
 Cross-step context and activity signals are navigation, not proof of relevance or progress. Review only the primary segment;
 use neighboring steps and repeated-operation endpoints to explain causes. Judge against the plan active at action time,
 not a later revision. Distinguish execution plans from acceptance criteria; justified replanning may be effective.
-Return progress (empty only when unsupported): [{segment_id, kind, label, evidence_refs}] with kind information_gain|hypothesis_eliminated|
+Return progress (empty only when unsupported): [{segment_id, kind, label, evidence_refs, fact_ids}] with kind information_gain|hypothesis_eliminated|
 decision|artifact_change|blocker_resolution|verification. Each landmark needs delivered evidence in the primary segment
 showing a meaningful change. A new tool output or an agent's claim alone does not establish useful progress.
 Return plan_assessments: [{segment_id, plan_snapshot_id, node_id, status, rationale, evidence_refs}], where status is
@@ -58,6 +65,18 @@ Repeated reads may follow mutations, truncation or lost context. Ten tools witho
 a low_progress_window; negative results and parallel experiments can be useful. Do not equate tool count with wasted effort.
 Keep one diagnosis per mechanism and supporting evidence; use dimensions (array) for additional affected dimensions.
 For graph nodes reuse the same precise evidence ranges and labels when referring to the same earlier fact across steps.
+behavior_facts are host-computed observations. Do not recalculate their counts, hashes, times or plan bindings.
+Return fact_assessments: [{fact_id, status: effective|mixed|ineffective|unknown, rationale, evidence_refs}].
+Assess each supplied fact once: whether a repeated result was necessary, a plan deviation justified, an observation
+resolved uncertainty, a recorded decision used available evidence, or a verification result supports the applicable goal.
+Distinguish recorded dependency completion from verified deliverables, identical output from wasted effort,
+and new content from useful evidence. A missing plan or missing resource identity is not a failure.
+Verification facts retain recorded assurance and goal_binding; a mismatched goal cannot support current-goal acceptance.
+Use only supplied fact IDs, cite delivered evidence, and name competing explanations. Unknown needs a specific reason.
+Cite both first_line and line when judging repeated content. For plan bindings/control actions cite an action_lines event
+(recorded response, tool input or result for that same action); plan text alone cannot demonstrate execution.
+For progress landmarks, include fact_ids linking the host observations used to infer useful progress.
+For diagnoses, include fact_ids linking the specific host observations behind the mechanism. Facts alone do not prove causality.
 """
 
 
@@ -69,6 +88,7 @@ def empty_semantic(facts):
         "preserved_behaviors": [],
         "progress": [],
         "plan_assessments": [],
+        "fact_assessments": [],
         "behavior_graph": {"nodes": [], "edges": []},
         "summary": "",
         "evidence_packets": [],
@@ -92,7 +112,7 @@ def partial_semantic(facts, checkpoint):
     for key, stage in stages.items():
         if not key.startswith("focus:"):
             continue
-        for field in ("diagnoses", "assessments", "preserved_behaviors", "progress", "plan_assessments"):
+        for field in ("diagnoses", "assessments", "preserved_behaviors", "progress", "plan_assessments", "fact_assessments"):
             result[field].extend(stage["result"].get(field, []))
         result["coverage"]["limitations"].extend(stage["result"].get("limitations", []))
         for field in ("nodes", "edges"):
@@ -109,7 +129,15 @@ def partial_semantic(facts, checkpoint):
         scope="selected_segments_with_whole_source_scan",
         scanned_pages=sum(k.startswith("scan:") for k in stages),
         scan_pages=checkpoint.get("scan_pages", 0),
+        delivered_focus_packets=sum(len(stage.get("delivered_packets", [])) for key, stage in stages.items() if key.startswith("focus:")),
     )
+    coverage["unknown_reasons"] = {}
+    coverage['fact_assessments'] = {'reviewed': len(result['fact_assessments']),
+                                   'supported': sum(r['status'] != 'unknown' for r in result['fact_assessments'])}
+    for row in result["assessments"]:
+        if row["status"] == "unknown":
+            reason = row.get("unknown_reason", "unspecified")
+            coverage["unknown_reasons"][reason] = coverage["unknown_reasons"].get(reason, 0) + 1
     reviewed = {a["segment_id"] for a in result["assessments"]}
     coverage["pending_segments"] = [sid for sid in checkpoint.get("selected", []) if sid not in reviewed]
     coverage["unselected_segments"] = [s["id"] for s in facts["segments"] if s["id"] not in checkpoint.get("selected", [])]
@@ -169,12 +197,12 @@ def _validate_focus(value, review, selected, facts=None):
     def refs(items):
         if not isinstance(items, list):
             raise ValueError("References must be an array")
-        return [asdict(review.store.pointer(r)) for r in items]
+        return [asdict(review.citation(r)) for r in items]
 
     def visible(items):
         return bool(items) and all(review.covers(r) for r in items)
 
-    for field in ("assessments", "diagnoses", "preserved_behaviors", "progress", "plan_assessments"):
+    for field in ("assessments", "diagnoses", "preserved_behaviors", "progress", "plan_assessments", "fact_assessments"):
         if not isinstance(value.get(field, []), list) or any(not isinstance(row, dict) for row in value.get(field, [])):
             raise ValueError(f"{field} must be an array of objects")
     if not isinstance(value.get("behavior_graph", {}), dict):
@@ -184,6 +212,31 @@ def _validate_focus(value, review, selected, facts=None):
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise ValueError(f"Graph {field} must be an array of objects")
     assessments, issues = {}, []
+    segments_by_id = {s['id']: s for s in (facts or {}).get('segments', [])}
+    fact_index = {r['id']: r for sid in selected if sid in segments_by_id for r in focus_observations(facts, segments_by_id[sid])}
+
+    def linked_facts(row, evidence):
+        ids = row.get('fact_ids')
+        if ids is None or ids == []:
+            ids = list(fact_index)
+        if not isinstance(ids, list) or any(not isinstance(i, str) for i in ids):
+            raise ValueError('fact_ids must be an array of strings')
+        cited = {r['line_number'] for r in evidence if review.covers(r)}
+        linked = []
+        for fid in dict.fromkeys(ids):
+            if fid not in fact_index:
+                continue
+            fact = fact_index[fid]
+            required = {fact['line']}
+            if fact.get('action_lines'):
+                if not cited.intersection(fact['action_lines']):
+                    continue
+                required = set()
+            if fact.get('first_line'):
+                required.add(fact['first_line'])
+            if required <= cited:
+                linked.append(fid)
+        return linked
     rejected_assessments = {}
     for index, a in enumerate(value.get("assessments", [])):
         evidence = refs(a.get("evidence_refs", []))
@@ -199,13 +252,19 @@ def _validate_focus(value, review, selected, facts=None):
             continue
         a = {**a, "evidence_refs": evidence}
         if a["status"] != "unknown" and not visible(evidence):
-            a.update(status="unknown", rationale="Evidence exceeds delivered source ranges")
+            reason = "missing_citation" if not evidence else "citation_outside_delivered_ranges"
+            a.update(proposed_status=a["status"], proposed_rationale=a["rationale"], unknown_reason=reason,
+                     status="unknown", rationale="Evaluator supplied no evidence citations" if not evidence
+                     else "Citations exceed the source ranges delivered to the evaluator")
+        elif a["status"] == "unknown":
+            a["unknown_reason"] = "evaluator_uncertain"
         assessments[a["segment_id"], a["dimension"]] = a
     for sid in selected:
         for d in DIMENSIONS:
             reason = rejected_assessments.get((sid, d))
             assessments.setdefault((sid, d), {"segment_id": sid, "dimension": d, "status": "unknown",
                                              "rationale": f"Evaluator assessment omitted: invalid {reason}" if reason else "Not assessed",
+                                             "unknown_reason": "invalid_assessment" if reason else "missing_assessment",
                                              "evidence_refs": []})
     diagnoses = []
     for d in value.get("diagnoses", []):
@@ -222,7 +281,8 @@ def _validate_focus(value, review, selected, facts=None):
         if not isinstance(d.get("alternatives", []), list) or any(not isinstance(v, str) for v in d.get("alternatives", [])):
             raise ValueError("Diagnosis alternatives must be an array of strings")
         support, counter = refs(d.get("supporting_refs", [])), refs(d.get("counterevidence_refs", []))
-        d = {**d, "supporting_refs": support, "counterevidence_refs": counter}
+        d = {**d, "supporting_refs": support, "counterevidence_refs": counter, 'fact_ids': linked_facts(d, support),
+             'fact_link_basis': 'source_citations'}
         if not visible(support) or any(not review.covers(r) for r in counter):
             d["epistemic_status"] = "unknown"
         d["id"] = stable_id("finding", d["segment_id"], d["dimension"], d["pattern_type"], d["mechanism_id"])
@@ -264,10 +324,13 @@ def _validate_focus(value, review, selected, facts=None):
             raise ValueError("Invalid progress landmark")
         evidence = refs(p.get("evidence_refs", []))
         primary_lines = {r["line_number"] for r in segments.get(p["segment_id"], {}).get("evidence_refs", [])}
+        primary_lines.update(r['line'] for r in fact_index.values() if p['segment_id'] in r.get('segment_ids', [])
+                             and r.get('goal_binding') != 'mismatch')
         anchors = [r["line_number"] for r in evidence if r["line_number"] in primary_lines]
         if visible(evidence) and anchors:
             progress.append({"segment_id": p["segment_id"], "kind": p["kind"], "label": p["label"],
-                             "evidence_refs": evidence, "line": max(anchors), "basis": "inferred"})
+                             "evidence_refs": evidence, "line": max(anchors), "basis": "inferred", 'fact_ids': linked_facts(p, evidence),
+                             'fact_link_basis': 'source_citations'})
     plans = {p["id"]: p for p in (facts or {}).get("plan_revisions", [])}
     for index, p in enumerate(value.get("plan_assessments", [])):
         # Source integrity remains strict, even for an unusable optional plan judgment.
@@ -294,6 +357,25 @@ def _validate_focus(value, review, selected, facts=None):
         active_plans = {c.get("plan_snapshot_id") for c in (facts or {}).get("model_calls", []) if c["id"] in segment.get("round_ids", [])}
         supported = supported and p["plan_snapshot_id"] in active_plans
         plan_assessments.append({**p, "evidence_refs": evidence, "status": p["status"] if supported else "unknown"})
+    fact_assessments = {}
+    for index, row in enumerate(value.get('fact_assessments', [])):
+        evidence = refs(row.get('evidence_refs', []))
+        fid = row.get('fact_id')
+        if not isinstance(fid, str) or fid not in fact_index or row.get('status') not in STATUSES or not isinstance(row.get('rationale'), str):
+            issues.append({'field': f'fact_assessments[{index}]', 'invalid_fields': ['fact_id/status/rationale'], 'action': 'omitted'})
+            continue
+        supported = visible(evidence) and fid in linked_facts({'fact_ids': [fid]}, evidence)
+        fact_assessments[fid] = {**row, 'evidence_refs': evidence, 'basis': 'inferred',
+                                 'fact_kind': fact_index[fid]['kind'], 'fact_label': fact_index[fid]['label'], 'fact_line': fact_index[fid]['line'],
+                                 'status': row['status'] if supported else 'unknown',
+                                 'unknown_reason': None if supported and row['status'] != 'unknown' else
+                                 'evaluator_uncertain' if row['status'] == 'unknown' else 'missing_fact_evidence'}
+        if not supported and row['status'] != 'unknown':
+            fact_assessments[fid].update(proposed_status=row['status'], proposed_rationale=row['rationale'],
+                                        rationale='Citations do not cover the relevant recorded action or both repetition endpoints')
+    for fid in fact_index:
+        fact_assessments.setdefault(fid, {'fact_id': fid, 'status': 'unknown', 'rationale': 'Evaluator omitted this fact judgment',
+                                         'unknown_reason': 'missing_assessment', 'evidence_refs': [], 'basis': 'inferred'})
     limitations = []
     for field, label in (("assessments", "behavior assessment"), ("plan_assessments", "optional plan assessment")):
         rejected = [issue for issue in issues if issue["field"].startswith(field + "[")]
@@ -303,7 +385,7 @@ def _validate_focus(value, review, selected, facts=None):
                                + ", ".join(sorted({key for issue in rejected for key in issue["invalid_fields"]})) + ").")
     return {"assessments": list(assessments.values()), "diagnoses": diagnoses, "preserved_behaviors": preserved,
             "behavior_graph": graph, "progress": progress, "plan_assessments": plan_assessments,
-            "validation_issues": issues, "limitations": limitations}
+            'fact_assessments': list(fact_assessments.values()), "validation_issues": issues, "limitations": limitations}
 
 
 async def judge_behavior(
@@ -376,14 +458,21 @@ async def judge_behavior(
         review, packets = EvidenceReview(store), []
         for packet in inherited:
             # Re-present exact source ranges, not broader earlier reads. These quotes actually enter this prompt.
+            preview = store.read(packet['returned_ref'], max_chars=max(1, packet['returned_chars']))
+            candidate = {'stage': key, **payload, 'evidence_packets': [*packets, preview]}
+            if len(RUBRIC) + len(json.dumps(candidate, ensure_ascii=False)) > max_prompt_chars - 1000:
+                break
             packets.append(review.present(packet["returned_ref"], max_chars=max(1, packet["returned_chars"])))
+        if inherited:
+            payload = {**payload, 'quote_delivery': {'requested': len(inherited), 'delivered': len(packets)}}
         initial_chars = 0
         unique_initial = {json.dumps(r, sort_keys=True): r for r in initial_refs}
-        for ref in unique_initial.values():
+        for index, ref in enumerate(unique_initial.values()):
             remaining = min(max_evidence_chars - usage["evidence_chars"], min(12000, max_prompt_chars // 3) - initial_chars)
             if remaining <= 0:
                 break
-            limit = min(1200, remaining)
+            # Share the initial allowance across actions/results, including later rounds.
+            limit = min(1800, max(1, remaining // (len(unique_initial) - index)))
             preview = store.read(ref, max_chars=limit)
             candidate = {"stage": key, **payload, "evidence_packets": [*packets, preview]}
             if len(RUBRIC) + len(json.dumps(candidate, ensure_ascii=False)) > max_prompt_chars - 1000:
@@ -522,6 +611,11 @@ async def judge_behavior(
                     if not isinstance(value.get("limitations", []), list) or any(not isinstance(v, str) for v in value.get("limitations", [])):
                         raise ValueError("Synthesis limitations must be an array of strings")
                     value = {k: value.get(k, []) for k in ("summary", "finding_ids", "limitations")}
+                    value['summary_input_coverage'] = payload.get('input_coverage', {})
+                    value['summary_quote_delivery'] = payload.get('quote_delivery', {'requested': 0, 'delivered': 0})
+                    for field, scope in value['summary_input_coverage'].items():
+                        if scope['included'] < scope['available']:
+                            value['limitations'].append(f"Synthesis included {scope['included']}/{scope['available']} {field}; all local results remain saved")
                 if key.startswith("focus:"):
                     cp["stages"].pop("synthesis", None)
                 claim_packets = []
@@ -532,6 +626,9 @@ async def judge_behavior(
                         if d["epistemic_status"] != "unknown"
                     ]
                     claims += [(stable_id("preserved", p["behavior"]), p["evidence_refs"]) for p in value["preserved_behaviors"]]
+                    for field in ("assessments", "progress", "plan_assessments", "fact_assessments"):
+                        claims += [(stable_id(field, row), row["evidence_refs"]) for row in value[field]
+                                   if row.get("status") != "unknown"]
                     for claim_id, refs in claims:
                         for ref in refs:
                             if review.covers(ref):
@@ -592,10 +689,11 @@ async def judge_behavior(
         anchors = [r for w in related[:3] for r in w.get("evidence_refs", [])[:2]]
         anchors += [t["raw_output_ref"] for t in facts["tool_uses"] if t["round_id"] in s["round_ids"] and t.get("raw_output_ref")]
         anchors += [r for p in context["plans"] for r in p["evidence_refs"][:1]]
+        anchors = [r for f in context['behavior_facts'] for r in f['evidence_refs'][:2]] + anchors
         payload = {"segments": [compact_segment(s)],
                    "goals": [g for g in facts["goal_revisions"] if g["episode_id"] == s["episode_id"]],
                    **context, "candidate_windows": related[:8]}
-        return payload, anchors + s["evidence_refs"]
+        return payload, focus_evidence_refs(store, s, anchors)
 
     # Include a control, then prioritize suspicious segments. The cap is an upper limit,
     # not a promise to review eight expensive segments regardless of remaining resources.
@@ -624,7 +722,7 @@ async def judge_behavior(
             await persist()
             break
     local = partial_semantic(facts, cp)
-    synthesis, quotes = synthesis_inputs(local, max_prompt_chars)
+    synthesis, quotes = synthesis_inputs(local, max_prompt_chars - len(RUBRIC) - 1200)
     await stage(
         "synthesis",
         synthesis,

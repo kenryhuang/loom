@@ -25,13 +25,25 @@ class EvidenceReview:
     def __init__(self, store: EvidenceStore):
         self.store = store
         self.spans: dict[tuple[int, str | None], list[tuple[int, int]]] = {}
+        self.citations: dict[str, dict[str, Any]] = {}
 
     def present(self, ref: EvidencePointer | Mapping[str, Any], *, max_chars: int) -> dict[str, Any]:
         ref = self.store.pointer(ref)
         result = self.store.read(ref, max_chars=max_chars)
+        result["evidence_id"] = f"e{len(self.citations) + 1}"
+        self.citations[result["evidence_id"]] = result["returned_ref"]
+        # The broader requested pointer is navigation, not a valid citation of a truncated packet.
+        result.pop("ref")
         start = ref.start or 0
         self.spans.setdefault((ref.line_number, ref.field_path), []).append((start, start + result["returned_chars"]))
         return result
+
+    def citation(self, value):
+        if isinstance(value, str):
+            if value not in self.citations:
+                raise ValueError(f"Unknown delivered evidence ID: {value}")
+            value = self.citations[value]
+        return self.store.pointer(value)
 
     def covers(self, ref: EvidencePointer | Mapping[str, Any]) -> bool:
         ref = self.store.pointer(ref)
