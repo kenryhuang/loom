@@ -41,6 +41,9 @@ class LoomService:
         self.capacity = max_active_runs
         self.provider_factory = provider_factory
         self.active = {}
+        self.shared_active = lambda: {}
+        self.shared_capacity = self.capacity
+        self.operation_limit = None
         self.lock = threading.RLock()
         self.stopping = threading.Event()
         self.thread = None
@@ -106,6 +109,8 @@ class LoomService:
                 answer = None
 
             def after(state, emit, db):
+                if command['type'] == 'restart_task' and sid in self.active:
+                    raise ServiceError('Wait for the previous worker to exit before restarting', 409)
                 if answer:
                     self._reconcile(state, emit, db, answer)
                 if command["type"] in {"stop_run", "complete_task"} and (sid not in self.active or not state["run"] or state["run"]["state"] != "running"):
@@ -152,7 +157,7 @@ class LoomService:
                         scratch[target] = state[source]
             context = replace(context, state=replace(context.state, observations=tuple(observations), scratch=scratch))
             state["context"] = encode(context)
-        if state["run"]:
+        if state["run"] and state['run']['state'] != 'completed':
             state["run"]["checkpoint"] = None
             state["run"]["state"] = "stopped"
             emit("run.stopped", {"reason": "User ended suspended execution"})
@@ -162,15 +167,17 @@ class LoomService:
             if state.get("workspace_blocked"):
                 raise ServiceError("Previous processes have not exited", 409)
             old = state["run"]
+            restarting = state.pop('restart_pending', False)
             if not old or old["state"] in {"completed", "stopped", "failed"}:
                 state["run"] = {"id": new_id("run"), "state": "queued", "steps": 0, "checkpoint": None, "active_seconds": 0, "counters": encode({})}
                 state["run"]["reset_planning"] = bool(
-                    old
+                    restarting or old
                     and (
                         old["state"] == "completed"
                         or (old["state"] == "stopped" and any(m["role"] == "user" and m["seq"] > state["input_cursor"] for m in state["messages"]))
                     )
                 )
+                state['run']['restart_from_scratch'] = restarting
             if not state["run"].get("task_episode_id"):
                 state["run"]["task_episode_id"] = (old.get("task_episode_id") if old and old["state"] != "completed"
                                                    and not state["run"].get("reset_planning") else None) or new_id("episode")
@@ -339,6 +346,12 @@ class LoomService:
                 elif op and op["status"] == "started" and op["effect_kind"] == "side_effecting":
                     raise ServiceError("Uncertain operation requires recovery", 409)
                 elif state["control"] or any(m["role"] == "user" and m["state"] == "accepted" and m["seq"] > state["input_cursor"] for m in state["messages"]):
+                    response = {"defer": True}
+                elif self.operation_limit and (
+                    db.execute("SELECT COUNT(*) FROM operations WHERE session_id=?", (sid,)).fetchone()[0] >= self.operation_limit(state)
+                ):
+                    state["control"] = {"kind": "paused", "reason": "Diagnosis tool-call budget exhausted", "command_id": None}
+                    emit("diagnosis.budget.exhausted", {"kind": "tool_calls"})
                     response = {"defer": True}
                 else:
                     call = plain(value)
@@ -594,7 +607,10 @@ class LoomService:
                         else:
                             self.store.update(sid, self._cleanup_groups)
                         self.active.pop(sid)
-                for sid in ready_sessions(self.store.list_sessions(), self.active, self.capacity):
+                shared = self.shared_active()
+                available = min(self.capacity - len(self.active), self.shared_capacity - len(self.active) - len(shared))
+                occupied = {**shared, **self.active}
+                for sid in ready_sessions(self.store.list_sessions(), occupied, len(occupied) + max(0, available)):
                     try:
                         descriptor = self.prepare_attempt(sid)
                         attempt = spawn_attempt(descriptor, self.config_path, self.provider_factory, self.plugin_registry_factory)

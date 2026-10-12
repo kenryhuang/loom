@@ -452,3 +452,20 @@ test("live failure preserves its cause through recovery and clears on the next a
   projection.apply(event(4, "run.started", {}));
   assert.equal(projection.snapshot.run.failure, undefined);
 });
+
+test('restart clears current execution projections while retaining durable messages', () => {
+  const state = snapshot();
+  state.run = { id: 'old', state: 'completed' };
+  state.acceptance = { state: 'passed' }; state.plan = { items: [{ status: 'completed' }] };
+  state.output_artifacts = [{ path: 'old.md' }];
+  state.messages = [{ role: 'assistant', content: 'Previous report' }];
+  state.token_budget = { used: 500, limit: 1000, remaining: 500 };
+  const projection = new SessionProjection(state);
+  projection.apply(event(1, 'task.restarted', { previous_run_id: 'old', reset_fields: ['acceptance', 'plan', 'output_artifacts'] }));
+  assert.equal(projection.snapshot.run, null);
+  assert.equal(projection.snapshot.acceptance, undefined);
+  assert.equal(projection.snapshot.plan, undefined);
+  assert.equal(projection.snapshot.output_artifacts, undefined);
+  assert.equal(projection.snapshot.token_budget.used, 0);
+  assert.equal(projection.snapshot.messages[0].content, 'Previous report');
+});

@@ -300,3 +300,85 @@ def test_budget_wrap_up_is_persisted_as_partial_assistant_answer(tmp_path):
         assert llm[-1]["payload"]["tools"] == []
     finally:
         service.close()
+
+
+@pytest.mark.parametrize('reopen', [True, False])
+def test_complete_preserves_success_and_restart_creates_a_fresh_goal_execution(tmp_path, reopen):
+    import json
+
+    from tests.service.fakes import turn_prompt_provider_factory
+
+    service = LoomService(tmp_path / 'data', provider_factory=turn_prompt_provider_factory).start()
+    try:
+        sid = create(service, tmp_path / 'workspace', 'Investigate parser')
+        first = wait_state(service, sid, 'idle')
+        old_id = first['run']['id']
+        old_episode = first['run']['task_episode_id']
+        command(service, sid, 'complete_task')
+        assert service.snapshot(sid)['run']['state'] == 'completed'
+        assert not any(e['type'] == 'run.stopped' for e in service.events(sid, limit=1000))
+        if reopen:
+            command(service, sid, 'reopen_task')
+            assert service.snapshot(sid)['task']['state'] == 'idle'
+        deadline = time.monotonic() + 3
+        while service.active and time.monotonic() < deadline:
+            time.sleep(.02)
+        restart = {'command_id': 'fresh-restart', 'type': 'restart_task', 'payload': {}}
+        receipt = service.submit(sid, restart)
+        assert service.submit(sid, restart) == receipt
+        second = wait_state(service, sid, 'idle')
+        assert second['run']['id'] != old_id
+        assert second['run']['task_episode_id'] != old_episode
+        assert second['task']['id'] == first['task']['id']
+        assert second['run']['restart_from_scratch']
+        reports = [m['content'] for m in second['messages'] if m['role'] == 'assistant']
+        assert len(reports) == 2
+        result = json.loads(reports[-1])
+        assert result['objective'] == 'Investigate parser'
+        assert result['history'] == []
+        assert service.submit(sid, restart) == receipt
+        assert service.snapshot(sid)['run']['id'] == second['run']['id']
+    finally:
+        service.close()
+
+
+def test_restart_discards_checkpoint_and_usage_but_preserves_pending_guidance(tmp_path):
+    from loom.client.projection import SessionProjection
+    from loom.runtime.checkpoints import decode
+    from loom.service.contracts import ServiceError
+    service = LoomService(tmp_path / 'data')
+    try:
+        sid = create(service, tmp_path / 'workspace', 'Inspect code')
+        descriptor = service.prepare_attempt(sid)
+        def pause(state, emit, db):
+            state['task']['state'] = 'paused'
+            state['input_cursor'] = state['messages'][0]['seq']
+            state['run'].update(state='suspended', steps=99, active_seconds=999,
+                                counters=encode({'llm_calls': 199}), checkpoint={'sha256': 'do-not-load'})
+            state.update(context={'old': 'do not decode'}, plan={'items': [{'status': 'completed'}]},
+                         acceptance={'state': 'passed'}, output_artifacts=[{'old': 'report'}])
+        service.store.update(sid, pause)
+        command(service, sid, 'submit_message', content='Also check tests')
+        before = service.snapshot(sid)
+        projection = SessionProjection(before)
+        command(service, sid, 'restart_task')
+        queued = service.snapshot(sid)
+        assert queued['run'] is None and queued['token_budget']['used'] == 0
+        assert queued['task']['state'] == 'queued'
+        assert not any(k in queued for k in ('plan', 'acceptance', 'output_artifacts'))
+        for event in service.events(sid, before['event_cursor']):
+            projection.apply(event)
+        assert projection.snapshot['run'] is None
+        assert 'acceptance' not in projection.snapshot
+        restarted = service.prepare_attempt(sid)
+        assert restarted['run']['id'] != descriptor['run']['id']
+        assert restarted['run']['steps'] == 0
+        assert restarted['run']['active_seconds'] == 0
+        assert decode(restarted['run']['counters']) == {}
+        assert restarted['context'] is None
+        pending = [m for m in restarted['messages'] if m['role'] == 'user' and m['seq'] > restarted['input_cursor']]
+        assert [m['content'] for m in pending] == ['Inspect code\n\nAlso check tests']
+        with pytest.raises(ServiceError, match='Pause or stop'):
+            command(service, sid, 'restart_task')
+    finally:
+        service.close()

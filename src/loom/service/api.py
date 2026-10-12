@@ -61,9 +61,14 @@ class ServiceHTTPServer(ThreadingHTTPServer):
         from loom.knowledge.jobs import KnowledgeJobs
 
         self.knowledge_jobs = KnowledgeJobs(service.store.knowledge)
+        from loom.diagnostics.jobs import SessionDiagnosis
+
+        self.diagnoses = SessionDiagnosis(service)
 
     def server_close(self):
         self.closing.set()
+        if hasattr(self, "diagnoses"):
+            self.diagnoses.close()
         if hasattr(self, "knowledge_jobs"):
             self.knowledge_jobs.close()
         if hasattr(self, "semantic"):
@@ -206,9 +211,41 @@ class SessionHandler(BaseHTTPRequestHandler):
             if method == "POST" and route == "delete" and len(parts) == 4:
                 if self._body() != {}:
                     raise ServiceError("Session deletion requires an empty object")
-                self._json(200, service.delete(sid))
+                self.server.diagnoses.before_delete(sid)
+                deleted = service.delete(sid)
+                self.server.diagnoses.after_delete(sid)
+                self._json(200, deleted)
             elif method == "POST" and route == "commands" and len(parts) == 4:
                 self._json(202, service.submit(sid, self._body()))
+            elif route == "diagnoses":
+                diagnosis = self.server.diagnoses
+                if len(parts) == 4 and method == "GET":
+                    self._json(200, diagnosis.list(sid))
+                elif len(parts) == 4 and method == "POST":
+                    self._json(202, diagnosis.start(sid, self._body()))
+                elif len(parts) == 5 and method == "GET":
+                    self._json(200, diagnosis.get(sid, parts[4]))
+                elif len(parts) == 6 and parts[5] == "events" and method == "GET":
+                    self._json(200, diagnosis.events(sid, parts[4], self._number(query, "after", 0)))
+                elif len(parts) == 7 and parts[5] == "artifacts" and method == "GET":
+                    self._json(200, diagnosis.artifact(sid, parts[4], parts[6]))
+                elif len(parts) == 6 and parts[5] == "evidence" and method == "GET":
+                    refs = query.get("ref", [])
+                    if len(refs) != 1:
+                        raise ServiceError("A single evidence ref is required")
+                    self._json(200, diagnosis.evidence(sid, parts[4], refs[0]))
+                elif len(parts) == 6 and parts[5] == "cancel" and method == "POST":
+                    if self._body() != {}:
+                        raise ServiceError("Cancel accepts an empty object")
+                    self._json(202, diagnosis.cancel(sid, parts[4]))
+                elif len(parts) == 6 and parts[5] == "changes" and method == "GET":
+                    self._json(200, diagnosis.changes(sid, parts[4]))
+                elif len(parts) == 6 and parts[5] in {"merge", "discard"} and method == "POST":
+                    self._json(200, diagnosis.workspace_action(sid, parts[4], parts[5], self._body()))
+                elif len(parts) == 6 and parts[5] == "resume" and method == "POST":
+                    self._json(202, diagnosis.resume(sid, parts[4], self._body()))
+                else:
+                    raise ServiceError("Route not found", 404)
             elif route == "trajectory":
                 analysis = self.server.trajectory
                 if method == "POST" and len(parts) == 4:

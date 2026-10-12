@@ -353,3 +353,81 @@ def test_session_delete_rejects_live_work_and_evaluation(api):
         db.execute("INSERT INTO semantic_jobs VALUES(?,?,?,?)", ("busy", sid, "busy", json.dumps({"state": "running"})))
     with pytest.raises(ServiceError, match="Deep evaluation"):
         client._json(f"/v1/sessions/{sid}/delete", {})
+
+
+def test_diagnosis_api_is_independent_owned_and_does_not_mutate_target(api):
+    from tests.diagnostics.fakes import factory
+    service, server, client, path = api
+    server.diagnoses.root = path
+    server.diagnoses.runtime.provider_factory = factory
+    sid = client.create({'workspace': str(path)}, command_id='diagnosis-target')['session_id']
+    before = service.store.snapshot(sid)
+    listing = client._json(f'/v1/sessions/{sid}/diagnoses')
+    assert listing['jobs'] == []
+    request = {'request_id': 'diagnosis-api', 'mode': 'read_only'}
+    job = client._json(f'/v1/sessions/{sid}/diagnoses', request)
+    assert client._json(f'/v1/sessions/{sid}/diagnoses', request)['id'] == job['id']
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        job = client._json(f'/v1/sessions/{sid}/diagnoses/{job["id"]}')
+        if job['state'] not in {'queued', 'running'}:
+            break
+        time.sleep(.05)
+    assert job['state'] == 'completed', job
+    assert service.store.snapshot(sid) == before
+    assert 'runtime_session_id' not in job
+    assert client._json(f'/v1/sessions/{sid}/diagnoses/{job["id"]}/events')['events']
+    other = client.create({'workspace': str(path)}, command_id='diagnosis-other')['session_id']
+    with pytest.raises(ServiceError) as denied:
+        client._json(f'/v1/sessions/{other}/diagnoses/{job["id"]}')
+    assert denied.value.status == 404
+    report = client._json(f'/v1/sessions/{sid}/diagnoses/{job["id"]}/artifacts/{job["report_ref"]["sha256"]}')
+    assert report['status'] == 'inconclusive'
+    deadline = time.monotonic() + 5
+    while server.diagnoses.runtime.active and time.monotonic() < deadline:
+        time.sleep(.05)
+    assert client._json(f'/v1/sessions/{sid}/delete', {})['deleted']
+    assert client._json(f'/v1/sessions/{sid}/delete', {})['deleted']
+    assert not server.diagnoses._jobs(sid)
+    assert not (server.diagnoses.directory / job['id']).exists()
+
+
+def test_worktree_diagnosis_review_and_discard_routes(api):
+    from loom.diagnostics.workspace import git
+    from tests.diagnostics.fakes import factory
+
+    service, server, client, path = api
+    root = path / 'repo'
+    root.mkdir()
+    git(root, 'init', '-b', 'main')
+    git(root, 'config', 'user.name', 'Test')
+    git(root, 'config', 'user.email', 'test@localhost')
+    (root / 'sample.py').write_text('value = 2\n')
+    (root / '.gitignore').write_text('.worktrees/\n')
+    git(root, 'add', '.')
+    git(root, 'commit', '-m', 'Initial')
+    server.diagnoses.root = root
+    server.diagnoses.runtime.provider_factory = factory
+    sid = client.create({'workspace': str(root)})['session_id']
+    job = client._json(f'/v1/sessions/{sid}/diagnoses', {'request_id': 'worktree-api', 'cleanup': 'keep'})
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        job = client._json(f'/v1/sessions/{sid}/diagnoses/{job["id"]}')
+        if job.get('workspace', {}).get('state') == 'review':
+            break
+        time.sleep(.05)
+    assert job['state'] == 'completed', job
+    assert job['workspace']['state'] == 'review', job
+    prefix = f'/v1/sessions/{sid}/diagnoses/{job["id"]}'
+    changes = client._json(prefix + '/changes')
+    assert changes['patch'] == ''
+    assert job['changes_ref']['kind'] == 'diagnosis_changes'
+    with pytest.raises(ServiceError, match='requires'):
+        client._json(prefix + '/merge', {})
+    other = client.create({'workspace': str(root)})['session_id']
+    with pytest.raises(ServiceError) as denied:
+        client._json(f'/v1/sessions/{other}/diagnoses/{job["id"]}/changes')
+    assert denied.value.status == 404
+    result = client._json(prefix + '/discard', {})
+    assert result['workspace']['state'] == 'deleted'
+    assert client._json(prefix + '/changes') == {**changes, 'workspace': result['workspace']}

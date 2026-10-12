@@ -75,6 +75,30 @@ export class SessionApi {
   catalog(signal) {
     return this.json("/v1/web/catalog", { signal });
   }
+  diagnoses(id, signal) {
+    return this.json(this.path(id, "diagnoses"), { signal });
+  }
+  diagnosis(id, job, signal) {
+    return this.json(this.path(id, `diagnoses/${encodeURIComponent(job)}`), { signal });
+  }
+  startDiagnosis(id, body, signal) {
+    return this.json(this.path(id, "diagnoses"), { body, signal });
+  }
+  diagnosisChanges(id, job, signal) {
+    return this.json(this.path(id, `diagnoses/${encodeURIComponent(job)}/changes`), { signal });
+  }
+  diagnosisCommand(id, job, action, body, signal) {
+    return this.json(this.path(id, `diagnoses/${encodeURIComponent(job)}/${action}`), { body, signal });
+  }
+  diagnosisEvents(id, job, after, signal) {
+    return this.json(this.path(id, `diagnoses/${encodeURIComponent(job)}/events?after=${after}`), { signal });
+  }
+  diagnosisArtifact(id, job, digest, signal) {
+    return this.json(this.path(id, `diagnoses/${encodeURIComponent(job)}/artifacts/${encodeURIComponent(digest)}`), { signal });
+  }
+  diagnosisEvidence(id, job, ref, signal) {
+    return this.json(this.path(id, `diagnoses/${encodeURIComponent(job)}/evidence?ref=${encodeURIComponent(ref)}`), { signal });
+  }
   async sessions(signal) {
     const values = [];
     let offset = 0;

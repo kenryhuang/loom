@@ -290,6 +290,16 @@ class AcceptanceController:
         self.goal(context)
         if self.data["plan"]:
             return
+        policy = getattr(self.assembly, "acceptance_policy", None)
+        if policy:
+            # Snapshot-only diagnosis must not probe the live workspace or invent executable checks.
+            self.data["revision"] += 1
+            self.data["profile"] = {"fingerprint": digest(policy.view.manifest), "kind": "diagnosis_snapshot"}
+            self.data["plan"] = {**self.validate_plan(policy.plan()), "revision": self.data["revision"],
+                                 "goal_digest": self.data["goal_digest"], "origin": "trusted_diagnosis_policy"}
+            self.data.update(state="not_ready", reason="Evidence-backed diagnosis report required")
+            await self.emit(runtime, "acceptance.plan.accepted")
+            return
         self.data.update(state="not_ready", reason="Preparing task acceptance plan")
         self.data["profile"] = probe(self.root)
         await self.emit(runtime, "workspace.probed", profile=self.data["profile"])
@@ -353,6 +363,8 @@ class AcceptanceController:
 
     async def revise(self, value, runtime):
         """Strengthen the current contract; changing the goal creates a fresh plan."""
+        if getattr(self.assembly, "acceptance_policy", None):
+            raise ValueError("Trusted diagnosis acceptance cannot be changed by the solver")
         if not self.data["plan"] or value.get("base_revision") != self.data["revision"]:
             raise ValueError("Acceptance revision is stale or no plan has been accepted")
         if not isinstance(value.get("reason"), str) or not value["reason"].strip():
@@ -401,6 +413,16 @@ class AcceptanceController:
         self.verifying = True
         await self.emit(runtime, "acceptance.verifying")
         try:
+            policy = getattr(self.assembly, "acceptance_policy", None)
+            if policy:
+                try:
+                    policy.validate(candidate)
+                except ValueError as exc:
+                    self.data.update(state="needs_repair", reason=str(exc), results=[{
+                        "criterion_id": "diagnosis-evidence", "status": "failed", "reason": str(exc),
+                        "method": "report_schema_and_references", "evidence_ids": []}])
+                    await self.emit(runtime, "acceptance.gate.blocked", results=self.data["results"])
+                    return False
             before = self.fingerprint(candidate)
             evidence = [{"id": "candidate", "content": candidate, "sha256": digest(candidate)}]
             evidence.extend(self.assembly.acceptance_evidence())

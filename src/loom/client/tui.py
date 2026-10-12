@@ -42,8 +42,8 @@ class SessionTuiApp(LoomTuiApp):
     #sessions > ListItem > Label.session-workspace {{ background: {COLORS["bg_dark"]}; }}
     #session_body {{ width: 1fr; }}
     #question, #plan, #notice, #budget {{ height: auto; max-height: 6; padding: 0 1; }}
-    #controls {{ height: 3; }}
-    #controls Button {{ min-width: 7; padding: 0 1; }}
+    #controls, #task_controls {{ height: 3; }}
+    #controls Button, #task_controls Button {{ min-width: 7; padding: 0 1; }}
     #message {{ height: 3; }}
     """
     BINDINGS = [
@@ -86,6 +86,9 @@ class SessionTuiApp(LoomTuiApp):
                         ("older", "History"),
                         ("artifact", "Detail"),
                     ):
+                        yield Button(label, id=kind)
+                with Horizontal(id='task_controls'):
+                    for kind, label in (("complete_task", "Complete"), ("reopen_task", "Reopen"), ("restart_task", "Restart")):
                         yield Button(label, id=kind)
         yield StatusBar(id="status")
         yield Footer()
@@ -295,6 +298,12 @@ class SessionTuiApp(LoomTuiApp):
         self.query_one("#pause", Button).disabled = waiting or task["state"] not in {"running", "queued", "pausing"}
         self.query_one("#resume", Button).disabled = waiting or bool(pending) or task["state"] not in {"paused", "failed"}
         self.query_one("#stop_run", Button).disabled = waiting or task["state"] in {"idle", "completed", "recovering"}
+        self.query_one('#complete_task', Button).disabled = task['state'] not in {'idle', 'paused'} or bool(pending and request['kind'] == 'recovery')
+        self.query_one('#reopen_task', Button).disabled = task['state'] != 'completed'
+        self.query_one('#restart_task', Button).disabled = (
+            waiting or task['state'] not in {'idle', 'paused', 'failed', 'completed'} or bool(state.get('workspace_blocked'))
+            or bool(pending and request['kind'] == 'recovery')
+        )
         budget = state.get("token_budget", {})
         limit = task.get("limits", {}).get("max_tokens", LIMITS["max_tokens"])
         self.query_one("#budget", Static).update(Text(f"Tokens: {budget.get('used', 0):,} / {limit:,} — /budget 20M to change"))

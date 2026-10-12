@@ -3,6 +3,7 @@ import { renderBehaviorSequence } from "./behavior-sequence.mjs";
 import { element } from "../markdown.mjs";
 import { ReasoningView } from "./reasoning.mjs";
 import { EvaluationView } from "./evaluation.mjs";
+import { DiagnosisView } from "./diagnosis.mjs";
 import { renderVerificationArtifact } from "./activity-row.mjs";
 
 const number = (value) => (value == null ? "—" : value.toLocaleString());
@@ -86,6 +87,7 @@ export class TrajectoryView {
     this.onError = onError;
   }
   close() {
+    this.diagnosisView?.close();
     this.abort?.abort();
     this.dialog?.remove();
     this.dialog = null;
@@ -97,6 +99,7 @@ export class TrajectoryView {
   updateState(state) {
     if (state.session_id !== this.sessionId) return;
     this.cursor = state.event_cursor;
+    this.diagnosisView?.updateCursor(this.cursor);
     this.snapshotLabel();
   }
   snapshotLabel() {
@@ -134,9 +137,10 @@ export class TrajectoryView {
     tabs.setAttribute("aria-label", "Evaluation views");
     this.deepPanel = element("section", "trajectory-evaluation");
     this.reasoningPanel = element("section", "trajectory-reasoning");
+    this.diagnosisPanel = element("section", "trajectory-diagnosis");
     this.reasoningPanel.append(element("p", "muted", "Preparing reasoning activity…"));
-    const panels = [this.body, this.deepPanel, this.reasoningPanel];
-    this.tabs = ["Trace analysis", "Deep evaluation", "Reasoning efficiency"].map((label, index) => {
+    const panels = [this.body, this.deepPanel, this.reasoningPanel, this.diagnosisPanel];
+    this.tabs = ["Trace analysis", "Deep evaluation", "Reasoning efficiency", "Session diagnosis"].map((label, index) => {
       const tab = button(label, () => this.selectTab(index));
       tab.id = `evaluation-tab-${index}`;
       tab.setAttribute("role", "tab");
@@ -161,7 +165,9 @@ export class TrajectoryView {
     this.deepPanel.append(
       element("p", "muted", "Preparing snapshot for evaluation…"),
     );
-    this.root.append(tabs, heading, this.body, this.deepPanel, this.reasoningPanel);
+    this.root.append(tabs, heading, this.body, this.deepPanel, this.reasoningPanel, this.diagnosisPanel);
+    this.diagnosisView = new DiagnosisView(this.diagnosisPanel);
+    void this.diagnosisView.open(api, sessionId);
     this.traceHeading = heading;
     this.selectTab(this.selectedTab || 0);
     try {
@@ -201,6 +207,7 @@ export class TrajectoryView {
     this.body.hidden = index !== 0;
     this.deepPanel.hidden = index !== 1;
     this.reasoningPanel.hidden = index !== 2;
+    this.diagnosisPanel.hidden = index !== 3;
     this.traceHeading.hidden = index !== 0;
     this.status.hidden = index !== 0 || !this.status.textContent;
     this.tabs.forEach((tab, i) => {

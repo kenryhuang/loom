@@ -31,14 +31,16 @@ def main(argv=None):
     budget.add_argument("session_id")
     budget.add_argument("tokens", nargs="?", type=parse_token_budget, help="New budget, e.g. 10M or 500K")
     budget.add_argument("--command-id")
-    for kind in ("message", "answer", "supersede", "pause", "resume", "stop", "complete", "reopen", "snapshot", "history", "events", "artifact", "connect"):
+    for kind in (
+        "message", "answer", "supersede", "pause", "resume", "stop", "complete", "reopen", "restart", "snapshot", "history", "events", "artifact", "connect"
+    ):
         sub = commands.add_parser(kind)
         sub.add_argument("session_id", nargs="?" if kind == "connect" else None)
         if kind in {"message", "answer", "supersede"}:
             sub.add_argument("content")
         if kind in {"answer", "supersede"}:
             sub.add_argument("--request-id", required=True)
-        if kind in {"message", "answer", "supersede", "pause", "resume", "stop", "complete", "reopen"}:
+        if kind in {"message", "answer", "supersede", "pause", "resume", "stop", "complete", "reopen", "restart"}:
             sub.add_argument("--command-id")
         if kind == "history":
             sub.add_argument("--before", type=int)
@@ -98,6 +100,7 @@ def main(argv=None):
                 "stop": "stop_run",
                 "complete": "complete_task",
                 "reopen": "reopen_task",
+                "restart": "restart_task",
             }
             payload = {}
             if args.command in {"message", "supersede", "answer"}:

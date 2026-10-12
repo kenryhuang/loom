@@ -219,3 +219,19 @@ async def test_budget_slash_command_updates_paused_session_without_becoming_task
         assert len(state["messages"]) == 1
         assert app.projection.snapshot["token_budget"] == {"limit": 10000000, "used": 120000, "remaining": 9880000}
         assert app.query_one("#message", Input).value == ""
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_buttons_offer_restart_without_resuming_old_execution():
+    from textual.widgets import Button
+    client = FakeClient()
+    client.states['one']['task']['state'] = 'completed'
+    app = SessionTuiApp(client, 'one')
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.pause()
+        assert app.query_one('#complete_task', Button).disabled
+        assert not app.query_one('#reopen_task', Button).disabled
+        assert not app.query_one('#restart_task', Button).disabled
+        await pilot.click('#restart_task')
+        await pilot.pause()
+        assert client.commands[-1]['type'] == 'restart_task'

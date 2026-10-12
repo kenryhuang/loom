@@ -103,6 +103,23 @@ Research 可以不绑定 workspace；如果希望分析文档落盘，请绑定�
 结果会同时保留为 artifact。内置调研工具读取给定的 HTTP(S) URL，
 当前没有内置搜索引擎，也不执行 JavaScript 浏览器。
 
+任务控制中，**Complete task** 关闭任务，**Reopen task** 恢复消息输入，但不会自动执行。
+需要从头运行时点击 **Restart task**：沿用当前目标和工具配置，创建新 run，
+清空执行上下文、计划、验收及本轮预算用量；历史记录和 artifact 保留，工作区文件不回滚。
+暂停期间尚未执行的追加要求会合并到新一轮目标。旧 worker 退出后，可从 idle、paused、failed、completed 直接重跑。
+TUI 也提供这些按钮，CLI 使用 `loom session restart SESSION_ID`。
+
+在 **Evaluation / Evolve → Session diagnosis** 中选择 run 和模型，按需填写问题，
+点击 **Diagnose session**。独立 Loom 循环读取脱敏的源码、trace、配置与装配快照，
+默认 **Worktree verification** 会在 `.worktrees/` 创建独立分支与工作区，包含当前未提交代码，
+允许编写复现测试、修改代码并在操作系统沙箱中离线验证。默认 **Auto-delete worktree**
+在诊断结束后删除临时分支和工作区，保留报告、测试记录和补丁；也可选择 **Keep for review**。
+通过 **Review patch → Merge reviewed changes** 显式应用补丁，冲突时拒绝覆盖；
+不自动暂存、提交或重启服务。**Read-only investigation** 保留原有只读调查方式。
+执行验证需要 macOS `sandbox-exec` 或 Linux `bubblewrap`，无无限制执行的降级路径。
+预算耗尽后在 **Budgets** 增加对应总预算，再 **Resume diagnosis**，复用已有证据。
+详见[设计与实现说明](docs/session-self-diagnosis.zh-CN.md)。
+
 **Knowledge bases** 页面管理文档导入、embedding profile、网站来源和图谱。
 将知识库显式绑定到 Session 后，Agent 才能检索其中的资料。
 LightRAG 的 **Sync activity** 展示当前页面或文档、执行阶段、已保存文档数量、

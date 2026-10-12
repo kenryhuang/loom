@@ -41,7 +41,7 @@ async def test_lifecycle_events_share_a_folded_group_with_a_working_toggle():
         assert all(row.query_one(".compact-summary").region.height == 1 for row in group.records)
         await pilot.click(group.records[1].query_one(".compact-summary"))
         assert group.records[1].is_expanded
-        assert "step_number" in group.records[1].query_one(".compact-details").render().plain
+        assert "step number" in group.records[1].query_one(".compact-details").render().plain
         assert app.apply_session_event(envelope(6, "step.started", {"step_number": 2}), app.subscription_generation)
         assert group.is_expanded
         await pilot.pause(0.4)

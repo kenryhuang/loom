@@ -170,9 +170,10 @@ class SessionStore:
             task = state["task"]
             kind, payload = command["type"], command["payload"]
             request = state.get("input_request")
-            if kind in {"pause", "stop_run", "resume", "complete_task"} and request and request["kind"] == "recovery" and request["state"] == "pending":
+            if (kind in {"pause", "stop_run", "resume", "complete_task", "restart_task"}
+                    and request and request["kind"] == "recovery" and request["state"] == "pending"):
                 raise ServiceError("Verify the uncertain effects and answer the recovery question first", 409)
-            if kind in {"resume", "answer_input"} and state.get("workspace_blocked"):
+            if kind in {"resume", "answer_input", "restart_task"} and state.get("workspace_blocked"):
                 raise ServiceError("Previous processes have not exited; workspace remains blocked", 409)
             expected = command["expected_task_revision"]
             if expected is not None and expected != task["revision"]:
@@ -209,6 +210,11 @@ class SessionStore:
                 raise ServiceError("Pause or stop active execution before completing", 409)
             elif kind == "reopen_task" and task["state"] != "completed":
                 raise ServiceError("Task is not completed", 409)
+            elif kind == 'restart_task':
+                if not task['objective']:
+                    raise ServiceError('Enter a task before restarting', 409)
+                if task['state'] not in {'idle', 'paused', 'failed', 'completed'} or (state['run'] and state['run']['state'] == 'running'):
+                    raise ServiceError('Pause or stop active execution before restarting', 409)
             elif kind in {"pause", "stop_run"} and task["state"] == "completed":
                 raise ServiceError("Task is completed", 409)
             self.append(db, state, "command.accepted", {"type": kind}, command_id=cid)
@@ -258,6 +264,28 @@ class SessionStore:
                     state["run"]["state"] = "stopped"
             elif kind == "reopen_task":
                 task["state"] = "idle"
+            elif kind == 'restart_task':
+                previous_run = state['run']
+                if request and request['state'] == 'pending':
+                    request['state'] = 'cancelled'
+                    self.append(db, state, 'input.cancelled', request, command_id=cid)
+                if previous_run and previous_run['state'] not in {'completed', 'stopped'}:
+                    self.append(db, state, 'run.stopped', {'reason': 'Restarted from scratch'}, command_id=cid)
+                pending = [m for m in state['messages'] if m['role'] == 'user' and m['seq'] > state['input_cursor']]
+                # Pending guidance belongs to the new goal once, not to an abandoned checkpoint.
+                content = '\n\n'.join([task['objective'], *[m['content'] for m in pending if m['content'] != task['objective']]])
+                for message in pending:
+                    self.applied(db, state, message['command_id'])
+                state['input_cursor'] = state['event_cursor']
+                cleared = ['plan', 'plan_run_id', 'workflow', 'workflow_route', 'acceptance', 'acceptance_run_id',
+                           'output_artifacts', 'workspace_profile', 'acceptance_current_check', 'plan_event']
+                for field in cleared:
+                    state.pop(field, None)
+                state.update(run=None, context=None, control=None, input_request=None, restart_pending=True)
+                task.update(state='queued', plan_revision=0)
+                self.append(db, state, 'task.restarted', {'previous_run_id': previous_run['id'] if previous_run else None,
+                            'reset_fields': cleared, 'objective': content}, command_id=cid)
+                self._message(db, state, cid, content)
             elif kind in {"set_knowledge_bases", "set_external_tools"}:
                 updated = validate_create(
                     {

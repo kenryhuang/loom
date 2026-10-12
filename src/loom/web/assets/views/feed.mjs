@@ -33,15 +33,23 @@ export class FeedView {
     this.onDetailsChange = onDetailsChange;
     this.events = [];
     this.emptyState = root.querySelector(".empty-state");
-    root.addEventListener("toggle", () => this.detailsChanged(), true);
-    document.addEventListener("selectionchange", () => {
+    this.onToggle = () => this.detailsChanged();
+    root.addEventListener("toggle", this.onToggle, true);
+    this.ownerDocument = root.ownerDocument;
+    this.onSelectionChange = () => {
       if (document.getSelection()?.isCollapsed) {
         for (const group of this.groups.values())
           for (const record of group.records.values())
             if (record.node.open) record.view.renderDetails();
       }
-    });
+    };
+    this.ownerDocument.addEventListener("selectionchange", this.onSelectionChange);
     this.reset();
+  }
+  destroy() {
+    this.inspector.close();
+    this.root.removeEventListener("toggle", this.onToggle, true);
+    this.ownerDocument.removeEventListener("selectionchange", this.onSelectionChange);
   }
   reset({ preserveDetails = false } = {}) {
     if (!preserveDetails) {

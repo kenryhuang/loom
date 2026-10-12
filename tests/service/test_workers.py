@@ -152,7 +152,7 @@ def test_controls_cannot_bypass_uncertain_side_effect_recovery(tmp_path):
         }
         service.worker_record(sid, record)
         service.recover(sid, "lost")
-        for kind in ("stop_run", "pause", "resume", "complete_task"):
+        for kind in ("stop_run", "pause", "resume", "complete_task", "restart_task"):
             with pytest.raises(ServiceError):
                 command(service, sid, kind)
         assert service.snapshot(sid)["input_request"]["state"] == "pending"

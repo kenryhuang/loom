@@ -109,6 +109,28 @@ press Enter to begin.
 5. Send additional guidance or answer a pending question. Use **Pause**,
    **Resume**, and **Stop** to control execution.
 
+Task controls have distinct meanings: **Complete task** closes the task, and
+**Reopen task** enables new messages without starting execution. **Restart task**
+runs the current goal again with a new run, empty execution context, fresh plan and
+acceptance checks, and reset run budgets. History and artifacts remain available;
+workspace files are used as they currently exist. Pending guidance is included once.
+You can restart directly from idle, paused, failed, or completed state after the
+previous worker exits. TUI provides the same controls; CLI: `loom session restart SESSION_ID`.
+
+Open **Evaluation / Evolve → Session diagnosis** to investigate a session failure.
+Choose a run and model, optionally describe the problem, then click **Diagnose session**.
+An independent Loom loop investigates source, trace, configuration, and assembly.
+By default, **Worktree verification** creates a branch under `.worktrees/`, includes
+your current uncommitted code, and lets the agent write regression tests, edit files,
+and run offline checks in an OS sandbox. **Auto-delete worktree** removes the temporary
+branch and workspace when the diagnosis ends; reports, test receipts, and the patch remain.
+Choose **Keep for review** to retain it, or **Read-only investigation** to disable writes.
+Use **Review patch → Merge reviewed changes** to apply the saved delta to the original
+working directory after conflict checks. Merging does not stage, commit, or restart the service.
+Validation requires macOS `sandbox-exec` or Linux `bubblewrap`; no unrestricted fallback.
+Use **Budgets → Resume diagnosis** after increasing an exhausted budget; saved evidence
+is reused. [Design and implementation notes](docs/session-self-diagnosis.zh-CN.md).
+
 Coding and file/command tools require an existing workspace directory on the
 service host. Research can run without a workspace; bind a writable directory
 when you want analysis documents saved as files as well as artifacts. The

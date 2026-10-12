@@ -1,6 +1,6 @@
 # Session 自诊断设计
 
-状态：待实施设计。日期：2026-10-12。
+状态：第二版隔离工作区验证已实施。日期：2026-10-12。**当前行为见第 16 节**；第 1–15 节保留第一版只读设计与实现记录。新增诊断默认可以在独立 worktree 编辑代码、编写测试并验证，结束后默认删除临时分支和工作区，保留补丁供用户审阅、合并。
 
 ## 1. 目标与范围
 
@@ -290,3 +290,173 @@ checkpoint 保存同一 source cursor、源码视图身份、loop/plugin 状态�
 10. **取消、重启、版本变化**：诊断自身可恢复或明确要求重新开始；原任务不被暂停/恢复；诊断失败不会递归创建更多诊断。
 
 设计的核心是：**用 Loom 的执行循环调查 Loom，但将目标运行固定为只读证据，将建议保留为待执行的建议。**
+
+
+## 15. 第一版实现与使用
+
+入口：**Evaluation / Evolve → Session diagnosis**。选择 Latest run、历史 run 或 All runs，选模型，可填问题，再点击 **Diagnose session**。进入页面不自动调用模型；Trace analysis 失败不阻断这个入口。页面展示预算、当前调查活动、报告、因果链、证据、覆盖缺口和独立事件 feed。Stop 只暂停并取消诊断；离开页面只停止订阅。
+
+实现文件：
+
+- `diagnostics/evidence.py`：固定 cursor 的事件与 artifact 快照、源码清单和内容 hash、脱敏、分页和证据账本。
+- `diagnostics/tools.py`：八个只读调查工具，包含字面搜索、带行号源码、按调用 ID 过滤事件、JSON pointer artifact 字段读取。
+- `diagnostics/report.py`：结构化报告合同、确定性引用检查、独立语义验收、Markdown 报告生成。
+- `diagnostics/runner.py`：受信 registry 与固定能力 TaskAssembly；继续使用 dynamic workflow。
+- `diagnostics/jobs.py`：持久化 job、模型与配置选择、队列、停止和预算续跑。
+- `web/assets/views/diagnosis.mjs`：独立 tab、状态轮询、报告与证据查看。
+
+### 执行与存储
+
+没有另写一套 agent 引擎。诊断使用一个私有 `LoomService`，复用现有 worker、journal、RPC、checkpoint、ManagedStep 和 TaskAssembly。其 session 记录位于 `<data-dir>/diagnostics/runtime`，不进入普通 session 列表，也不接收目标 session 的控制能力。主数据库中的 `diagnosis_jobs` 只保存归属与 job 状态；`<data-dir>/diagnostics/<job-id>` 保存固定证据视图和 ledger。
+
+私有 supervisor 与主服务共享 admission lock 和总运行容量；诊断最多一个活跃 worker、四个等待 job。源码已在启动时复制成不可变文本视图，因此执行阶段的 source resource 声明 `access_mode: none`，不会为了读取固定快照阻塞在同目录运行的正常任务。普通 registry 不注册 `session_diagnostics`，目标插件始终只作为数据读取。
+
+### 配置与预算
+
+源码目录默认从已加载 `loom` 模块向上定位项目。可在启动服务前设置 `LOOM_DIAGNOSTICS_SOURCE_ROOT=/path/to/loom` 覆盖；它是服务进程环境变量，不是 task spec 中的任意 root，也不是新的 `config.yaml` 字段。快照标明该目录是否包含实际加载的模块。data dir 使用当前 service 的目录，不需要用户再配置。
+
+模型使用目标 session 的配置别名，未指定时使用 service default；页面可以选择其他已配置模型。当前有效模型配置与目标绑定的 external connection 配置经过脱敏后供调查读取，包括 credential 是否存在；不会调用 MCP、CLI 或导入目标插件。历史生效配置只能由历史 trace 证明，不能由当前配置倒推。
+
+默认预算：20 steps、30 model calls、100 tool calls、300,000 reported tokens、600 秒活跃运行时间；暂停和排队不消耗这项时间。上限依次为 100、200、500、2,000,000、3,600。缺失用量和未完成调用单独显示。单页最多 16,000 字符，累计读取最多 1,000,000 字符；证据读取上限是固定的，需要新诊断缩小调查范围，不能通过 Resume 清零。
+
+当状态为 budget_exhausted 时，在 Budgets 中增加耗尽的**总预算**，然后 Resume diagnosis。原快照、证据账本和累计调用计数继续使用。中断且存在可恢复 checkpoint 的 job 可以续跑；没有有效 checkpoint 的启动错误需发起新诊断。报告格式或语义验收最多修订一轮；调整 task 总预算不会重置验收修订次数。
+
+### 报告与边界
+
+结构化报告包含 summary、identified/inconclusive、findings、causal_chain、coverage。每项 finding 包含归属层、confirmed/hypothesis/unknown、原因、实际读取过的证据 ID、建议、拟议验证及风险；因果边注明 observed/inferred。报告由宿主生成 Markdown，同时保存结构化和 Markdown artifacts。完成状态只表示诊断报告通过验收。
+
+报告最多 24,000 字符、12 个问题和 12 个不同引用页。确定性校验会拒绝虚构引用，随后把引用的实际证据交给独立语义验收；早期证据不会因为最近工具窗口滚动而丢失。尚未通过验收的输出保留为 partial report 或调查 trace，不展示为已完成报告。
+
+当前源码快照最多 5,000 个文件、单文件 1 MB、合计 32 MB；原始事件视图最多 64M 字符，连同 artifact 合计最多 96M 字符、单个 artifact 最多 8 MB。遗漏文件和 artifact 记录在 coverage 中，不被默认为成功读取。源码身份使用完整内容清单 hash，包含未提交代码；并不声称还原了历史 Git checkout。历史 artifact 可作为同 session 的背景，事件读取默认限定选择的 runs，显式 `include_prior_context` 才扩大事件范围。
+
+API 与第 12 节一致；创建额外要求 `request_id`，用于幂等请求。另提供 `GET .../diagnoses/{id}/artifacts/{digest}` 读取该诊断自己的产物。删除目标 session 前停止相关诊断，删除后移除诊断索引和证据快照；私有 runtime 历史沿用正常服务的逻辑删除策略。
+
+回归测试覆盖真实 persisted worker 的完成与预算续跑、目标 session 不变、跨 session artifact 拒绝、源码快照与路径隔离、脱敏、引用校验、API 归属、主分析失败时的独立入口和前端异步生命周期。测试使用可控模型响应验证执行合同，不把它等同于真实模型对所有历史故障都能准确归因。
+
+## 16. 第二版：隔离工作区验证（已实施）
+
+### 16.1 当前默认行为
+
+第一版的“只读、不执行测试”限制只适用于 **Read-only investigation** 模式。
+新建诊断默认选择 **Worktree verification**，继续使用独立的 Loom task loop，增加
+“读取证据 → 建立假设 → 编写复现测试 → 修改 → 再验证 → 报告”的能力。
+原 session 的 trace、配置和 assembly 仍然是只读快照；原任务不会因此被标为修复或完成。
+
+```mermaid
+flowchart LR
+    A[捕获 trace 和当前代码] --> B[创建独立 Git 分支与 worktree]
+    B --> C[读取证据 / 提出假设]
+    C --> D[新建复现测试 / 编辑代码]
+    D --> E[离线沙箱执行检查]
+    E -->|需继续调查| C
+    E --> F[报告 / 测试结果 / 增量补丁]
+    F --> G[默认删除临时 worktree 和分支]
+    F --> H[可选：保留供审阅]
+    G --> I[用户审阅保存的补丁]
+    H --> I
+    I -->|显式点击 Merge reviewed changes| J[冲突检查后应用到原分支工作区]
+```
+
+### 16.2 Git 基线与归属
+
+- 必须是具有 HEAD、当前处于命名分支上的 Loom Git 仓库。安装包目录、detached HEAD 等不能用于
+  worktree 模式；仍可以选择只读模式。
+- 工作目录：`<loom-source>/.worktrees/<diag-id>`；独立分支：`loom-diagnosis/<diag-id>`。
+- 基线包含启动时的 tracked 文件、未被忽略的新增文件，以及已有未提交修改和删除。
+  不执行 `stash`，不修改原分支 HEAD 或原 index，不把用户改动提交到原分支。
+- 使用临时 Git index 和私有 baseline commit 建立工作副本。诊断结束时只导出相对该 baseline
+  的增量，因此不会把启动前已有改动误当成诊断修复。
+- 不复制 `.env`、实际 `config.yaml/yml`、凭据/密钥文件、隐藏目录、符号链接、运行数据、依赖和缓存；
+  保留 `.gitignore` 以排除测试生成物。排除清单在页面可展开查看。真实配置仍通过脱敏工具调查，
+  需要配置的测试应构造 fixture，不加载线上凭据。
+- 单个基线/修改文件最多 2 MB，基线合计 64 MB，最终补丁最多 8 MB。超限给出具体错误；
+  无法保存补丁时保留 worktree，不先删除唯一改动副本。
+- 源码 reader 保留原始不可变快照；`read_file` 读取正在修改的 worktree。
+  基线反映诊断开始时的代码，不代表历史 run 一定使用过此版本。
+
+### 16.3 工具与验证记录
+
+`session_diagnostics` 在 worktree 模式下额外装配：
+
+| 工具 | 能力 |
+|---|---|
+| `read_file` | 读取当前 worktree 文件，返回内容与 SHA256 |
+| `write_file` | 新建测试或替换文本文件，自动建立父目录 |
+| `edit_file` | 唯一匹配 `old_text` 后替换，避免模糊修改 |
+| `delete_file` | 删除 worktree 内单个文件 |
+| `workspace_diff` | 查看相对私有基线的补丁、文件清单和补丁 hash |
+| `run_validation` | 执行 Python、pytest 或 Node 检查，产生可引用执行凭据 |
+
+文件工具拒绝绝对路径、越界路径、敏感文件与符号链接。
+写入和执行工具标为 `side_effecting`，仍经过普通 operation journal 与 tool budget；
+只读模式不会装配它们。没有将通用、不受限的 shell 或外部 MCP 加入诊断。
+
+验证命令通过 `argv` 数组传入，例如：
+
+```json
+{"argv":["python","-m","pytest","tests/tasks/test_acceptance.py","-q"],"timeout_seconds":60}
+```
+
+- 默认 60 秒，单次上限 120 秒，计入诊断自身运行时间和工具调用预算。
+- 使用当前服务的 Python 环境读取已安装依赖，`PYTHONPATH` 指向 worktree 的 `src` 与根目录。
+  不自动安装依赖。pytest 不自动载入第三方插件；需要时显式使用 `-p pytest_asyncio.plugin` 等参数。
+- 每次记录 argv、起始时间、耗时、退出码、passed/failed/timeout、沙箱类型、baseline、
+  **执行前的补丁 hash**、最多 32 KB 输出和截断标志。页面区分“最终补丁”和“更早补丁”的检查。
+  某次测试通过不是所有改动都被验证，后续编辑也不能沿用先前结果冒充重新验证。
+- 输出进入 evidence ledger，可被 finding 引用。新增可选 `validation_status`：
+  `not_run / passed / failed / timeout`；非 `not_run` 必须引用实际执行且结果匹配的 `run_validation` 凭据。
+  原有不含该字段的报告兼容为 `not_run`。语义验收继续核查结论是否得到证据支持。
+- 报告可以描述 worktree 中完成的验证，不得声称原服务已经修复或原任务已经通过验收。
+  JSON、Markdown 和诊断变更（补丁、检查记录）分别保存为 artifact。
+
+### 16.4 执行边界
+
+**Git worktree 本身不是安全沙箱。** 因此测试进程另外使用操作系统限制：
+macOS 使用 `sandbox-exec`，Linux 使用 `bubblewrap`。无可用后端时 `run_validation` 返回明确错误，
+不会降级为宿主无限制 shell；其他调查、编辑与补丁保存能力仍可用。
+
+验证进程只能写诊断 worktree 和该 job 的 scratch 目录；允许读取系统运行库及服务 Python 环境，
+不挂入目标 session 数据，不继承服务密钥、代理或模型环境变量，不提供网络访问。
+worktree 的 `.git` 入口受保护，Git 分支创建、删除和补丁应用全部由宿主执行。
+测试使用独立进程组，记录 PID 与启动身份；超时、worker 停止和恢复时清理遗留验证进程，
+进程未确认退出前不删除 worktree。
+
+这是本机离线复现环境，不适合直接复测需要真实 MCP、线上账户、网络或凭据的问题。
+报告应将这些验证明确列为未执行，给出手工检查建议。
+macOS 后端有实际执行与越界回归；Linux 后端需要在有可用 bubblewrap/user namespace 的宿主部署验证。
+
+### 16.5 结束、恢复与合并
+
+| 状态 / 操作 | 行为 |
+|---|---|
+| completed / failed / cancelled | worker 退出后保存补丁；默认删除临时分支、worktree 与 scratch；报告、补丁和证据继续保留 |
+| paused / budget_exhausted / interrupted | 保留 worktree，Resume 在相同快照与改动上继续；用户 Stop 后按结束策略清理 |
+| Keep for review | 结束后保留工作区；可在页面点击 Delete worktree，保存的补丁不随之丢失 |
+| Auto-delete worktree（默认） | 自动清理后仍能 Review patch，并显式合并保存的补丁 |
+| 删除目标 session | 停止诊断及验证进程，清理其专属 worktree、分支和诊断记录 |
+
+**Merge reviewed changes** 是用户动作，不是模型工具，也不会自动触发。
+页面先展示完整已保存补丁，合并请求携带 `patch_sha256`，服务端校验用户审阅的版本。
+等待运行中的 worker 退出后，检查原分支和 HEAD 未变化、补丁涉及文件与启动基线一致、路径未变成符号链接，
+再通过 `git apply --check` 与 `git apply` 应用全部增量。冲突时拒绝合并，不覆盖新改动。
+无关文件的未提交修改和原 index 都保留。
+
+这里的“合并”是将诊断增量应用到原工作区，**不是直接 git merge 私有 baseline 分支**：
+后者会混入用户原有未提交代码及被排除文件的差异。应用后文件仍是未提交修改，
+由用户正常 review/commit；不自动提交、推送或重启服务。
+
+### 16.6 API 与文件
+
+创建参数新增：`mode: worktree | read_only`（默认 worktree），
+`cleanup: delete | keep`（默认 delete）。老 job 沿用其原来的能力，不在 Resume 时悄悄升级权限。
+
+| 接口 | 用途 |
+|---|---|
+| `GET .../diagnoses/{id}/changes` | 取得保存的补丁、hash、文件清单与验证记录 |
+| `POST .../diagnoses/{id}/discard`，body `{}` | 删除保留的临时工作区和分支，保留补丁 |
+| `POST .../diagnoses/{id}/merge`，body `{"patch_sha256":"..."}` | 显式应用用户审阅的补丁；跨 session 访问、活动诊断和冲突均拒绝 |
+
+新增 `diagnostics/workspace.py` 管理 Git 生命周期，`diagnostics/validation.py` 管理离线执行；
+`tools.py`、`runner.py`、`jobs.py`、`report.py`、服务 API 和诊断 tab 承接装配、引用验收及交互。
+回归包含：dirty baseline、未提交新文件和删除、真实 worker 写测试→失败→修复→通过、
+默认清理后继续审阅/合并、保留与手动删除、暂停保留与取消清理、冲突拒绝、路径/网络边界及结果引用。

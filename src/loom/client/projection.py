@@ -45,6 +45,14 @@ class SessionProjection:
             self.snapshot["task"]["state"] = data["state"]
             if "revision" in data:
                 self.snapshot["task"]["revision"] = data["revision"]
+        elif kind == 'task.restarted':
+            for field in data.get('reset_fields', []):
+                self.snapshot.pop(field, None)
+            self.snapshot.update(run=None, input_request=None)
+            self.snapshot['task']['plan_revision'] = 0
+            self.streams.clear()
+            self.stream_origins.clear()
+            self._budget(used=0)
         elif kind == "task.goal.revised":
             self.snapshot["task"].update(objective=data["objective"], goal_revision=data["goal_revision"])
             if "title" in data:

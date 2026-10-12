@@ -8,6 +8,7 @@ from loom.service.contracts import COMMAND_TYPES
 COMMAND_LABELS = {
     "pause": "Pause", "resume": "Resume", "stop_run": "Stop run",
     "complete_task": "Complete task", "reopen_task": "Reopen task",
+    "restart_task": "Restart task",
 }
 
 

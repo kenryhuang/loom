@@ -19,6 +19,7 @@ COMMAND_TYPES = frozenset(
         "stop_run",
         "complete_task",
         "reopen_task",
+        "restart_task",
         "set_token_budget",
         "set_knowledge_bases",
         "set_external_tools",

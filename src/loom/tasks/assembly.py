@@ -270,6 +270,8 @@ class TaskAssembly:
         from loom.llm import TokenUsage
         from loom.tasks.acceptance import AcceptanceController
 
+        # Policies are supplied by trusted collection factories, never by model/task JSON.
+        self.acceptance_policy = next((c.acceptance_policy for c in self.collections if hasattr(c, "acceptance_policy")), None)
         self.acceptance = AcceptanceController(self, self.spec.get("acceptance"))
         self.acceptance_provider = None
         self.acceptance_limits = {}
@@ -758,6 +760,8 @@ class TaskAssembly:
             self.execution.boundary(self._acceptance_cp)
 
     def acceptance_evidence(self):
+        if self.acceptance_policy:
+            return self.acceptance_policy.evidence(self.acceptance.data["candidate"])
         return json_value(self._acceptance_evidence)
 
     async def acceptance_model_request(self, runtime, stage, prompt, content, timeout):

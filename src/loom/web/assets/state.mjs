@@ -52,6 +52,14 @@ export class SessionProjection {
     } else if (kind === "task.state.changed") {
       state.task.state = data.state;
       if (data.revision != null) state.task.revision = data.revision;
+    } else if (kind === "task.restarted") {
+      for (const field of data.reset_fields || []) delete state[field];
+      state.run = null;
+      state.input_request = null;
+      state.task.plan_revision = 0;
+      this.streams = {};
+      this.origins = {};
+      this.budget(0);
     } else if (kind === "task.goal.revised") {
       Object.assign(state.task, {
         objective: data.objective,

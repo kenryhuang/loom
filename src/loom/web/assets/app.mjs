@@ -324,11 +324,28 @@ function renderState(state) {
       : "Ctrl / ⌘ + Enter to send";
   $("message").disabled = state.task.state === "completed";
   $("send").disabled = sending || $("message").disabled;
+  updateTaskControls(state);
   if (
     state.run?.reason &&
     ["paused", "recovering", "failed"].includes(state.task.state)
   )
     notice(state.run.reason);
+}
+
+function updateTaskControls(state) {
+  if (!state) return;
+  const status = state.task.state;
+  const recovery = state.input_request?.state === "pending" && state.input_request?.kind === "recovery";
+  const allowed = {
+    complete_task: ["idle", "paused"].includes(status) && !recovery,
+    reopen_task: status === "completed",
+    restart_task: Boolean(state.task.objective) && ["idle", "paused", "failed", "completed"].includes(status)
+      && !recovery && !state.workspace_blocked?.length,
+  };
+  for (const [id, enabled] of Object.entries(allowed)) {
+    const button = document.querySelector(`[data-command="${id}"]`);
+    if (button) button.disabled = button.dataset.busy === "true" || !enabled;
+  }
 }
 
 function renderControls() {
@@ -340,14 +357,22 @@ function renderControls() {
       command.label,
     );
     button.dataset.command = command.id;
+    button.title = {
+      complete_task: "Close this task; preserve its run history and verification results",
+      reopen_task: "Reopen for new messages; execution starts when you send a task or choose Restart task",
+      restart_task: "Run the current goal from scratch with a fresh plan, acceptance checks and budget, using current workspace files",
+    }[command.id] || command.label;
     button.addEventListener("click", async () => {
+      button.dataset.busy = "true";
       button.disabled = true;
       try {
         await controller.command(command.id);
       } catch (error) {
         showError(error);
       } finally {
+        delete button.dataset.busy;
         button.disabled = false;
+        updateTaskControls(controller.projection?.snapshot);
       }
     });
     $("controls").append(button);
