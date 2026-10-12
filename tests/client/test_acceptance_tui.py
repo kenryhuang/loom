@@ -4,7 +4,7 @@ from copy import deepcopy
 import pytest
 
 from loom.client.tui import SessionTuiApp
-from loom.tui.acceptance import AcceptancePanel
+from loom.tui.acceptance import AcceptancePanel, round_summary
 from loom.tui.compact import CompactEventFeedWidget, CompactLoomTuiApp
 from loom.tui.tui_collector import TuiEvent, TuiEventCollector
 from tests.client.test_tui import FakeClient
@@ -14,6 +14,15 @@ def acceptance(state="verifying"):
     return {"state": state, "revision": 2, "reason": "Checking deliverable", "plan": {
         "criteria": [{"id": "doc", "description": "Analysis saved in workspace"}, {"id": "goal", "description": "Full goal satisfied"}],
         "unresolved_requirements": []}, "results": [{"criterion_id": "doc", "status": "passed"}]}
+
+
+def test_precheck_block_is_pending_not_failed_checks():
+    value = {**acceptance("blocked"), "results": []}
+    summary, failed = round_summary(value)
+    assert failed
+    assert "Acceptance blocked before checks" in summary
+    assert "2 checks pending" in summary
+    assert "0/2 checks passed" not in summary
 
 
 @pytest.mark.asyncio

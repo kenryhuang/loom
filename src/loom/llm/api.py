@@ -931,6 +931,7 @@ class OpenAIProvider:
     request_options: Mapping[str, Any] = field(default_factory=dict)
     base_url: str = "https://api.openai.com/v1"
     http_client: Any = None
+    context_window_tokens: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "request_options", normalize_request_options(self.request_options))

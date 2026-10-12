@@ -14,6 +14,7 @@ base_url = "https://example.test/v1"
 api_key_env = "MAIN_KEY"
 temperature = 0.2
 max_completion_tokens = 1234
+context_window_tokens = 128000
 
 [models.fast]
 provider = "openai"
@@ -31,7 +32,24 @@ api_key = "inline-key"
     assert loaded.models["main"].api_key_env == "MAIN_KEY"
     assert loaded.models["main"].temperature == 0.2
     assert loaded.models["main"].max_completion_tokens == 1234
+    assert loaded.models["main"].context_window_tokens == 128000
     assert loaded.models["fast"].api_key == "inline-key"
+
+
+def test_model_context_capacity_is_local_metadata_and_validated(tmp_path):
+    from loom.llm import LlmMessage
+
+    config = TaskRunnerConfig(default_model="main", models={"main": ModelConfig(
+        model="custom", base_url="https://example.test/v1", api_key="key", context_window_tokens=128000,
+    )})
+    provider = create_provider_from_task_config(config).unwrap()
+    assert provider.context_window_tokens == 128000
+    assert "context_window_tokens" not in provider._request_body([LlmMessage("user", "hello")], None, None, stream=False)
+    for value in [0, -1, 1023, True, "128000", 128000.5]:
+        path = tmp_path / "bad.yaml"
+        import json
+        path.write_text('models:\n  main:\n    context_window_tokens: ' + json.dumps(value) + '\n')
+        assert not load_task_config(path).ok
 
 
 def test_load_task_config_reads_plan_mode_from_toml_and_yaml(tmp_path):

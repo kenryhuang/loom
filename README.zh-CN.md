@@ -25,6 +25,8 @@ Loom 是一个运行在本地的 AI Agent 任务执行框架，用于编程、�
   `create_report` 会将分析文档写入目录，页面展示保存路径。
 - **本地知识库**：支持关键词、向量混合、YakDB 和 LightRAG。
   LightRAG 支持网站同步、图谱浏览、索引进度展示和按已完成文档续跑。
+- **外部工具**：注册 MCP 服务或 CLI 命令，手工选择或通过 LLM 推荐选择具体工具，
+  接入同一个 Task Loop，保留执行控制、调用记录和结果。
 - **可追踪的执行过程**：查看模型与工具活动、原始证据，分析 trace 和 Session 轨迹；
   高级评估及 Meta-Harness 命令支持实验和受治理约束的优化。可选的 [行为评估 v3](docs/behavior-evaluation-v3.zh-CN.md) 将目标验收与意图、计划、推进、推理效率及恢复能力分开评估。
 
@@ -107,6 +109,11 @@ LightRAG 的 **Sync activity** 展示当前页面或文档、执行阶段、已�
 请求用量和近期活动；失败或取消后可通过 **Resume sync** 从保存进度继续。
 
 **Trajectory** 打开 Session 执行分析，**Outputs** 展示已保存文档路径和报告 artifact。
+
+**External tools** 页面注册 MCP（stdio / Streamable HTTP / SSE）和 CLI 连接。
+发现 MCP 工具后，可在 **New session** 中手工勾选，或通过 **Recommend with LLM**
+推荐；已有 Session 可在任务之间调整绑定。安装、配置和示例见
+[外部工具指南](docs/external-tools.zh-CN.md)。
 详细说明见 [Web 指南](docs/web-frontend.md) 和 [Session 创建指南](docs/session-setup.md)。
 
 关闭浏览器标签页不会停止后端任务。凭证只保存在当前标签页内存，
@@ -210,6 +217,8 @@ Web/TUI 中选择的是服务端配置的别名。
 
 `provider: openai` 表示使用 OpenAI 兼容 Chat API 适配器。
 `max_completion_tokens` 限制模型输出，包含 reasoning 内容。
+
+验收输入预算默认使用**验证模型上下文的 60%**，按多语言 token 估算并预留输出空间，不再默认使用固定字符上限。已知模型容量自动识别；自定义模型或部署可在 `config.yaml` 的 `models.<别名>` 下设置 `context_window_tokens`（例如 `context_window_tokens: 128000`）。未知模型使用明确标注的 32,768 token 回退值。该字段仅供 Loom 使用，不发送给模型 API。任务显式设置的 `acceptance.max_prompt_chars` 仍作为额外上限；省略或设为 `null` 即使用自动预算。输入超限时会显示估算用量和容量，不会静默截断证据。输入估算与服务商报告的实际 token 用量分开记录。
 `request_options` 将供应商参数传入流式和非流式请求，例如模型支持的 thinking 参数。
 参数必须适用于该供应商和模型，不能覆盖 Loom 管理的 `messages`、
 `tools`、`stream` 等字段。
@@ -334,6 +343,7 @@ run:
 - [Session 创建与配置推荐](docs/session-setup.md)
 - [任务插件、工作流和报告输出](docs/general-task-runtime.md)
 - [知识库与 LightRAG 同步](docs/knowledge-bases.md)
+- [外部工具：MCP 与 CLI](docs/external-tools.zh-CN.md)
 - [Session 轨迹分析](docs/session-trajectory-analysis.md)
 - [Trace 效果分析](docs/trace-effectiveness-analysis.md)
 - [Meta-Harness：优化、实验与治理](docs/meta-harness.md)

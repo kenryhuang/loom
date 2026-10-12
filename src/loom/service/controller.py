@@ -185,6 +185,7 @@ class LoomService:
             descriptor = json.loads(canonical(state))
             descriptor["checkpoint_value"] = encode(self._checkpoint_value(state))
             descriptor["knowledge_directory"] = str(self.store.knowledge.directory)
+            descriptor["external_tools_directory"] = str(self.store.external_tools.directory)
             return descriptor
 
         return self.store.update(sid, prepare)

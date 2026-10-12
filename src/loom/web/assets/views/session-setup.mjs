@@ -1,3 +1,4 @@
+import {toolChoices, selectedTools} from "./external-tools.mjs";
 import { element } from "../markdown.mjs";
 
 export class SessionSetupView {
@@ -37,6 +38,12 @@ export class SessionSetupView {
       ? "Click Recommend with LLM to fill in the configuration below, then review it and create your session."
       : "Configure manually. LLM recommendations require a configured model and service support.";
     this.recommendation = null;
+    const external = this.get('create-external-tools');
+    if (external) {
+      toolChoices(external, catalog.external_tools || []);
+      external.onchange = () => {const check = this.get('create-collections').querySelector('[value="external_tools"]');
+        if (check) check.checked = selectedTools(external).length > 0;};
+    }
     this.renderAcceptance(catalog.acceptance);
   }
   renderAcceptance(acceptance, recommended = false) {
@@ -45,7 +52,7 @@ export class SessionSetupView {
       "The acceptance plan is prepared after creation from the task and bound workspace. No workspace has been inspected or checks run yet.";
     const limits = acceptance?.defaults;
     this.get("setup-acceptance-budget").textContent = limits
-      ? `Default limits: ${limits.max_repairs} repair rounds · ${limits.max_model_calls} planning/review calls · ${limits.max_seconds}s acceptance time. Calls share the task budget. Custom task specifications may override these defaults.`
+      ? `Default limits: ${limits.max_repairs} repair rounds · ${limits.max_model_calls} planning/review calls · ${limits.max_seconds}s acceptance time · Input budget: ${limits.context_window_percent ?? 60}% of the verification model context (estimated tokens). Calls share the task budget.`
       : "Acceptance applies to every workflow and does not require an optional tool collection.";
   }
   fingerprint() {
@@ -97,7 +104,11 @@ export class SessionSetupView {
       check.value = item.id;
       check.checked = selected.includes(item.id) || item.id === "task_control";
       check.disabled = item.id === "task_control";
-      check.onchange = () => this.updateWorkspace();
+      check.onchange = () => {
+        if (item.id === 'external_tools' && !check.checked)
+          this.get('create-external-tools')?.querySelectorAll('input').forEach(input => input.checked = false);
+        this.updateWorkspace();
+      };
       const description = element("span");
       description.append(
         element("strong", "", item.label),
@@ -190,6 +201,7 @@ export class SessionSetupView {
           )
           .join("\n");
       }
+      if (this.get('create-external-tools')) toolChoices(this.get('create-external-tools'), this.catalog.external_tools || [], result.external_tools || [], result.external_tool_reasons || {});
       this.recommendation = { fingerprint, result };
       this.renderAcceptance(result.acceptance || this.catalog.acceptance, true);
       this.get("setup-status").textContent =
@@ -216,6 +228,9 @@ export class SessionSetupView {
     }
   }
   apply(payload, template) {
+    payload.external_tool_ids = this.get('create-external-tools') ? selectedTools(this.get('create-external-tools')) : [];
+    if (this.collections().includes('external_tools') && !payload.external_tool_ids.length)
+      throw new Error('Select external tools, or uncheck External tools.');
     const editableCollections =
       this.get("create-template").value !== "custom" &&
       Boolean(this.catalog?.tool_collections);

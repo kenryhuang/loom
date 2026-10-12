@@ -991,6 +991,18 @@ function verificationEvents({attempts = 1, failed = false, goal = "goal"} = {}) 
   return events;
 }
 
+test("acceptance blocked before checks shows pending instead of zero passed", () => {
+  const dom = setup(), root = document.getElementById("feed");
+  const feed = new FeedView(root, {});
+  const first = verificationEvents()[0];
+  feed.append({...first, type: "acceptance.gate.blocked", payload: {...first.payload,
+    acceptance: {...first.payload.acceptance, state: "blocked", reason: "Cannot fingerprint scope"}}});
+  assert.match(root.querySelector("summary").textContent, /Acceptance blocked before checks.*4 checks pending/);
+  assert.doesNotMatch(root.querySelector("summary").textContent, /0\/4 checks passed/);
+  assert.match(root.textContent, /Cannot fingerprint scope/);
+  dom.window.close();
+});
+
 test("acceptance feed aggregates live checks and replay into one expandable round with evidence", async () => {
   const dom = setup(), root = document.getElementById("feed"), loaded = [];
   const feed = new FeedView(root, {loadArtifact: async digest => {loaded.push(digest); return {evidence: "Verification evidence"};}});

@@ -172,6 +172,15 @@ export function builtinPanels() {
         },
       };
     })
+    .register("external-tools", (actions) => {
+      const root = panel("External tools"), text = element("p", "muted"), configure = element("button", "quiet", "Configure external tools");
+      configure.type = "button"; configure.onclick = () => actions.externalTools?.(); root.append(text, configure);
+      return {element: root, update(state) {
+        const tools = state.task.external_tool_bindings || [];
+        text.textContent = tools.length ? tools.map(t => `${t.connector_name} / ${t.name}`).join(', ') : 'No external tools attached';
+        configure.disabled = !['idle', 'completed'].includes(state.task.state);
+      }};
+    })
     .register("workflow", () => {
       const root = panel("Workflow"),
         list = element("ul", "plan-list");

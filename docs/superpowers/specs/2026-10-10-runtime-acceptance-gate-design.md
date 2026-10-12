@@ -12,6 +12,8 @@ Command checks use registered tools and the durable operation journal. Artifact 
 
 Current scope differs from the broader target below: plan revisions may add criteria but cannot replace/remove existing obligations; external checks remain blocked (a trusted feedback ingestion API is not yet implemented). The probe inventories bounded files/configuration; it does not discover every dependency, git modification or remote environment. Freshness uses candidate, goal, plan, scoped file hashes and conservative task-tool write invalidation; concurrent out-of-scope changes are not proven absent. Review input is bounded and excessive evidence blocks instead of silently truncating the final deliverable. Verification calls share durable task token/model/time counters; existing cooperative task stopping provides headroom, without guaranteeing a reserved amount for arbitrary provider prompt usage. Per-criterion reuse and automatic verification-method replacement remain future extensions.
 
+Acceptance scopes support individual files and small directories. Directory fingerprints include all nested paths and file contents, so additions, deletions and edits invalidate prior receipts. No subtree is silently excluded: secret paths, symbolic links, special files and exceeded bounds block with an explicit reason. Each manifest is bounded to 2,048 entries, 8 MB per file and 32 MB total. Prefer targeted source directories over project roots. A block before any check result is displayed as pending checks rather than a zero-pass score; existing saved directory scopes require no plan migration.
+
 Optional global configuration selects a model alias defined under `models` (defaults to the task model):
 
 ```yaml
@@ -22,11 +24,15 @@ Task specifications can override these independent acceptance limits:
 
 ```json
 {"acceptance": {"max_checks": 8, "max_model_calls": 6, "max_seconds": 180,
-  "max_repairs": 2, "max_prompt_chars": 48000, "max_output_tokens": 4096,
+  "max_repairs": 2, "context_window_percent": 60, "max_prompt_chars": null, "max_output_tokens": 4096,
   "command_timeout_seconds": 60}}
 ```
 
 `max_checks` bounds proposed criteria; the host adds the full-goal check. Model calls include acceptance planning and judging. Planning receives the registered command input schemas; malformed JSON or invalid check inputs receive one bounded correction attempt with validation feedback before suspension. This correction shares the existing time/model/token budgets and never executes an invalid proposal. Each model request is limited to 60 seconds or the remaining acceptance allowance. These limits do not extend the task budget. An interrupted command with an unknown journal outcome requires reconciliation, not automatic replay.
+
+The default input budget is 60% of the selected **verification** model's context capacity, not the solver's output limit. Capacity resolves from model-level `context_window_tokens`, exact known model metadata, then a labeled 32,768-token fallback. Input estimation includes both messages, JSON serialization and envelope overhead: ASCII characters / 3 plus non-ASCII UTF-8 bytes. This is an estimate, not provider usage or an exact tokenizer. The request output cap is bounded by the remaining context space and the provider's configured output limit. Budget metadata is retained in acceptance snapshots/events, including estimates, capacity source and limits. Explicit legacy `max_prompt_chars` values remain additional caps; absent/null values no longer impose the old 48,000-character ceiling. Existing checkpoints retain their evidence/results and resolve this policy from the task spec and current verification provider when resumed. This change does not add evidence batching or increase task/time/model-call budgets.
+
+Planning also receives attached MCP/CLI tool descriptions and input schemas so opaque runtime IDs do not appear to be missing capabilities. Required tool use can be reviewed against recorded calls and outputs; it does not require a command verifier. Source URLs must be grounded in the task or supplied evidence, rather than invented before research. The canonical `unresolved_requirements` representation remains an array of strings. An unambiguous `{id?, description}` entry is normalized without discarding its ID or description; ambiguous entries still require correction, and normalized unresolved requirements continue to block completion.
 
 New session setup and its LLM recommendation show acceptance as a mandatory runtime facility and expose its default limits. Setup does not inspect a workspace or generate an accepted plan: that happens after binding resources and starting execution. Both the session TUI and one-shot task TUI have a persistent acceptance area showing criteria, passed counts, the current check and failure reasons; session reconnect restores it from the current run snapshot. Detailed events remain in the expandable process history.
 

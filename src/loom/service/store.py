@@ -10,7 +10,7 @@ from pathlib import Path
 
 from loom.core import now_iso
 from loom.service.artifacts import ServiceArtifacts
-from loom.service.contracts import EVENT_SCHEMA, ServiceError, canonical, new_id, text, validate_command, validate_create
+from loom.service.contracts import EVENT_SCHEMA, ServiceError, canonical, new_id, object_value, text, validate_command, validate_create
 
 
 class SessionStore:
@@ -20,8 +20,10 @@ class SessionStore:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "service.sqlite"
         self.artifacts = ServiceArtifacts(self.directory)
+        from loom.external_tools.store import ExternalToolStore
         from loom.knowledge.store import KnowledgeStore
 
+        self.external_tools = ExternalToolStore(self.directory / "external_tools")
         self.knowledge = KnowledgeStore(self.directory / "knowledge")
         self.lock = threading.RLock()
         self.changed = threading.Condition(self.lock)
@@ -95,6 +97,8 @@ class SessionStore:
             previous = json.loads(row[0])
             if previous.get("type") == "create":
                 previous["payload"].setdefault("knowledge_base_ids", [])
+                previous["payload"].setdefault("external_tool_ids", [])
+                previous["payload"].setdefault("external_tool_bindings", [])
             if canonical(previous) != canonical(normalized):
                 raise ServiceError("Command conflict: ID already has different input", 409)
             return json.loads(row[1])
@@ -102,7 +106,8 @@ class SessionStore:
 
     def create(self, command_id, payload):
         text(command_id, "command_id", max_length=200)
-        payload = validate_create(payload, plugin_registry=self.plugin_registry_factory() if self.plugin_registry_factory else None)
+        bindings = self.external_tools.resolve(object_value(payload).get("external_tool_ids", []))
+        payload = validate_create(payload, plugin_registry=self.plugin_registry_factory() if self.plugin_registry_factory else None, external_bindings=bindings)
         self.knowledge.validate_ids(payload["knowledge_base_ids"])
         normalized = {"type": "create", "payload": payload}
         with self.transaction() as db:
@@ -175,10 +180,13 @@ class SessionStore:
             if kind == "submit_message":
                 if task["state"] == "completed":
                     raise ServiceError("Reopen the completed task first", 409)
-            elif kind == "set_knowledge_bases":
+            elif kind in {"set_knowledge_bases", "set_external_tools"}:
                 if task["state"] not in {"idle", "completed"} or (state["run"] and state["run"]["state"] not in {"completed", "stopped"}):
-                    raise ServiceError("Change knowledge bases between tasks, when the session is idle or completed", 409)
-                self.knowledge.validate_ids(payload["knowledge_base_ids"])
+                    raise ServiceError("Change tool bindings between tasks, when the session is idle or completed", 409)
+                if kind == "set_knowledge_bases":
+                    self.knowledge.validate_ids(payload["knowledge_base_ids"])
+                else:
+                    self.external_tools.resolve(payload["external_tool_ids"])
             elif kind == "set_token_budget":
                 if task["state"] in {"running", "pausing", "queued"} or (state["run"] and state["run"]["state"] == "running"):
                     raise ServiceError("Pause execution before changing the token budget", 409)
@@ -250,20 +258,25 @@ class SessionStore:
                     state["run"]["state"] = "stopped"
             elif kind == "reopen_task":
                 task["state"] = "idle"
-            elif kind == "set_knowledge_bases":
+            elif kind in {"set_knowledge_bases", "set_external_tools"}:
                 updated = validate_create(
                     {
                         **{key: task[key] for key in ("objective", "workspace", "title", "model", "plan_mode", "limits", "task_spec")},
                         "objective": task["objective"] or None,
-                        "knowledge_base_ids": payload["knowledge_base_ids"],
+                        "knowledge_base_ids": payload.get("knowledge_base_ids", task.get("knowledge_base_ids", [])),
+                        "external_tool_ids": payload.get("external_tool_ids", task.get("external_tool_ids", [])),
                     },
                     plugin_registry=self.plugin_registry_factory() if self.plugin_registry_factory else None,
+                    external_bindings=(self.external_tools.resolve(payload["external_tool_ids"]) if kind == "set_external_tools"
+                                       else task.get("external_tool_bindings", [])),
                 )
                 state["context"] = None  # New tools take effect in a fresh turn; durable conversation/trace remain intact.
-                for key in ("knowledge_base_ids", "task_spec", "plugin_version_refs"):
+                for key in ("knowledge_base_ids", "external_tool_ids", "external_tool_bindings", "task_spec", "plugin_version_refs"):
                     task[key] = updated[key]
                 self.append(
-                    db, state, "task.knowledge.changed", {key: task[key] for key in ("knowledge_base_ids", "task_spec", "plugin_version_refs")}, command_id=cid
+                    db, state, "task.knowledge.changed" if kind == "set_knowledge_bases" else "task.external_tools.changed",
+                    {key: task[key] for key in ("knowledge_base_ids", "external_tool_ids", "external_tool_bindings", "task_spec", "plugin_version_refs")},
+                    command_id=cid
                 )
             elif kind == "set_token_budget":
                 task["limits"]["max_tokens"] = payload["max_tokens"]
@@ -272,7 +285,7 @@ class SessionStore:
             self.append(db, state, "task.state.changed", {"state": task["state"], "revision": task["revision"]})
             receipt = {"session_id": sid, "command_id": cid, "state": "accepted"}
             db.execute("INSERT INTO commands VALUES(?,?,?,?,?)", (cid, sid, canonical(normalized), canonical(receipt), "accepted"))
-            if kind in {"resume", "reopen_task", "complete_task", "set_token_budget", "set_knowledge_bases"} or (
+            if kind in {"resume", "reopen_task", "complete_task", "set_token_budget", "set_knowledge_bases", "set_external_tools"} or (
                 kind in {"pause", "stop_run"} and task["state"] == "paused"
             ):
                 self.applied(db, state, cid)

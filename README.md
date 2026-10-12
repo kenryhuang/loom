@@ -30,6 +30,9 @@ disconnect while work continues, and return to its saved state.
 - **Local knowledge bases:** keyword, hybrid vector, YakDB, and LightRAG engines.
   LightRAG supports website sync, graph exploration, visible indexing progress,
   and resuming from completed document checkpoints.
+- **External tools:** register MCP servers or CLI commands, select individual
+  tools manually or through LLM session recommendations, and invoke them through
+  the same task loop with recorded results and execution controls.
 - **Observable execution:** inspect model/tool activity and stored evidence;
   analyze traces or session trajectories. Advanced evaluation and Meta-Harness
   commands support experiments and governed optimization. Opt-in [behavior evaluation v3](docs/behavior-evaluation-v3.md) separates goal verification from intent, planning, progress, reasoning efficiency, and recovery.
@@ -117,6 +120,12 @@ sources, and graph exploration. Attach selected bases to a session so its agent
 can retrieve them. The LightRAG **Sync activity** area shows the current
 page/document, stage, saved document count, request usage, and recent activity;
 **Resume sync** continues from saved progress after failure or cancellation.
+
+The **External tools** view registers MCP (stdio, Streamable HTTP or legacy SSE) and CLI
+connections. Discover MCP tools, then select them in **New session** or use
+**Recommend with LLM**. Existing sessions can change their selection between
+tasks. See the [external tools guide](docs/external-tools.md) for installation,
+configuration, and examples.
 
 **Trajectory** opens execution analysis for a session. **Outputs** exposes saved
 document paths and report artifacts. See the [Web guide](docs/web-frontend.md)
@@ -226,6 +235,8 @@ Web/TUI model selections refer to the aliases configured on the service.
 
 `provider: openai` means the OpenAI-compatible Chat API adapter.
 `max_completion_tokens` caps output including reasoning content.
+
+Acceptance automatically budgets input at 60% of the verification model's context window, using a multilingual token estimate and reserving space for output. It no longer applies a fixed character cap by default. Known model capacities are resolved locally; for custom models or deployments, set `context_window_tokens` under `models.<alias>` in `config.yaml` (for example, `context_window_tokens: 128000`). Unknown models use a visibly labeled 32,768-token fallback. This metadata is not sent as an API parameter. An explicitly configured task-level `acceptance.max_prompt_chars` still acts as an additional cap; omit it or set it to `null` for automatic budgeting. Oversized evidence blocks with estimated usage and capacity details; it is not silently truncated. These estimates are separate from provider-reported usage.
 `request_options` passes provider-specific fields, such as supported thinking
 options, to both streaming and non-streaming requests. Options must match the
 chosen provider/model and cannot override Loom-owned fields such as
@@ -352,6 +363,7 @@ traces under `runs/` by default and are tied to their launching process.
 - [Session creation and recommendations](docs/session-setup.md)
 - [Task plugins, workflows, and report output](docs/general-task-runtime.md)
 - [Knowledge bases and LightRAG sync](docs/knowledge-bases.md)
+- [External tools: MCP and CLI](docs/external-tools.md)
 - [Session trajectory analysis](docs/session-trajectory-analysis.md)
 - [Trace effectiveness analysis](docs/trace-effectiveness-analysis.md)
 - [Meta-Harness: optimization, experiments, and governance](docs/meta-harness.md)

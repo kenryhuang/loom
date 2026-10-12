@@ -22,6 +22,7 @@ _MODEL_CONFIG_FIELDS = frozenset(
         "api_key_env",
         "temperature",
         "max_completion_tokens",
+        "context_window_tokens",
         "request_options",
     }
 )
@@ -37,8 +38,11 @@ class ModelConfig:
     temperature: float | None = None
     max_completion_tokens: int | None = None
     request_options: Mapping[str, Any] = field(default_factory=dict)
+    context_window_tokens: int | None = None
 
     def __post_init__(self) -> None:
+        if self.context_window_tokens is not None and (type(self.context_window_tokens) is not int or self.context_window_tokens < 1024):
+            raise ValueError("context_window_tokens must be an integer of at least 1024")
         object.__setattr__(self, "request_options", normalize_request_options(self.request_options))
 
 
@@ -160,6 +164,7 @@ def create_provider_from_task_config(
             base_url=model.base_url,
             temperature=model.temperature,
             max_completion_tokens=model.max_completion_tokens,
+            context_window_tokens=model.context_window_tokens,
             request_options=model.request_options,
             http_client=http_client,
         )
@@ -316,6 +321,7 @@ def _parse_model_config(payload: Mapping[str, Any], path: Path, name: str) -> Re
                 api_key_env=_optional_str(payload.get("api_key_env")),
                 temperature=_optional_float(payload.get("temperature")),
                 max_completion_tokens=_optional_int(payload.get("max_completion_tokens")),
+                context_window_tokens=payload.get("context_window_tokens"),
                 request_options=request_options,
             )
         )

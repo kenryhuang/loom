@@ -172,6 +172,12 @@ class SessionHandler(BaseHTTPRequestHandler):
             if method == "POST" and parts == ["v1", "session-setup", "recommend"]:
                 self._json(200, self.server.session_setup.recommend(self._body()))
                 return
+            if parts[:2] == ["v1", "external-tools"]:
+                from loom.external_tools.api import dispatch
+
+                status, body = dispatch(self, method, parts)
+                self._json(status, body)
+                return
             if parts[:2] == ["v1", "knowledge-bases"]:
                 from loom.knowledge.api import dispatch
 

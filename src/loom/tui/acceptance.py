@@ -16,7 +16,11 @@ def round_summary(value):
     passed = sum(results.get(c["id"], {}).get("status") == "passed" for c in criteria)
     failed = value["state"] in {"blocked", "needs_repair"} or any(r["status"] in {"failed", "blocked"} for r in results.values())
     title = "Acceptance passed" if value["state"] == "passed" else "Acceptance needs attention" if failed else "Verifying acceptance"
-    return f"{title} · {passed}/{len(criteria)} checks passed · Round {value.get('attempts', 0)}", failed
+    not_run = bool(criteria) and not any(c["id"] in results for c in criteria)
+    if failed and not_run:
+        title = "Acceptance blocked before checks"
+    progress = f"{len(criteria)} checks pending · No results yet" if not_run else f"{passed}/{len(criteria)} checks passed"
+    return f"{title} · {progress} · Round {value.get('attempts', 0)}", failed
 
 
 def round_details(value):
@@ -88,6 +92,8 @@ class AcceptancePanel(Static):
         passed = sum(results.get(c["id"], {}).get("status") == "passed" for c in criteria)
         label = "Preparing plan" if value["state"] == "not_ready" and not value.get("plan") else LABELS.get(value["state"], value["state"])
         progress = f"{passed}/{len(criteria)} checks passed" if criteria else "Criteria pending"
+        if criteria and not any(c["id"] in results for c in criteria):
+            progress = f"{len(criteria)} checks pending · No results yet"
         lines = [f"Acceptance · {label} · {progress} · revision {value.get('revision', 0)}"]
         if self.current_check:
             lines.append("Checking: " + self.current_check)

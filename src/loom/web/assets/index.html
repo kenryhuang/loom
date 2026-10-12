@@ -72,6 +72,9 @@
             />
           </svg>
         </button>
+        <button id="nav-external-tools" class="activity-button" data-component="external-tools" aria-label="External tools" title="External tools" aria-pressed="false" aria-controls="external-tools-panel">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 3v5m8-5v5M5 8h14v4a7 7 0 0 1-14 0V8Zm7 11v3"/></svg>
+        </button>
       </nav>
       <aside class="sidebar">
         <header class="brand">
@@ -160,6 +163,14 @@
           <nav id="knowledge-list" aria-label="Knowledge bases">
             <p class="muted">Connect to load knowledge bases.</p>
           </nav>
+        </section>
+        <section id="external-tools-panel" class="component-panel" aria-label="External tools panel" hidden>
+          <div class="section-heading component-heading">
+            <h2>External tools</h2>
+            <button id="register-external-tool" class="primary" disabled>Register</button>
+          </div>
+          <p class="muted">MCP servers and CLI commands</p>
+          <p class="muted small">Register connections, discover capabilities, and select tools for each session.</p>
         </section>
         <footer class="sidebar-footer">
           <span id="connection" class="connection" role="status"
@@ -276,6 +287,9 @@
       >
         <section id="knowledge-page" class="knowledge-page"></section>
       </main>
+      <main id="external-tools-workspace" class="workspace knowledge-workspace" aria-label="External tool management" hidden>
+        <section id="external-tools-page" class="knowledge-page"></section>
+      </main>
       <main
         id="create-page"
         class="workspace create-workspace"
@@ -336,10 +350,8 @@
           </fieldset>
           <details class="setup-external">
             <summary>External tools</summary>
-            <p class="muted small">
-              No external tools are connected yet. External integrations will
-              appear here when supported.
-            </p>
+            <div id="create-external-tools" class="external-choices"></div>
+            <p class="muted small">Selected tools are available to the task model when useful. Register connections in External tools.</p>
           </details>
           <label for="create-title"
             >Session title <span class="muted">(optional)</span></label

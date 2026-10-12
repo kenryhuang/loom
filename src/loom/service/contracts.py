@@ -21,6 +21,7 @@ COMMAND_TYPES = frozenset(
         "reopen_task",
         "set_token_budget",
         "set_knowledge_bases",
+        "set_external_tools",
     }
 )
 LIMITS = {"max_steps": 100, "max_llm_calls": 200, "max_tokens": 10_000_000, "max_duration_seconds": 1800, "max_window_chars": 240_000}
@@ -59,9 +60,10 @@ def object_value(value: Any, name: str = "payload") -> dict:
     return dict(value)
 
 
-def validate_create(payload: Any, *, plugin_registry=None) -> dict:
+def validate_create(payload: Any, *, plugin_registry=None, external_bindings=()) -> dict:
     payload = object_value(payload)
-    allowed = {"objective", "workspace", "title", "model", "plan_mode", "limits", "task_spec", "resource_claims", "plugin_version_refs", "knowledge_base_ids"}
+    allowed = {"objective", "workspace", "title", "model", "plan_mode", "limits", "task_spec", "resource_claims",
+               "plugin_version_refs", "knowledge_base_ids", "external_tool_ids", "external_tool_bindings"}
     if set(payload) - allowed:
         raise ServiceError("Unknown session fields")
     objective = text(payload["objective"], "objective") if payload.get("objective") is not None else None
@@ -84,6 +86,14 @@ def validate_create(payload: Any, *, plugin_registry=None) -> dict:
     ids = payload.get("knowledge_base_ids", [])
     if not isinstance(ids, list) or len(ids) > 20 or any(not isinstance(item, str) for item in ids) or len(set(ids)) != len(ids):
         raise ServiceError("knowledge_base_ids must be a unique list of at most 20 IDs")
+    external_ids = payload.get("external_tool_ids", [])
+    if (not isinstance(external_ids, list) or len(external_ids) > 64 or any(not isinstance(i, str) for i in external_ids)
+            or len(set(external_ids)) != len(external_ids)):
+        raise ServiceError("external_tool_ids must be a unique list of at most 64 IDs")
+    if external_ids != [binding['id'] for binding in external_bindings]:
+        raise ServiceError("External tools must be resolved through the service registry")
+    if "external_tool_bindings" in payload and payload["external_tool_bindings"] != list(external_bindings):
+        raise ServiceError("External tool bindings must match the registered tools")
     from loom.tasks.assembly import normalize_task_spec
 
     try:
@@ -93,8 +103,13 @@ def validate_create(payload: Any, *, plugin_registry=None) -> dict:
             collections.remove("knowledge")
         if ids:
             collections.append("knowledge")
+        if "external_tools" in collections:
+            collections.remove("external_tools")
+        if external_ids:
+            collections.append("external_tools")
         assembly = TaskAssembly(
-            TaskRequest(objective or "New session", workspace=workspace, task_spec=spec, metadata={"knowledge_base_ids": ids}),
+            TaskRequest(objective or "New session", workspace=workspace, task_spec=spec,
+                        metadata={"knowledge_base_ids": ids, "external_tool_bindings": external_bindings}),
             plan_mode=mode,
             registry=plugin_registry,
         )
@@ -111,6 +126,8 @@ def validate_create(payload: Any, *, plugin_registry=None) -> dict:
         raise ServiceError("Plugin manifests must match the registered task plugins")
     return {
         "knowledge_base_ids": ids,
+        "external_tool_ids": external_ids,
+        "external_tool_bindings": list(external_bindings),
         "objective": objective,
         "workspace": str(directory) if directory else None,
         "task_spec": assembly.spec,
@@ -141,6 +158,11 @@ def validate_command(command: Any) -> dict:
         ids = payload.get("knowledge_base_ids")
         if not isinstance(ids, list) or len(ids) > 20 or any(not isinstance(item, str) for item in ids) or len(set(ids)) != len(ids):
             raise ServiceError("knowledge_base_ids must be a unique list of at most 20 IDs")
+    elif kind == "set_external_tools":
+        allowed = {"external_tool_ids"}
+        ids = payload.get("external_tool_ids")
+        if not isinstance(ids, list) or len(ids) > 64 or any(not isinstance(item, str) for item in ids) or len(set(ids)) != len(ids):
+            raise ServiceError("external_tool_ids must be a unique list of at most 64 IDs")
     elif kind == "set_token_budget":
         allowed = {"max_tokens"}
         value = payload.get("max_tokens")

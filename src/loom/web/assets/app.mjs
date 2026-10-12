@@ -1,3 +1,4 @@
+import {ExternalToolsView, bindExternalTools} from "./views/external-tools.mjs";
 import { SessionApi } from "./api.mjs";
 import { SessionController } from "./controller.mjs";
 import { element, renderResult } from "./markdown.mjs";
@@ -84,6 +85,16 @@ const evaluationList = new SessionListView(
   openEvaluation,
   deleteSession,
 );
+const externalTools = new ExternalToolsView($("external-tools-page"), {
+  api: () => controller?.api,
+  registerButton: $("register-external-tool"),
+  changed: async () => {const active = controller; if (!active) return;
+    const next = await active.api.catalog(); if (controller === active) catalog = next;},
+});
+function openExternalTools() {
+  activateComponent('external-tools'); setWorkspaceMode('external-tools');
+  history.replaceState(null, '', '#/external-tools'); return externalTools.open();
+}
 let activeComponent = "sessions";
 function activateComponent(component) {
   activeComponent = component;
@@ -97,7 +108,8 @@ for (const button of document.querySelectorAll("[data-component]")) {
   button.addEventListener("click", () => {
     const component = button.dataset.component;
     activateComponent(component);
-    if (component === "knowledge") openKnowledge();
+    if (component === "external-tools") openExternalTools();
+    else if (component === "knowledge") openKnowledge();
     else if (component === "evaluation")
       openEvaluation(evaluationId || controller?.selectedId);
     else {
@@ -123,6 +135,13 @@ const panels = new PanelsView($("session-panels"), builtinPanels(), {
   error: showError,
   artifact: openArtifact,
   knowledge: () => knowledgeBinding.open(true),
+  externalTools: async () => {
+    const active = controller, sid = active?.selectedId;
+    if (!sid) return;
+    try {await bindExternalTools({api: active.api, selected: active.projection.snapshot.task.external_tool_ids || [],
+      save: ids => {if (controller !== active || active.selectedId !== sid) throw new Error('Session changed. Reopen tool settings.');
+        return active.command('set_external_tools', {external_tool_ids: ids});}});} catch (error) {showError(error);}
+  },
 });
 
 async function deleteSession(session) {
@@ -221,15 +240,18 @@ function setWorkspaceMode(mode) {
   const creating = mode === "create";
   $("create-page").hidden = !creating;
   if (!creating) sessionSetup.abort?.abort();
+  const externalMode = mode === 'external-tools';
+  $('external-tools-workspace').hidden = !externalMode;
+  if (!externalMode) externalTools.close();
   const knowledgeMode = mode === "knowledge";
   const analysis = mode === true;
   $("knowledge-workspace").hidden = !knowledgeMode;
   if (!knowledgeMode) knowledge.close();
-  $("conversation-workspace").hidden = analysis || knowledgeMode || creating;
+  $("conversation-workspace").hidden = analysis || knowledgeMode || externalMode || creating;
   $("conversation-page").hidden = analysis;
   $("evaluation-workspace").hidden = !analysis;
   document.querySelector(".session-details").hidden =
-    analysis || knowledgeMode || creating;
+    analysis || knowledgeMode || externalMode || creating;
   if (!analysis) trajectory.close();
 }
 async function openEvaluation(id, { fromHistory = false } = {}) {
@@ -367,6 +389,7 @@ async function login(token) {
   $("auth-dialog").close();
   $("credential").value = "";
   $("credential-file").value = "";
+  if (location.hash === "#/external-tools") {await openExternalTools(); return;}
   const requested = currentId(),
     chosen =
       next.sessions.find((session) => session.session_id === requested) ||
@@ -381,6 +404,8 @@ async function login(token) {
 
 function disconnect() {
   sessionSetup.abort?.abort();
+  externalTools.close();
+  $("external-tools-page").replaceChildren();
   knowledge.close();
   knowledgeBinding.close();
   $("knowledge-page").replaceChildren();
@@ -512,6 +537,10 @@ $("refresh-sessions").addEventListener("click", () =>
 );
 $("new-session").addEventListener("click", async () => {
   $("create-error").textContent = "";
+  const setupController = controller;
+  if (setupController) {try {const next = await setupController.api.catalog();
+    if (controller === setupController) catalog = next;} catch (error) {showError(error); return;}}
+  if (controller !== setupController) return;
   sessionSetup.configure(catalog);
   templateChanged();
   $("setup-knowledge-reasons").textContent = "";
@@ -602,6 +631,7 @@ $("history").addEventListener("click", async () => {
   }
 });
 window.addEventListener("hashchange", () => {
+  if (location.hash === "#/external-tools") {openExternalTools(); return;}
   if (evaluationRoute()) openEvaluation(currentId(), { fromHistory: true });
   else select(currentId(), { fromHistory: true });
 });

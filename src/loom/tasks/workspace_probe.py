@@ -66,15 +66,46 @@ def probe(root, *, max_entries=200, max_bytes=24000):
     return result
 
 
-def manifest(root, scope):
-    """Missing files are explicit; large files cannot silently become verified."""
+def manifest(root, scope, *, max_entries=2048, max_file_bytes=8_000_000, max_total_bytes=32_000_000):
+    """Hash complete scoped trees, including membership; never silently truncate."""
     result = {}
+    entries, total_bytes = 0, 0
     for name in sorted(set(scope)):
-        path = bound_path(root, name)
-        if not path.exists():
-            result[name] = None
-        elif not path.is_file() or path.stat().st_size > 8_000_000:
-            raise ValueError("Verification scope requires files up to 8 MB")
-        else:
-            result[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        pending = [name]
+        tree = {}
+        while pending:
+            current = pending.pop()
+            entries += 1
+            if entries > max_entries:
+                raise ValueError(f"Verification scope exceeds {max_entries} entries; narrow scope near {current}")
+            # Do not follow symlinks in trees, including links to ancestor directories.
+            path = bound_path(root, current)
+            lexical = Path(root).resolve()
+            for part in Path(current).parts:
+                lexical /= part
+                if lexical.is_symlink():
+                    raise ValueError(f"Verification scope contains a symbolic link: {current}")
+            if not path.exists():
+                tree[current] = None
+            elif path.is_dir():
+                tree[current] = {"type": "directory"}
+                # Bound enumeration itself, not just the subsequent file reads.
+                for child in path.iterdir():
+                    if entries + len(pending) >= max_entries:
+                        raise ValueError(f"Verification scope exceeds {max_entries} entries; narrow scope near {current}")
+                    pending.append((Path(current) / child.name).as_posix())
+            elif path.is_file():
+                if path.stat().st_size > max_file_bytes:
+                    raise ValueError(f"Verification file exceeds {max_file_bytes} bytes: {current}")
+                with path.open("rb") as stream:
+                    raw = stream.read(min(max_file_bytes, max_total_bytes - total_bytes) + 1)
+                total_bytes += len(raw)
+                if len(raw) > max_file_bytes:
+                    raise ValueError(f"Verification file exceeds {max_file_bytes} bytes: {current}")
+                if total_bytes > max_total_bytes:
+                    raise ValueError(f"Verification scope exceeds {max_total_bytes} total bytes near {current}")
+                tree[current] = hashlib.sha256(raw).hexdigest()
+            else:
+                raise ValueError(f"Verification scope requires a regular file or directory: {current}")
+        result[name] = digest(tree) if isinstance(tree[name], dict) else tree[name]
     return result

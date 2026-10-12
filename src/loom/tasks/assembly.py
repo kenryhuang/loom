@@ -100,7 +100,12 @@ def normalize_task_spec(spec=None, *, workspace=None, plan_mode="auto"):
     acceptance = spec.get("acceptance", {})
     if not isinstance(acceptance, dict) or set(acceptance) - set(ACCEPTANCE_DEFAULTS):
         raise ValueError("Invalid acceptance configuration")
-    if any(type(v) is not int or v < (0 if k in {"max_checks", "max_repairs"} else 1) or v > 100000 for k, v in acceptance.items()):
+    if "context_window_percent" in acceptance and (
+        type(acceptance["context_window_percent"]) is not int or not 1 <= acceptance["context_window_percent"] <= 95
+    ):
+        raise ValueError("Acceptance context_window_percent must be an integer between 1 and 95")
+    if any(type(v) is not int or v < (0 if k in {"max_checks", "max_repairs"} else 1) or v > 100000
+           for k, v in acceptance.items() if not (k == "max_prompt_chars" and v is None)):
         raise ValueError("Acceptance limits must be bounded integers (only max_checks and max_repairs may be zero)")
     return spec
 
@@ -119,6 +124,9 @@ def default_plugin_registry():
     from loom.knowledge.tools import knowledge_collection
 
     registry.register("tools", "knowledge", lambda config, request: _custom_collection(knowledge_collection, config, request))
+    from loom.external_tools.tools import external_collection
+
+    registry.register("tools", "external_tools", lambda config, request: _custom_collection(external_collection, config, request))
     registry.register("tools", "document_outputs", lambda config, request: _custom_collection(document_collection, config, request))
     return registry
 
@@ -788,7 +796,9 @@ class TaskAssembly:
                 {"type": "llm.requested", **metadata, "model": self.acceptance_provider.model, "messages": tuple(messages), "tools": None, "at": now_iso()}
             )
         ).unwrap()
-        cap = min(self.acceptance.config["max_output_tokens"], max(1, token_limit - usage.total_tokens) if token_limit else 4096)
+        cap = self.acceptance.input_budget()["max_output_tokens"]
+        if token_limit:
+            cap = min(cap, max(1, token_limit - usage.total_tokens))
         stream = not hasattr(self.acceptance_provider, "chat")
         provider = evaluator_provider(self.acceptance_provider, output_tokens=cap, timeout_seconds=timeout, install_http=not stream)
         timer = asyncio.timeout(timeout)

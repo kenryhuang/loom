@@ -1844,3 +1844,30 @@ dialog h1 {
 .reasoning-cycle-pattern { color: var(--accent); font-size: .9rem; }
 .reasoning-cycle-frame { position: absolute; left: 3px; right: 3px; border: 1px solid var(--line); border-radius: 10px; pointer-events: none; }
 .reasoning-cycle-toggle { position: absolute; left: 15px; max-width: calc(100% - 30px); min-height: 36px; color: var(--accent); font-size: .85rem; }
+
+.external-connections { display: grid; gap: 16px; margin-top: 20px; container-type: inline-size; }
+.external-list-toolbar { display: flex; align-items: center; gap: 16px; }
+.external-list-toolbar input { flex: 1; min-width: 0; }
+.external-list-toolbar > span { white-space: nowrap; }
+.external-connection-heading { display: grid; grid-template-columns: minmax(0, 1fr) 140px 292px; align-items: center; gap: 16px; }
+.external-connection-heading h2 { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.external-connection-heading > .status { justify-self: start; white-space: nowrap; }
+.external-connection-actions { display: grid; grid-template-columns: 60px 84px 132px; gap: 8px; }
+.external-connection-actions button { margin: 0; min-height: 36px; white-space: nowrap; }
+@container (max-width: 680px) {
+  .external-connection-heading { grid-template-columns: minmax(0, 1fr) auto; }
+  .external-connection-actions { grid-column: 1 / -1; justify-self: end; }
+}
+@container (max-width: 380px) {
+  .external-connection-heading { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .external-connection-actions { justify-self: stretch; grid-template-columns: auto auto minmax(0, 1fr); }
+  .external-connection-actions button { white-space: normal; }
+}
+.external-editor { display: grid; gap: 12px; }
+.external-editor label { display: grid; gap: 6px; }
+.external-editor input, .external-editor select, .external-editor textarea { width: 100%; }
+.external-config { min-height: 300px; font-family: var(--font-mono, monospace); }
+.external-schema { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; }
+.external-choices { display: grid; gap: 8px; max-height: 400px; overflow: auto; }
+.external-bind-dialog { width: min(700px, 95vw); max-height: 90vh; }
+.external-bind-dialog form { display: grid; gap: 12px; }

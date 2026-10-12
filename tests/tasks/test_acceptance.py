@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from loom.core import ok
+from loom.core import ok, thaw_json
 from loom.llm import LlmResponse, LlmToolCall, TokenUsage
 from loom.tasks.acceptance import AcceptanceController
 from loom.tasks.assembly import TaskAssembly
@@ -107,6 +107,24 @@ def test_direct_answer_and_finish_both_require_independent_acceptance(tmp_path):
         kinds = [e["type"] for e in sink.events]
         assert kinds.index("acceptance.plan.accepted") < kinds.index("acceptance.gate.passed") < kinds.index("run.completed")
         assert sum(e["type"] == "llm.requested" and e.get("usage_role") == "verification" for e in sink.events) == 2
+
+
+def test_directory_scoped_acceptance_completes_and_detects_later_changes(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.ts").write_text("initial")
+    judge = Judge(criteria=[{"id": "ui", "description": "UI works", "verifier": "semantic", "scope": ["src/"], "check": {}}])
+    result = asyncio.run(run_generic_task(
+        TaskRequest("Check UI", workspace=tmp_path), provider=judge,
+        options=TaskRunOptions(plan_mode="off", max_steps=3),
+    )).unwrap()
+    snapshot = result.run_result.context.state.scratch["acceptance"]
+    assert snapshot["state"] == "passed"
+    assert len(snapshot["results"]) == 2
+    assembly = TaskAssembly(TaskRequest("Check UI", workspace=tmp_path), plan_mode="off")
+    assembly.acceptance.restore({**assembly.acceptance.snapshot(), **thaw_json(snapshot)})
+    before = assembly.acceptance.fingerprint("answer")
+    (tmp_path / "src" / "new.ts").write_text("added after verification")
+    assert assembly.acceptance.fingerprint("answer") != before
 
 
 def test_rejected_direct_answer_never_emits_completed(tmp_path):
@@ -387,6 +405,66 @@ class PlanRepairJudge(Judge):
             value = self.proposals[min(len(self.plan_payloads) - 1, len(self.proposals) - 1)]
             return ok(LlmResponse(content=value if isinstance(value, str) else json.dumps(value), usage=TokenUsage(10, 5, 15)))
         return await super().chat(messages, tools, cancellation, **kwargs)
+
+
+def test_structured_unresolved_requirements_preserve_blockers_without_schema_retry(tmp_path):
+    requirement = {"id": "ur1", "description": "Customer approval must be obtained"}
+    proposal = {"criteria": [], "unresolved_requirements": [requirement, "External confirmation unavailable"]}
+    judge, sink = PlanRepairJudge([proposal]), Sink()
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest("Deliver with approval", workspace=tmp_path),
+            provider=judge,
+            options=TaskRunOptions(plan_mode="off"),
+            trace_sink=sink,
+        )
+    ).unwrap()
+    acceptance = result.run_result.context.state.scratch["acceptance"]
+    assert len(judge.plan_payloads) == 1
+    assert list(acceptance["plan"]["unresolved_requirements"]) == ["ur1: Customer approval must be obtained", "External confirmation unavailable"]
+    assert acceptance["state"] == "blocked" and acceptance["attempts"] == 1
+    assert result.run_result.metrics.outcome == "paused"
+    assert not any(e["type"] in {"acceptance.plan.rejected", "acceptance.gate.passed", "run.completed"} for e in sink.events)
+    assert next(e for e in sink.events if e["type"] == "acceptance.plan.proposed")["proposal"] == proposal
+
+
+@pytest.mark.parametrize("value", [None, "missing", [3], [""], [{"id": "ur1"}], [{"description": "Missing", "reason": "Keep this detail"}]])
+def test_ambiguous_unresolved_requirements_still_require_correction(tmp_path, value):
+    assembly = TaskAssembly(TaskRequest("Answer", workspace=tmp_path), plan_mode="off")
+    with pytest.raises(ValueError, match="unresolved_requirements"):
+        assembly.acceptance.validate_plan({"criteria": [], "unresolved_requirements": value})
+
+
+def test_acceptance_planner_receives_external_tool_descriptions_and_schema(tmp_path):
+    binding = {
+        "id": "ext_search",
+        "name": "bailian_web_search",
+        "connector_id": "search",
+        "connector_name": "Web search",
+        "description": "Search the public web",
+        "kind": "mcp",
+        "effect_kind": "read_only",
+        "version": "1",
+        "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+    }
+    judge = PlanRepairJudge([{"criteria": []}])
+    result = asyncio.run(
+        run_generic_task(
+            TaskRequest(
+                "Research",
+                workspace=tmp_path,
+                task_spec={"tools": {"collections": ["external_tools", "task_control"]}},
+                metadata={"external_tool_bindings": [binding]},
+            ),
+            provider=judge,
+            options=TaskRunOptions(plan_mode="off"),
+        )
+    ).unwrap()
+    assert result.run_result.metrics.outcome == "pass"
+    tool = judge.plan_payloads[0]["external_tools"][0]
+    assert tool["id"] == binding["id"] and "bailian_web_search" in tool["description"]
+    assert tool["input_schema"] == binding["input_schema"]
+    assert "command check is not required" in judge.calls[0][0].content
 
 
 def malformed_process_plan():
