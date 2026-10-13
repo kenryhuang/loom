@@ -21,22 +21,8 @@ function field(label, value, type = "text") {
 export async function renderKnowledgeGraph(view, base) {
   const id = base.id,
     root = element("section", "knowledge-graph-section");
-  const progressPanel = view.basePanel.querySelector(".knowledge-job-progress");
-  view.basePanel.insertBefore(
-    root,
-    progressPanel ? progressPanel.nextSibling : view.basePanel.firstChild,
-  );
-  const stats = base.graph_stats;
-  root.append(element("h3", "", "Website sources & knowledge graph"));
-  root.append(
-    element(
-      "p",
-      "muted",
-      stats
-        ? `${stats.entities}${stats.graph_truncated ? "+" : ""} entities · ${stats.relations} visible relationships · ${stats.chunks} chunks · ${base.indexing_model}`
-        : `No published graph yet · indexing model: ${base.indexing_model}`,
-    ),
-  );
+  (view.urlPanel || view.basePanel).append(root);
+  root.append(element("h3", "", "Website sources"));
   const sourceList = element("div");
   root.append(sourceList);
   const invoke = async (action, control) => {
@@ -122,7 +108,7 @@ export async function renderKnowledgeGraph(view, base) {
 
   const data = await view.request(`/${id}/sources`);
   if (view.baseId !== id || !root.isConnected) return;
-  for (const source of data.sources) {
+  for (const source of data.sources || []) {
     const row = element("article", "knowledge-source");
     const link = element("a", "", source.url);
     link.href = source.url;
@@ -177,19 +163,20 @@ export async function renderKnowledgeGraph(view, base) {
     progress.setAttribute("aria-live", "polite");
     const cancel = button("Cancel sync");
     cancel.hidden = true;
-    let cancellationRequested;
+    let cancellationRequested, resumableJob;
     const updateProgress = (job) => {
       if (job.source_id !== source.id) return;
       const active = ["queued", "running"].includes(job.state);
+      resumableJob = ["paused", "failed"].includes(job.state) && job.resumable !== false ? job.id : null;
       if (job.cancel_requested) cancellationRequested = job.id;
       sync.disabled = active;
       sync.textContent = active
         ? "Syncing…"
-        : job.state !== "completed" &&
+        : resumableJob || (job.state !== "completed" &&
             (job.crawl_checkpoint ||
               job.checkpointed ||
               job.snapshot_saved ||
-              job.snapshot_reused)
+              job.snapshot_reused))
           ? "Resume sync"
           : "Sync now";
       cancel.hidden = !active;
@@ -282,7 +269,7 @@ export async function renderKnowledgeGraph(view, base) {
         progress.textContent = "Starting sync…";
         try {
           const job = await view.request(
-            `/${id}/sources/${source.id}/sync`,
+            resumableJob ? `/${id}/jobs/${resumableJob}/resume` : `/${id}/sources/${source.id}/sync`,
             {},
           );
           updateProgress(job);
@@ -341,6 +328,7 @@ export async function renderKnowledgeGraph(view, base) {
     sourceList.append(row);
   }
 
+  if (base.engine !== "lightrag_local") return;
   const graphSection = element("details", "knowledge-create");
   graphSection.append(element("summary", "", "Explore knowledge graph"));
   const [labelField, label] = field("Entity name (empty = graph overview)", "");
@@ -350,7 +338,7 @@ export async function renderKnowledgeGraph(view, base) {
     inspector = element("div");
   exportButton.disabled = true;
   graphSection.append(labelField, load, exportButton, canvas, inspector);
-  root.append(graphSection);
+  (view.viewPanel || root).append(graphSection);
   let graph;
   load.onclick = () =>
     invoke(async () => {

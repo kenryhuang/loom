@@ -75,12 +75,16 @@
         <button id="nav-external-tools" class="activity-button" data-component="external-tools" aria-label="External tools" title="External tools" aria-pressed="false" aria-controls="external-tools-panel">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 3v5m8-5v5M5 8h14v4a7 7 0 0 1-14 0V8Zm7 11v3"/></svg>
         </button>
+        <button id="nav-settings" class="activity-button activity-settings" data-component="settings" aria-label="Settings" title="Settings" aria-pressed="false" aria-controls="settings-panel">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m9 3-1 3-3 1 1 3-2 2 2 2-1 3 3 1 1 3h6l1-3 3-1-1-3 2-2-2-2 1-3-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
       </nav>
       <aside class="sidebar">
         <header class="brand">
           <span class="brand-mark">L</span>
           <div><strong>Loom</strong><small>Session workspace</small></div>
         </header>
+        <section id="settings-panel" class="component-panel" aria-label="Settings panel" hidden><h2>Settings</h2><p class="muted">Models, embedding services and execution defaults.</p><p class="muted">Changes are saved to the service configuration file.</p></section>
         <section
           id="sessions-panel"
           class="component-panel"
@@ -287,6 +291,7 @@
       >
         <section id="knowledge-page" class="knowledge-page"></section>
       </main>
+      <main id="settings-workspace" class="workspace knowledge-workspace" aria-label="Application settings" hidden><section id="settings-page" class="knowledge-page"></section></main>
       <main id="external-tools-workspace" class="workspace knowledge-workspace" aria-label="External tool management" hidden>
         <section id="external-tools-page" class="knowledge-page"></section>
       </main>

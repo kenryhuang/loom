@@ -1,6 +1,7 @@
 import { element } from "../markdown.mjs";
 
 const stages = {
+  paused: 'Paused · progress saved',
   queued: "Waiting to start",
   crawling: "Crawling pages",
   crawl_retry: "Retrying webpage request",
@@ -178,7 +179,7 @@ export class KnowledgeProgress {
     this.root.dataset.state = state;
     setText(
       this.title,
-      job?.kind === "document" ? "Indexing activity" : "Sync activity",
+      ['document', 'local'].includes(job?.kind) ? "Indexing activity" : "Sync activity",
     );
     setText(
       this.state,
@@ -188,6 +189,7 @@ export class KnowledgeProgress {
         running: "Running",
         failed: "Failed",
         cancelled: "Cancelled",
+        paused: "Paused",
         completed: "Complete",
         partial: "Partial sync",
       }[state] || state,
@@ -304,6 +306,7 @@ export class KnowledgeProgress {
         ? "Documents are ready. Publishing the new searchable index."
         : job.state === "completed"
           ? "The collected documents are available in the searchable index."
+          : job.kind === 'local' ? "Completed files are searchable. Resume skips completed files that have not changed."
           : "Coverage advances after a full document finishes. The published index updates after this sync completes.";
     this.metrics.replaceChildren();
     for (const [label, value] of [

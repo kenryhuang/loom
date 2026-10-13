@@ -1921,3 +1921,25 @@ dialog h1 {
 .diagnosis-checks th:last-child { width: 25%; }
 .diagnosis-checks th, .diagnosis-checks td { padding: .5rem; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
 .diagnosis-checks pre { max-height: 20rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.activity-settings { margin-top: auto; }
+.kb-tabs { display: flex; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--line); padding: 12px 0; margin-bottom: 20px; }
+.kb-tabs button[aria-selected="true"], .kb-tabs button[aria-pressed="true"] { color: var(--accent); background: var(--panel); box-shadow: inset 0 -2px var(--accent); }
+.kb-tab-pane, .settings-body, .knowledge-create-page { min-width: 0; width: 100%; }
+.knowledge-create-page { max-width: 760px; margin: 20px auto; }
+.kb-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.kb-stats > div { display: flex; flex-direction: column; gap: 6px; padding: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.kb-stats strong { font-size: 24px; }
+.kb-document { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.kb-document > div { display: grid; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
+.kb-document button { flex-shrink: 0; }
+.kb-job-card { border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin: 12px 0; overflow-wrap: anywhere; }
+.kb-job-card > .knowledge-progress-actions { justify-content: flex-end; padding-top: 12px; }
+.kb-import-jobs .knowledge-job-progress { margin-bottom: 0; }
+.settings-editor { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; line-height: 1.6; padding: 16px; resize: vertical; }
+#settings-page { width: 100%; min-width: 0; max-width: 1200px; padding: 24px; }
+#settings-page > button { margin-top: 20px; }
+.settings-profile { border: 1px solid var(--line); padding: 20px; border-radius: 10px; margin-bottom: 16px; }
+.settings-profile .knowledge-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.kb-source-group { margin: 12px 0; border: 1px solid var(--line); padding: 14px; border-radius: 8px; }
+.kb-source-group > summary { overflow-wrap: anywhere; }

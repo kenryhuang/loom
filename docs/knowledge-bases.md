@@ -10,18 +10,28 @@ Loom service supports shared local knowledge bases and explicit per-session bind
 
 Data lives in `<service-data-dir>/knowledge/knowledge.sqlite`. An embedding profile contains a name, the complete HTTP(S) embeddings endpoint, model, and optional API-key environment-variable name. The service resolves the secret from its environment or the `.env` file selected by `LOOM_ENV_FILE`; the secret itself is not stored in the profile. For example, a local endpoint may be `http://localhost:11434/v1/embeddings` with an installed embedding model. Endpoint redirects are rejected. Chunks and search queries are sent to that endpoint.
 
-Profiles and a knowledge base's engine/profile binding are immutable. The first successful import pins the vector dimension. Use a new profile and knowledge base, then reimport documents when changing embedding models. Dimension checks cannot detect a provider silently replacing a model with another model of the same dimension.
+A knowledge base's engine/profile binding is immutable. Settings prevents changing the endpoint/model or deleting an embedding profile while a knowledge base uses it. The first successful import pins the vector dimension. Use a new profile and knowledge base, then reimport documents when changing embedding models. Dimension checks cannot detect a provider silently replacing a model with another model of the same dimension.
 
 ## Web workflow
 
-1. Open **Knowledge bases** in the sidebar.
-2. For hybrid search, add an embedding profile; create a knowledge base using the selected engine.
-3. Import UTF-8 text or Markdown by file or paste. Indexing runs in the background and exposes completion/failure status. Use **Search** to check retrieved passages.
-4. Select knowledge bases when creating a session, or use **Knowledge bases → Configure** in the session info panel between tasks.
+1. Open **Settings** at the bottom of the left navigation. Configure **Embedding services** for hybrid search or LightRAG. Other tabs edit models, model selection, task/run defaults and Evaluation / Evolve configuration.
+2. Open **Knowledge**, then **New** in the middle panel. Creation has its own page; select the engine, embedding service and (for LightRAG) indexing model.
+3. Select a knowledge base to open its **Import**, **View** and **Search** tabs.
+4. In **Import**, choose **Single file**, **Folder** or **Web URL**. File/folder paths refer to the machine running Loom service, not a remote browser's machine. Folder imports include supported files recursively, skipping hidden directories, symlinks and dependency folders.
+5. **View** groups indexed documents by source directory or website, with document/passage counts and engine metadata. LightRAG also provides **Explore knowledge graph / Load graph**. **Search** retrieves indexed passages.
+6. Select bases during session creation or use **Knowledge bases → Configure** between tasks.
 
-An import with the same document name atomically replaces the previous document. Failed imports retain the previous searchable version. Interrupted indexing jobs are marked failed after service restart; reimport to retry. Documents can be removed when that base has no pending indexing job.
+**Import activity** appears below the import forms. It shows the current file/stage, progress, elapsed time and available engine usage data. **Pause** requests a cooperative stop; an in-flight embedding/model request may finish before the job pauses. **Resume** continues the same saved job, skipping completed, unchanged local files and reusing available website/LightRAG checkpoints. An interrupted current local document may need indexing again. Jobs interrupted by service restart become paused when their inputs are saved; older jobs without saved inputs require a new import. **Terminate** stops the job; **Clear** removes a stopped job's history, not its indexed documents. Finish or terminate paused imports before starting another import or deleting the base.
 
-The SQLite engines accept UTF-8 text. The YakDB engine additionally accepts binary PDF/Office documents. File uploads are limited to 500 KB in the web UI, text to 500,000 characters per API import, and HTTP request bodies to 1 MiB. There is a 20,000-passage limit per base and at most 20 attached bases per session. Local vector search scans the base's vectors; this engine is intended for modest local collections.
+Local imports reference original absolute paths and keep derived chunks, embeddings and graph data in the index. They do not create a separate source-file copy. Removing a document or deleting a knowledge base leaves original files untouched. If a source moves or changes, reimport it; `knowledge_read` rejects missing/changed source content instead of presenting it as the old indexed evidence. Legacy content-upload API routes remain available.
+
+Local text files are limited to 500,000 bytes; YakDB files to 20 MiB. Folders support up to 1,000 files per import. Text API imports allow 500,000 characters, within the normal 1 MiB request limit. There is a 20,000-passage limit for SQLite bases and at most 20 attached bases per session.
+
+### Saving configuration
+
+Settings writes the service's configured YAML file (`--config`, otherwise `config.yaml` in the working directory). Embedding profiles are stored in its `embedding_profiles` array; existing database profiles are migrated on save. Embedding services have form fields plus advanced JSON; other tabs use JSON editors. Save validates configuration and uses an atomic, revision-checked write. A concurrent change requires reloading before saving. YAML comments/formatting are regenerated.
+
+API keys shown as `••••••••` retain their existing values. Prefer environment-variable references for credentials. New requests load updated configuration; already running calls retain their settings. CLI-only service options such as bind port are still set at startup.
 
 ## Model behavior and evidence
 
@@ -35,7 +45,11 @@ All routes use the service's existing bearer authentication.
 
 | Method | Route | Body / purpose |
 | --- | --- | --- |
+| GET / POST | `/v1/settings` | Read masked config / save `{ "revision": "...", "config": {...} }` |
 | GET | `/v1/knowledge-bases` | Catalog, profiles, engines |
+| POST | `/v1/knowledge-bases/{id}/imports` | `{ "kind": "file", "path": "/absolute/manual.md" }` or `kind: folder` |
+| POST | `/v1/knowledge-bases/{id}/jobs/{job_id}/{action}` | `{}`; action: `pause`, `resume`, `terminate`, `clear` |
+| POST | `/v1/knowledge-bases/{id}/delete` | `{}`; delete index and metadata, preserve local source files |
 | POST | `/v1/knowledge-bases` | `{ "name": "Manuals", "engine": "sqlite_fts" }` |
 | POST | `/v1/knowledge-bases/embedding-profiles` | `{ "name": "Local", "endpoint": "http://localhost:11434/v1/embeddings", "model": "your-model" }` |
 | GET | `/v1/knowledge-bases/{id}` | Documents and recent indexing jobs |
@@ -59,16 +73,16 @@ uv pip install --python .venv/bin/python "$HOME/workspace/yakDB[embedded]"
 
 This builds a normal installed package; subsequent edits to the source checkout require reinstalling. YakDB also needs system libmagic; scanned PDFs use Tesseract and the applicable language packs. The current machine has English OCR but no Chinese language packs. Text-based Chinese PDFs do not require OCR. YakDB's existing mixed text/scanned PDF OCR heuristic remains unchanged. Remote vision calls are disabled in the adapter.
 
-Choose **YakDB local** when creating a base. Select a PDF/Office/text file (up to 20 MiB) or paste text. For API uploads use `{ "name": "manual.pdf", "file_base64": "..." }`; this engine's document route permits a 28 MiB JSON request. Other routes keep their existing 1 MiB limit. Search results expose `page_number`, `section_title`, `source_id`, and page text (up to 12,000 characters, with a `truncated` flag). Indexing is limited to 180 seconds and search to 60 seconds per worker operation.
+Choose **YakDB local** when creating a base. Enter a PDF/Office/text file path (up to 20 MiB) in **Import → Single file**. For API uploads use `{ "name": "manual.pdf", "file_base64": "..." }`; this engine's document route permits a 28 MiB JSON request. Other routes keep their existing 1 MiB limit. Search results expose `page_number`, `section_title`, `source_id`, and page text (up to 12,000 characters, with a `truncated` flag). Indexing is limited to 180 seconds and search to 60 seconds per worker operation.
 
-Each operation runs the installed package in a separate process to isolate YakDB's global backend and settings. Imports/deletions create a new SQLite snapshot and atomically publish its pointer after success. Originals remain under versioned directories in `<service-data-dir>/knowledge/yakdb/<kb-id>/`; prior generations are retained to protect in-flight readers. Automatic reclamation is not yet implemented, so repeated replacements consume additional disk space. Deleting a document removes it from current search results, not from retained historical snapshots.
+Each operation runs the installed package in a separate process to isolate YakDB's global backend and settings. Imports/deletions create a new SQLite snapshot and atomically publish its pointer after success. Index snapshots remain under versioned directories in `<service-data-dir>/knowledge/yakdb/<kb-id>/`; prior generations are retained to protect in-flight readers. Automatic reclamation is not yet implemented, so repeated replacements consume additional disk space. Deleting a document removes it from current search results, not from retained historical snapshots.
 
 Within one knowledge base, importing identical bytes under another filename is rejected explicitly because YakDB deduplicates by content. The same filename replaces the existing document. Bases remain isolated, and only session-bound bases can be searched. YakDB uses keyword retrieval, including its existing Chinese substring fallback; it is not a vector engine.
 
 
 ## DashScope embedding profile
 
-The web form has a **Use DashScope · text-embedding-v4** preset. For the existing DashScope service configuration use:
+**Settings → Embedding services → Add embedding service** starts with a DashScope `text-embedding-v4` preset. For the existing DashScope service configuration use:
 
 ```json
 {
@@ -79,7 +93,7 @@ The web form has a **Use DashScope · text-embedding-v4** preset. For the existi
 }
 ```
 
-This reuses the task model's key variable, including the service's configured `.env` fallback. The Beijing endpoint above was verified with the existing installation; use the endpoint matching your account's region for another deployment. Indexing submits at most 10 passages per embedding request, matching the [DashScope v4 synchronous API batch limit](https://www.alibabacloud.com/help/en/model-studio/text-embedding-synchronous-api). The preset fills the form; click **Add embedding profile** to save, then select it when creating a hybrid knowledge base.
+This reuses the task model's key variable, including the service's configured `.env` fallback. The Beijing endpoint above was verified with the existing installation; use the endpoint matching your account's region for another deployment. Indexing submits at most 10 passages per embedding request, matching the [DashScope v4 synchronous API batch limit](https://www.alibabacloud.com/help/en/model-studio/text-embedding-synchronous-api). Click **Save configuration**, then select the service when creating a hybrid knowledge base.
 
 ## Reading retrieved documents
 
@@ -106,9 +120,9 @@ uv pip install --python .venv/bin/python '.[knowledge-graph]'
 
 This pins `lightrag-hku==1.5.7` and installs BeautifulSoup for local HTML extraction. Restart the service after installation. In **Knowledge → New**, choose **LightRAG local**, an indexing LLM from the service configuration, and an embedding profile (for example DashScope `text-embedding-v4`). The LLM extracts entities and relationships; embeddings support semantic retrieval. NetworkX, NanoVectorDB, and JSON stores run locally without Neo4j or another database server. Initial tokenizer setup may download tiktoken data.
 
-Open the base in the main panel and use **Import URL**. Supply a starting URL, same-origin path scope, page/depth limits and optionally a periodic sync interval. **Import URL** starts a durable background job. Progress includes crawl counts/current URL, indexing stage/document, LLM calls, reported tokens and embedding inputs. **Cancel indexing** stops the current operation; **Sync now** retries. **Sync settings** changes limits, delay and interval; **Pause source** disables automatic scheduling. Scheduling runs only while Loom service is running.
+Open the base and use **Import → Web URL** (available for all engines). Supply a starting URL, same-origin path scope, page/depth limits and optionally a periodic sync interval. **Import URL** starts a durable background job. Progress includes crawl counts/current URL, indexing stage/document, LLM calls, reported tokens and embedding inputs. **Pause / Resume / Terminate** control the current operation in Import activity. **Sync settings** changes limits, delay and interval; **Pause source** disables automatic scheduling. Scheduling runs only while Loom service is running.
 
-The **Sync activity** panel shows the collection, change-checking, indexing and publishing stages, the current page or document, elapsed time and time since the last activity. Document coverage advances after a full document finishes; crawling shows collected-page counts without an estimated percentage. Saved document counts and recent activity remain visible after a failure, with **Resume sync** to continue from saved progress. Retry messages are shown while requests are retried, and interrupted live updates reconnect automatically. A partial sync keeps the incomplete website crawl visible even when all collected documents have been indexed.
+The **Import activity** panel shows the collection, change-checking, indexing and publishing stages, the current page or document, elapsed time and time since the last activity. Document coverage advances after a full document finishes; crawling shows collected-page counts without an estimated percentage. Saved document counts and recent activity remain visible after a failure, with **Resume sync** to continue from saved progress. Retry messages are shown while requests are retried, and interrupted live updates reconnect automatically. A partial sync keeps the incomplete website crawl visible even when all collected documents have been indexed.
 
 The crawler follows public HTTP(S) HTML links, extracts readable HTML/Markdown/text, preserves original URLs, respects robots.txt and rate limits, and validates/pins public addresses on every request and redirect. It excludes query-string links and cannot log in or render JavaScript-only pages. Export those pages to Markdown/HTML first. Limits are 1,000 visited pages, depth 10, 4 MB per HTTP response, 500,000 characters per extracted page and 50 MB per crawl snapshot. Scope changes require a new source.
 

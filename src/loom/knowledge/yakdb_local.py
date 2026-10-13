@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 from loom.core import now_iso
 from loom.service.contracts import ServiceError, canonical, new_id, object_value, text
@@ -29,9 +30,14 @@ def require():
 def document_payload(payload):
     value = object_value(payload)
     name = text(value.get("name"), "name", max_length=300)
-    if set(value) not in ({"name", "content"}, {"name", "file_base64"}):
+    if set(value) not in ({"name", "content"}, {"name", "file_base64"}, {"name", "source_path"}):
         raise ServiceError("Document requires name and exactly one of content or file_base64")
-    if "content" in value:
+    if "source_path" in value:
+        source = Path(value["source_path"])
+        if not source.is_file() or source.stat().st_size > MAX_UPLOAD:
+            raise ServiceError("Source file missing or exceeds 20 MiB")
+        data = source.read_bytes()
+    elif "content" in value:
         data = text(value["content"], "content", max_length=500000).encode()
     else:
         encoded = value["file_base64"]
@@ -65,7 +71,7 @@ def call(workspace, action, **values):
         raise ServiceError("YakDB worker failed or timed out; previous index retained", 502) from exc
 
 
-def publish(store, base, payload=None, document_id=None):
+def publish(store, base, payload=None, document_id=None, *, cancelled=lambda: False):
     require()
     kb_id = base["id"]
     with store.connect() as db:
@@ -93,10 +99,13 @@ def publish(store, base, payload=None, document_id=None):
             source.backup(target)
     try:
         if payload is not None:
-            with tempfile.NamedTemporaryFile(dir=workspace) as upload:
-                upload.write(data)
-                upload.flush()
-                result = call(workspace, "index", name=name, upload=upload.name)
+            if "source_path" in payload:
+                result = call(workspace, "index", name=name, upload=payload["source_path"])
+            else:
+                with tempfile.NamedTemporaryFile(dir=workspace) as upload:
+                    upload.write(data)
+                    upload.flush()
+                    result = call(workspace, "index", name=name, upload=upload.name)
             pages = result["pages"]
             digest = hashlib.sha256(data).hexdigest()
             doc_id = previous["id"] if previous else new_id("doc")
@@ -106,6 +115,8 @@ def publish(store, base, payload=None, document_id=None):
         total = sum(json.loads(doc["content"])["pages"] for doc in documents if doc["name"] != name) + pages
         if total > 20000:
             raise ServiceError("Knowledge base limit is 20000 pages", 413)
+        if cancelled():
+            raise ServiceError("Knowledge job interrupted", 409)
         with store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             current = json.loads(db.execute("SELECT body FROM bases WHERE id=?", (kb_id,)).fetchone()[0])
@@ -117,6 +128,7 @@ def publish(store, base, payload=None, document_id=None):
                 db.execute("INSERT OR REPLACE INTO documents VALUES(?,?,?,?,?,?)", (doc_id, kb_id, name, digest, canonical({"pages": pages}), now_iso()))
             else:
                 db.execute("DELETE FROM documents WHERE id=?", (document_id,))
+                db.execute("DELETE FROM local_sources WHERE document_id=?", (document_id,))
         return {"document_id": doc_id, "name": name, "chunks": pages, "digest": digest} if payload is not None else {"deleted": document_id}
     except BaseException:
         shutil.rmtree(workspace, ignore_errors=True)

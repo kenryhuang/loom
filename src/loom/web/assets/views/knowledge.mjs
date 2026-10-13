@@ -54,6 +54,7 @@ export class KnowledgeView {
     this.client = this.api();
     if (!this.client) return;
     this.session = bindSession ? this.state() : null;
+    this.creating = create;
     this.selected = new Set(this.session?.task.knowledge_base_ids || []);
     this.dialog.replaceChildren();
     const heading = element("div", "dialog-heading");
@@ -70,10 +71,6 @@ export class KnowledgeView {
     if (!this.root) this.dialog.showModal();
     try {
       await this.refresh(baseId ?? this.baseId);
-      if (create) {
-        this.content.querySelector(".knowledge-create").open = true;
-        this.content.querySelector(".knowledge-create input").focus();
-      }
     } catch (error) {
       this.error(error);
     }
@@ -97,7 +94,12 @@ export class KnowledgeView {
     if (this.abort.signal.aborted) return;
     this.content.replaceChildren();
     if (this.session) this.renderBinding(catalog.knowledge_bases);
-    this.renderCreate(catalog);
+    if (this.creating) {
+      this.onSelected(null);
+      this.renderCreate(catalog);
+      this.content.querySelector("input")?.focus();
+      return;
+    }
     const select = element("select");
     this.baseSelect = select;
     select.setAttribute("aria-label", "Knowledge base");
@@ -172,8 +174,8 @@ export class KnowledgeView {
     this.content.append(section);
   }
   renderCreate(catalog) {
-    const details = element("details", "knowledge-create");
-    details.append(element("summary", "", "Create a knowledge base"));
+    const details = element("section", "knowledge-create-page");
+    details.append(element("h2", "", "Create a knowledge base"));
     const form = element("form", "knowledge-form"),
       name = input("Knowledge base name"),
       description = input("What information does this contain?");
@@ -249,6 +251,8 @@ export class KnowledgeView {
             ? {}
             : { indexing_model: indexingModel.value }),
         });
+        this.creating = false;
+        this.activeTab = "import";
         await this.refresh(base.id);
         this.notice.textContent = "Knowledge base created.";
       } catch (error) {
@@ -264,313 +268,160 @@ export class KnowledgeView {
     };
     details.append(form);
     this.content.append(details);
-    const profiles = element("details", "knowledge-create");
-    profiles.append(element("summary", "", "Configure embedding service"));
-    const config = element("form", "knowledge-form"),
-      profileName = input("Local embedding"),
-      endpoint = input("http://localhost:11434/v1/embeddings", "url"),
-      model = input("Embedding model name"),
-      env = input("Optional API key environment variable");
-    profileName.required = endpoint.required = model.required = true;
-    const preset = button("Use DashScope · text-embedding-v4");
-    preset.onclick = () => {
-      profileName.value = "DashScope text-embedding-v4";
-      endpoint.value =
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings";
-      model.value = "text-embedding-v4";
-      env.value = "LOOM_LLM_API_KEY";
-      endpoint.focus();
-    };
-    const profileError = element("p", "notice error knowledge-form-error");
-    profileError.setAttribute("role", "alert");
-    profileError.tabIndex = -1;
-    profileError.hidden = true;
-    const add = element("button", "", "Add embedding profile");
-    add.type = "submit";
-    config.append(
-      preset,
-      field("Profile name", profileName),
-      field("Full embeddings endpoint", endpoint),
-      field("Model", model),
-      field("API key environment variable", env),
-      element(
-        "p",
-        "muted",
-        "OpenAI-compatible embeddings API. Text passages and queries are sent to this endpoint; documents and indexes stay local. Credentials are read from the service environment or its configured .env file; enter the variable name, not the secret. Each knowledge base keeps its chosen profile; changing models requires a new index.",
-      ),
-      profileError,
-      add,
-    );
-    config.onsubmit = async (event) => {
-      event.preventDefault();
-      add.disabled = true;
-      profileError.hidden = true;
-      try {
-        await this.request("/embedding-profiles", {
-          name: profileName.value,
-          endpoint: endpoint.value,
-          model: model.value,
-          api_key_env: env.value,
-        });
-        await this.refresh();
-        this.notice.textContent = "Embedding profile saved.";
-      } catch (error) {
-        if (error.name !== "AbortError") {
-          profileError.textContent = `Could not save embedding profile: ${error.message}`;
-          profileError.hidden = false;
-          profileError.focus();
-          profileError.scrollIntoView?.({ block: "nearest" });
-        }
-        add.disabled = false;
-      }
-    };
-    profiles.append(config);
-    this.content.append(profiles);
   }
   async renderBase() {
     clearTimeout(this.timer);
-    const id = this.baseId,
-      base = await this.request(`/${id}`);
+    const id = this.baseId, base = await this.request(`/${id}`);
     if (id !== this.baseId || this.abort.signal.aborted) return;
-    const option = [...this.baseSelect.options].find(
-      (item) => item.value === id,
-    );
-    if (option)
-      option.textContent = `${base.name} · ${base.engine} · ${base.documents.length} documents`;
     this.knowledgeJobListeners = new Set();
-    this.latestKnowledgeJob = null;
-    this.basePanel.replaceChildren(
-      element("h3", "", base.name),
-      element(
-        "p",
-        "muted",
-        `${base.chunk_count} indexed passages · ${base.engine}${base.embedding_dimension ? ` · ${base.embedding_dimension} dimensions` : ""}`,
-      ),
-    );
-    if (base.description)
-      this.basePanel.append(element("p", "", base.description));
-    const documents = element("ul", "knowledge-documents");
-    for (const doc of base.documents) {
-      const row = element("li");
-      const remove = button("Remove");
-      remove.onclick = async () => {
-        remove.disabled = true;
-        try {
-          await this.request(`/${id}/documents/${doc.id}/delete`, {});
-          await this.renderBase();
-        } catch (error) {
-          this.error(error);
-          remove.disabled = false;
-        }
-      };
-      row.append(element("span", "", doc.name), remove);
-      documents.append(row);
+    this.basePanel.replaceChildren();
+    const header = element('div', 'dashboard-toolbar');
+    const title = element('div'); title.append(element('h2', '', base.name), element('span', 'muted', base.engine));
+    const remove = button('Delete knowledge base'); remove.classList.add('danger');
+    remove.onclick = async () => {
+      if (!confirm(`Delete “${base.name}” and its indexes? Original local files will remain.`)) return;
+      try {await this.request(`/${id}/delete`, {}); this.baseId = null; await this.refresh();}
+      catch (error) {this.error(error);}
+    };
+    header.append(title, remove); this.basePanel.append(header);
+    const tabs = element('div', 'kb-tabs'); tabs.setAttribute('role', 'tablist');
+    this.basePanel.append(tabs);
+    const panes = {};
+    for (const [key, label] of [['import', 'Import'], ['view', 'View'], ['search', 'Search']]) {
+      const tab = button(label), pane = element('section', 'kb-tab-pane');
+      tab.setAttribute('role', 'tab'); pane.setAttribute('role', 'tabpanel');
+      tab.id = `kb-tab-${key}`; pane.id = `kb-pane-${key}`;
+      tab.setAttribute('aria-controls', pane.id); pane.setAttribute('aria-labelledby', tab.id);
+      panes[key] = pane; tabs.append(tab); this.basePanel.append(pane);
+      tab.onclick = () => {this.activeTab = key; show();};
     }
-    this.basePanel.append(documents);
-    const form = element("form", "knowledge-form"),
-      file = input("", "file"),
-      name = input("Document name"),
-      content = element("textarea");
-    const yakdb = base.engine === "yakdb_local";
-    let fileBase64 = null;
-    file.accept =
-      ".txt,.md,.markdown,.rst,.csv,.json,.py,.js,.ts,.yaml,.yml,.toml,.html,.log";
-    if (yakdb) file.accept += ",.pdf,.docx,.pptx,.xlsx";
-    name.required = true;
-    content.rows = 4;
-    content.placeholder = "Paste text or select a UTF-8 file";
-    content.required = true;
-    file.onchange = async () => {
-      const selected = file.files[0];
-      fileBase64 = null;
-      content.disabled = false;
-      content.required = true;
-      if (!selected) return;
-      content.value = "";
-      name.value = "";
-      if (selected.size > (yakdb ? 20 * 1024 * 1024 : 500000)) {
-        this.notice.textContent = yakdb
-          ? "Import files up to 20 MiB."
-          : "Import files up to 500 KB.";
-        return;
+    const show = () => {
+      [...tabs.children].forEach((tab, index) => {
+        const key = ['import', 'view', 'search'][index], selected = key === (this.activeTab || 'import');
+        tab.setAttribute('aria-selected', String(selected)); panes[key].hidden = !selected;
+      });
+    }; show();
+    this.importPanel = panes.import; this.viewPanel = panes.view;
+    const modes = element('div', 'kb-tabs kb-import-modes'), importPanes = {};
+    this.importPanel.append(modes);
+    for (const [kind, label] of [['file', 'Single file'], ['folder', 'Folder'], ['web', 'Web URL']]) {
+      const select = button(label), pane = element('section');
+      importPanes[kind] = pane; modes.append(select); this.importPanel.append(pane);
+      select.onclick = () => {this.importMode = kind; displayMode();};
+      if (kind === 'web') {this.urlPanel = pane; continue;}
+      const form = element('form', 'knowledge-form'), path = input(kind === 'folder' ? '/absolute/path/to/folder' : '/absolute/path/to/document.md');
+      path.required = true;
+      const submit = element('button', 'primary', kind === 'folder' ? 'Import folder' : 'Import file'); submit.type = 'submit';
+      form.append(field(kind === 'folder' ? 'Folder path on the Loom service machine' : 'File path on the Loom service machine', path),
+        element('p', 'muted', 'Index in place. The source file stays at its original path.'), submit);
+      form.onsubmit = async event => {
+        event.preventDefault(); submit.disabled = true;
+        try {await this.request(`/${id}/imports`, {kind, path: path.value.trim()}); await this.renderBase();}
+        catch (error) {this.error(error); submit.disabled = false;}
+      };
+      pane.append(form);
+    }
+    const displayMode = () => {
+      [...modes.children].forEach((tab, index) => {
+        const key = ['file', 'folder', 'web'][index], selected = key === (this.importMode || 'file');
+        tab.setAttribute('aria-pressed', String(selected)); importPanes[key].hidden = !selected;
+      });
+    }; displayMode();
+    const jobsRoot = element('section', 'kb-import-jobs');
+    this.importPanel.append(element('h3', '', 'Import activity'), jobsRoot);
+    const cards = new Map();
+    const renderJobs = jobs => {
+      for (const job of jobs || []) {
+        this.latestKnowledgeJob = job;
+        for (const listener of this.knowledgeJobListeners) listener(job);
+        let card = cards.get(job.id);
+        if (!card) {
+          const root = element('details', 'kb-job-card'), summary = element('summary'), controls = element('div', 'knowledge-progress-actions');
+          root.open = cards.size === 0;
+          const cancel = button(''); cancel.style.display = 'none';
+          const progress = new KnowledgeProgress({cancel, resume: async () => {}, error: error => this.error(error)});
+          progress.retry.style.display = 'none';
+          const actions = {};
+          for (const [action, label] of [['pause', 'Pause'], ['resume', 'Resume'], ['terminate', 'Terminate'], ['clear', 'Clear']]) {
+            const control = button(label); actions[action] = control; controls.append(control);
+            control.onclick = async () => {
+              control.disabled = true;
+              try {await this.request(`/${id}/jobs/${job.id}/${action}`, {}); await this.renderBase();}
+              catch (error) {this.error(error); control.disabled = false;}
+            };
+          }
+          root.append(summary, controls, progress.root); jobsRoot.append(root);
+          card = {root, summary, progress, actions}; cards.set(job.id, card);
+          this.knowledgeJobListeners.add(value => {if (value.id === job.id) progress.update(value);});
+        }
+        card.summary.textContent = `${job.document} · ${job.state}${job.requested_action ? ` · ${job.requested_action} requested` : ''}`;
+        card.progress.update(job);
+        const active = ['queued', 'running'].includes(job.state);
+        card.actions.pause.disabled = !active || job.cancel_requested;
+        card.actions.resume.disabled = !['paused', 'failed'].includes(job.state) || job.resumable === false;
+        card.actions.terminate.disabled = !active && !['paused', 'failed'].includes(job.state);
+        card.actions.clear.disabled = active || job.state === 'paused';
       }
+      if (!jobs?.length && !jobsRoot.childNodes.length) jobsRoot.append(element('p', 'muted', 'No imports yet.'));
+    };
+    const stats = element('div', 'kb-stats');
+    for (const [label, value] of [['Documents', base.documents.length], ['Passages', base.chunk_count], ['Dimensions', base.embedding_dimension || '—'],
+      ['Entities', base.graph_stats?.entities ?? '—'], ['Relationships', base.graph_stats?.relations ?? '—']]) {
+      const cell = element('div'); cell.append(element('strong', '', String(value)), element('span', 'muted', label)); stats.append(cell);
+    }
+    panes.view.append(stats);
+    if (base.description) panes.view.append(element('p', 'muted', base.description));
+    const documents = element('div', 'knowledge-documents');
+    const groups = new Map();
+    for (const doc of base.documents) {
+      const groupName = doc.source_path ? doc.source_path.slice(0, doc.source_path.lastIndexOf('/')) : doc.source_url ? new URL(doc.source_url).origin : 'Documents';
+      if (!groups.has(groupName)) {
+        const group = element('details', 'kb-source-group'); group.open = true;
+        group.append(element('summary', '', groupName)); documents.append(group); groups.set(groupName, group);
+      }
+      const row = element('article', 'kb-document'), info = element('div');
+      info.append(element('strong', '', doc.source_path || doc.name), element('small', 'muted', `${doc.at || ''} · ${(doc.digest || '').slice(0, 12)}`));
+      const removeDoc = button('Remove index');
+      removeDoc.onclick = async () => {try {await this.request(`/${id}/documents/${doc.id}/delete`, {}); await this.renderBase();} catch (e) {this.error(e);}};
+      row.append(info, removeDoc); groups.get(groupName).append(row);
+    }
+    panes.view.append(element('h3', '', 'Indexed sources'), documents);
+    const search = element('form', 'knowledge-search'), query = input('Search indexed knowledge'), submit = element('button', 'primary', 'Search'), results = element('div');
+    submit.type = 'submit'; query.required = true; search.append(field('Query', query), submit);
+    search.onsubmit = async event => {
+      event.preventDefault(); submit.disabled = true;
       try {
-        if (yakdb) {
-          const bytes = new Uint8Array(await selected.arrayBuffer());
-          if (file.files[0] !== selected) return;
-          const parts = [];
-          for (let offset = 0; offset < bytes.length; offset += 32768)
-            parts.push(
-              String.fromCharCode(...bytes.subarray(offset, offset + 32768)),
-            );
-          fileBase64 = btoa(parts.join(""));
-          name.value = selected.name;
-          content.disabled = true;
-          content.required = false;
+        const data = await this.request(`/${id}/search`, {query: query.value, limit: 5}); results.replaceChildren();
+        for (const hit of data.matches) {
+          const row = element('article', 'knowledge-hit');
+          row.append(element('strong', '', hit.source_url || (hit.page_number ? `${hit.document} · page ${hit.page_number}` : `${hit.document}:${hit.start_line}–${hit.end_line}`)), element('small', 'muted', hit.source_id), element('p', '', hit.text)); results.append(row);
+        }
+        if (!data.matches.length) results.textContent = 'No matching passages.';
+      } catch (error) {this.error(error);} finally {submit.disabled = false;}
+    };
+    panes.search.append(search, results);
+    await renderKnowledgeGraph(this, base);
+    renderJobs(base.jobs);
+    const abort = this.abort;
+    let currentJobs = base.jobs || [];
+    const poll = async () => {
+      if (abort !== this.abort || abort.signal.aborted || id !== this.baseId || !jobsRoot.isConnected) return;
+      try {
+        currentJobs = await Promise.all(currentJobs.map(job => ['queued', 'running'].includes(job.state)
+          ? this.request(`/${id}/jobs/${job.id}`) : job));
+        renderJobs(currentJobs);
+        if (!currentJobs.some(job => ['queued', 'running'].includes(job.state))) {
+          this.changed();
+          if (currentJobs.some(job => job.state === 'completed')) await this.renderBase();
           return;
         }
-        content.value = new TextDecoder("utf-8", { fatal: true }).decode(
-          await selected.arrayBuffer(),
-        );
-        name.value = selected.name;
-      } catch {
-        this.notice.textContent =
-          "Import UTF-8 text or Markdown; binary/PDF documents are not supported yet.";
-      }
-    };
-    const add = element("button", "primary", "Import / replace document");
-    add.type = "submit";
-    const status = element("p", "muted");
-    status.setAttribute("role", "status");
-    form.append(
-      field(
-        yakdb
-          ? "PDF / Office / text file (up to 20 MiB)"
-          : "UTF-8 text / Markdown file (up to 500 KB)",
-        file,
-      ),
-      field("Document name (same name replaces its previous index)", name),
-      field("Content", content),
-      add,
-      status,
-    );
-    const pending = base.jobs?.find((job) =>
-      ["queued", "running"].includes(job.state),
-    );
-    const cancel = button("Cancel indexing / sync");
-    cancel.hidden = true;
-    let progress;
-    if (base.engine === "lightrag_local") {
-      status.hidden = true;
-      progress = new KnowledgeProgress({
-        cancel,
-        resume: async (job) => {
-          await this.request(`/${id}/sources/${job.source_id}/sync`, {});
-          await this.renderBase();
-        },
-        error: (error) => this.error(error),
-      });
-      this.knowledgeJobListeners.add((job) => progress.update(job));
-      this.basePanel.insertBefore(progress.root, documents);
-    } else form.append(cancel);
-    const abort = this.abort;
-    const current = () =>
-      id === this.baseId &&
-      abort === this.abort &&
-      !abort.signal.aborted &&
-      status.isConnected;
-    const poll = async (job) => {
-      if (!current()) return;
-      this.latestKnowledgeJob = job;
-      for (const listener of this.knowledgeJobListeners) listener(job);
-      status.textContent = `${job.document} · ${job.state} · ${job.stage || "indexing"}${job.pages !== undefined ? ` · ${job.pages} pages` : ""}${job.indexed !== undefined ? ` · ${job.indexed}/${job.total} documents` : ""}${job.llm_calls ? ` · ${job.llm_calls} LLM calls · ${job.reported_tokens || 0} tokens` : ""}${job.embedding_inputs ? ` · ${job.embedding_inputs} embedding inputs` : ""}${job.current_document ? ` · ${job.current_document}` : ""}${job.current_url ? ` · ${job.current_url}` : ""}${job.error ? ` · ${job.error}` : ""}`;
-      add.disabled = ["queued", "running"].includes(job.state);
-      cancel.hidden = !add.disabled || base.engine !== "lightrag_local";
-      cancel.onclick = async () => {
-        cancel.disabled = true;
-        try {
-          const receipt = await this.request(
-            `/${id}/jobs/${job.id}/cancel`,
-            {},
-          );
-          this.latestKnowledgeJob = receipt;
-          for (const listener of this.knowledgeJobListeners) listener(receipt);
-          status.textContent = "Cancellation requested…";
-          progress?.cancellationRequested();
-        } catch (error) {
-          this.error(error);
-          cancel.disabled = false;
-        }
-      };
-      if (add.disabled) {
-        const follow = async () => {
-          if (!current()) return;
-          try {
-            await poll(await this.request(`/${id}/jobs/${job.id}`));
-          } catch (error) {
-            if (!current()) return;
-            if (progress) progress.connectionError(error);
-            else this.error(error);
-            this.timer = setTimeout(follow, 2000);
-          }
-        };
-        this.timer = setTimeout(follow, 800);
-      } else if (job.state === "completed") {
-        this.changed();
-        this.notice.textContent =
-          job.result?.complete === false
-            ? `Partial sync: ${job.result.pages} collected pages indexed; website crawl incomplete. See source details.`
-            : `Indexed ${job.result.chunks} passages from ${job.document}.`;
-        await this.renderBase();
-      }
-    };
-    form.onsubmit = async (event) => {
-      event.preventDefault();
-      add.disabled = true;
-      try {
-        await poll(
-          await this.request(`/${id}/documents`, {
-            name: name.value,
-            ...(fileBase64 !== null
-              ? { file_base64: fileBase64 }
-              : { content: content.value }),
-          }),
-        );
+        this.timer = setTimeout(poll, 800);
       } catch (error) {
-        this.error(error);
-        add.disabled = false;
+        if (abort.signal.aborted) return;
+        for (const card of cards.values()) card.progress.connectionError(error);
+        this.timer = setTimeout(poll, 2000);
       }
     };
-    this.basePanel.append(form);
-    if (pending) poll(pending);
-    else if (base.jobs?.[0]) {
-      const job = base.jobs[0];
-      this.latestKnowledgeJob = job;
-      progress?.update(job);
-      status.textContent = `${job.result?.complete === false ? "Partial sync — website crawl incomplete" : job.state}: ${job.error || `${job.result?.chunks || 0} indexed chunks`}`;
-    }
-    const search = element("form", "knowledge-search"),
-      query = input("Test a query"),
-      submit = element("button", "", "Search"),
-      results = element("div");
-    submit.type = "submit";
-    query.required = true;
-    search.append(field("Search this knowledge base", query), submit);
-    search.onsubmit = async (event) => {
-      event.preventDefault();
-      submit.disabled = true;
-      try {
-        const data = await this.request(`/${id}/search`, {
-          query: query.value,
-          limit: 5,
-        });
-        results.replaceChildren();
-        for (const hit of data.matches) {
-          const item = element("article", "knowledge-hit");
-          item.append(
-            element(
-              "strong",
-              "",
-              hit.source_url
-                ? hit.source_url
-                : hit.page_number
-                  ? `${hit.document} · page ${hit.page_number}`
-                  : `${hit.document}:${hit.start_line}–${hit.end_line}`,
-            ),
-            element("small", "muted", hit.source_id),
-            element("p", "", hit.text),
-          );
-          results.append(item);
-        }
-        if (!data.matches.length) results.textContent = "No matching passages.";
-      } catch (error) {
-        this.error(error);
-      } finally {
-        submit.disabled = false;
-      }
-    };
-    this.basePanel.append(search, results);
-    if (base.engine === "lightrag_local")
-      await renderKnowledgeGraph(this, base);
+    if (currentJobs.some(job => ['queued', 'running'].includes(job.state))) this.timer = setTimeout(poll, 800);
   }
 }

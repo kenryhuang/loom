@@ -141,7 +141,7 @@ test("knowledge binding events update session state without changing task progre
   assert.equal(projection.snapshot.task.state, "idle");
 });
 
-test("creation errors stay beside the form and DashScope preset fills a reusable profile", async () => {
+test("creation is a separate page and errors retain entered fields", async () => {
   const api = {
     json: async (path, options) => {
       if (options.body) throw new Error("Unknown knowledge engine");
@@ -150,7 +150,7 @@ test("creation errors stay beside the form and DashScope preset fills a reusable
   };
   const { dom, view } = setup(api);
   await view.open(false, { create: true });
-  const form = view.content.querySelector(".knowledge-create form");
+  const form = view.content.querySelector(".knowledge-create-page form");
   const name = form.querySelector("input");
   name.value = "Keep my input";
   form.dispatchEvent(new dom.window.Event("submit", { cancelable: true }));
@@ -164,19 +164,8 @@ test("creation errors stay beside the form and DashScope preset fills a reusable
     form.querySelector('option[value="yakdb_local"]').disabled,
     true,
   );
-  const profileForm = view.content.querySelectorAll(
-    ".knowledge-create form",
-  )[1];
-  profileForm.querySelector('button[type="button"]').click();
-  const values = [...profileForm.querySelectorAll("input")].map(
-    (input) => input.value,
-  );
-  assert.deepEqual(values, [
-    "DashScope text-embedding-v4",
-    "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings",
-    "text-embedding-v4",
-    "LOOM_LLM_API_KEY",
-  ]);
+  assert.equal(view.content.querySelector('.knowledge-base-panel'), null);
+  assert.doesNotMatch(view.content.textContent, /Configure embedding service/);
   view.close();
 });
 
@@ -232,7 +221,7 @@ test("LightRAG creation selects model/profile and website graph lives in main pa
     },
   });
   await view.open(true);
-  assert.match(view.dialog.textContent, /Website sources & knowledge graph/);
+  assert.match(view.dialog.textContent, /Website sources/);
   assert.match(view.dialog.textContent, /Sync settings/);
   const urlInput = view.dialog.querySelector(
     '.knowledge-url-form input[type="url"]',
@@ -254,6 +243,9 @@ test("LightRAG creation selects model/profile and website graph lives in main pa
     .querySelector("svg circle")
     .dispatchEvent(new dom.window.Event("click", { bubbles: true }));
   assert.match(view.dialog.textContent, /Agent service/);
+  assert.equal(view.dialog.querySelector('.knowledge-create-page'), null);
+  assert.ok(view.dialog.querySelector('#kb-pane-view .knowledge-graph'));
+  await view.open(false, {create: true});
   const selects = [...view.dialog.querySelectorAll("select")];
   const engine = selects.find((s) =>
     [...s.options].some((o) => o.value === "lightrag_local"),
@@ -314,7 +306,7 @@ test("website sync progress and failures appear beside the source", async () => 
     assert.ok(
       panel.compareDocumentPosition(
         view.dialog.querySelector(".knowledge-url-import"),
-      ) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+      ) & dom.window.Node.DOCUMENT_POSITION_PRECEDING,
     );
     assert.equal(
       panel.querySelector(".knowledge-progress-state").textContent,
@@ -395,7 +387,8 @@ test("website sync progress and failures appear beside the source", async () => 
 
 test("sync polling propagates a model failure to the panel and source and stops polling", async (t) => {
   const timers = [];
-  t.mock.method(globalThis, "setTimeout", (callback) => {
+  t.mock.method(globalThis, "setTimeout", (callback, delay) => {
+    if (!delay) return 0;
     timers.push(callback);
     return timers.length;
   });
@@ -470,6 +463,7 @@ test("sync polling propagates a model failure to the panel and source and stops 
 test("sync polling recovers from network errors and renders the terminal result", async (t) => {
   const timers = [];
   t.mock.method(globalThis, "setTimeout", (callback, delay) => {
+    if (!delay) return 0;
     timers.push({ callback, delay });
     return timers.length;
   });
@@ -537,4 +531,30 @@ test("sync polling recovers from network errors and renders the terminal result"
     view.close();
     dom.window.close();
   }
+});
+
+test('local import submits paths and job controls stay inside Import', async () => {
+  const requests = [];
+  const paused = {...base, jobs: [{id: 'job', kind: 'local', document: '/docs', state: 'paused', stage: 'paused'}]};
+  const {dom, view} = setup({json: async (path, options) => {
+    requests.push([path, options?.body]);
+    if (path.endsWith('/sources')) return {sources: []};
+    if (path.endsWith('/kb')) return paused;
+    return catalog;
+  }});
+  try {
+    await view.open();
+    assert.equal(view.dialog.querySelector('.knowledge-create-page'), null);
+    const pane = view.dialog.querySelector('#kb-pane-import');
+    assert.ok(pane.querySelector('.kb-import-jobs'));
+    const form = pane.querySelector('form'); form.querySelector('input').value = '/docs/guide.md';
+    form.dispatchEvent(new dom.window.Event('submit', {cancelable: true})); await tick();
+    assert.ok(requests.some(([path, body]) => path.endsWith('/imports') && body.path === '/docs/guide.md' && body.kind === 'file'));
+    const resume = [...view.dialog.querySelectorAll('.kb-job-card > .knowledge-progress-actions button')].find(b => b.textContent === 'Resume');
+    assert.equal(resume.disabled, false); resume.click(); await tick();
+    assert.ok(requests.some(([path]) => path.endsWith('/jobs/job/resume')));
+    const tab = view.dialog.querySelector('#kb-tab-view'); tab.click();
+    assert.equal(view.dialog.querySelector('#kb-pane-import').hidden, true);
+    assert.equal(view.dialog.querySelector('#kb-pane-view').hidden, false);
+  } finally {view.close(); dom.window.close();}
 });

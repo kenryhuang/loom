@@ -1,3 +1,4 @@
+import {SettingsView} from "./views/settings.mjs";
 import {ExternalToolsView, bindExternalTools} from "./views/external-tools.mjs";
 import { SessionApi } from "./api.mjs";
 import { SessionController } from "./controller.mjs";
@@ -85,6 +86,13 @@ const evaluationList = new SessionListView(
   openEvaluation,
   deleteSession,
 );
+const settings = new SettingsView($("settings-page"), {api: () => controller?.api, changed: async () => {
+  if (controller) catalog = await controller.api.catalog();
+}});
+function openSettings() {
+  activateComponent('settings'); setWorkspaceMode('settings');
+  history.replaceState(null, '', '#/settings'); return settings.open();
+}
 const externalTools = new ExternalToolsView($("external-tools-page"), {
   api: () => controller?.api,
   registerButton: $("register-external-tool"),
@@ -108,7 +116,8 @@ for (const button of document.querySelectorAll("[data-component]")) {
   button.addEventListener("click", () => {
     const component = button.dataset.component;
     activateComponent(component);
-    if (component === "external-tools") openExternalTools();
+    if (component === "settings") openSettings();
+    else if (component === "external-tools") openExternalTools();
     else if (component === "knowledge") openKnowledge();
     else if (component === "evaluation")
       openEvaluation(evaluationId || controller?.selectedId);
@@ -237,6 +246,9 @@ function openKnowledge(options = {}) {
   return knowledge.open(false, options);
 }
 function setWorkspaceMode(mode) {
+  const settingsMode = mode === 'settings';
+  $('settings-workspace').hidden = !settingsMode;
+  if (!settingsMode) settings.close();
   const creating = mode === "create";
   $("create-page").hidden = !creating;
   if (!creating) sessionSetup.abort?.abort();
@@ -247,11 +259,11 @@ function setWorkspaceMode(mode) {
   const analysis = mode === true;
   $("knowledge-workspace").hidden = !knowledgeMode;
   if (!knowledgeMode) knowledge.close();
-  $("conversation-workspace").hidden = analysis || knowledgeMode || externalMode || creating;
+  $("conversation-workspace").hidden = analysis || knowledgeMode || externalMode || creating || settingsMode;
   $("conversation-page").hidden = analysis;
   $("evaluation-workspace").hidden = !analysis;
   document.querySelector(".session-details").hidden =
-    analysis || knowledgeMode || externalMode || creating;
+    analysis || knowledgeMode || externalMode || creating || settingsMode;
   if (!analysis) trajectory.close();
 }
 async function openEvaluation(id, { fromHistory = false } = {}) {
@@ -414,6 +426,7 @@ async function login(token) {
   $("auth-dialog").close();
   $("credential").value = "";
   $("credential-file").value = "";
+  if (location.hash === "#/settings") {await openSettings(); return;}
   if (location.hash === "#/external-tools") {await openExternalTools(); return;}
   const requested = currentId(),
     chosen =
@@ -430,6 +443,8 @@ async function login(token) {
 function disconnect() {
   sessionSetup.abort?.abort();
   externalTools.close();
+  settings.close();
+  $("settings-page").replaceChildren();
   $("external-tools-page").replaceChildren();
   knowledge.close();
   knowledgeBinding.close();
@@ -656,6 +671,7 @@ $("history").addEventListener("click", async () => {
   }
 });
 window.addEventListener("hashchange", () => {
+  if (location.hash === "#/settings") {openSettings(); return;}
   if (location.hash === "#/external-tools") {openExternalTools(); return;}
   if (evaluationRoute()) openEvaluation(currentId(), { fromHistory: true });
   else select(currentId(), { fromHistory: true });

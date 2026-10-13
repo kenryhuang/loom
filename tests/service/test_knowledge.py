@@ -152,3 +152,34 @@ def test_lightrag_source_and_graph_routes(api, monkeypatch):  # noqa: F811
         client._json(route + "/sources/" + source["id"], {"url": "https://other.example/"})
     with pytest.raises(ServiceError):
         client._json(route + "/graph", {"limit": 10000})
+
+
+def test_local_import_job_controls_and_settings_routes(api):  # noqa: F811
+    service, server, client, path = api
+    config = path / 'config.yaml'
+    config.write_text('models: {}\n')
+    service.config_path = str(config)
+    service.store.knowledge.config_path = str(config)
+    settings = client._json('/v1/settings')
+    assert settings['path'] == str(config)
+    settings['config']['embedding_profiles'] = []
+    saved = client._json('/v1/settings', {key: settings[key] for key in ('revision', 'config')})
+    assert saved['revision'] != settings['revision']
+    original = path / 'manual.md'
+    original.write_text('Original source reference AlphaBeta')
+    base = client._json('/v1/knowledge-bases', {'name': 'References'})
+    route = '/v1/knowledge-bases/' + base['id']
+    job = client._json(route + '/imports', {'kind': 'file', 'path': str(original)})
+    job_route = route + '/jobs/' + job['id']
+    for _ in range(100):
+        job = client._json(job_route)
+        if job['state'] in {'completed', 'failed'}:
+            break
+        time.sleep(.02)
+    assert job['state'] == 'completed', job
+    assert client._json(route)['documents'][0]['source_path'] == str(original)
+    assert client._json(job_route + '/clear', {})['cleared'] == job['id']
+    client._json(route + '/delete', {})
+    assert original.read_text() == 'Original source reference AlphaBeta'
+    with pytest.raises(ServiceError):
+        client._json(route)

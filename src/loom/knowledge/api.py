@@ -23,10 +23,21 @@ def dispatch(handler, method, parts):
     if not tail:
         raise ServiceError("Route not found", 404)
     kb_id = tail[0]
+    if tail[1:] == ['delete'] and method == 'POST':
+        if handler._body() != {}:
+            raise ServiceError('Delete requires an empty object')
+        return 200, jobs.delete_base(kb_id)
+    if tail[1:] == ['imports'] and method == 'POST':
+        return 202, jobs.import_local(kb_id, handler._body())
+    if len(tail) == 4 and tail[1] == 'jobs' and tail[3] in {'pause', 'resume', 'terminate', 'clear'} and method == 'POST':
+        if handler._body() != {}:
+            raise ServiceError('Job action requires an empty object')
+        return 200, jobs.control(kb_id, tail[2], tail[3])
     if len(tail) == 1 and method == "GET":
         base = store.get(kb_id)
         with store.connect() as db:
             base["jobs"] = [json.loads(row[0]) for row in db.execute("SELECT body FROM jobs WHERE kb_id=? ORDER BY rowid DESC LIMIT 20", (kb_id,))]
+        base['jobs'] = [jobs.get(kb_id, job['id']) for job in base['jobs']]
         return 200, base
     if tail[1:] == ["sources"]:
         from loom.knowledge.web_sources import save_source, sources
@@ -68,9 +79,9 @@ def dispatch(handler, method, parts):
             raise ServiceError("Delete requires an empty object")
         if store.get(kb_id)["engine"] == "lightrag_local":
             return 202, jobs.remove(kb_id, tail[2])
-        # Serialise deletion against queued/running publication for this KB.
+        # Paused imports must retain completed documents for a consistent resume.
         with jobs.lock, store.connect() as db:
-            if db.execute("SELECT 1 FROM jobs WHERE kb_id=? AND json_extract(body,'$.state') IN ('queued','running')", (kb_id,)).fetchone():
-                raise ServiceError("Wait for indexing to finish before removing documents", 409)
+            if db.execute("SELECT 1 FROM jobs WHERE kb_id=? AND json_extract(body,'$.state') IN ('queued','running','paused')", (kb_id,)).fetchone():
+                raise ServiceError("Finish or terminate the import before removing documents", 409)
             return 200, store.remove_document(kb_id, tail[2])
     raise ServiceError("Route not found", 404)

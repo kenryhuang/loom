@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tomllib
 from collections.abc import Mapping
@@ -546,6 +547,13 @@ def _strip_yaml_comment(line: str) -> str:
 def _parse_yaml_scalar(value: str | None) -> Any:
     if value is None:
         return None
+    if value == '{}':
+        return {}
+    if value.startswith('"') and value.endswith('"'):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value[1:-1]
     if value.startswith("[") and value.endswith("]"):
         return _parse_yaml_inline_list(value)
     if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):

@@ -21,8 +21,7 @@ def source(store, kb_id, identifier):
 
 
 def save_source(store, kb_id, payload, identifier=None):
-    if store.get(kb_id)["engine"] != "lightrag_local":
-        raise ServiceError("Website sources currently require a LightRAG local knowledge base")
+    store.get(kb_id)
     value = object_value(payload)
     fields = {"url", "path_prefix", "max_pages", "max_depth", "delay_seconds", "interval_hours", "delete_missing", "enabled"}
     if set(value) - fields:
@@ -83,20 +82,25 @@ def sync(store, kb_id, identifier, *, progress=lambda **_: None, cancelled=lambd
     progress(stage="crawl_saved", snapshot_saved=True, pages=len(result["pages"]))
     with store.connect() as db:
         previous = {r["url"]: dict(r) for r in db.execute("SELECT * FROM web_pages WHERE source_id=?", (identifier,))}
+    base = store.get(kb_id)
+    existing_ids = {doc['id'] for doc in base['documents']}
     documents, updates = [], []
     for page in result["pages"]:
         old = previous.get(page["url"])
         doc_id = old["document_id"] if old else "doc_" + hashlib.sha256(f"{kb_id}/{identifier}/{page['url']}".encode()).hexdigest()[:32]
         name = f"{identifier}_{hashlib.sha256(page['url'].encode()).hexdigest()[:12]}_{page['title'][:150]}.md"
+        if base['engine'] != 'lightrag_local':
+            name = f"{identifier}_{hashlib.sha256(page['url'].encode()).hexdigest()[:12]}.md"
         content = f"# {page['title']}\n\nSource: {page['url']}\n\n{page['content']}"
         digest = hashlib.sha256(content.encode()).hexdigest()
         documents.append({"id": doc_id, "name": name, "content": content, "digest": digest, "url": page["url"]})
         updates.append({"url": page["url"], "document_id": doc_id, "digest": digest, "title": page["title"]})
     present = {p["url"] for p in updates}
     # Page/depth caps, network failures and robots exclusions never imply deletions.
-    removed = [p["document_id"] for url, p in previous.items() if url not in present] if spec["delete_missing"] and result["complete"] else []
+    removed = [p["document_id"] for url, p in previous.items() if url not in present and p['document_id'] in existing_ids
+               ] if spec["delete_missing"] and result["complete"] else []
     changed = [doc for doc, page in zip(documents, updates, strict=True)
-               if page["url"] not in previous or previous[page["url"]]["digest"] != page["digest"]]
+               if page["url"] not in previous or previous[page["url"]]["digest"] != page["digest"] or page['document_id'] not in existing_ids]
     summary = {"pages": len(updates), "updated": len(changed), "unchanged": len(updates) - len(changed), "removed": len(removed),
                "complete": result["complete"], "errors": result["errors"][:100], "skipped": result["skipped"][:100],
                "visited": result.get("visited"), "pending": result.get("pending", 0),
@@ -108,12 +112,31 @@ def sync(store, kb_id, identifier, *, progress=lambda **_: None, cancelled=lambd
         current = json.loads(db.execute("SELECT body FROM web_sources WHERE id=? AND kb_id=?", (identifier, kb_id)).fetchone()[0])
         current.update(last_sync_at=now_iso(), last_result=summary)
         db.execute("UPDATE web_sources SET body=? WHERE id=?", (canonical(current), identifier))
+        if spec['delete_missing'] and result['complete']:
+            for url in previous.keys() - present:
+                db.execute('DELETE FROM web_pages WHERE source_id=? AND url=?', (identifier, url))
         for page in updates:
             db.execute("INSERT OR REPLACE INTO web_pages VALUES(?,?,?,?,?,?)",
                        (identifier, kb_id, page["url"], page["document_id"], page["digest"], canonical(page)))
 
     progress(stage="diffing", **{k: summary[k] for k in ("pages", "updated", "unchanged", "removed")})
-    if changed or removed:
+    if store.get(kb_id)['engine'] != 'lightrag_local':
+        for number, doc in enumerate(changed):
+            if cancelled():
+                raise ServiceError('Knowledge job interrupted', 409)
+            progress(stage='indexing', indexed=number, total=len(changed), current_document=doc['name'])
+            indexed = store.index(kb_id, {'name': doc['name'], 'content': doc['content']}, progress=progress, cancelled=cancelled)
+            next(p for p in updates if p['url'] == doc['url'])['document_id'] = indexed['document_id']
+        for document_id in removed:
+            if cancelled():
+                raise ServiceError('Knowledge job interrupted', 409)
+            store.remove_document(kb_id, document_id, cancelled=cancelled)
+        if cancelled():
+            raise ServiceError('Knowledge job interrupted', 409)
+        with store.connect() as db:
+            publication(db)
+        index = {'chunks': store.get(kb_id)['chunk_count']}
+    elif changed or removed:
         index = publish(store, kb_id, changed, removed, progress=progress, cancelled=cancelled, publication=publication,
                         checkpoint_key=f"resume_{identifier}")
     else:

@@ -80,6 +80,27 @@ def embed(profile, inputs, *, timeout=30):
         raise ServiceError("Embedding service failed or returned invalid vectors", 502, "EMBEDDING_FAILED") from exc
 
 
+def validate_profile(payload):
+    value = object_value(payload)
+    if set(value) - {"name", "endpoint", "model", "api_key_env"}:
+        raise ServiceError("Unknown embedding profile fields")
+    endpoint = text(value.get("endpoint"), "endpoint", max_length=2000)
+    url = urlsplit(endpoint)
+    if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password or url.query or url.fragment:
+        raise ServiceError("Embedding endpoint must be an HTTP(S) URL without credentials or query parameters")
+    env = value.get("api_key_env", "")
+    if not isinstance(env, str) or (env and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env)):
+        raise ServiceError("api_key_env must be an environment variable name")
+    profile = {
+        "id": new_id("emb"),
+        "name": text(value.get("name"), "name", max_length=120),
+        "endpoint": endpoint,
+        "model": text(value.get("model"), "model", max_length=200),
+        "api_key_env": env,
+    }
+    return profile
+
+
 class KnowledgeStore:
     def __init__(self, directory, *, embedder=embed, config_path=None):
         self.directory = Path(directory).resolve()
@@ -101,6 +122,8 @@ class KnowledgeStore:
                 CREATE INDEX IF NOT EXISTS chunks_base ON chunks(kb_id);
                 CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(terms, tokenize='unicode61');
                 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, kb_id TEXT NOT NULL, body TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS job_inputs(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS local_sources(document_id TEXT PRIMARY KEY, kb_id TEXT NOT NULL, path TEXT NOT NULL, digest TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS web_sources(id TEXT PRIMARY KEY, kb_id TEXT NOT NULL, body TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS web_pages(source_id TEXT NOT NULL, kb_id TEXT NOT NULL, url TEXT NOT NULL,
                     document_id TEXT NOT NULL, digest TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(source_id,url));
@@ -121,26 +144,26 @@ class KnowledgeStore:
 
     def profiles(self):
         with self.connect() as db:
-            return [json.loads(row[0]) for row in db.execute("SELECT body FROM profiles ORDER BY rowid")]
+            profiles = {p["id"]: p for row in db.execute("SELECT body FROM profiles ORDER BY rowid") if (p := json.loads(row[0]))}
+        if self.config_path and Path(self.config_path).exists():
+            from loom.tasks.config import parse_yaml_document
+            config = parse_yaml_document(Path(self.config_path).read_text(), self.config_path)
+            if config.ok and 'embedding_profiles' in config.value:
+                return config.value['embedding_profiles']
+        return list(profiles.values())
 
     def create_profile(self, payload):
-        value = object_value(payload)
-        if set(value) - {"name", "endpoint", "model", "api_key_env"}:
-            raise ServiceError("Unknown embedding profile fields")
-        endpoint = text(value.get("endpoint"), "endpoint", max_length=2000)
-        url = urlsplit(endpoint)
-        if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password or url.query or url.fragment:
-            raise ServiceError("Embedding endpoint must be an HTTP(S) URL without credentials or query parameters")
-        env = value.get("api_key_env", "")
-        if not isinstance(env, str) or (env and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env)):
-            raise ServiceError("api_key_env must be an environment variable name")
-        profile = {
-            "id": new_id("emb"),
-            "name": text(value.get("name"), "name", max_length=120),
-            "endpoint": endpoint,
-            "model": text(value.get("model"), "model", max_length=200),
-            "api_key_env": env,
-        }
+        profile = validate_profile(payload)
+        if self.config_path:
+            from types import SimpleNamespace
+
+            from loom.service.settings import Settings
+
+            settings = Settings(SimpleNamespace(config_path=self.config_path, store=SimpleNamespace(knowledge=self)))
+            value = settings.get()
+            value['config']['embedding_profiles'].append(profile)
+            settings.save({k: value[k] for k in ('revision', 'config')})
+            return profile
         with self.connect() as db:
             db.execute("INSERT INTO profiles VALUES(?,?)", (profile["id"], canonical(profile)))
         return profile
@@ -152,6 +175,14 @@ class KnowledgeStore:
                 raise ServiceError("Knowledge base not found", 404)
             base = json.loads(row[0])
             base["documents"] = [dict(row) for row in db.execute("SELECT id,name,digest,at FROM documents WHERE kb_id=? ORDER BY name", (kb_id,))]
+            refs = {r['document_id']: dict(r) for r in db.execute('SELECT * FROM local_sources WHERE kb_id=?', (kb_id,))}
+            urls = {r['document_id']: r['url'] for r in db.execute('SELECT document_id,url FROM web_pages WHERE kb_id=?', (kb_id,))}
+            for document in base['documents']:
+                if document['id'] in refs:
+                    document['source_path'] = refs[document['id']]['path']
+                    document['source_kind'] = 'local_reference'
+                elif document['id'] in urls:
+                    document.update(source_kind='website', source_url=urls[document['id']])
             base["chunk_count"] = db.execute("SELECT COUNT(*) FROM chunks WHERE kb_id=?", (kb_id,)).fetchone()[0]
             if base["engine"] == "yakdb_local":
                 base["chunk_count"] = base.get("yakdb_pages", 0)
@@ -175,6 +206,17 @@ class KnowledgeStore:
         if not base_row or not doc:
             raise ServiceError("Document not found in this knowledge base", 404)
         base = json.loads(base_row[0])
+        with self.connect() as db:
+            source = db.execute('SELECT path,digest FROM local_sources WHERE document_id=?', (document_id,)).fetchone()
+        if source and base['engine'] != 'yakdb_local':
+            try:
+                with Path(source['path']).open('rb') as stream:
+                    raw = stream.read(500001)
+            except OSError as exc:
+                raise ServiceError('Original source file is unavailable; restore its path or reimport', 409) from exc
+            if hashlib.sha256(raw).hexdigest() != source['digest']:
+                raise ServiceError('Original source changed after indexing; reimport before reading', 409)
+            doc = {**dict(doc), 'content': raw.decode('utf-8')}
         if base["engine"] == "yakdb_local":
             from loom.knowledge.yakdb_local import call
 
@@ -201,6 +243,7 @@ class KnowledgeStore:
         with self.connect() as db:
             provenance = db.execute("SELECT url FROM web_pages WHERE kb_id=? AND document_id=?", (kb_id, document_id)).fetchone()
         return {
+            "source_path": source['path'] if source else None,
             "source_url": provenance[0] if provenance else None,
             "knowledge_base_id": kb_id, "document_id": document_id, "document": doc["name"],
             "source_id": f"{kb_id}/{document_id}#page={page_number}" if base["engine"] == "yakdb_local" else f"{kb_id}/{document_id}#offset={offset}",
@@ -264,7 +307,7 @@ class KnowledgeStore:
         if base["engine"] == "yakdb_local":
             from loom.knowledge.yakdb_local import publish
 
-            return publish(self, base, payload=payload)
+            return publish(self, base, payload=payload, cancelled=cancelled)
         value = object_value(payload)
         if set(value) - {"name", "content"}:
             raise ServiceError("Document accepts name and UTF-8 text content")
@@ -279,17 +322,23 @@ class KnowledgeStore:
             existing = next((d for d in base["documents"] if d["name"] == name), None)
             identifier = existing["id"] if existing else new_id("doc")
             doc = {"id": identifier, "name": name, "content": content, "digest": hashlib.sha256(content.encode()).hexdigest()}
-            return publish(self, kb_id, [doc], progress=progress, cancelled=cancelled)
+            result = publish(self, kb_id, [doc], progress=progress, cancelled=cancelled)
+            return {**result, 'document_id': identifier, 'name': name, 'digest': doc['digest']}
         parts = list(chunks(content))
         vectors = []
         if base["engine"] == "sqlite_hybrid":
             profile = self._profile(base)
             for offset in range(0, len(parts), 10):
+                if cancelled():
+                    raise ServiceError('Knowledge job interrupted', 409)
+                progress(stage='embedding', indexed=offset, total=len(parts), current_document=name)
                 vectors.extend(self.embedder(profile, [part["content"] for part in parts[offset : offset + 10]]))
             dimensions = {len(vector) for vector in vectors}
             if len(dimensions) != 1 or (base["embedding_dimension"] and dimensions != {base["embedding_dimension"]}):
                 raise ServiceError("Embedding dimensions changed; create a new knowledge base and reindex", 409, "EMBEDDING_MISMATCH")
         digest = hashlib.sha256(content.encode()).hexdigest()
+        if cancelled():
+            raise ServiceError('Knowledge job interrupted', 409)
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             current = json.loads(db.execute("SELECT body FROM bases WHERE id=?", (kb_id,)).fetchone()[0])
@@ -336,6 +385,7 @@ class KnowledgeStore:
                 raise ServiceError("Document not found", 404)
             self._remove_chunks(db, document_id)
             db.execute("DELETE FROM documents WHERE id=?", (document_id,))
+            db.execute("DELETE FROM local_sources WHERE document_id=?", (document_id,))
         return {"deleted": document_id}
 
     def search(self, ids, query, limit=5):

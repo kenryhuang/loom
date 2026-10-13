@@ -164,6 +164,7 @@ def publish(store, kb_id, documents, delete_ids=(), *, progress=lambda **_: None
                     raise ServiceError("Knowledge index changed during publication", 409)
                 for identifier in removed:
                     db.execute("DELETE FROM documents WHERE kb_id=? AND id=?", (kb_id, identifier))
+                    db.execute("DELETE FROM local_sources WHERE document_id=?", (identifier,))
                     db.execute("DELETE FROM web_pages WHERE kb_id=? AND document_id=?", (kb_id, identifier))
                 for doc in changed:
                     db.execute("INSERT OR REPLACE INTO documents VALUES(?,?,?,?,?,?)",

@@ -497,3 +497,26 @@ def test_website_budget_stops_between_documents_and_resumes(graph_store, monkeyp
     result = web_sources.sync(store, kb, source['id'], crawler=crawl)
     assert result['updated'] == 2 and len(calls) == 2
     assert len(store.get(kb)['documents']) == 2
+
+
+def test_local_graph_import_keeps_path_reference_and_reads_original(graph_store, tmp_path):
+    from loom.knowledge.local_sources import paths, run
+
+    store, kb, calls = graph_store
+    original = tmp_path / 'source.md'
+    original.write_text('Local graph evidence')
+    manifest = paths(store, kb, {'kind': 'file', 'path': str(original)})
+    result = run(store, kb, manifest, lambda **_: None, lambda: False, lambda _: None)
+    assert result['documents'] == 1
+    doc = store.get(kb)['documents'][0]
+    assert doc['source_path'] == str(original)
+    assert store.read(kb, doc['id'])['text'] == 'Local graph evidence'
+    with store.connect() as db:
+        assert db.execute('SELECT content FROM documents').fetchone()[0] == ''
+    original.write_text('Updated graph evidence')
+    run(store, kb, paths(store, kb, {'kind': 'file', 'path': str(original)}), lambda **_: None, lambda: False, lambda _: None)
+    assert len(store.get(kb)['documents']) == 1
+    assert store.read(kb, doc['id'])['text'] == 'Updated graph evidence'
+    store.remove_document(kb, doc['id'])
+    assert original.read_text() == 'Updated graph evidence'
+    assert not store.get(kb)['documents']

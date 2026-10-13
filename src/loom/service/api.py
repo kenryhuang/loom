@@ -189,6 +189,17 @@ class SessionHandler(BaseHTTPRequestHandler):
                 status, body = dispatch(self, method, parts)
                 self._json(status, body)
                 return
+            if parts == ["v1", "settings"] and method in {"GET", "POST"}:
+                from loom.service.settings import Settings
+
+                settings = Settings(self.server.service)
+                result = settings.get() if method == "GET" else settings.save(self._body())
+                if method == "POST":
+                    self.server.semantic.config_path = self.server.service.config_path
+                    self.server.diagnoses.runtime.config_path = self.server.service.config_path
+                    self.server.diagnoses.runtime.store.knowledge.config_path = self.server.service.config_path
+                self._json(200, result)
+                return
             if parts == ["v1", "sessions"]:
                 if method == "POST":
                     body = self._body()
