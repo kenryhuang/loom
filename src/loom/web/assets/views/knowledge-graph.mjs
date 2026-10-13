@@ -258,10 +258,10 @@ export async function renderKnowledgeGraph(view, base) {
       };
     };
     view.knowledgeJobListeners.add(updateProgress);
-    const latest =
+    const latest = base.import_activity?.find(group => group.kind === 'website' && group.source_id === source.id)?.latest || (
       view.latestKnowledgeJob?.source_id === source.id
         ? view.latestKnowledgeJob
-        : base.jobs?.find((job) => job.source_id === source.id);
+        : base.jobs?.find((job) => job.source_id === source.id));
     if (latest) updateProgress(latest);
     row.append(progress, cancel);
     sync.onclick = () =>

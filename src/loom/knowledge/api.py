@@ -38,6 +38,9 @@ def dispatch(handler, method, parts):
         with store.connect() as db:
             base["jobs"] = [json.loads(row[0]) for row in db.execute("SELECT body FROM jobs WHERE kb_id=? ORDER BY rowid DESC LIMIT 20", (kb_id,))]
         base['jobs'] = [jobs.get(kb_id, job['id']) for job in base['jobs']]
+        from loom.knowledge.activity import activity
+
+        base['import_activity'] = activity(store, jobs, base)
         return 200, base
     if tail[1:] == ["sources"]:
         from loom.knowledge.web_sources import save_source, sources

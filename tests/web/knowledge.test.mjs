@@ -558,3 +558,58 @@ test('local import submits paths and job controls stay inside Import', async () 
     assert.equal(view.dialog.querySelector('#kb-pane-view').hidden, false);
   } finally {view.close(); dom.window.close();}
 });
+
+test('import activity groups attempts by source, keeps old statuses in History and clears the selected attempt', async () => {
+  const requests = [];
+  const latest = {id: 'latest', kind: 'website', source_id: 'web', document: 'https://example.com/docs', state: 'failed', stage: 'failed',
+    error: 'Latest failure', checkpointed: 38, created_at: '2026-10-13T12:00:00Z'};
+  const previous = {id: 'previous', kind: 'website', state: 'completed', checkpointed: 3, created_at: '2026-10-12T12:00:00Z'};
+  const grouped = {...base, jobs: [latest, {...previous, source_id: 'web'}], import_activity: [{
+    id: 'website:web', kind: 'website', source_id: 'web', source: latest.document, index_directory: '/data/knowledge/lightrag/kb',
+    published_directory: '/data/knowledge/lightrag/kb/generation_current', checkpoint_directory: '/data/knowledge/lightrag/kb/resume_web',
+    latest, history: [previous],
+  }]};
+  const {dom, view} = setup({json: async (path, options) => {
+    requests.push([path, options?.body]);
+    if (path.endsWith('/sources')) return {sources: [{id: 'web', url: latest.document}]};
+    if (path.endsWith('/kb')) return grouped;
+    return catalog;
+  }});
+  try {
+    await view.open();
+    assert.equal(view.dialog.querySelectorAll('.kb-import-source').length, 1);
+    assert.equal(view.dialog.querySelectorAll('.knowledge-job-progress').length, 1);
+    assert.equal(view.dialog.querySelector('.knowledge-progress-state').textContent, 'Failed');
+    assert.match(view.dialog.querySelector('.knowledge-source-progress').textContent, /failed/);
+    const card = view.dialog.querySelector('.kb-import-source');
+    assert.match(card.textContent, /https:\/\/example.com\/docs/);
+    assert.match(card.textContent, /\/data\/knowledge\/lightrag\/kb/);
+    const history = card.querySelector('.kb-import-history'); assert.equal(history.open, false);
+    assert.match(history.querySelector('summary').textContent, /1 previous attempts/);
+    history.open = true; history.querySelector('.kb-import-attempt').open = true;
+    history.querySelector('button').click(); await tick();
+    assert.ok(requests.some(([path]) => path.endsWith('/jobs/previous/clear')));
+    assert.ok(!requests.some(([path]) => path.endsWith('/delete')));
+  } finally {view.close(); dom.window.close();}
+});
+
+test('legacy cancelled website attempts can resume shared checkpoints from their source card', async () => {
+  const requests = [];
+  const latest = {id: 'legacy', kind: 'website', source_id: 'web', document: 'https://example.com', state: 'cancelled', checkpointed: 38, resumable: false};
+  const grouped = {...base, jobs: [latest], import_activity: [{id: 'website:web', kind: 'website', source_id: 'web', source: latest.document,
+    index_directory: '/data/index', checkpoint_directory: '/data/index/resume_web', latest, history: []}]};
+  const {dom, view} = setup({json: async (path, options) => {
+    requests.push([path, options?.body]);
+    if (path.endsWith('/sources')) return {sources: []};
+    if (path.endsWith('/kb')) return grouped;
+    return catalog;
+  }});
+  try {
+    await view.open();
+    const resume = [...view.dialog.querySelectorAll('.kb-import-source > .knowledge-progress-actions button')].find(b => b.textContent === 'Resume');
+    assert.equal(resume.disabled, false); resume.click(); await tick();
+    assert.ok(requests.some(([path]) => path.endsWith('/sources/web/sync')));
+    assert.ok(!requests.some(([path]) => path.endsWith('/jobs/legacy/resume')));
+    assert.equal(view.dialog.querySelector('.knowledge-progress-source').hidden, true);
+  } finally {view.close(); dom.window.close();}
+});

@@ -1969,3 +1969,22 @@ dialog h1 {
 .settings-add-property select { max-width: 150px; }
 .settings-footer { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-top: 24px; padding: 16px 0; background: var(--bg); border-top: 1px solid var(--line); z-index: 2; }
 @media (max-width: 1050px) { .settings-grid { grid-template-columns: minmax(0, 1fr); } }
+
+.kb-import-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px 20px; }
+.kb-import-heading h3 { margin: 0; }
+.kb-import-metadata { display: grid; gap: 12px; margin: 18px 0; }
+.kb-import-metadata > div { display: grid; gap: 4px; min-width: 0; }
+.kb-import-metadata dt { font-size: 12px; }
+.kb-import-metadata dd { margin: 0; min-width: 0; }
+.kb-import-metadata code, .kb-import-metadata a { white-space: normal; overflow-wrap: anywhere; }
+.kb-import-storage { margin-bottom: 12px; font-size: 12px; }
+.kb-import-storage summary, .kb-import-history > summary { cursor: pointer; color: var(--muted); }
+.kb-import-history { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+.kb-import-attempt { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.kb-import-attempt > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; cursor: pointer; }
+.kb-import-attempt > summary::before { content: '▸'; color: var(--muted); }
+.kb-import-attempt[open] > summary::before { content: '▾'; }
+.kb-import-attempt > code { display: block; margin: 10px 0; overflow-wrap: anywhere; }
+.kb-attempt-state { padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; }
+.kb-attempt-state.failed { color: var(--danger); }
+.kb-attempt-state.completed { color: var(--accent); }

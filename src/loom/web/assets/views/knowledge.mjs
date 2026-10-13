@@ -1,6 +1,6 @@
 import { element } from "../markdown.mjs";
 import { renderKnowledgeGraph } from "./knowledge-graph.mjs";
-import { KnowledgeProgress } from "./knowledge-progress.mjs";
+import { KnowledgeActivity } from "./knowledge-activity.mjs";
 import { canUpdateTaskTools } from "../state.mjs";
 
 function field(label, input) {
@@ -331,41 +331,6 @@ export class KnowledgeView {
     }; displayMode();
     const jobsRoot = element('section', 'kb-import-jobs');
     this.importPanel.append(element('h3', '', 'Import activity'), jobsRoot);
-    const cards = new Map();
-    const renderJobs = jobs => {
-      for (const job of jobs || []) {
-        this.latestKnowledgeJob = job;
-        for (const listener of this.knowledgeJobListeners) listener(job);
-        let card = cards.get(job.id);
-        if (!card) {
-          const root = element('details', 'kb-job-card'), summary = element('summary'), controls = element('div', 'knowledge-progress-actions');
-          root.open = cards.size === 0;
-          const cancel = button(''); cancel.style.display = 'none';
-          const progress = new KnowledgeProgress({cancel, resume: async () => {}, error: error => this.error(error)});
-          progress.retry.style.display = 'none';
-          const actions = {};
-          for (const [action, label] of [['pause', 'Pause'], ['resume', 'Resume'], ['terminate', 'Terminate'], ['clear', 'Clear']]) {
-            const control = button(label); actions[action] = control; controls.append(control);
-            control.onclick = async () => {
-              control.disabled = true;
-              try {await this.request(`/${id}/jobs/${job.id}/${action}`, {}); await this.renderBase();}
-              catch (error) {this.error(error); control.disabled = false;}
-            };
-          }
-          root.append(summary, controls, progress.root); jobsRoot.append(root);
-          card = {root, summary, progress, actions}; cards.set(job.id, card);
-          this.knowledgeJobListeners.add(value => {if (value.id === job.id) progress.update(value);});
-        }
-        card.summary.textContent = `${job.document} · ${job.state}${job.requested_action ? ` · ${job.requested_action} requested` : ''}`;
-        card.progress.update(job);
-        const active = ['queued', 'running'].includes(job.state);
-        card.actions.pause.disabled = !active || job.cancel_requested;
-        card.actions.resume.disabled = !['paused', 'failed'].includes(job.state) || job.resumable === false;
-        card.actions.terminate.disabled = !active && !['paused', 'failed'].includes(job.state);
-        card.actions.clear.disabled = active || job.state === 'paused';
-      }
-      if (!jobs?.length && !jobsRoot.childNodes.length) jobsRoot.append(element('p', 'muted', 'No imports yet.'));
-    };
     const stats = element('div', 'kb-stats');
     for (const [label, value] of [['Documents', base.documents.length], ['Passages', base.chunk_count], ['Dimensions', base.embedding_dimension || '—'],
       ['Entities', base.graph_stats?.entities ?? '—'], ['Relationships', base.graph_stats?.relations ?? '—']]) {
@@ -403,15 +368,20 @@ export class KnowledgeView {
     };
     panes.search.append(search, results);
     await renderKnowledgeGraph(this, base);
-    renderJobs(base.jobs);
+    const activity = new KnowledgeActivity(jobsRoot, base, {
+      act: async path => {await this.request(`/${id}${path}`, {}); await this.renderBase();},
+      notify: job => {this.latestKnowledgeJob = job; for (const listener of this.knowledgeJobListeners) listener(job);},
+      error: error => this.error(error),
+    });
+    this.knowledgeJobListeners.add(job => activity.update([job], false));
     const abort = this.abort;
-    let currentJobs = base.jobs || [];
+    let currentJobs = activity.latestJobs;
     const poll = async () => {
       if (abort !== this.abort || abort.signal.aborted || id !== this.baseId || !jobsRoot.isConnected) return;
       try {
         currentJobs = await Promise.all(currentJobs.map(job => ['queued', 'running'].includes(job.state)
           ? this.request(`/${id}/jobs/${job.id}`) : job));
-        renderJobs(currentJobs);
+        activity.update(currentJobs);
         if (!currentJobs.some(job => ['queued', 'running'].includes(job.state))) {
           this.changed();
           if (currentJobs.some(job => job.state === 'completed')) await this.renderBase();
@@ -420,7 +390,7 @@ export class KnowledgeView {
         this.timer = setTimeout(poll, 800);
       } catch (error) {
         if (abort.signal.aborted) return;
-        for (const card of cards.values()) card.progress.connectionError(error);
+        activity.connectionError(error);
         this.timer = setTimeout(poll, 2000);
       }
     };

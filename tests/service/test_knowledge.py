@@ -177,7 +177,11 @@ def test_local_import_job_controls_and_settings_routes(api):  # noqa: F811
             break
         time.sleep(.02)
     assert job['state'] == 'completed', job
-    assert client._json(route)['documents'][0]['source_path'] == str(original)
+    detail = client._json(route)
+    assert detail['documents'][0]['source_path'] == str(original)
+    assert detail['import_activity'][0]['source'] == str(original)
+    assert detail['import_activity'][0]['latest']['id'] == job['id']
+    assert detail['import_activity'][0]['index_file'] == str(service.store.knowledge.path)
     assert client._json(job_route + '/clear', {})['cleared'] == job['id']
     client._json(route + '/delete', {})
     assert original.read_text() == 'Original source reference AlphaBeta'
