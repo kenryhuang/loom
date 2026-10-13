@@ -1,4 +1,5 @@
 import {element} from '../markdown.mjs';
+import {action, fields, textField, modelChoice, modelFields, requestFields, taskFields, runFields, metaFields, labelFor} from './settings-fields.mjs';
 
 export class SettingsView {
   constructor(root, {api, changed}) {Object.assign(this, {root, api, changed});}
@@ -7,84 +8,143 @@ export class SettingsView {
     this.close(); this.abort = new AbortController();
     const signal = this.abort.signal;
     this.root.replaceChildren(element('h1', '', 'Settings'));
-    const notice = element('p', 'notice'); this.root.append(notice);
     try {
       const data = await this.api().json('/v1/settings', {signal});
-      if (signal.aborted) return;
-      this.data = data;
-      notice.textContent = data.path;
-      const tabs = element('div', 'kb-tabs settings-tabs'), body = element('section', 'settings-body');
-      tabs.setAttribute('role', 'tablist'); this.root.append(tabs, body);
-      const config = data.config, scalar = {};
-      for (const [key, value] of Object.entries(config)) if (value === null || typeof value !== 'object') scalar[key] = value;
-      const groups = [['general', 'Model selection', scalar], ['models', 'Models', config.models || {}],
-        ['embedding_profiles', 'Embedding services', config.embedding_profiles || []], ['task', 'Task defaults', config.task || {}],
-        ['run', 'Run defaults', config.run || {}], ['meta_harness', 'Evaluation / Evolve', config.meta_harness || {}]];
-      for (const [key, value] of Object.entries(config)) if (typeof value === 'object' && value !== null && !groups.some(g => g[0] === key)) groups.push([key, key.replaceAll('_', ' '), value]);
-      const editors = new Map();
-      for (const [key, label, value] of groups) {
-        const tab = element('button', 'quiet', label); tab.type = 'button'; tab.setAttribute('role', 'tab');
-        const panel = element('section'); panel.setAttribute('role', 'tabpanel'); panel.append(element('h2', '', label));
-        const editor = element('textarea', 'settings-editor'); editor.value = JSON.stringify(value, null, 2); editor.rows = 20;
-        editor.spellcheck = false; editor.setAttribute('aria-label', `${label} configuration JSON`);
-        panel.append(element('p', 'muted', 'Edit this configuration as JSON. Save writes config.yaml. Masked secrets are preserved.'), editor);
-        if (key === 'embedding_profiles') {
-          panel.replaceChildren(element('h2', '', label));
-          const profilesRoot = element('div', 'settings-profiles');
-          const advanced = element('details'); advanced.append(element('summary', '', 'Advanced JSON'), editor);
-          const renderProfiles = () => {
-            const profiles = JSON.parse(editor.value); profilesRoot.replaceChildren();
-            profiles.forEach((profile, index) => {
-              const card = element('section', 'settings-profile');
-              const fields = element('div', 'knowledge-form');
-              for (const [name, caption] of [['name', 'Name'], ['endpoint', 'Embeddings endpoint'], ['model', 'Model'], ['api_key_env', 'API key environment variable']]) {
-                const label = element('label', 'knowledge-field', caption), input = element('input');
-                input.value = profile[name] || ''; input.type = name === 'endpoint' ? 'url' : 'text';
-                input.oninput = () => {profiles[index][name] = input.value; editor.value = JSON.stringify(profiles, null, 2);};
-                label.append(input); fields.append(label);
-              }
-              const remove = element('button', 'quiet', 'Remove service');
-              remove.onclick = () => {profiles.splice(index, 1); editor.value = JSON.stringify(profiles, null, 2); renderProfiles();};
-              card.append(fields, remove); profilesRoot.append(card);
-            });
-          };
-          const add = element('button', 'quiet', 'Add embedding service');
-          add.onclick = () => {
-            try {
-              const profiles = JSON.parse(editor.value); profiles.push({id: `emb_${crypto.randomUUID().replaceAll('-', '')}`, name: 'New embedding service',
-                endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings', model: 'text-embedding-v4', api_key_env: 'LOOM_LLM_API_KEY'});
-              editor.value = JSON.stringify(profiles, null, 2); renderProfiles();
-            } catch (error) {notice.textContent = error.message;}
-          };
-          editor.onchange = () => {try {renderProfiles();} catch (error) {notice.textContent = error.message;}};
-          panel.append(profilesRoot, add, element('p', 'muted', 'Use an environment-variable name for credentials. Changing an indexed model requires a new service and index.'), advanced);
-          renderProfiles();
-        }
-        panel.hidden = key !== (this.selected || 'general'); tab.setAttribute('aria-selected', String(!panel.hidden));
-        tab.onclick = () => {
-          this.selected = key;
-          for (const entry of editors.values()) {entry.panel.hidden = entry.key !== key; entry.tab.setAttribute('aria-selected', String(entry.key === key));}
-        };
-        editors.set(key, {key, panel, tab, editor}); tabs.append(tab); body.append(panel);
+      if (!signal.aborted) this.render(data);
+    } catch (error) {if (!signal.aborted) this.root.append(element('p', 'error', error.message));}
+  }
+  render(data, message = '') {
+    this.data = data;
+    this.draft = structuredClone(data.config);
+    const draft = this.draft, signal = this.abort.signal;
+    this.root.replaceChildren(element('h1', '', 'Settings'), element('p', 'muted small settings-path', data.path));
+    const notice = element('p', 'notice', message); notice.hidden = !message; notice.setAttribute('role', 'status');
+    const announce = message => {notice.textContent = message; notice.hidden = false;};
+    this.root.append(notice);
+    const controls = element('fieldset', 'settings-controls'); this.root.append(controls);
+    const tabs = element('div', 'evaluation-tabs settings-tabs'), body = element('div', 'settings-body');
+    tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Configuration categories'); controls.append(tabs, body);
+    const groups = [['general', 'Model selection'], ['models', 'Models'], ['embedding_profiles', 'Embedding services'],
+      ['task', 'Task defaults'], ['run', 'Run defaults'], ['meta_harness', 'Evaluation / Evolve']];
+    const extras = Object.keys(draft).filter(key => draft[key] !== null && typeof draft[key] === 'object' && !groups.some(([id]) => key === id));
+    groups.push(...extras.map(key => [key, labelFor(key)]));
+    const panels = new Map();
+    const choose = key => {
+      this.selected = key;
+      for (const [id, {panel, tab}] of panels) {
+        panel.hidden = id !== key; tab.setAttribute('aria-selected', String(id === key)); tab.tabIndex = id === key ? 0 : -1;
       }
-      const save = element('button', 'primary', 'Save configuration');
-      save.onclick = async () => {
-        save.disabled = true;
-        try {
-          const next = {};
-          for (const [key, entry] of editors) {
-            const value = JSON.parse(entry.editor.value);
-            if (key === 'general') Object.assign(next, value); else next[key] = value;
-          }
-          const result = await this.api().json('/v1/settings', {signal, body: {revision: this.data.revision, config: next}});
-          this.data = result;
-          // Replace plaintext secrets entered in the editor with the server's masked view.
-          for (const [key, entry] of editors) if (key !== 'general') entry.editor.value = JSON.stringify(result.config[key], null, 2);
-          notice.textContent = `Saved to ${result.path}. New requests use the updated configuration; running calls keep their current settings.`;
-          await this.changed?.();
-        } catch (error) {notice.textContent = error.message;} finally {save.disabled = false;}
+    };
+    const context = {models: () => draft.models || {}};
+    for (const [key, title] of groups) {
+      const tab = action(title, () => choose(key)), panel = element('section', 'settings-category');
+      tab.id = `settings-tab-${key}`; panel.id = `settings-content-${key}`;
+      tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', panel.id);
+      panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', tab.id);
+      panel.append(element('h2', '', title)); tabs.append(tab); body.append(panel); panels.set(key, {panel, tab});
+      tab.onkeydown = event => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault(); const index = groups.findIndex(([id]) => id === key);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? groups.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + groups.length) % groups.length;
+        choose(groups[next][0]); panels.get(groups[next][0]).tab.focus();
       };
-      this.root.append(save);
-    } catch (error) {if (!signal.aborted) notice.textContent = error.message;}
+      if (key === 'general') {
+        panel.append(element('p', 'muted', 'Choose which configured model handles each role.'));
+        const known = ['default_model', 'evaluation_model', 'verification_model'];
+        const scalarKeys = [...new Set([...known, ...Object.keys(draft).filter(k =>
+          (draft[k] === null || typeof draft[k] !== 'object') && !groups.some(([id]) => id === k))])];
+        fields(panel, () => Object.fromEntries(scalarKeys.filter(k => Object.hasOwn(draft, k)).map(k => [k, draft[k]])), next => {
+          for (const k of scalarKeys) {if (Object.hasOwn(next, k)) draft[k] = next[k]; else delete draft[k];}
+        }, {default_model: modelChoice('Default task model'), evaluation_model: modelChoice('Deep evaluation model'), verification_model: modelChoice('Acceptance verifier model')}, context);
+      } else if (key === 'models') this.models(panel, context, announce);
+      else if (key === 'embedding_profiles') this.embeddings(panel, context);
+      else {
+        if (key === 'run') panel.append(element('p', 'muted', 'Defaults for new task runs. Empty fields retain Loom defaults.'));
+        if (key === 'meta_harness') panel.append(element('p', 'muted', 'Configure optimization models, candidate search and trial budgets.'));
+        if (Array.isArray(draft[key])) fields(panel, () => ({items: draft[key]}), value => {draft[key] = value.items;},
+          {items: {label: title, type: 'list'}}, context, key);
+        else fields(panel, () => draft[key], value => {draft[key] = value;}, {task: taskFields, run: runFields, meta_harness: metaFields}[key] || {}, context, key);
+      }
+    }
+    choose(panels.has(this.selected) ? this.selected : 'general');
+    const footer = element('div', 'settings-footer');
+    const save = action('Save configuration', async () => {
+      const invalid = [...controls.querySelectorAll('input,select,textarea')].find(input => !input.checkValidity());
+      if (invalid) {
+        const panel = invalid.closest('[role=tabpanel]');
+        if (panel) choose([...panels].find(([, entry]) => entry.panel === panel)[0]);
+        for (let node = invalid.parentElement; node && node !== controls; node = node.parentElement) if (node.tagName === 'DETAILS') node.open = true;
+        invalid.reportValidity(); invalid.focus(); announce('Check the highlighted field before saving.'); return;
+      }
+      const models = draft.models || {};
+      for (const key of ['default_model', 'evaluation_model', 'verification_model']) {
+        if (draft[key] && !Object.hasOwn(models, draft[key])) {announce(`${labelFor(key)} must refer to a configured model.`); choose('general'); return;}
+      }
+      if (draft.meta_harness && Object.keys(draft.meta_harness).length) {
+        for (const key of ['proposer_model', 'solver_model', 'judge_model']) if (!Object.hasOwn(models, draft.meta_harness[key])) {
+          announce(`Select a configured ${labelFor(key).toLowerCase()} before saving Evaluation / Evolve settings.`); choose('meta_harness'); return;
+        }
+      }
+      controls.disabled = true; save.textContent = 'Saving…';
+      try {
+        const result = await this.api().json('/v1/settings', {signal, body: {revision: this.data.revision, config: structuredClone(draft)}});
+        if (signal.aborted) return;
+        this.render(result, 'Configuration saved. New requests use the updated settings.');
+        await this.changed?.();
+      } catch (error) {if (!signal.aborted) announce(error.message);}
+      finally {controls.disabled = false; save.textContent = 'Save configuration';}
+    });
+    save.className = 'primary'; footer.append(element('span', 'muted small', 'Changes are applied when you save.'), save);
+    controls.append(footer);
+  }
+  redraw() {this.render({...this.data, config: this.draft});}
+  models(root, context, announce) {
+    const models = this.draft.models || {};
+    if (!Object.keys(models).length) root.append(element('p', 'muted', 'No models configured. Add a model to get started.'));
+    for (const [name, model] of Object.entries(models)) {
+      const card = element('details', 'settings-card'); card.open = name === (this.openModel || this.draft.default_model || Object.keys(models)[0]);
+      const summary = element('summary'); summary.append(element('strong', '', name), element('span', 'muted', model.model || 'New model'));
+      card.append(summary); root.append(card);
+      fields(card, () => Object.fromEntries(Object.entries(models[name]).filter(([key]) => key !== 'request_options')),
+        value => {models[name] = {...value, ...(models[name].request_options !== undefined ? {request_options: models[name].request_options} : {})};},
+        modelFields, context, `models.${name}`);
+      const advanced = element('details', 'settings-field-group'); advanced.append(element('summary', '', 'Provider request options'));
+      fields(advanced, () => models[name].request_options, value => {models[name].request_options = value;}, requestFields, {...context, compact: true}, `models.${name}.request_options`, true);
+      card.append(advanced, action('Remove model', () => {
+        const used = ['default_model', 'evaluation_model', 'verification_model'].some(key => this.draft[key] === name)
+          || ['proposer_model', 'solver_model', 'judge_model'].some(key => this.draft.meta_harness?.[key] === name);
+        if (used) {announce(`“${name}” is selected for a model role. Change its model selections before removing it.`); return;}
+        delete models[name]; this.redraw();
+      }));
+    }
+    const add = element('div', 'settings-add-model'), name = element('input');
+    name.placeholder = 'Model alias, e.g. main or evaluator'; name.setAttribute('aria-label', 'New model alias');
+    name.oninput = () => name.setCustomValidity('');
+    add.append(name, action('Add model', () => {
+      const key = name.value.trim();
+      name.setCustomValidity(!/^[a-zA-Z0-9_-]+$/.test(key) ? 'Use letters, numbers, underscores or hyphens.' : Object.hasOwn(models, key) ? 'This model alias already exists.' : '');
+      if (!name.reportValidity()) return;
+      Object.defineProperty(models, key, {value: {provider: 'openai', model: '', base_url: '', api_key_env: 'LOOM_LLM_API_KEY'}, enumerable: true, writable: true, configurable: true});
+      this.draft.models = models; this.openModel = key; this.redraw();
+    })); root.append(add);
+  }
+  embeddings(root, context) {
+    const profiles = this.draft.embedding_profiles || [];
+    if (!profiles.length) root.append(element('p', 'muted', 'No embedding services configured.'));
+    profiles.forEach((profile, index) => {
+      const card = element('section', 'settings-card'); card.append(element('h3', '', profile.name || 'New embedding service')); root.append(card);
+      const specs = {
+        name: textField('Name', {required: true}), endpoint: textField('Embeddings endpoint', {required: true, type: 'url'}),
+        model: textField('Embedding model', {required: true}), api_key_env: textField('API key environment variable'),
+      };
+      fields(card, () => Object.fromEntries(Object.entries(profiles[index]).filter(([key]) => key !== 'id')),
+        value => {profiles[index] = {...value, id: profile.id};}, specs, context, `embedding_profiles.${index}`);
+      card.append(action('Remove service', () => {profiles.splice(index, 1); this.draft.embedding_profiles = profiles; this.redraw();}));
+    });
+    root.append(action('Add embedding service', () => {
+      profiles.push({id: `emb_${crypto.randomUUID().replaceAll('-', '')}`, name: 'New embedding service',
+        endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings', model: 'text-embedding-v4', api_key_env: 'LOOM_LLM_API_KEY'});
+      this.draft.embedding_profiles = profiles; this.redraw();
+    }), element('p', 'muted small', 'Credentials use environment-variable names. An indexed service cannot change its model or endpoint.'));
   }
 }

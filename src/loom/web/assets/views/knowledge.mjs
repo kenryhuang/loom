@@ -284,7 +284,7 @@ export class KnowledgeView {
       catch (error) {this.error(error);}
     };
     header.append(title, remove); this.basePanel.append(header);
-    const tabs = element('div', 'kb-tabs'); tabs.setAttribute('role', 'tablist');
+    const tabs = element('div', 'evaluation-tabs'); tabs.setAttribute('role', 'tablist');
     this.basePanel.append(tabs);
     const panes = {};
     for (const [key, label] of [['import', 'Import'], ['view', 'View'], ['search', 'Search']]) {
@@ -302,10 +302,12 @@ export class KnowledgeView {
       });
     }; show();
     this.importPanel = panes.import; this.viewPanel = panes.view;
-    const modes = element('div', 'kb-tabs kb-import-modes'), importPanes = {};
+    const modes = element('div', 'kb-import-modes'), importPanes = {};
+    modes.setAttribute('role', 'group'); modes.setAttribute('aria-label', 'Import source type');
     this.importPanel.append(modes);
     for (const [kind, label] of [['file', 'Single file'], ['folder', 'Folder'], ['web', 'Web URL']]) {
-      const select = button(label), pane = element('section');
+      const select = button(label), pane = element('section', 'kb-import-settings');
+      pane.setAttribute('aria-label', `${label} import settings`);
       importPanes[kind] = pane; modes.append(select); this.importPanel.append(pane);
       select.onclick = () => {this.importMode = kind; displayMode();};
       if (kind === 'web') {this.urlPanel = pane; continue;}

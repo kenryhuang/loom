@@ -31,8 +31,10 @@ def restore(value, old):
     if isinstance(value, dict):
         return {k: restore(v, old.get(k) if isinstance(old, dict) else None) for k, v in value.items()}
     if isinstance(value, list):
-        previous = {r.get('id'): r for r in old or [] if isinstance(r, dict)}
-        return [restore(v, previous.get(v.get('id'))) if isinstance(v, dict) else v for v in value]
+        rows = old if isinstance(old, list) else []
+        previous = {r['id']: r for r in rows if isinstance(r, dict) and 'id' in r}
+        return [restore(v, previous.get(v['id']) if isinstance(v, dict) and 'id' in v else rows[i] if i < len(rows) else None)
+                for i, v in enumerate(value)]
     return value
 
 
@@ -80,6 +82,15 @@ class Settings:
                 raise ServiceError(parsed.error.message)
             if data.get('default_model') and data['default_model'] not in data.get('models', {}):
                 raise ServiceError('default_model must name a configured model')
+            if data.get('meta_harness'):
+                from loom.optimize.config import _parse_meta
+
+                if not isinstance(data['meta_harness'], dict):
+                    raise ServiceError('meta_harness must be a configuration group')
+                try:
+                    _parse_meta(data['meta_harness'], parsed.value.models)
+                except (TypeError, ValueError, ArithmeticError) as exc:
+                    raise ServiceError(f"{getattr(exc, 'field', 'meta_harness')}: {exc}") from exc
             from loom.knowledge.store import validate_profile
             profiles = data.get('embedding_profiles', [])
             if not isinstance(profiles, list):

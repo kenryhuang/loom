@@ -29,7 +29,7 @@ Local text files are limited to 500,000 bytes; YakDB files to 20 MiB. Folders su
 
 ### Saving configuration
 
-Settings writes the service's configured YAML file (`--config`, otherwise `config.yaml` in the working directory). Embedding profiles are stored in its `embedding_profiles` array; existing database profiles are migrated on save. Embedding services have form fields plus advanced JSON; other tabs use JSON editors. Save validates configuration and uses an atomic, revision-checked write. A concurrent change requires reloading before saving. YAML comments/formatting are regenerated.
+Settings writes the service's configured YAML file (`--config`, otherwise `config.yaml` in the working directory). Embedding profiles are stored in its `embedding_profiles` array; existing database profiles are migrated on save. All categories use forms: model selectors, model/service cards, numeric budgets, on/off/default choices and editable lists. Provider-specific parameters use typed fields and nested groups. Empty optional fields use Loom defaults; untouched configuration values are preserved. Save validates configuration and uses an atomic, revision-checked write. A concurrent change requires reloading before saving. YAML comments/formatting are regenerated.
 
 API keys shown as `••••••••` retain their existing values. Prefer environment-variable references for credentials. New requests load updated configuration; already running calls retain their settings. CLI-only service options such as bind port are still set at startup.
 
