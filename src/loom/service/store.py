@@ -182,8 +182,12 @@ class SessionStore:
                 if task["state"] == "completed":
                     raise ServiceError("Reopen the completed task first", 409)
             elif kind in {"set_knowledge_bases", "set_external_tools"}:
-                if task["state"] not in {"idle", "completed"} or (state["run"] and state["run"]["state"] not in {"completed", "stopped"}):
-                    raise ServiceError("Change tool bindings between tasks, when the session is idle or completed", 409)
+                if task["state"] not in {"idle", "completed", "paused"} or (
+                    state["run"] and state["run"]["state"] not in {"completed", "stopped", "suspended"}
+                ):
+                    raise ServiceError("Change tool bindings while paused or between tasks, when the session is idle or completed", 409)
+                if state.get("workspace_blocked") or (request and request["state"] == "pending"):
+                    raise ServiceError("Resolve pending input or recovery and wait for workspace processes before changing tools", 409)
                 if kind == "set_knowledge_bases":
                     self.knowledge.validate_ids(payload["knowledge_base_ids"])
                 else:
@@ -298,7 +302,22 @@ class SessionStore:
                     external_bindings=(self.external_tools.resolve(payload["external_tool_ids"]) if kind == "set_external_tools"
                                        else task.get("external_tool_bindings", [])),
                 )
-                state["context"] = None  # New tools take effect in a fresh turn; durable conversation/trace remain intact.
+                if task["state"] == "paused" and state["run"] and state["run"]["state"] == "suspended":
+                    removed = set(task.get("external_tool_ids", [])) - set(updated["external_tool_ids"])
+                    if task.get("knowledge_base_ids") and not updated["knowledge_base_ids"]:
+                        removed.update({"knowledge_list", "knowledge_search", "knowledge_read"})
+                    nodes = (state.get("workflow") or {}).get("workflow", {}).get("nodes", [])
+                    for node in nodes:
+                        config = node.get("executor_config", {})
+                        required = set(config.get("allowed_tools", [])) | {config.get("tool_id")}
+                        if required & removed:
+                            raise ServiceError(
+                                f"Saved workflow node {node['id']} references detached tools: {', '.join(sorted(required & removed))}. "
+                                "Keep these tools attached to resume this workflow.", 409)
+                    # Resume must retain the run's progress, but reconsider pending actions with new tools.
+                    state["run"]["assembly_update_pending"] = task["revision"] + 1
+                else:
+                    state["context"] = None
                 for key in ("knowledge_base_ids", "external_tool_ids", "external_tool_bindings", "task_spec", "plugin_version_refs"):
                     task[key] = updated[key]
                 self.append(

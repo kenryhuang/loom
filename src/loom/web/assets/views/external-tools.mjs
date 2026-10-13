@@ -134,6 +134,7 @@ export async function bindExternalTools({api, selected, save}) {
   const data = await api.json('/v1/external-tools');
   const dialog = element('dialog', 'external-bind-dialog'), form = element('form'), choices = element('div', 'external-choices'), error = element('p', 'notice error');
   form.append(element('h2', '', 'Session external tools'), choices, error); toolChoices(choices, data.tools, selected);
+  form.append(element('p', 'muted', 'Apply tools refreshes selected tool definitions. While paused, changes take effect on Resume and completed work is preserved.'));
   const submit = element('button', 'primary', 'Apply tools'); submit.type = 'submit';
   form.append(submit, button('Cancel', () => dialog.close())); dialog.append(form); document.body.append(dialog);
   dialog.addEventListener('close', () => dialog.remove(), {once: true});

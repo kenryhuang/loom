@@ -81,7 +81,9 @@ def make_task_context(
     if not tool_validation.ok:
         return tool_validation
 
-    profile_result = _resolve_profile(request)
+    diagnosis = assembly is not None and assembly.acceptance_policy is not None
+    # Trusted diagnosis has its own output contract; words like "report" must not select project_audit.
+    profile_result = get_task_profile("general") if diagnosis else _resolve_profile(request)
     if not profile_result.ok:
         return profile_result
     profile = profile_result.value

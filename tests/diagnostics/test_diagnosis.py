@@ -235,3 +235,75 @@ def test_effective_config_reads_only_bound_connection_without_calling_it(setup, 
         assert view["external_connections"][0]["credentials_present"]["CUSTOM_AUTH"] is True
     finally:
         manager.close()
+
+
+def test_budget_errors_identify_every_invalid_field_and_range():
+    from loom.diagnostics.jobs import MAXIMUM, budgets
+
+    with pytest.raises(ServiceError) as error:
+        budgets({"max_tokens": 10_000_000, "max_duration_seconds": 7200, "max_steps": 0})
+    message = str(error.value)
+    assert "Tokens (max_tokens): received 10,000,000; allowed integer range is 1–2,000,000" in message
+    assert "Seconds (max_duration_seconds): received 7,200; allowed integer range is 1–3,600" in message
+    assert "Steps (max_steps): received 0; allowed integer range is 1–100" in message
+    assert budgets(MAXIMUM) == MAXIMUM
+    for value in [None, True, 1.5, "100"]:
+        with pytest.raises(ServiceError, match=r"Model calls \(max_llm_calls\).*allowed integer range is 1–200"):
+            budgets({"max_llm_calls": value})
+
+
+def test_resume_decrease_error_identifies_field_and_previous_total():
+    from loom.diagnostics.jobs import DEFAULTS, budgets
+
+    with pytest.raises(ServiceError) as error:
+        budgets({"max_tokens": 100, "max_tool_calls": 1}, DEFAULTS)
+    assert "Tokens (max_tokens): received 100, previous total 300,000" in str(error.value)
+    assert "Tool calls (max_tool_calls): received 1, previous total 100" in str(error.value)
+
+
+def test_diagnosis_report_word_does_not_select_project_audit(setup, tmp_path):
+    from loom.diagnostics.runner import objective
+    from loom.tasks.runner import make_task_context
+
+    _, _, root = setup
+    directory = snapshot(setup, tmp_path)
+    request = TaskRequest(objective=objective('Explain this repo failure'), workspace=root, task_spec=specification(root, directory))
+    assembly = TaskAssembly(request, registry=registry_factory())
+    context = make_task_context(request, assembly=assembly).unwrap()
+    assert context.metadata['profile'] == 'general'
+    assert not any('markdown audit' in c.description or 'smoke' in c.description for c in context.identity.constraints)
+
+
+def test_old_audit_diagnosis_checkpoint_can_resume_after_repair_exhaustion(setup):
+    from dataclasses import replace
+
+    from loom.runtime.checkpoints import encode
+    from loom.tasks.runner import make_task_context
+
+    service, sid, root = setup
+    manager = SessionDiagnosis(service, root=root, provider_factory=factory)
+    try:
+        job = manager.start(sid, {'mode': 'read_only', 'request_id': 'legacy', 'budgets': {'max_tool_calls': 1}})
+        job = wait_job(manager, sid, job['id'])
+        assert job['state'] == 'budget_exhausted'
+        deadline = time.monotonic() + 5
+        while manager.runtime.active and time.monotonic() < deadline:
+            time.sleep(.05)
+        runtime_sid = manager._load(sid, job['id'])['runtime_session_id']
+        def legacy(state, emit, db):
+            cp = manager.runtime._checkpoint_value(state)
+            audit = make_task_context(TaskRequest(state['task']['objective'], workspace=root, profile='project_audit')).unwrap()
+            cp['context'] = replace(cp['context'], identity=audit.identity, goal=audit.goal,
+                                    metadata={**cp['context'].metadata, 'profile': 'project_audit'})
+            cp['plugin_states']['acceptance'].update(attempts=2, state='blocked', reason='Acceptance repair limit reached',
+                                                     goal_digest='legacy-project-audit-goal')
+            cp['output_retries'] = 2
+            state['run']['checkpoint'] = manager.runtime.store.artifact_in_transaction(
+                db, runtime_sid, encode(cp), 'execution_checkpoint')
+        manager.runtime.store.update(runtime_sid, legacy)
+        manager.resume(sid, job['id'], {'budgets': {'max_tool_calls': 10}})
+        done = wait_job(manager, sid, job['id'])
+        assert done['state'] == 'completed', done
+        assert done['counters']['evidence_reads'] == 1
+    finally:
+        manager.close()

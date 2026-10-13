@@ -576,3 +576,61 @@ def test_repeated_search_loop_yields_report_instead_of_exhausting_budget(tmp_pat
         assert len(calls) == 9 and len(provider.calls) == 10
         assert len(result.value.context.state.scratch["run_progress"]["ledger"]["evidence"]) == 1
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('limit,last,threshold', [(300000, 45419, 209162), (300000, 40886, 218228), (300000, 0, 255000), (300000, 200000, 60000)])
+def test_token_wrap_up_threshold_and_message_are_explicit(limit, last, threshold):
+    from loom.llm.progress import stop_reason, token_budget_status
+    from loom.service.contracts import LIMITS
+
+    cp = {'llm_calls': 1, 'usage': TokenUsage(threshold - 1, 0, threshold - 1), 'last_call_tokens': last}
+    limits = {**LIMITS, 'max_tokens': limit}
+    assert stop_reason(cp, limits) is None
+    cp['usage'] = TokenUsage(threshold, 0, threshold)
+    reason = stop_reason(cp, limits)
+    assert f'used {threshold:,}/{limit:,}' in reason
+    assert f'wrap-up threshold {threshold:,}' in reason
+    assert f'reserved {limit - threshold:,}' in reason
+    assert token_budget_status(threshold, limit, last)['wrap_up_at'] == threshold
+
+
+def test_paused_assembly_update_discards_pending_calls_but_keeps_completed_evidence(tmp_path):
+    async def scenario():
+        calls = []
+
+        async def read(value, _options):
+            calls.append(value['path'])
+            return ok(Observation('read-first', 'read_file', {'content': 'evidence'}, 'now'))
+
+        provider = Provider([LlmResponse('', (
+            LlmToolCall('first', 'read_file', '{"path":"a"}'),
+            LlmToolCall('stale', 'read_file', '{"path":"b"}'),
+        )), final()])
+        execution = Execution()
+        execution.pause_after_tool = True
+        paused = await run_managed(tmp_path, provider, execution, {'read_file': read})
+        assert paused.value.control.kind == 'paused'
+        execution.pause_after_tool = False
+        execution.assembly_revision = 5
+        result = await run_managed(tmp_path, provider, execution, {'read_file': read})
+        assert result.ok and result.value.control.kind == 'completed'
+        assert calls == ['a']
+        assert any(m.tool_call_id == 'first' and 'evidence' in m.content for m in provider.calls[-1])
+        assert any(m.tool_call_id == 'stale' and 'interrupted' in m.content for m in provider.calls[-1])
+        assert execution.checkpoint['assembly_revision'] == 5
+    asyncio.run(scenario())
+
+
+def test_unavailable_json_tool_action_is_not_a_completion_candidate(tmp_path):
+    async def scenario():
+        provider = Provider([
+            LlmResponse(json.dumps({'action': {'kind': 'tool', 'target': 'not_visible', 'input': {}}})),
+            final('Actual final report'),
+        ])
+        execution = Execution()
+        result = await run_managed(tmp_path, provider, execution)
+        assert result.ok and result.value.control.kind == 'completed'
+        assert len(provider.calls) == 2
+        assert not execution.operations
+        assert any('not submitted for acceptance' in m.content for m in provider.calls[-1])
+    asyncio.run(scenario())

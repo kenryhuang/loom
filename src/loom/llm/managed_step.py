@@ -27,7 +27,7 @@ from loom.llm.api import (
     request_llm_response,
     to_llm_tools,
 )
-from loom.llm.progress import guidance, record, stop_reason
+from loom.llm.progress import guidance, record, stop_reason, token_budget_status
 from loom.runtime.control import StepControl
 from loom.service.contracts import LIMITS, canonical
 
@@ -140,7 +140,8 @@ class ManagedStep:
         report += "\n".join(f"- {item['source']}: {item['text']}" for item in evidence[-12:])
         remaining = self.limits["max_tokens"] - cp["usage"].total_tokens
         seconds = self.limits["max_duration_seconds"] - cp.get("active_seconds", 0)
-        await self._emit(runtime, "run.wrapping_up", reason=reason, partial=True)
+        await self._emit(runtime, "run.wrapping_up", reason=reason, partial=True,
+                         token_budget=token_budget_status(cp["usage"].total_tokens, self.limits["max_tokens"], cp.get("last_call_tokens", 0)))
         if allow_model and remaining >= 4096 and seconds > 2 and cp["llm_calls"] < self.limits["max_llm_calls"]:
             from dataclasses import fields, is_dataclass
 
@@ -393,6 +394,25 @@ class ManagedStep:
 
     async def __call__(self, context, runtime):
         restored = getattr(self.execution, "checkpoint", None)
+        assembly_revision = getattr(self.execution, "assembly_revision", None)
+        if assembly_revision and (not restored or restored.get("assembly_revision") != assembly_revision):
+            if restored:
+                # Preserve completed observations/messages; never dispatch decisions made for old tools.
+                if restored["phase"] == "after_llm" and restored.get("response"):
+                    for call in restored["response"].tool_calls:
+                        await self._emit(runtime, "tool.interrupted", tool_call_id=call.id, tool_id=call.name,
+                                         reason="Task tools updated while paused")
+                if restored["phase"] == "tool_batch":
+                    await self._interrupt_batch(restored, runtime, "Task tools updated while paused")
+                restored.update(phase="before_llm", response=None, calls=[], tool_index=0, pending_input=None, missing_retries=0,
+                                assembly_revision=assembly_revision)
+                for key in ("terminal", "visible_tool_ids", "output_retries"):
+                    restored.pop(key, None)
+                restored["messages"].append(LlmMessage("user", "Task tools were updated while paused. "
+                    "Use the current tool definitions, preserve completed work, and reconsider your next action."))
+            if self.assembly and self.assembly.acceptance.invalidate("Task tools updated while paused"):
+                await self.assembly.acceptance.emit(runtime, "acceptance.invalidated")
+        self.execution.assembly_revision = None
         if restored and restored.get("terminal"):
             if self.planning and restored.get("planning"):
                 self.planning.restore(restored["planning"]).unwrap()
@@ -433,6 +453,8 @@ class ManagedStep:
                 "input_cursor": getattr(self.execution, "input_cursor", 0),
                 "missing_retries": 0,
             }
+        if assembly_revision:
+            cp["assembly_revision"] = assembly_revision
         saved_progress = (context.state.scratch or {}).get("run_progress", {})
         if "progress" not in cp and saved_progress.get("run_id") == context.run_id:
             cp["progress"] = thaw_json(saved_progress["ledger"])
@@ -578,8 +600,9 @@ class ManagedStep:
                 else:
                     calls = list(response.tool_calls)
                     cp["native"] = bool(calls)
+                    unavailable = ()
                     if not calls:
-                        calls, _, _ = self._response_calls(cp)
+                        calls, _, unavailable = self._response_calls(cp)
                 if calls:
                     cp["calls"] = calls
                     cp["tool_index"] = 0
@@ -601,6 +624,17 @@ class ManagedStep:
                     cp["phase"] = "before_llm"
                     continue
                 parsed = _parse_decision(response.content, cp["trace_id"])
+                if parsed["action"].kind == "tool":
+                    # An unavailable JSON tool action is not a completion candidate.
+                    cp["messages"].extend([
+                        LlmMessage("assistant", response.content or ""),
+                        LlmMessage("user", f"Tool selection rejected: {parsed['action'].target or '(missing target)'} is unavailable. "
+                                   "No tool was executed. Select a currently available tool; this was not submitted for acceptance."),
+                    ])
+                    await self._emit(runtime, "tool.selection.rejected", tool_id=parsed["action"].target,
+                                     available_tools=cp.get("visible_tool_ids", []))
+                    cp.update(phase="before_llm", response=None)
+                    continue
                 unfinished_plan = self.planning and (
                     self.planning.unfinished()
                     if hasattr(self.planning, "unfinished")

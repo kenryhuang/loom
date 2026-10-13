@@ -24,7 +24,9 @@ uv pip install --python .venv/bin/python '.[external-tools]'
 
 新建 session 时可以手工勾选具体工具；**Recommend with LLM** 根据任务、工具名称和描述推荐，创建前可以调整。推荐阶段不能执行或注册工具。注册连接不会自动给已有 session 增加工具。
 
-已有 session 在任务之间、idle/completed 状态下，通过 **Configure external tools** 调整挂载。停用连接后不能新选或调用。session 固定所选工具的定义和配置指纹；注册配置或工具 schema 改变后，需要重新绑定才能使用新版本。
+已有 session 在 paused、idle 或 completed 状态下，通过 **Configure external tools → Apply tools** 调整挂载。同样的工具保持勾选并再次 Apply，也会更新到注册中心的最新定义。停用连接后不能新选或调用。session 固定所选工具的定义和配置指纹；注册配置或工具 schema 改变后，需要重新绑定才能使用新版本。
+
+暂停后也可以更新 Knowledge bases，保存不会自动开始执行。点击 **Resume** 后，Loom 重新组装工具组件，保留同一个 run 的计划、已完成操作、证据、历史和累计用量；尚未执行的旧工具调用会作废，由模型根据新定义重新决定下一步，已有验收结果重新验证。普通 Resume 不修改组件时仍直接恢复 checkpoint。更新前必须等待 worker 退出并解决待处理的输入或恢复问题；已保存工作流节点显式引用的工具不能直接移除。此入口不修改模型、工作流策略或其他插件配置。
 
 执行链路：注册中心 → 选中的工具 ID → 固定定义 → `TaskAssembly / tools / external_tools` → 模型选择调用 → MCP/CLI 适配器 → Observation → 下一轮模型输入。调用复用原有执行日志、trace、checkpoint 和错误处理；有副作用的工具会参与验收失效机制。
 

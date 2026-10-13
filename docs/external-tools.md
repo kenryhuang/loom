@@ -68,7 +68,9 @@ CLI output includes stdout, stderr, exit code and a truncation flag. Nonzero exi
 
 In **New session → External tools**, choose individual tools. **Recommend with LLM** can choose from enabled, discovered tools using their descriptions; review or change the recommendation before creating the session. The setup model has no execution tools and cannot register or invoke a connection.
 
-The session's **Configure external tools** action changes bindings between tasks when idle/completed. Registration alone does not attach tools to existing sessions. Disabled connections cannot be selected or called. Tool definitions and configuration fingerprints are pinned to the session: after changing a connection or discovered schema, explicitly rebind its tools before using the new definition.
+The session's **Configure external tools → Apply tools** action changes bindings when paused, idle or completed. Applying the same selection refreshes its registered definitions. Registration alone does not attach tools to existing sessions. Disabled connections cannot be selected or called. Tool definitions and configuration fingerprints are pinned to the session: after changing a connection or discovered schema, explicitly rebind its tools before using the new definition.
+
+While paused, you can also update Knowledge bases. Saving does not start execution. **Resume** rebuilds the tool assembly while preserving the run, plan, completed operations, evidence, history and accumulated usage. Pending calls selected using the old tools are discarded; the model chooses its next action using the new definitions, and prior acceptance results require revalidation. Resume without binding changes retains normal checkpoint behavior. Wait for the worker to exit and resolve pending input/recovery first. Tools explicitly referenced by saved workflow nodes cannot be detached. These controls do not change the model, workflow policy or other plugin configuration.
 
 ```text
 Registry → selected tool IDs → pinned definitions → TaskAssembly tools/external_tools

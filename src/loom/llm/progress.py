@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 
 from loom.core import thaw_json
 
@@ -36,14 +37,22 @@ def record(cp, name, arguments, observation):
     ledger["stale"] = 0 if new else ledger["stale"] + 1
 
 
+def token_budget_status(used, limit, last_call_tokens=0):
+    reserve = min(limit * 0.8, max(limit * 0.15, 2048, last_call_tokens * 2))
+    threshold = math.ceil(limit - reserve)
+    return {"used": used, "limit": limit, "last_call_tokens": last_call_tokens,
+            "reserve_tokens": limit - threshold, "wrap_up_at": threshold}
+
+
 def stop_reason(cp, limits):
     if cp["llm_calls"] >= max(1, limits["max_llm_calls"] - 1):
         return "Model call budget is nearly exhausted"
     used = cp["usage"].total_tokens
-    reserve = min(limits["max_tokens"] * 0.8,
-                  max(limits["max_tokens"] * 0.15, 2048, cp.get("last_call_tokens", 0) * 2))
-    if used and used >= limits["max_tokens"] - reserve:
-        return "Token budget is nearly exhausted"
+    budget = token_budget_status(used, limits["max_tokens"], cp.get("last_call_tokens", 0))
+    if used and used >= budget["wrap_up_at"]:
+        return (f"Token budget is nearly exhausted: used {used:,}/{budget['limit']:,}; "
+                f"wrap-up threshold {budget['wrap_up_at']:,}; reserved {budget['reserve_tokens']:,} "
+                f"(last model call {budget['last_call_tokens']:,})")
     elapsed = cp.get("active_seconds", 0)
     if elapsed >= limits["max_duration_seconds"] - min(120, limits["max_duration_seconds"] * 0.2):
         return "Time budget is nearly exhausted"

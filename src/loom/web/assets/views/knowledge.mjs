@@ -1,6 +1,7 @@
 import { element } from "../markdown.mjs";
 import { renderKnowledgeGraph } from "./knowledge-graph.mjs";
 import { KnowledgeProgress } from "./knowledge-progress.mjs";
+import { canUpdateTaskTools } from "../state.mjs";
 
 function field(label, input) {
   const node = element("label", "knowledge-field");
@@ -133,13 +134,10 @@ export class KnowledgeView {
       element(
         "p",
         "muted",
-        "The model decides when to search attached knowledge bases. Change attachments between tasks.",
+        "Update attachments while paused or between tasks. Resume applies changes and preserves completed work.",
       ),
     );
-    const editable =
-      ["idle", "completed"].includes(this.session.task.state) &&
-      (!this.session.run ||
-        ["completed", "stopped"].includes(this.session.run.state));
+    const editable = canUpdateTaskTools(this.session);
     for (const base of bases) {
       const check = input("", "checkbox");
       check.value = base.id;

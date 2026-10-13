@@ -91,8 +91,18 @@ async def _execute_assembled(state, bridge, provider, request, assembly):
             },
         )
     context = bridge.checkpoint["context"] if bridge.checkpoint else replace(context, run_id=state["run"]["id"])
+    if assembly.acceptance_policy and (context.metadata or {}).get("profile") == "project_audit":
+        # Migrate old diagnosis checkpoints that accidentally inherited the audit contract.
+        context = replace(context, identity=initial.identity, goal=replace(context.goal, criteria=initial.goal.criteria),
+                          metadata={**(context.metadata or {}), "profile": "general", "blueprint": initial.metadata["blueprint"]})
+        if bridge.checkpoint:
+            bridge.checkpoint["context"] = context
+            bridge.checkpoint.pop("visible_tool_ids", None)
+            bridge.checkpoint.pop("output_retries", None)
+    bridge.assembly_revision = state["run"].get("assembly_update_pending")
+    rebind = bool(bridge.assembly_revision)
     if bridge.checkpoint and bridge.checkpoint.get("plugin_states"):
-        assembly.restore(bridge.checkpoint["plugin_states"])
+        assembly.restore(bridge.checkpoint["plugin_states"], rebind_tools=rebind)
         context = planning.project_state(context)
     elif bridge.checkpoint and bridge.checkpoint.get("planning"):
         planning.restore(bridge.checkpoint["planning"]).unwrap()
@@ -100,8 +110,13 @@ async def _execute_assembled(state, bridge, provider, request, assembly):
     elif same_run and not state["run"].get("reset_planning"):
         snapshot = (context.state.scratch or {}).get("execution_plugins")
         if snapshot:
-            assembly.restore(snapshot)
+            assembly.restore(snapshot, rebind_tools=rebind)
             context = planning.project_state(context)
+    if rebind:
+        planning.configure_normal_tool_refs(assembly.context_tools())
+        context = replace(context, affordances=replace(initial.affordances, tools=planning.visible_tool_refs(assembly.context_tools())))
+        if bridge.checkpoint:
+            bridge.checkpoint["context"] = context
     if state["run"].get("reset_planning") and not bridge.checkpoint and state["run"]["steps"] == 0:
         context = planning.project_state(context)
     assembly.update_goal(context.goal)

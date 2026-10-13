@@ -131,6 +131,12 @@ def test_edit_tools_are_bound_to_worktree_and_citable(tmp_path, repo):
         ws = DiagnosisWorkspace.create(directory, repo, "diag_tools")
         request = TaskRequest(objective="Diagnose", task_spec=specification(repo, directory, ws.path))
         assembly = TaskAssembly(request, registry=registry_factory())
+        from loom.tasks.runner import make_task_context
+
+        context = make_task_context(request, assembly=assembly).unwrap()
+        visible = {ref.id for ref in assembly.resolve_tools(context)}
+        assert {'run_validation', 'workspace_diff', 'delete_file', 'finish'} <= visible
+        assert len(visible) > 16  # The old count limit silently hid validation tools.
         assert {"write_file", "edit_file", "run_validation"} <= assembly.bindings.keys()
         tools = collection(request).entrypoints
         denied = asyncio.run(tools["session_diagnostics/write_file"]({"path": "../escape.py", "content": "bad"}))

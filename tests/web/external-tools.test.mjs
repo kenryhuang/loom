@@ -65,3 +65,13 @@ test('new session recommendations select external tools and remain manually edit
   payload = {knowledge_base_ids: []}; view.apply(payload, template); assert.deepEqual(payload.external_tool_ids, []);
   dom.window.close();
 });
+
+test('paused session can update tools but active execution and recovery cannot', async () => {
+  const {canUpdateTaskTools} = await import('../../src/loom/web/assets/state.mjs');
+  const paused = {task: {state: 'paused'}, run: {state: 'suspended'}};
+  assert.equal(canUpdateTaskTools(paused), true);
+  assert.equal(canUpdateTaskTools({...paused, run: {state: 'running'}}), false);
+  assert.equal(canUpdateTaskTools({...paused, task: {state: 'pausing'}}), false);
+  assert.equal(canUpdateTaskTools({...paused, input_request: {state: 'pending', kind: 'recovery'}}), false);
+  assert.equal(canUpdateTaskTools({...paused, workspace_blocked: ['process']}), false);
+});

@@ -1873,35 +1873,51 @@ dialog h1 {
 .external-bind-dialog form { display: grid; gap: 12px; }
 
 /* Diagnosis uses the same compact dashboard rhythm as the other evaluation tabs. */
-.trajectory-diagnosis { display: grid; gap: 14px; min-width: 0; }
+.trajectory-diagnosis { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; min-width: 0; width: 100%; max-width: 100%; }
+.trajectory-diagnosis > *, .diagnosis-report > *, .diagnosis-coverage > * { min-width: 0; max-width: 100%; }
+.trajectory-diagnosis { overflow-wrap: anywhere; }
+.trajectory-diagnosis select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+.trajectory-diagnosis .dashboard-toolbar > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.trajectory-diagnosis .dashboard-toolbar > button { white-space: normal; }
 .trajectory-diagnosis[hidden] { display: none; }
-.diagnosis-toolbar { align-items: center; flex-wrap: wrap; }
+.diagnosis-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.diagnosis-selectors { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.diagnosis-actions { display: flex; flex-wrap: nowrap; gap: 10px; }
+.diagnosis-actions button { flex: 1 1 0; min-width: 0; min-height: 40px; margin: 0; white-space: normal; }
+.diagnosis-actions button[hidden] { display: none; }
 .trajectory-diagnosis textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 .diagnosis-budget-fields { display: flex; gap: 12px; flex-wrap: wrap; padding: 12px 0; }
 .diagnosis-budget-fields label { display: grid; gap: 5px; }
 .diagnosis-budget-fields input { width: 115px; }
+.diagnosis-budget-fields input[aria-invalid="true"] { border-color: var(--danger); outline-color: var(--danger); }
 .diagnosis-status { flex-wrap: wrap; }
 .diagnosis-activity { flex-basis: 100%; overflow-wrap: anywhere; }
 .diagnosis-conclusion { padding: 16px; border: 1px solid var(--line); border-radius: 8px; }
-.diagnosis-table { overflow-x: auto; }
-.diagnosis-findings { width: 100%; border-collapse: collapse; }
+.diagnosis-table { min-width: 0; max-width: 100%; overflow-x: auto; }
+.diagnosis-findings { width: 100%; min-width: 800px; table-layout: fixed; border-collapse: collapse; }
 .diagnosis-findings th, .diagnosis-findings td { text-align: left; vertical-align: top; padding: 12px; border-bottom: 1px solid var(--line); }
-.diagnosis-findings td { min-width: 100px; overflow-wrap: anywhere; }
-.diagnosis-findings td:nth-child(4), .diagnosis-findings td:nth-child(5) { min-width: 250px; }
+.diagnosis-findings td { overflow-wrap: anywhere; }
+.diagnosis-findings th:nth-child(1) { width: 16%; }
+.diagnosis-findings th:nth-child(2), .diagnosis-findings th:nth-child(3) { width: 12%; }
+.diagnosis-findings th:nth-child(4), .diagnosis-findings th:nth-child(5) { width: 30%; }
 .diagnosis-refs { display: flex; flex-wrap: wrap; gap: 4px; }
 .diagnosis-refs button { font-size: 11px; max-width: 100%; overflow-wrap: anywhere; }
 .diagnosis-coverage { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
 .diagnosis-link { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px; border: 1px solid var(--line); margin: 8px 0; }
 .diagnosis-link.inferred { border-style: dashed; }
 .diagnosis-feed { max-height: 650px; overflow: auto; }
+.diagnosis-report > details { overflow-x: auto; }
+.diagnosis-report pre, .diagnosis-workspace pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 700px) { .diagnosis-coverage { grid-template-columns: 1fr; } }
 
-.diagnosis-toolbar select { width: min(290px, 100%); }
+.diagnosis-toolbar select { width: 100%; min-width: 0; height: 40px; }
 .diagnosis-toolbar > button { margin-left: 0; }
 .diagnosis-status .metric-chip, .diagnosis-conclusion .metric-chip { padding: 5px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
 
-.diagnosis-workspace { margin: 1rem 0; padding: 1rem; border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; }
+.diagnosis-workspace { min-width: 0; max-width: 100%; margin: 1rem 0; padding: 1rem; border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; }
 .diagnosis-workspace > p { overflow-wrap: anywhere; }
-.diagnosis-checks { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+.diagnosis-checks { width: 100%; min-width: 540px; table-layout: fixed; border-collapse: collapse; margin-top: 1rem; }
+.diagnosis-checks th:first-child { width: 45%; }
+.diagnosis-checks th:last-child { width: 25%; }
 .diagnosis-checks th, .diagnosis-checks td { padding: .5rem; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
 .diagnosis-checks pre { max-height: 20rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

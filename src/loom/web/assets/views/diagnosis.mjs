@@ -4,6 +4,12 @@ import { FeedView } from "./feed.mjs";
 const option = (label, value) => { const node = element("option", "", label); node.value = value; return node; };
 const button = (label, action) => { const node = element("button", "quiet", label); node.type = "button"; node.addEventListener("click", action); return node; };
 const active = new Set(["preparing", "queued", "running", "cancelling"]);
+const resumable = new Set(["paused", "budget_exhausted", "interrupted"]);
+const historyLabel = job => `${job.workspace?.branch || `${job.mode === "worktree" ? "worktree" : "read-only"} · ${job.id}`} · ${job.state} · ${job.created_at}`;
+const budgetLabels = { max_steps: "Steps", max_llm_calls: "Model calls", max_tool_calls: "Tool calls", max_tokens: "Tokens", max_duration_seconds: "Seconds" };
+// Older running services enforce these limits but do not include them in the response.
+const legacyBudgetLimits = { max_steps: 100, max_llm_calls: 200, max_tokens: 2000000, max_duration_seconds: 3600, max_tool_calls: 500 };
+const number = value => value.toLocaleString("en-US");
 
 export class DiagnosisView {
   constructor(root) { this.root = root; }
@@ -21,6 +27,7 @@ export class DiagnosisView {
     this.close();
     this.abort = new AbortController();
     this.api = api; this.sessionId = sessionId; this.after = 0; this.job = null; this.workspaceKey = null;
+    this.commandError = null;
     this.root.replaceChildren();
     this.notice = element("p", "notice"); this.notice.hidden = true;
     const toolbar = element("div", "dashboard-toolbar diagnosis-toolbar");
@@ -36,18 +43,24 @@ export class DiagnosisView {
     this.start = button("Diagnose session", () => this.command("start"));
     this.start.disabled = true;
     this.stop = button("Stop", () => this.command("cancel")); this.stop.hidden = true;
-    this.resume = button("Resume diagnosis", () => this.command("resume")); this.resume.hidden = true;
-    toolbar.append(this.run, this.model, this.mode, this.cleanup, this.start, this.stop, this.resume, button("Refresh", () => this.open(api, sessionId)));
+    this.resume = button("Resume diagnosis", () => this.command("resume")); this.resume.disabled = true;
+    const selectors = element("div", "diagnosis-selectors"), actions = element("div", "diagnosis-actions");
+    selectors.append(this.run, this.model, this.mode, this.cleanup);
+    actions.append(this.start, this.resume, this.stop, button("Refresh", () => this.open(api, sessionId)));
+    toolbar.append(selectors, actions);
     this.question = element("textarea"); this.question.rows = 2; this.question.maxLength = 4000;
     this.question.placeholder = "Optional: what went wrong?"; this.question.setAttribute("aria-label", "Diagnosis question");
-    const advanced = element("details", "diagnosis-budget"); advanced.append(element("summary", "", "Budgets"));
+    const advanced = this.budgetPanel = element("details", "diagnosis-budget"); advanced.append(element("summary", "", "Budgets"));
     this.budgetFields = {};
-    const labels = { max_steps: "Steps", max_llm_calls: "Model calls", max_tool_calls: "Tool calls", max_tokens: "Tokens", max_duration_seconds: "Seconds" };
+    this.budgetRanges = {};
     const fields = element("div", "diagnosis-budget-fields");
-    for (const [key, label] of Object.entries(labels)) {
+    for (const [key, label] of Object.entries(budgetLabels)) {
       const field = element("label", "", label), input = element("input");
       input.type = "number"; input.min = "1"; input.step = "1"; input.setAttribute("aria-label", `Diagnosis ${label.toLowerCase()}`);
-      field.append(input); fields.append(field); this.budgetFields[key] = input;
+      const range = element("small", "muted"); range.id = `diagnosis-budget-${key}-range`;
+      input.setAttribute("aria-describedby", range.id);
+      input.addEventListener("input", () => input.removeAttribute("aria-invalid"));
+      field.append(input, range); fields.append(field); this.budgetFields[key] = input; this.budgetRanges[key] = range;
     }
     advanced.append(fields);
     this.history = element("select"); this.history.setAttribute("aria-label", "Diagnosis history");
@@ -70,6 +83,11 @@ export class DiagnosisView {
       this.model.value = data.models.includes(data.default_model) ? data.default_model : "";
       this.supportsWorktree = data.default_mode === "worktree";
       this.mode.hidden = this.cleanup.hidden = !this.supportsWorktree;
+      for (const [key, input] of Object.entries(this.budgetFields)) {
+        const maximum = (data.budget_limits || legacyBudgetLimits)[key];
+        if (maximum) input.max = String(maximum);
+        this.budgetRanges[key].textContent = maximum ? `1–${number(maximum)}` : "Integer ≥ 1";
+      }
       this.setBudgets(data.budgets);
       this.jobs = data.jobs; this.renderHistory(); this.start.disabled = false;
       if (data.source_error) { this.error(new Error(data.source_error)); this.start.disabled = true; }
@@ -82,15 +100,32 @@ export class DiagnosisView {
     this.notice.textContent = error.message; this.notice.hidden = false;
   }
   setBudgets(budgets) { for (const [key, value] of Object.entries(budgets || {})) if (this.budgetFields[key]) this.budgetFields[key].value = value; }
-  budgets() { return Object.fromEntries(Object.entries(this.budgetFields).map(([key, input]) => [key, Number(input.value)])); }
+  budgets() {
+    const result = {}, errors = [];
+    let firstInvalid;
+    for (const [key, input] of Object.entries(this.budgetFields)) {
+      const value = Number(input.value), maximum = input.max ? Number(input.max) : Infinity;
+      result[key] = value;
+      if (!Number.isInteger(value) || value < 1 || value > maximum) {
+        input.setAttribute("aria-invalid", "true"); firstInvalid ||= input;
+        const received = input.value ? (Number.isFinite(value) ? number(value) : input.value) : "empty";
+        errors.push(`${budgetLabels[key]} (${key}): received ${received}; ${Number.isFinite(maximum) ? `allowed integer range is 1–${number(maximum)}` : "must be an integer ≥ 1"}`);
+      } else input.removeAttribute("aria-invalid");
+    }
+    if (errors.length) {
+      this.budgetPanel.open = true; firstInvalid.focus();
+      throw new Error(`Invalid diagnosis budgets: ${errors.join("; ")}`);
+    }
+    return result;
+  }
   renderHistory() {
-    this.history.replaceChildren(...this.jobs.map(job => option(`${job.created_at} · ${job.state}`, job.id)));
+    this.history.replaceChildren(...this.jobs.map(job => option(historyLabel(job), job.id)));
     if (this.job) this.history.value = this.job.id;
   }
   async command(action) {
     if (this.busy) return;
     this.busy = true; this.start.disabled = this.stop.disabled = this.resume.disabled = true;
-    this.notice.hidden = true;
+    this.notice.hidden = true; this.commandError = null;
     const generation = this.generation;
     try {
       const job = action === "start" ? await this.api.startDiagnosis(this.sessionId, {
@@ -102,10 +137,15 @@ export class DiagnosisView {
       if (generation !== this.generation || this.abort.signal.aborted) return;
       this.jobs = [job, ...this.jobs.filter(existing => existing.id !== job.id)];
       this.renderHistory(); await this.select(job.id);
-    } catch (error) { if (generation === this.generation) this.error(error); }
+    } catch (error) {
+      if (generation === this.generation) { this.commandError = error.message; this.error(error); }
+    }
     finally {
       if (generation === this.generation) this.busy = false;
-      if (generation === this.generation && !this.abort.signal.aborted) this.start.disabled = this.stop.disabled = this.resume.disabled = false;
+      if (generation === this.generation && !this.abort.signal.aborted) {
+        this.start.disabled = this.stop.disabled = false;
+        this.resume.disabled = !resumable.has(this.job?.state);
+      }
     }
   }
   async reviewChanges() {
@@ -175,7 +215,8 @@ export class DiagnosisView {
       if (generation !== this.generation || this.selected !== id || this.abort.signal.aborted) return;
       this.job = job; this.history.value = id;
       const choice = [...this.history.options].find(option => option.value === id);
-      if (choice) choice.textContent = `${job.created_at} · ${job.state}`;
+      if (choice) choice.textContent = historyLabel(job);
+      this.history.title = historyLabel(job);
       if (initial) this.setBudgets(job.budgets);
       this.render(job);
       if (this.trace.open) await this.loadEvents();
@@ -226,15 +267,24 @@ export class DiagnosisView {
     const c = job.counters || {};
     this.status.replaceChildren(...[
       job.state.replaceAll("_", " "), `${c.seconds || 0}s`, `${c.model_calls || 0} model calls`,
-      `${c.tool_calls || 0} tool calls`, `${(c.tokens || 0).toLocaleString()} reported tokens`, `Snapshot #${job.source_cursor}`,
+      `${c.tool_calls || 0} tool calls`, `${number(c.tokens || 0)} / ${number(job.budgets.max_tokens)} tokens`, `Snapshot #${job.source_cursor}`,
       ...(c.calls_without_reported_usage ? [`${c.calls_without_reported_usage} calls without reported usage`] : []),
       ...(c.unfinished_model_calls ? [`${c.unfinished_model_calls} unfinished model calls`] : []),
       ...(job.stale ? ["New events available"] : []),
     ].map(text => element("span", "metric-chip", text)));
+    const budget = job.wrap_up?.token_budget || job.token_budget;
+    if (budget) {
+      const threshold = element("span", "metric-chip", `Token wrap-up at ${number(budget.wrap_up_at)}`);
+      threshold.title = `Reserves ${number(budget.reserve_tokens)} tokens; last model call: ${number(budget.last_call_tokens)}. `
+        + "Recomputed after model calls. Threshold = budget − min(80% of budget, max(15% of budget, 2,048, 2 × last call)). "
+        + "Crossing it stops investigation, generates a partial summary if possible, then pauses. Summary tokens add to the displayed total.";
+      this.status.append(threshold, element("span", "metric-chip", `${number(budget.reserve_tokens)} reserved`));
+    }
     this.status.append(element("span", "diagnosis-activity", job.current_activity || ""));
-    this.stop.hidden = !active.has(job.state); this.resume.hidden = !["paused", "budget_exhausted", "interrupted"].includes(job.state);
-    this.notice.hidden = !job.error;
-    if (job.error) this.notice.textContent = job.error;
+    this.stop.hidden = !active.has(job.state); this.resume.disabled = this.busy || !resumable.has(job.state);
+    const error = this.commandError || job.error;
+    this.notice.hidden = !error;
+    if (error) this.notice.textContent = error;
     const key = JSON.stringify([job.state, job.report, job.partial_report]);
     if (this.reportKey === key) return;
     this.reportKey = key; this.report.replaceChildren();

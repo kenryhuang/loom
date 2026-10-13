@@ -364,6 +364,15 @@ def test_diagnosis_api_is_independent_owned_and_does_not_mutate_target(api):
     before = service.store.snapshot(sid)
     listing = client._json(f'/v1/sessions/{sid}/diagnoses')
     assert listing['jobs'] == []
+    assert listing['budget_limits']['max_tokens'] == 2_000_000
+    with pytest.raises(ServiceError) as invalid:
+        client._json(f'/v1/sessions/{sid}/diagnoses', {
+            'request_id': 'invalid-budgets', 'budgets': {'max_tokens': 10_000_000, 'max_duration_seconds': 7200},
+        })
+    assert invalid.value.status == 400
+    assert 'Tokens (max_tokens): received 10,000,000; allowed integer range is 1–2,000,000' in str(invalid.value)
+    assert 'Seconds (max_duration_seconds): received 7,200; allowed integer range is 1–3,600' in str(invalid.value)
+    assert client._json(f'/v1/sessions/{sid}/diagnoses')['jobs'] == []
     request = {'request_id': 'diagnosis-api', 'mode': 'read_only'}
     job = client._json(f'/v1/sessions/{sid}/diagnoses', request)
     assert client._json(f'/v1/sessions/{sid}/diagnoses', request)['id'] == job['id']

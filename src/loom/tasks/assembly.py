@@ -325,8 +325,22 @@ class TaskAssembly:
             }
         )
 
-    def restore(self, snapshot):
+    def restore(self, snapshot, *, rebind_tools=False):
         snapshot = json_value(snapshot)
+        if rebind_tools:
+            # Only the service's explicit paused binding update enables this migration.
+            current = self.snapshot()
+            mutable = {"knowledge", "external_tools"}
+            def fixed(manifests):
+                return [m for m in manifests if not (m["kind"] == "tools" and m["plugin_id"] in mutable)]
+
+            if fixed(snapshot.get("manifests", [])) != fixed(current["manifests"]):
+                raise ValueError("Only knowledge and external tool bindings can change while paused")
+            snapshot.update(config_digest=self.digest, manifests=current["manifests"])
+            snapshot["tools"] = {
+                key: value if key in mutable else snapshot["tools"][key]
+                for key, value in current["tools"].items()
+            }
         if snapshot.get("schema_version") != 1 or snapshot.get("config_digest") != self.digest:
             raise ValueError("Task plugin configuration changed since checkpoint")
         if json_value(snapshot.get("manifests")) != json_value(self.manifests):
@@ -357,6 +371,9 @@ class TaskAssembly:
         from loom.tools.contracts import CatalogTool, ToolLifecycle
 
         required = tuple(ref.id for ref in refs if ref.id not in self.bindings or self.bindings[ref.id].placement == "control")
+        if self.acceptance_policy:
+            # This fixed collection is the diagnosis contract, including validation and diff tools.
+            required = tuple(ref.id for ref in refs)
         catalog = ToolCatalog(atomic=tuple(CatalogTool(ref, ToolLifecycle("atomic")) for ref in refs))
         return ToolResolver(required_atomic_ids=required).resolve(catalog, AffordanceBudget(**budget_config)).tools
 

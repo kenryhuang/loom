@@ -109,6 +109,8 @@ class LoomService:
                 answer = None
 
             def after(state, emit, db):
+                if command['type'] in {'set_external_tools', 'set_knowledge_bases'} and sid in self.active:
+                    raise ServiceError('Wait for the paused worker to exit before changing tools', 409)
                 if command['type'] == 'restart_task' and sid in self.active:
                     raise ServiceError('Wait for the previous worker to exit before restarting', 409)
                 if answer:
@@ -308,6 +310,8 @@ class LoomService:
                 previous = decode(run.get("counters", encode({})))
                 used = getattr(previous.get("usage"), "total_tokens", 0)
                 run["checkpoint"] = self.store.artifact_in_transaction(db, sid, encode(value), "execution_checkpoint")
+                if run.get("assembly_update_pending") == value.get("assembly_revision"):
+                    run.pop("assembly_update_pending", None)
                 run["counters"] = encode({"llm_calls": value["llm_calls"], "usage": value["usage"]})
                 if value["usage"].total_tokens != used:
                     emit("run.usage.changed", {"total_tokens": value["usage"].total_tokens})

@@ -1,5 +1,5 @@
 import { element } from "../markdown.mjs";
-import { parseBudget } from "../state.mjs";
+import { parseBudget, canUpdateTaskTools } from "../state.mjs";
 
 function panel(title) {
   const root = element("section", "panel");
@@ -178,7 +178,7 @@ export function builtinPanels() {
       return {element: root, update(state) {
         const tools = state.task.external_tool_bindings || [];
         text.textContent = tools.length ? tools.map(t => `${t.connector_name} / ${t.name}`).join(', ') : 'No external tools attached';
-        configure.disabled = !['idle', 'completed'].includes(state.task.state);
+        configure.disabled = !canUpdateTaskTools(state);
       }};
     })
     .register("workflow", () => {

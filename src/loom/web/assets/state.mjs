@@ -1,5 +1,10 @@
 /** Protocol projection, independent of transport and DOM. */
 export class EventGap extends Error {}
+export function canUpdateTaskTools(state) {
+  return ["idle", "completed", "paused"].includes(state.task.state)
+    && (!state.run || ["completed", "stopped", "suspended"].includes(state.run.state))
+    && !state.workspace_blocked?.length && state.input_request?.state !== "pending";
+}
 export const codePoints = (value) => Array.from(value || "");
 export function streamKey(event) {
   const data = event.payload;

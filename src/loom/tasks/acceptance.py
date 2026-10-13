@@ -407,7 +407,10 @@ class AcceptanceController:
         if self.applicable(candidate):
             return True
         if self.data["attempts"] > self.config["max_repairs"]:
-            raise AcceptanceBlocked("Acceptance repair limit reached; unmet checks retained")
+            unmet = "; ".join(f"{row['criterion_id']}: {row.get('reason', row['status'])}"
+                              for row in self.data["results"] if row["status"] != "passed")
+            raise AcceptanceBlocked(f"Acceptance repair limit reached ({self.data['attempts']}/{self.config['max_repairs'] + 1} attempts); "
+                                    f"unmet checks retained: {unmet or self.data['reason']}")
         self.data["attempts"] += 1
         self.data.update(candidate=candidate, state="verifying", reason="Checking completion candidate", results=[])
         self.verifying = True

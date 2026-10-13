@@ -14,6 +14,7 @@ from loom.diagnostics.report import markdown, validate_report
 from loom.diagnostics.runner import objective, registry_factory, specification
 from loom.diagnostics.validation import backend
 from loom.diagnostics.workspace import DiagnosisWorkspace
+from loom.llm.progress import token_budget_status
 from loom.runtime.checkpoints import decode, encode, plain
 from loom.service.contracts import ServiceError, canonical, new_id
 from loom.service.controller import LoomService
@@ -21,17 +22,34 @@ from loom.tasks.config import _read_dotenv, load_task_config
 
 DEFAULTS = {"max_steps": 20, "max_llm_calls": 30, "max_tokens": 300000, "max_duration_seconds": 600, "max_tool_calls": 100}
 MAXIMUM = {"max_steps": 100, "max_llm_calls": 200, "max_tokens": 2000000, "max_duration_seconds": 3600, "max_tool_calls": 500}
+BUDGET_LABELS = {
+    "max_steps": "Steps",
+    "max_llm_calls": "Model calls",
+    "max_tokens": "Tokens",
+    "max_duration_seconds": "Seconds",
+    "max_tool_calls": "Tool calls",
+}
 ACTIVE = {"preparing", "queued", "running", "cancelling"}
 
 
 def budgets(value, previous=None):
-    if not isinstance(value, dict) or set(value) - set(DEFAULTS):
-        raise ServiceError("Invalid diagnosis budgets")
+    if not isinstance(value, dict):
+        raise ServiceError("Diagnosis budgets must be an object")
+    if unknown := set(value) - set(DEFAULTS):
+        raise ServiceError("Unknown diagnosis budget fields: " + ", ".join(sorted(unknown)))
     result = {**(previous or DEFAULTS), **value}
-    if any(type(v) is not int or not 1 <= v <= MAXIMUM[k] for k, v in result.items()):
-        raise ServiceError("Diagnosis budgets exceed allowed limits")
-    if previous and any(result[k] < v for k, v in previous.items()):
-        raise ServiceError("Resume budgets must not decrease")
+    invalid = [
+        f"{BUDGET_LABELS[k]} ({k}): received {v:,}; allowed integer range is 1–{MAXIMUM[k]:,}"
+        if type(v) is int
+        else f"{BUDGET_LABELS[k]} ({k}): received {v!r}; allowed integer range is 1–{MAXIMUM[k]:,}"
+        for k, v in result.items()
+        if type(v) is not int or not 1 <= v <= MAXIMUM[k]
+    ]
+    if invalid:
+        raise ServiceError("Invalid diagnosis budgets: " + "; ".join(invalid))
+    decreased = [f"{BUDGET_LABELS[k]} ({k}): received {result[k]:,}, previous total {v:,}" for k, v in (previous or {}).items() if result[k] < v]
+    if decreased:
+        raise ServiceError("Resume budgets must not decrease: " + "; ".join(decreased))
     return result
 
 
@@ -154,6 +172,7 @@ class SessionDiagnosis:
             "models": list(config["models"]),
             "default_model": state["task"].get("model") or config.get("default_model"),
             "budgets": DEFAULTS,
+            "budget_limits": MAXIMUM,
             "source_root": str(self.root) if self.root else None,
             "source_error": self.source_error,
             "data_dir": str(self.service.store.directory),
@@ -278,10 +297,17 @@ class SessionDiagnosis:
             "seconds": round(run.get("active_seconds", 0), 1),
         }
         job["trace_cursor"] = state["event_cursor"]
+        checkpoint = run.get("checkpoint", {}).get("sha256") if run.get("checkpoint") else None
+        if checkpoint and checkpoint != job.get("_budget_checkpoint"):
+            with suppress(ServiceError, OSError, ValueError):
+                saved = self.runtime._checkpoint_value(state)
+                job["_last_call_tokens"] = saved.get("last_call_tokens", 0)
+                job["_budget_checkpoint"] = checkpoint
+        job["token_budget"] = token_budget_status(job["counters"]["tokens"], job["budgets"]["max_tokens"], job.get("_last_call_tokens", 0))
         with self.runtime.store.transaction() as db:
             rows = db.execute(
                 "SELECT body FROM events WHERE session_id=? AND seq>? AND seq<=? AND json_extract(body,'$.type') IN "
-                "('operation.started','llm.requested','llm.completed','llm.failed','acceptance.verifying') ORDER BY seq",
+                "('operation.started','llm.requested','llm.completed','llm.failed','acceptance.verifying','run.wrapping_up') ORDER BY seq",
                 (state["session_id"], job.get("_audit_cursor", 0), state["event_cursor"]),
             )
             for row in rows:
@@ -301,6 +327,8 @@ class SessionDiagnosis:
                     audit["model_completed"] += 1
                     if not payload.get("response", {}).get("usage", {}).get("total_tokens"):
                         audit["usage_missing"] += 1
+                elif event["type"] == "run.wrapping_up":
+                    job["wrap_up"] = {"reason": payload.get("reason"), "token_budget": payload.get("token_budget"), "seq": event["seq"]}
                 else:
                     job["current_activity"] = "Verifying diagnosis report and citations"
         job["_audit_cursor"] = state["event_cursor"]
@@ -488,6 +516,7 @@ class SessionDiagnosis:
                 write_json(self.directory / jid / "ledger.json", ledger)
                 self.runtime.submit(job["runtime_session_id"], {"command_id": new_id("resume"), "type": "resume", "payload": {}})
             job.update(budgets=limits, state="queued", error=None)
+            job.pop("wrap_up", None)
             self._save(job)
             return self._public(job)
 

@@ -36,7 +36,9 @@ test('diagnosis remains usable when base analysis fails and does not auto-start 
   assert.match(view.diagnosisPanel.textContent, /Historical state missing/);
   assert.equal(view.diagnosisPanel.querySelector('script'), null);
   assert.equal(view.diagnosisPanel.querySelector('.diagnosis-link.inferred') !== null, true);
-  assert.equal(view.diagnosisView.start.parentElement, view.diagnosisView.run.parentElement);
+  assert.equal(view.diagnosisView.start.closest('.diagnosis-toolbar'), view.diagnosisView.run.closest('.diagnosis-toolbar'));
+  assert.equal(view.diagnosisView.start.parentElement.className, 'diagnosis-actions');
+  assert.equal(view.diagnosisView.run.parentElement.className, 'diagnosis-selectors');
   await view.diagnosisView.evidence('ref:1@0:9');
   assert.match(view.diagnosisView.dialog.textContent, /snapshot evidence/);
   assert.equal(view.diagnosisView.dialog.querySelector('img'), null);
@@ -81,6 +83,8 @@ test('worktree verification defaults to auto-delete and merge requires reviewing
   await view.command('start');
   assert.equal(created.mode, 'worktree'); assert.equal(created.cleanup, 'delete');
   assert.match(root.textContent, /Auto-delete · patch retained/);
+  assert.match(view.history.selectedOptions[0].textContent, /loom-diagnosis\/diag1/);
+  assert.equal(view.resume.hidden, false); assert.equal(view.resume.disabled, true);
   assert.match(root.textContent, /final patch/);
   assert.equal(root.querySelector('script'), null);
   assert.equal([...root.querySelectorAll('button')].some(b => b.textContent === 'Merge reviewed changes'), false);
@@ -108,5 +112,51 @@ test('old running backend keeps read-only requests until service restart', async
   assert.match(root.textContent, /Restart the service/);
   await view.command('start');
   assert.equal('mode' in created, false); assert.equal('cleanup' in created, false);
+  view.close(); dom.window.close();
+});
+
+test('budget limits are visible and all invalid fields are explained before start or resume', async () => {
+  const { dom, root } = setup(); let sent = 0;
+  const limits = { max_steps: 100, max_llm_calls: 200, max_tokens: 2000000, max_duration_seconds: 3600, max_tool_calls: 500 };
+  const view = new DiagnosisView(root), client = { ...api(),
+    diagnoses: async () => ({ runs: [], models: [], budgets, budget_limits: limits, jobs: [] }),
+    startDiagnosis: async () => { sent++; return job; },
+    diagnosisCommand: async () => { sent++; return job; },
+  };
+  await view.open(client, 'target');
+  assert.equal(view.budgetFields.max_tokens.max, '2000000');
+  assert.equal(view.budgetRanges.max_tokens.textContent, '1–2,000,000');
+  view.budgetFields.max_tokens.value = '10000000'; view.budgetFields.max_duration_seconds.value = '7200';
+  await view.command('start');
+  assert.equal(sent, 0); assert.equal(view.budgetPanel.open, true);
+  assert.match(view.notice.textContent, /Tokens \(max_tokens\): received 10,000,000; allowed integer range is 1–2,000,000/);
+  assert.match(view.notice.textContent, /Seconds \(max_duration_seconds\): received 7,200; allowed integer range is 1–3,600/);
+  assert.equal(view.budgetFields.max_tokens.getAttribute('aria-invalid'), 'true');
+  assert.equal(document.activeElement, view.budgetFields.max_tokens);
+  view.job = job; view.render(job);
+  assert.equal(view.notice.hidden, false); // Polling another diagnosis must not erase a submission error.
+  assert.match(view.notice.textContent, /Tokens \(max_tokens\)/);
+  await view.command('resume'); assert.equal(sent, 0);
+  view.setBudgets(budgets); view.budgetFields.max_steps.value = '1.5';
+  await view.command('start'); assert.equal(sent, 0);
+  assert.match(view.notice.textContent, /Steps \(max_steps\).*1.5/);
+  view.setBudgets(budgets); await view.command('start'); assert.equal(sent, 1);
+  assert.equal(view.budgetFields.max_tokens.hasAttribute('aria-invalid'), false);
+  view.close(); dom.window.close();
+});
+
+test('diagnosis shows token threshold and preserves the trigger values after summary usage', async () => {
+  const { dom, root } = setup();
+  const stopped = { ...job, state: 'budget_exhausted', counters: { tokens: 235548 },
+    token_budget: { used: 235548, limit: 300000, wrap_up_at: 230000, reserve_tokens: 70000, last_call_tokens: 35000 },
+    wrap_up: { token_budget: { used: 228000, limit: 300000, wrap_up_at: 209162, reserve_tokens: 90838, last_call_tokens: 45419 } },
+  };
+  const view = new DiagnosisView(root);
+  await view.open({ ...api(), diagnoses: async () => ({ runs: [], models: [], budgets, jobs: [stopped] }), diagnosis: async () => stopped }, 'target');
+  assert.match(view.status.textContent, /235,548 \/ 300,000 tokens/);
+  assert.match(view.status.textContent, /Token wrap-up at 209,162/);
+  assert.match(view.status.textContent, /90,838 reserved/);
+  assert.equal(view.resume.disabled, false);
+  assert.match(view.history.selectedOptions[0].textContent, /read-only · diag1/);
   view.close(); dom.window.close();
 });
