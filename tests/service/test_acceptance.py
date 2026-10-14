@@ -25,6 +25,39 @@ def provider_factory(state):
     return provider
 
 
+def external_acceptance_provider(state):
+    from tests.service.test_external_tools import ExternalProvider
+
+    provider = ExternalProvider(state)
+    provider.verification_provider = Judge([{
+        "id": "external-used", "description": "Use the attached external tool", "verifier": "tool_call", "scope": [],
+        "check": {"tool_id": state["task"]["external_tool_ids"][0]},
+    }])
+    return provider
+
+
+def test_durable_external_call_acceptance_uses_recorded_artifact(tmp_path):
+    from tests.external_tools.test_external_tools import cli_config
+
+    service = LoomService(tmp_path / "data", provider_factory=external_acceptance_provider).start()
+    try:
+        connection = service.store.external_tools.save(cli_config())
+        tid = connection["tools"][0]["id"]
+        sid = service.create("external-verified", {"objective": "Use Echo to return hello", "external_tool_ids": [tid],
+                                                  "plan_mode": "off", "task_spec": {"tools": {"collections": ["task_control"]}}})["session_id"]
+        state = wait_state(service, sid, "idle")
+        assert state["acceptance"]["state"] == "passed"
+        result = next(r for r in state["acceptance"]["results"] if r["criterion_id"] == "external-used")
+        assert result["status"] == "passed" and result["method"] == "tool_call"
+        receipt = json.loads(service.store.read_artifact(sid, result["artifact"]["sha256"]))
+        assert receipt["detail"]["successful"] == 1
+        ref = receipt["detail"]["evidence"][0]["artifact"]
+        output = json.loads(service.store.read_artifact(sid, ref["sha256"]))
+        assert json.loads(output["result"]["stdout"]) == {"message": "hello"}
+    finally:
+        service.close()
+
+
 def test_durable_command_acceptance_counts_calls_and_journals_checks(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

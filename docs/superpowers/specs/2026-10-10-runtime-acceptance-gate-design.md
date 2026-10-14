@@ -131,7 +131,8 @@ Host plan acceptance validates structure and capabilities; it is not a mandatory
 | `artifact` | Files, reports and structured deliverables | Check presence, format, schema, content constraints and hashes. Nonempty output does not establish content correctness |
 | `source` | Retrieved sources, resolvable citations and claim provenance | Bind to actual retrieval artifacts. Having a source does not establish that it supports a claim |
 | `semantic` | Intent coverage, research conclusions, writing quality and answers lacking deterministic oracles | Separate bounded, read-only verifier call over the acceptance contract, candidate and relevant evidence; require per-criterion judgments with evidence |
-| `external` | Human acceptance or externally observable outcomes | Only trusted external feedback can pass; missing feedback remains blocked |
+| `tool_call` | Explicit requirements to use a registered tool, including MCP/CLI | Host-recorded successful calls for the current goal; result relevance and goal completion remain semantic checks |
+| `external` (reserved, unavailable) | Human acceptance or externally observable outcomes | No trusted feedback channel is implemented. New plans must retain genuine external approval requirements in `unresolved_requirements`, rather than accepting an always-blocked verifier |
 
 Arbitrary tasks require composable verifiers, not the assumption that every outcome has an automatic oracle. Answer-only tasks use answer requirements and bounded semantic review; subjective or unobservable outcomes may need external acceptance. Retain verification method and assurance separately for deterministic results and model judgments.
 

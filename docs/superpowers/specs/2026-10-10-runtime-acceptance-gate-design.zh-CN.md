@@ -138,7 +138,8 @@ Host 接受计划是结构与能力校验，不意味着每个任务都向用户
 | `artifact` | 文件/报告/结构化产物交付 | 对绑定 resource 或 artifact 做存在性、格式、schema、内容约束及 hash 检查；文件非空不等于内容正确 |
 | `source` | research 的来源读取、引用可解析、结论溯源 | 使用实际检索结果与 artifact 引用；有来源不等于来源支持结论 |
 | `semantic` | 意图覆盖、研究结论、文档质量、无法确定性判定的回答 | 独立、有界的 verifier 调用，只读验收合同、候选交付和相关证据；输出逐项裁决及证据，不复用 solver 的“已经完成”声明 |
-| `external` | 人工验收或环境外的结果 | 只有可信外部反馈可以通过；等待期间标记 blocked，不由 solver 自报通过 |
+| `tool_call` | 明确要求使用已注册工具，包括 MCP/CLI | Host 检查当前目标下成功的真实调用记录；资料有效性、是否支撑交付仍由语义验收判断 |
+| `external`（预留，暂不可用） | 人工验收或环境外的结果 | 当前没有可信反馈通道；新计划将真实外部确认要求保留在 `unresolved_requirements`，不再接受永远 blocked 的 verifier |
 
 “任意任务”意味着 verifier 可组合、可扩展，并不意味着每个任务都有自动 oracle。无 workspace 的问答应检查最终回答与用户目标是否对应；主观偏好或不可观测结果可要求 external 验收。确定性结果与语义裁决分别保留 `method` 和 `assurance`。
 

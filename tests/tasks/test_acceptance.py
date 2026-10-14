@@ -211,7 +211,7 @@ def test_command_failure_is_repaired_and_checked_again(tmp_path):
     assert len(commands) == 2
 
 
-def test_external_condition_blocks_without_repair_spinning(tmp_path):
+def test_unavailable_external_approval_is_rejected_before_execution(tmp_path):
     provider = Judge([{"id": "approval", "description": "Customer accepts", "verifier": "external", "scope": [], "check": {}}])
     result = asyncio.run(
         run_generic_task(
@@ -220,8 +220,9 @@ def test_external_condition_blocks_without_repair_spinning(tmp_path):
     ).unwrap()
     acceptance = result.run_result.context.state.scratch["acceptance"]
     assert acceptance["state"] == "blocked"
-    assert acceptance["attempts"] == 1
-    assert len(provider.calls) == 2  # No semantic call when a required external fact is unavailable.
+    assert acceptance["attempts"] == 0
+    assert "No external approval feedback channel" in acceptance["reason"]
+    assert len(provider.calls) == 2  # One plan correction; no solver or verification calls.
 
 
 def test_invalid_semantic_evidence_cannot_pass(tmp_path):
@@ -405,6 +406,46 @@ class PlanRepairJudge(Judge):
             value = self.proposals[min(len(self.plan_payloads) - 1, len(self.proposals) - 1)]
             return ok(LlmResponse(content=value if isinstance(value, str) else json.dumps(value), usage=TokenUsage(10, 5, 15)))
         return await super().chat(messages, tools, cancellation, **kwargs)
+
+
+def test_single_path_scope_is_normalized_without_spending_a_correction(tmp_path):
+    (tmp_path / "answer.md").write_text("answer")
+    criterion = {"id": "document", "description": "Report delivered", "verifier": "artifact",
+                 "scope": "answer.md", "check": {"path": "answer.md", "contains": ["answer"]}}
+    judge, sink = PlanRepairJudge([{"criteria": [criterion]}]), Sink()
+    result = asyncio.run(run_generic_task(TaskRequest("Deliver answer", workspace=tmp_path), provider=judge,
+                                         options=TaskRunOptions(plan_mode="off"), trace_sink=sink)).unwrap()
+    acceptance = result.run_result.context.state.scratch["acceptance"]
+    assert acceptance["state"] == "passed"
+    assert list(acceptance["plan"]["criteria"][0]["scope"]) == ["answer.md"]
+    assert len(judge.plan_payloads) == 1
+    assert not any(e["type"] == "acceptance.plan.rejected" for e in sink.events)
+    assert next(e for e in sink.events if e["type"] == "acceptance.plan.proposed")["proposal"]["criteria"][0]["scope"] == "answer.md"
+
+
+@pytest.mark.parametrize(("scope", "reason"), [
+    (None, "received NoneType"), ({"path": "app.ts"}, "received dict"),
+    (["a"] * 33, "33 paths; maximum is 32"), (["a", 1], r"scope\[1\].*nonempty path string"),
+    ("", r"scope\[0\].*nonempty path string"), (["   "], r"scope\[0\].*nonempty path string"),
+    ("../outside.txt", "workspace-relative"), ("/tmp/outside.txt", "workspace-relative"),
+    (".env", "secret files"),
+])
+def test_invalid_scope_errors_identify_the_criterion_and_preserve_path_safety(tmp_path, scope, reason):
+    assembly = TaskAssembly(TaskRequest("Check", workspace=tmp_path), plan_mode="off")
+    with pytest.raises(ValueError, match="Criterion ui: .*" + reason):
+        assembly.acceptance.validate_plan({"criteria": [{"id": "ui", "description": "UI works", "verifier": "semantic", "scope": scope}]})
+
+
+def test_single_path_scope_does_not_hide_invalid_source_check(tmp_path):
+    (tmp_path / "answer.md").write_text("answer")
+    wrong = {"id": "document", "description": "Report delivered", "verifier": "source", "scope": "answer.md", "check": {"urls": []}}
+    fixed = {**wrong, "verifier": "artifact", "check": {"path": "answer.md"}}
+    judge = PlanRepairJudge([{"criteria": [wrong]}, {"criteria": [fixed]}])
+    result = asyncio.run(run_generic_task(TaskRequest("Deliver answer", workspace=tmp_path), provider=judge,
+                                         options=TaskRunOptions(plan_mode="off"))).unwrap()
+    assert result.run_result.context.state.scratch["acceptance"]["state"] == "passed"
+    assert len(judge.plan_payloads) == 2
+    assert "Criterion document: source.check.urls" in judge.plan_payloads[1]["repair"]["validation_error"]
 
 
 def test_structured_unresolved_requirements_preserve_blockers_without_schema_retry(tmp_path):

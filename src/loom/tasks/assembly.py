@@ -278,6 +278,7 @@ class TaskAssembly:
         self._acceptance_cp = None
         self._task_runtime = None
         self._acceptance_evidence = []
+        self._acceptance_calls = []
         self._local_usage = TokenUsage()
         self._local_calls = 0
         plugins = [self.environment, self.context_manager, self.runtime, self.workflow, *self.collections]
@@ -319,6 +320,7 @@ class TaskAssembly:
                 "evidence": self._evidence,
                 "acceptance": self.acceptance.snapshot(),
                 "acceptance_evidence": self._acceptance_evidence,
+                "acceptance_calls": self._acceptance_calls,
                 "verified_sources": self._verified_sources,
                 **({"workspace_reports": self._workspace_reports} if self._workspace_reports else {}),
                 "manifests": self.manifests,
@@ -357,6 +359,7 @@ class TaskAssembly:
         if snapshot.get("acceptance"):
             self.acceptance.restore(snapshot["acceptance"])
         self._acceptance_evidence = snapshot.get("acceptance_evidence", [])
+        self._acceptance_calls = snapshot.get("acceptance_calls", [])
         self._evidence = snapshot.get("evidence", [])
         self._verified_sources = snapshot.get("verified_sources", {})
         self._workspace_reports = snapshot.get("workspace_reports", {})
@@ -466,12 +469,10 @@ class TaskAssembly:
                             output = {"value": output}
                         result = ok(replace(result.value, value={**output, "artifact": ref}))
                     self.ingest_tool_result(name, result.value)
-                    if not self.acceptance.verifying:
-                        raw = json.dumps(thaw_json(result.value.value), ensure_ascii=False)
-                        self._acceptance_evidence = [
-                            *self._acceptance_evidence,
-                            {"id": f"tool:{call_id}", "tool": name, "input": value, "output": raw[:3000], "truncated": len(raw) > 3000},
-                        ][-8:]
+                from loom.tasks.acceptance_evidence import record_call
+
+                result = record_call(self, run_id, call_id, name, value, result)
+                if result.ok and isinstance(result.value, Observation):
                     result = ok(self.project_tool_result(name, result.value))
                 if journal_here and not persisted:
                     self.execution.operation_finish(call, {"ok": result.ok, "value": result.value, "error": result.error})
@@ -779,7 +780,9 @@ class TaskAssembly:
     def acceptance_evidence(self):
         if self.acceptance_policy:
             return self.acceptance_policy.evidence(self.acceptance.data["candidate"])
-        return json_value(self._acceptance_evidence)
+        from loom.tasks.acceptance_evidence import evidence
+
+        return json_value(evidence(self))
 
     async def acceptance_model_request(self, runtime, stage, prompt, content, timeout):
         from loom.evaluation.provider import evaluator_provider
