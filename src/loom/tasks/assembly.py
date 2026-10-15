@@ -784,9 +784,10 @@ class TaskAssembly:
 
         return json_value(evidence(self))
 
-    async def acceptance_model_request(self, runtime, stage, prompt, content, timeout):
+    async def acceptance_model_request(self, runtime, stage, prompt, content, timeout, *, protocol=None, mode="text"):
         from loom.evaluation.provider import evaluator_provider
         from loom.llm import LlmMessage, TokenUsage, request_llm_response
+        from loom.llm.structured import UnsupportedFormat, protocol_provider, unsupported_format
         from loom.tasks.acceptance import AcceptanceBlocked
 
         if self.acceptance_provider is None:
@@ -808,6 +809,7 @@ class TaskAssembly:
             "llm_call_id": identifier,
             "usage_role": "verification",
             "acceptance_stage": stage,
+            **({"protocol": {**protocol.identity, "mode": mode}} if protocol else {}),
         }
         if cp:
             cp["llm_calls"] += 1
@@ -825,6 +827,8 @@ class TaskAssembly:
             cap = min(cap, max(1, token_limit - usage.total_tokens))
         stream = not hasattr(self.acceptance_provider, "chat")
         provider = evaluator_provider(self.acceptance_provider, output_tokens=cap, timeout_seconds=timeout, install_http=not stream)
+        if protocol:
+            provider = protocol_provider(provider, protocol, mode)
         timer = asyncio.timeout(timeout)
         try:
             async with timer:
@@ -839,6 +843,8 @@ class TaskAssembly:
                     if not task.done():
                         task.cancel()
                         await asyncio.gather(task, return_exceptions=True)
+            if not response.ok and protocol and mode != "text" and unsupported_format(response.error):
+                raise UnsupportedFormat()
             if timer.expired() or not response.ok:
                 raise AcceptanceBlocked("Acceptance model request timed out" if timer.expired() else response.error.message)
             returned = response.value.usage
@@ -849,6 +855,9 @@ class TaskAssembly:
                 self._local_usage = updated
             (await runtime.trace_sink.emit({"type": "llm.completed", **metadata, "response": response.value, "at": now_iso()})).unwrap()
             return response.value
+        except UnsupportedFormat as exc:
+            (await runtime.trace_sink.emit({"type": "llm.failed", **metadata, "error": str(exc), "at": now_iso()})).unwrap()
+            raise
         except (ValueError, TimeoutError) as exc:
             (await runtime.trace_sink.emit({"type": "llm.failed", **metadata, "error": str(exc), "at": now_iso()})).unwrap()
             raise AcceptanceBlocked(str(exc) or "Acceptance request timed out") from exc

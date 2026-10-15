@@ -101,3 +101,49 @@ def test_empty_source_has_no_invented_duration_or_success_rate():
     assert stats["timing"]["wall_ms"] is None
     assert stats["tools"]["success_rate"] is None
     assert stats["models"]["duration"]["average_ms"] is None
+
+
+def test_model_latency_throughput_aggregates_and_run_scopes():
+    rows = [event("llm.requested", 0, llm_call_id="a", model="one"),
+            event("llm.reasoning.delta", 1, llm_call_id="a", delta="reason"),
+            event("llm.content.delta", 2, llm_call_id="a", delta="answer"),
+            event("llm.completed", 5, llm_call_id="a", response={"usage": {"prompt_tokens": 10, "completion_tokens": 40}}),
+            event("llm.requested", 6, llm_call_id="b", model="one", run_id="other"),
+            event("llm.completed", 10, llm_call_id="b", run_id="other",
+                  response={"duration_ms": 3000, "ttft_ms": 1000, "usage": {"prompt_tokens": 30, "completion_tokens": 40}}),
+            event("llm.requested", 11, llm_call_id="c", model="one"),
+            event("llm.completed", 12, llm_call_id="c", response={"usage": {"completion_tokens": 4}})]
+    stats, _ = analyze(rows)
+    first, second, missing = sorted(stats["calls"]["models"], key=lambda r: r["llm_call_id"])
+    assert (first["ttft_ms"], first["tps"], first["performance_basis"]) == (1000, 10, "timestamps")
+    assert (second["duration_ms"], second["ttft_ms"], second["tps"], second["duration_basis"]) == (3000, 1000, 20, "monotonic")
+    assert missing["ttft_ms"] is None and missing["tps"] is None
+    model = stats["models"]["by_model"][0]
+    assert model["ttft"]["average_ms"] == 1000
+    assert model["tps"] == {"measured": 2, "missing": 1, "average": 15, "p95": 20, "max": 20}
+    assert model["prompt_tokens"]["known"] == 40 and model["prompt_tokens"]["max"] == 30
+    assert stats["by_run"]["other"]["models"]["tps"]["average"] == 20
+    assert stats["quality"]["missing_ttft_calls"] == 1
+
+
+@pytest.mark.parametrize(("first", "end", "usage", "ttft", "tps"), [
+    (2, 2, {"completion_tokens": 10}, 1000, None),
+    (0, 3, {"completion_tokens": 10}, None, None),
+    (4, 3, {"completion_tokens": 10}, None, None),
+    (2, 3, {}, 1000, None),
+])
+def test_unusable_stream_timing_or_missing_usage_does_not_invent_throughput(first, end, usage, ttft, tps):
+    stats, _ = analyze([event("llm.requested", 1, llm_call_id="a"),
+                        event("llm.content.delta", 1, llm_call_id="a", delta=""),
+                        event("llm.tool_call.started", first, llm_call_id="a", tool_name="read_file"),
+                        event("llm.completed", end, llm_call_id="a", response={"usage": usage})])
+    row = stats["calls"]["models"][0]
+    assert row["ttft_ms"] == ttft and row["tps"] == tps
+
+
+def test_failed_call_can_have_ttft_but_not_completed_output_throughput():
+    stats, _ = analyze([event("llm.requested", 1, llm_call_id="a"),
+                        event("llm.content.delta", 2, llm_call_id="a", delta="partial"),
+                        event("llm.failed", 3, llm_call_id="a", error={"code": "TIMEOUT"})])
+    row = stats["calls"]["models"][0]
+    assert row["status"] == "failed" and row["ttft_ms"] == 1000 and row["tps"] is None

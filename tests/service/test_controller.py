@@ -335,7 +335,8 @@ def test_complete_preserves_success_and_restart_creates_a_fresh_goal_execution(t
         assert len(reports) == 2
         result = json.loads(reports[-1])
         assert result['objective'] == 'Investigate parser'
-        assert result['history'] == []
+        assert result['history']
+        assert any('Investigate parser' in message['content'] for message in result['history'])
         assert service.submit(sid, restart) == receipt
         assert service.snapshot(sid)['run']['id'] == second['run']['id']
     finally:
@@ -380,5 +381,124 @@ def test_restart_discards_checkpoint_and_usage_but_preserves_pending_guidance(tm
         assert [m['content'] for m in pending] == ['Inspect code\n\nAlso check tests']
         with pytest.raises(ServiceError, match='Pause or stop'):
             command(service, sid, 'restart_task')
+    finally:
+        service.close()
+
+
+def test_edit_and_restart_uses_new_assembly_and_retains_old_results_as_background(tmp_path):
+    import json
+    from copy import deepcopy
+
+    from tests.service.fakes import turn_prompt_provider_factory
+
+    service = LoomService(tmp_path / 'data', provider_factory=turn_prompt_provider_factory).start()
+    try:
+        sid = create(service, tmp_path / 'workspace', 'Inspect the original problem')
+        first = wait_state(service, sid, 'idle')
+        deadline = time.monotonic() + 3
+        while service.active and time.monotonic() < deadline:
+            time.sleep(.02)
+        spec = deepcopy(first['task']['task_spec'])
+        spec['context'] = {'plugin': 'research_context'}
+        spec['workflow'] = {'plugin': 'dynamic'}
+        spec['tools']['collections'] = ['task_control', 'document_outputs']
+        service.submit(sid, {'command_id': 'edit-restart', 'type': 'restart_task',
+                            'expected_task_revision': first['task']['revision'], 'payload': {'task': {
+                                'objective': 'Write a new analysis', 'title': 'Updated task', 'model': 'alternate',
+                                'task_spec': spec, 'limits': {'max_tokens': 123456, 'max_steps': 15}}}})
+        second = wait_state(service, sid, 'idle')
+        assert second['title'] == 'Updated task'
+        assert second['task']['model'] == 'alternate'
+        assert second['task']['limits']['max_tokens'] == 123456
+        assert second['task']['limits']['max_steps'] == 15
+        assert second['task']['limits']['max_llm_calls'] == first['task']['limits']['max_llm_calls']
+        assert second['task']['task_spec']['context']['plugin'] == 'research_context'
+        assert second['task']['task_spec']['workflow']['plugin'] == 'dynamic'
+        assert second['run']['id'] != first['run']['id']
+        result = json.loads([m['content'] for m in second['messages'] if m['role'] == 'assistant'][-1])
+        assert result['objective'] == 'Write a new analysis'
+        assert any(m['role'] == 'assistant' and 'Inspect the original problem' in m['content'] for m in result['history'])
+        calls = [e for e in service.events(sid, limit=1000) if e['type'] == 'llm.requested' and e['run_id'] == second['run']['id']]
+        names = {t['function']['name'] for e in calls for t in e['payload'].get('tools') or []}
+        assert 'read_file' not in names and 'shell_execute' not in names
+        assert 'complete_node' in names and 'create_report' in names
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize('changes', [
+    {'limits': {'max_tokens': 0}}, {'task_spec': {'workflow': {'plugin': 'missing'}}},
+    {'external_tool_ids': ['missing']}, {'plugin_version_refs': []}, {'objective': ''},
+    {'plan_mode': 'invalid'}, {'task_spec': None, 'plan_mode': 'invalid'},
+])
+def test_invalid_restart_configuration_is_atomic(tmp_path, changes):
+    from loom.service.contracts import ServiceError
+
+    service = LoomService(tmp_path / 'data')
+    try:
+        sid = service.create('empty', {})['session_id']
+        before = service.store.snapshot(sid)
+        with pytest.raises(ServiceError):
+            command(service, sid, 'restart_task', task={'objective': 'New task', **changes})
+        assert service.store.snapshot(sid) == before
+    finally:
+        service.close()
+
+
+def test_restart_rebinds_workspace_claims_and_projects_updated_configuration(tmp_path):
+    from loom.client.projection import SessionProjection
+    from loom.service.contracts import ServiceError
+
+    service = LoomService(tmp_path / 'data')
+    try:
+        sid = service.create('empty', {})['session_id']
+        workspace = tmp_path / 'other'
+        workspace.mkdir()
+        before = service.snapshot(sid)
+        projection = SessionProjection(before)
+        with pytest.raises(ServiceError, match='Workspace must match'):
+            command(service, sid, 'restart_task', task={'objective': 'New task', 'workspace': str(workspace), 'task_spec': before['task']['task_spec']})
+        assert service.snapshot(sid) == before
+        command(service, sid, 'restart_task', task={'objective': 'New task', 'workspace': str(workspace), 'title': 'New title'})
+        after = service.snapshot(sid)
+        assert after['task']['workspace'] == str(workspace)
+        assert after['task']['task_spec']['session_environment']['resources'][0]['uri'] == str(workspace)
+        assert after['task']['resource_claims'] != before['task']['resource_claims']
+        for event in service.events(sid, before['event_cursor']):
+            projection.apply(event)
+        assert projection.snapshot['task'] == after['task']
+        assert projection.snapshot['title'] == after['title']
+        current = service.store.snapshot(sid)
+        with pytest.raises(ServiceError, match='revision conflict'):
+            service.submit(sid, {'command_id': 'stale', 'type': 'restart_task', 'payload': {}, 'expected_task_revision': before['task']['revision']})
+        assert service.store.snapshot(sid) == current
+    finally:
+        service.close()
+
+
+def test_restart_rejects_removed_model_without_saving_changes(tmp_path):
+    from loom.service.contracts import ServiceError
+
+    config = tmp_path / 'config.yaml'
+    config.write_text('default_model: main\nmodels:\n  main:\n    model: available\n    api_key: test-only\n')
+    service = LoomService(tmp_path / 'data', config_path=config)
+    try:
+        sid = service.create('empty', {})['session_id']
+        before = service.store.snapshot(sid)
+        with pytest.raises(ServiceError, match='not configured'):
+            command(service, sid, 'restart_task', task={'objective': 'New task', 'model': 'removed'})
+        assert service.store.snapshot(sid) == before
+    finally:
+        service.close()
+
+
+def test_restart_window_edit_updates_built_in_plugin_cap(tmp_path):
+    service = LoomService(tmp_path / 'data')
+    try:
+        sid = service.create('empty', {'task_spec': {'context': {'plugin': 'bounded_context', 'max_window_chars': 24000}}})['session_id']
+        command(service, sid, 'restart_task', task={'objective': 'Inspect source', 'limits': {'max_window_chars': 2400000}})
+        task = service.snapshot(sid)['task']
+        assert task['limits']['max_window_chars'] == 2400000
+        assert task['task_spec']['context']['max_window_chars'] == 2400000
     finally:
         service.close()

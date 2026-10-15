@@ -80,7 +80,7 @@ def build_episode_graph(events: Iterable[NormalizedEvent]) -> EpisodeGraph:
                 if event.event_type == "llm.requested":
                     bucket["requested"] = True
                     bucket["requested_event"] = event
-                if event.event_type in {"llm.stream.started", "llm.stream.completed"} or event.event_type.endswith(".delta"):
+                if event.event_type in {"llm.stream.started", "llm.stream.completed", "llm.tool_call.started"} or event.event_type.endswith(".delta"):
                     bucket["stream_events"].append(event)
                 if event.event_type == "llm.completed":
                     bucket["completed"] = True

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from loom.core import now_iso
 from loom.service.artifacts import ServiceArtifacts
-from loom.service.contracts import EVENT_SCHEMA, ServiceError, canonical, new_id, object_value, text, validate_command, validate_create
+from loom.service.contracts import EDITABLE_TASK_FIELDS, EVENT_SCHEMA, ServiceError, canonical, new_id, object_value, text, validate_command, validate_create
 
 
 class SessionStore:
@@ -158,6 +158,42 @@ class SessionStore:
         state["messages"].append(message)
         return message
 
+    def _restart_configuration(self, task, changes):
+        value = {key: task.get(key) for key in EDITABLE_TASK_FIELDS}
+        value.update(changes)
+        value["limits"] = {**task["limits"], **object_value(changes.get("limits", {}), "limits")}
+        if "workspace" in changes and "task_spec" not in changes:
+            spec = json.loads(canonical(task["task_spec"]))
+            resource_id = spec["execution_runtime"].get("workspace_resource", "workspace")
+            resources = spec["session_environment"].get("resources", [])
+            existing = next((r for r in resources if r["id"] == resource_id), {})
+            resources = [r for r in resources if r["id"] != resource_id]
+            if changes["workspace"]:
+                resources.append({"id": resource_id, "kind": "directory", "access": existing.get("access", "read-write"),
+                                  "uri": changes["workspace"]})
+                spec["execution_runtime"]["workspace_resource"] = resource_id
+            else:
+                spec["execution_runtime"].pop("workspace_resource", None)
+            spec["session_environment"]["resources"] = resources
+            value["task_spec"] = spec
+        workflow = value["task_spec"].get("workflow") if isinstance(value["task_spec"], dict) else None
+        context = value["task_spec"].get("context") if isinstance(value["task_spec"], dict) else None
+        if "max_window_chars" in changes.get("limits", {}) and isinstance(context, dict) and context.get("plugin") in {"bounded_context", "research_context"}:
+            value["task_spec"] = json.loads(canonical(value["task_spec"]))
+            value["task_spec"]["context"]["max_window_chars"] = value["limits"]["max_window_chars"]
+        if "plan_mode" in changes and isinstance(workflow, dict) and workflow.get("plugin") == "legacy_planning":
+            value["task_spec"] = json.loads(canonical(value["task_spec"]))
+            value["task_spec"]["workflow"]["mode"] = changes["plan_mode"]
+        # Restart resolves current registry bindings, rather than replaying pinned tool metadata.
+        self.knowledge.validate_ids(value.get("knowledge_base_ids") or [])
+        updated = validate_create(value, plugin_registry=self.plugin_registry_factory() if self.plugin_registry_factory else None,
+                                  external_bindings=self.external_tools.resolve(value.get("external_tool_ids") or []))
+        if "workspace" in changes:
+            requested = str(Path(changes["workspace"]).expanduser().resolve()) if changes["workspace"] is not None else None
+            if updated["workspace"] != requested:
+                raise ServiceError("Workspace must match the directory bound by task_spec.execution_runtime.workspace_resource")
+        return updated
+
     def submit(self, sid, command, *, after=None):
         command = validate_command(command)
         cid = command["command_id"]
@@ -215,10 +251,11 @@ class SessionStore:
             elif kind == "reopen_task" and task["state"] != "completed":
                 raise ServiceError("Task is not completed", 409)
             elif kind == 'restart_task':
-                if not task['objective']:
+                if not payload.get('task', {}).get('objective', task['objective']):
                     raise ServiceError('Enter a task before restarting', 409)
                 if task['state'] not in {'idle', 'paused', 'failed', 'completed'} or (state['run'] and state['run']['state'] == 'running'):
                     raise ServiceError('Pause or stop active execution before restarting', 409)
+                updated_task = self._restart_configuration(task, payload.get("task", {}))
             elif kind in {"pause", "stop_run"} and task["state"] == "completed":
                 raise ServiceError("Task is completed", 409)
             self.append(db, state, "command.accepted", {"type": kind}, command_id=cid)
@@ -270,6 +307,11 @@ class SessionStore:
                 task["state"] = "idle"
             elif kind == 'restart_task':
                 previous_run = state['run']
+                if updated_task["objective"] != task["objective"]:
+                    task["goal_revision"] += 1
+                task.update(updated_task)
+                state["title"] = task["title"]
+                self.append(db, state, "task.configuration.changed", {**updated_task, "goal_revision": task["goal_revision"]}, command_id=cid)
                 if request and request['state'] == 'pending':
                     request['state'] = 'cancelled'
                     self.append(db, state, 'input.cancelled', request, command_id=cid)
@@ -277,7 +319,8 @@ class SessionStore:
                     self.append(db, state, 'run.stopped', {'reason': 'Restarted from scratch'}, command_id=cid)
                 pending = [m for m in state['messages'] if m['role'] == 'user' and m['seq'] > state['input_cursor']]
                 # Pending guidance belongs to the new goal once, not to an abandoned checkpoint.
-                content = '\n\n'.join([task['objective'], *[m['content'] for m in pending if m['content'] != task['objective']]])
+                guidance = [] if "objective" in payload.get("task", {}) else [m['content'] for m in pending if m['content'] != task['objective']]
+                content = '\n\n'.join([task['objective'], *guidance])
                 for message in pending:
                     self.applied(db, state, message['command_id'])
                 state['input_cursor'] = state['event_cursor']

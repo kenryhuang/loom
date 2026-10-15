@@ -11,7 +11,7 @@ from math import ceil, isfinite
 from loom.core import thaw_json
 from loom.trace_analysis.links import tool_output
 
-VERSION = "loom.base-facts.v1"
+VERSION = "loom.base-facts.v2"
 STATUSES = ("success", "failed", "cancelled", "incomplete", "unknown")
 FAMILIES = {
     "read_file": "file_read", "list_directory": "file_read", "write_file": "file_write", "edit_file": "file_write",
@@ -94,6 +94,38 @@ def distribution(values):
             "p95_ms": known[ceil(len(known) * .95) - 1] if known else None, "max_ms": max(known) if known else None}
 
 
+def model_performance(item, elapsed, usage):
+    """Prefer monotonic request measurements; legacy streams use event timestamps."""
+    end = item.completed_event or item.failed_event
+    response = end.payload.get("response", {}) if end else {}
+    response = response if isinstance(response, Mapping) else {}
+
+    def valid(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value) and value >= 0
+
+    measured = response.get("duration_ms")
+    ttft = response.get("ttft_ms")
+    basis = "monotonic" if valid(ttft) and valid(measured) else "missing"
+    if valid(measured):
+        elapsed = measured
+    if basis == "missing":
+        ttft = None
+        start_at = timestamp(item.requested_event.at) if item.requested_event else None
+        end_at = timestamp(end.at) if end else None
+        first = next((event for event in item.stream_events if event.payload.get("delta") or
+                      (event.event_type == "llm.tool_call.started" and event.payload.get("tool_name"))), None)
+        first_at = timestamp(first.at) if first else None
+        if start_at is not None and first_at is not None and first_at >= start_at and (end_at is None or first_at <= end_at):
+            ttft, basis = first_at - start_at, "timestamps"
+    if ttft is not None and elapsed is not None and ttft > elapsed:
+        ttft, basis = None, "missing"
+    output = usage.get("completion_tokens")
+    generation = elapsed - ttft if elapsed is not None and ttft is not None else None
+    tps = output * 1000 / generation if item.completed_event and valid(output) and generation is not None and generation > 0 else None
+    return {"duration_ms": elapsed, "ttft_ms": ttft, "tps": tps, "performance_basis": basis,
+            "duration_basis": "monotonic" if valid(measured) else None}
+
+
 def aggregate(rows):
     counts = Counter(r["status"] for r in rows)
     resolved = counts["success"] + counts["failed"]
@@ -103,6 +135,12 @@ def aggregate(rows):
               "failure_reasons": dict(Counter(r["failure_reason"] for r in rows if r.get("failure_reason"))),
               "truncated_outputs": sum(r.get("output_truncated") is True for r in rows),
               "explicit_retries": sum(bool(r.get("retry_of")) for r in rows)}
+    result["ttft"] = distribution([r.get("ttft_ms") for r in rows])
+    speeds = sorted(r["tps"] for r in rows if r.get("tps") is not None)
+    result["tps"] = {"measured": len(speeds), "missing": len(rows) - len(speeds),
+                     "average": sum(speeds) / len(speeds) if speeds else None,
+                     "p95": speeds[ceil(len(speeds) * .95) - 1] if speeds else None,
+                     "max": max(speeds) if speeds else None}
     for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
         values = [r.get("usage", {}).get(field) for r in rows]
         known = [v for v in values if v is not None]
@@ -145,6 +183,9 @@ def call_ledger(store, graph, tokens):
             if kind == "model":
                 row.update(model=p.get("model") or "unknown", status=model_status(item, graph.events),
                            llm_call_id=item.llm_call_id, usage=ledger.get(item.id, {}))
+                performance = model_performance(item, elapsed, row["usage"])
+                performance["duration_basis"] = performance["duration_basis"] or basis
+                row.update(performance)
                 error = end.payload.get("error", {}) if end else {}
                 code = str(error.get("code", "")) if isinstance(error, Mapping) else ""
                 if row["status"] == "failed":
@@ -294,7 +335,9 @@ def build_base_statistics(store, graph, token_rows, *, coverage=None, acceptance
                         "token_basis": "provider_reported; missing usage is not zero; semantic efficiency is not assessed",
                         "retry_basis": "explicit retry_of only; repeated calls are not automatically retries",
                         "unavailable": ["provider cache/reasoning usage unless recorded", "provider-internal attempts",
-                                        "time to first token", "monetary cost"]}}
+                                        "monetary cost"],
+                        "missing_ttft_calls": sum(r["ttft_ms"] is None for r in calls["models"]),
+                        "missing_tps_calls": sum(r["tps"] is None for r in calls["models"])}}
     lifecycle = {"run.started": "running", "run.completed": "completed", "run.failed": "failed", "run.stopped": "stopped",
                  "run.paused": "paused", "run.suspended": "suspended"}
     result["execution_status"] = next((e.payload.get("state") if e.event_type == "run.state.changed" else lifecycle[e.event_type]

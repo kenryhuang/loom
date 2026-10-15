@@ -113,6 +113,15 @@ class LoomService:
                     raise ServiceError('Wait for the paused worker to exit before changing tools', 409)
                 if command['type'] == 'restart_task' and sid in self.active:
                     raise ServiceError('Wait for the previous worker to exit before restarting', 409)
+                if command['type'] == 'restart_task' and self.config_path and not self.provider_factory:
+                    from loom.tasks.config import load_task_config
+
+                    configured = load_task_config(self.config_path)
+                    if not configured.ok:
+                        raise ServiceError("Could not load model configuration for restart", 422)
+                    model = state["task"]["model"] or configured.value.default_model
+                    if model not in configured.value.models:
+                        raise ServiceError(f"Model {model!r} is not configured; select an available model", 422)
                 if answer:
                     self._reconcile(state, emit, db, answer)
                 if command["type"] in {"stop_run", "complete_task"} and (sid not in self.active or not state["run"] or state["run"]["state"] != "running"):

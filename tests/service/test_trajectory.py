@@ -82,7 +82,7 @@ def test_analysis_restores_source_links_usage_and_pins_evidence_across_updates_a
         assert analysis["tools"][0]["round_id"] == analysis["rounds"][0]["id"]
         assert analysis["tools"][0]["status"] == "failed"
         statistics = analysis["base"]["statistics"]
-        assert statistics["basic"]["events"]["raw"] == statistics["basic"]["events"]["analyzed"] + 1
+        assert statistics["basic"]["events"]["raw"] == statistics["basic"]["events"]["analyzed"]
         assert statistics["tools"]["failed"] == 1
         assert statistics["models"]["total_tokens"]["known"] == 15
         assert statistics["by_run"]["run"]["models"]["calls"] == 1
@@ -131,5 +131,37 @@ def test_empty_session_and_missing_cross_session_artifact_are_explicit(tmp_path)
         assert result["analysis"]["coverage"]["missing_artifacts"]
         assert result["analysis"]["coverage"]["unscoped_model_events"] == 1
         assert "other-session" not in json.dumps(result)
+    finally:
+        manager.close()
+
+
+def test_analysis_samples_first_output_per_run_and_exposes_model_performance(tmp_path):
+    store = SessionStore(tmp_path / "data")
+    sid = session(store, tmp_path)
+
+    def append(state, emit, db):
+        for run, first, tokens in (("a", 1, 40), ("b", 2, 60)):
+            state["run"] = {"id": run, "state": "running"}
+            scope = {"trace_id": "trace", "loop_id": "loop", "step_number": 0, "llm_call_id": "same"}
+
+            def record(kind, second, scope=scope, **extra):
+                emit(kind, {**scope, "at": f"2026-10-10T00:00:{second:02d}Z", **extra})
+
+            record("llm.requested", 0, model="test")
+            record("llm.content.delta", 0, delta="")
+            record("llm.reasoning.delta", first, delta="first output")
+            record("llm.content.delta", 3, delta="more output")
+            record("llm.completed", 5, response={"content": "done", "usage": {"completion_tokens": tokens}})
+
+    store.update(sid, append)
+    manager = SessionTrajectory(store)
+    try:
+        data = finished(manager, sid, manager.start(sid)["id"])["analysis"]
+        rounds = {r["run_id"]: r for r in data["rounds"]}
+        assert (rounds["a"]["ttft_ms"], rounds["a"]["tps"]) == (1000, 10)
+        assert (rounds["b"]["ttft_ms"], rounds["b"]["tps"]) == (2000, 20)
+        stats = data["base"]["statistics"]
+        assert stats["basic"]["events"]["raw"] - stats["basic"]["events"]["analyzed"] == 4
+        assert stats["models"]["tps"]["average"] == 15
     finally:
         manager.close()

@@ -1,6 +1,7 @@
 import { renderBaseEvaluation } from "./behavior-evaluation.mjs";
 import { renderBehaviorSequence } from "./behavior-sequence.mjs";
 import { element } from "../markdown.mjs";
+import { seconds, table, badge } from "./dashboard.mjs";
 import { ReasoningView } from "./reasoning.mjs";
 import { EvaluationView } from "./evaluation.mjs";
 import { DiagnosisView } from "./diagnosis.mjs";
@@ -359,160 +360,110 @@ export class TrajectoryView {
     callSection.append(callHeading, filters, this.timeline);
     this.body.append(callSection);
     this.renderRounds();
-    const unlinked = data.tools.filter((tool) => !tool.round_id);
-    if (unlinked.length) {
-      const section = element("details", "trajectory-section");
-      section.append(
-        element(
-          "summary",
-          "",
-          `Tools without an established model-call link · ${unlinked.length}`,
-        ),
-      );
-      for (const tool of unlinked) section.append(this.tool(tool));
-      this.body.append(section);
-    }
   }
   renderRounds() {
     this.timeline.replaceChildren();
-    const data = this.analysis,
-      query = this.search.value.trim().toLowerCase();
-    const maxTokens = Math.max(
-      1,
-      ...data.rounds.map((row) => row.usage.total_tokens || 0),
-    );
-    let shown = 0;
-    for (const [index, round] of data.rounds.entries()) {
-      const tools = data.tools.filter((tool) => tool.round_id === round.id);
-      if (this.runFilter.value && round.run_id !== this.runFilter.value)
-        continue;
-      if (
-        this.statusFilter.value === "failed" &&
-        round.status !== "failed" &&
-        !tools.some((tool) => tool.status === "failed")
-      )
-        continue;
-      if (this.statusFilter.value === "partial" && round.status !== "partial")
-        continue;
-      if (
-        query &&
-        !`${round.model} ${round.summary} ${round.llm_call_id} ${tools.map((tool) => tool.tool_id).join(" ")}`
-          .toLowerCase()
-          .includes(query)
-      )
-        continue;
-      shown++;
-      const node = element("details", "trajectory-round");
-      node.dataset.roundId = round.id;
-      const summary = element("summary"),
-        title = element("div", "trajectory-call-title");
-      title.append(
-        element("strong", "", `${index + 1}. ${round.model || "Model call"}`),
-        element(
-          "span",
-          "muted small",
-          preview(round.summary) || "No response content recorded",
-        ),
-      );
-      const stats = element("div", "trajectory-call-stats");
-      stats.append(
-        element(
-          "span",
-          "small",
-          `${number(round.usage.prompt_tokens)} in / ${number(round.usage.completion_tokens)} out`,
-        ),
-      );
-      const meter = element("meter");
-      meter.max = maxTokens;
-      meter.value = round.usage.total_tokens || 0;
-      meter.setAttribute("aria-label", `Call ${index + 1} recorded tokens`);
-      stats.append(meter);
-      const status = element(
-        "span",
-        `status ${round.status === "failed" ? "failed" : ""}`,
-        round.status,
-      );
-      summary.append(title, stats, status);
-      const body = element("div", "trajectory-round-detail");
-      body.append(
-        element(
-          "p",
-          "muted small",
-          `Event ${round.seq} · ${round.at || "Time unknown"} · ${round.duration_ms == null ? "Duration unknown" : `${number(round.duration_ms)} ms`} · ${round.run_id}`,
-        ),
-      );
-      const evidence = element("div", "trajectory-actions");
-      if (round.request_ref)
-        evidence.append(this.evidenceButton("Request", round.request_ref));
-      if (round.response_ref)
-        evidence.append(this.evidenceButton("Response", round.response_ref));
-      for (const ref of round.evidence_refs)
-        if (
-          !round.request_ref ||
-          ref.line_number !== round.request_ref.line_number
-        )
-          if (
-            !round.response_ref ||
-            ref.line_number !== round.response_ref.line_number
-          )
-            evidence.append(this.evidenceButton("Failure evidence", ref));
-      body.append(
-        evidence,
-        element(
-          "p",
-          "small",
-          `Context: ${number(round.context.message_count)} messages · ${round.context_changes.added} added · ${round.context_changes.retained} retained · ${round.context_changes.removed} removed`,
-        ),
-      );
-      for (const tool of tools) body.append(this.tool(tool));
-      const extra = element("div");
-      body.append(extra);
-      let loaded = false;
-      node.addEventListener("toggle", async () => {
-        if (!node.open || loaded) return;
-        loaded = true;
-        const signal = this.abort.signal;
-        extra.textContent = "Loading context and verification evidence…";
-        try {
-          const detail = await this.api.trajectoryRound(
-            this.sessionId,
-            this.job.id,
-            round.id,
-            signal,
-          );
-          if (signal.aborted) return;
-          extra.replaceChildren();
-          for (const [label, rows] of [
-            ["Context changes", detail.context_deltas],
-            ["Recorded verification evidence", detail.verification_evidence],
-          ]) {
-            const disclosure = element("details", "trajectory-section");
-            disclosure.append(
-              element("summary", "", label),
-              element("pre", "", JSON.stringify(rows, null, 2)),
-            );
-            extra.append(disclosure);
-          }
-        } catch (error) {
-          if (signal.aborted) return;
-          extra.textContent = `Could not load call details: ${error.message}. Close and reopen to retry.`;
-          loaded = false;
-          this.onError(error);
-        }
-      });
-      node.append(summary, body);
-      this.timeline.append(node);
+    const data = this.analysis, query = this.search.value.trim().toLowerCase();
+    const matches = (call, text) => {
+      if (this.runFilter.value && call.run_id !== this.runFilter.value) return false;
+      if (this.statusFilter.value && call.status !== this.statusFilter.value) return false;
+      return !query || text.toLowerCase().includes(query);
+    };
+    const makeTable = (title, headers) => {
+      const section = element("section", "call-explorer-group");
+      section.append(element("h4", "", title));
+      const node = table(section, headers, []);
+      const body = node.querySelector("tbody"); body.replaceChildren();
+      node.setAttribute("aria-label", title);
+      this.timeline.append(section);
+      return body;
+    };
+    const empty = (body, columns, text) => {
+      if (body.children.length) return;
+      const row = element("tr"), cell = element("td", "empty-state", text);
+      cell.colSpan = columns; row.append(cell); body.append(row);
+    };
+    const tools = makeTable("Tool calls", ["Tool call", "Execute time", "Status"]);
+    for (const tool of data.tools) {
+      if (!matches(tool, `${tool.tool_id} ${tool.tool_call_id || ""} ${tool.output_excerpt || ""}`)) continue;
+      this.callRow(tools, tool.id, [tool.tool_id, seconds(tool.duration_ms), this.callStatus(tool.status)], this.tool(tool));
     }
-    if (!shown)
-      this.timeline.append(
-        element(
-          "p",
-          "empty-state",
-          data.rounds.length
-            ? "No calls match these filters."
-            : "No model calls have been recorded in this session yet.",
-        ),
-      );
+    empty(tools, 3, data.tools.length ? "No calls match these filters." : "No tool calls have been recorded in this session yet.");
+    const models = makeTable("Model calls", ["Model", "TTFT", "TPS", "Token in", "Token out", "Duration", "Status"]);
+    for (const round of data.rounds) {
+      if (!matches(round, `${round.model} ${round.summary} ${round.llm_call_id}`)) continue;
+      const {body, load} = this.modelDetail(round);
+      this.callRow(models, round.id, [round.model || "Unknown model", seconds(round.ttft_ms),
+        round.tps == null ? "—" : `${number(Math.round(round.tps * 10) / 10)} tok/s`,
+        number(round.usage.prompt_tokens), number(round.usage.completion_tokens), seconds(round.duration_ms), this.callStatus(round.status)], body, load);
+    }
+    empty(models, 7, data.rounds.length ? "No calls match these filters." : "No model calls have been recorded in this session yet.");
+  }
+  callStatus(status) {
+    const name = {complete: "Success", partial: "Incomplete", failed: "Failed", cancelled: "Cancelled", unknown: "Unknown"}[status] || status;
+    return badge(name, status === "complete" ? "success" : status);
+  }
+  callRow(target, id, values, content, load) {
+    const row = element("tr", "call-explorer-row"), detail = element("tr", "call-explorer-detail");
+    const cell = element("td"); cell.colSpan = values.length;
+    detail.hidden = true; cell.append(content); detail.append(cell);
+    const toggle = element("button", "quiet call-explorer-toggle", `▸ ${values[0]}`);
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", "false");
+    row.dataset.callId = id;
+    detail.id = `call-detail-${id}`;
+    toggle.setAttribute("aria-controls", detail.id);
+    toggle.addEventListener("click", () => {
+      detail.hidden = !detail.hidden;
+      toggle.setAttribute("aria-expanded", String(!detail.hidden));
+      toggle.textContent = `${detail.hidden ? "▸" : "▾"} ${values[0]}`;
+      if (!detail.hidden) load?.();
+    });
+    for (const [index, value] of values.entries()) {
+      const cell = element("td");
+      if (!index) cell.append(toggle);
+      else if (value?.nodeType) cell.append(value);
+      else cell.textContent = value;
+      row.append(cell);
+    }
+    target.append(row, detail);
+  }
+  modelDetail(round) {
+    const body = element("div", "trajectory-round-detail");
+    body.append(element("p", "muted small", `Event ${round.seq} · ${round.at || "Time unknown"} · ${round.run_id} · ${round.llm_call_id}`));
+    if (round.summary) body.append(element("p", "call-response-preview", preview(round.summary)));
+    const evidence = element("div", "trajectory-actions");
+    if (round.request_ref) evidence.append(this.evidenceButton("Request", round.request_ref));
+    if (round.response_ref) evidence.append(this.evidenceButton("Response", round.response_ref));
+    for (const ref of round.evidence_refs)
+      if (ref.line_number !== round.request_ref?.line_number && ref.line_number !== round.response_ref?.line_number)
+        evidence.append(this.evidenceButton("Failure evidence", ref));
+    body.append(evidence, element("p", "small",
+      `Context: ${number(round.context.message_count)} messages · ${round.context_changes.added} added · ${round.context_changes.retained} retained · ${round.context_changes.removed} removed`));
+    const extra = element("div"); body.append(extra);
+    let loaded = false;
+    const load = async () => {
+      if (loaded) return;
+      loaded = true;
+      const signal = this.abort.signal;
+      extra.textContent = "Loading context and verification evidence…";
+      try {
+        const detail = await this.api.trajectoryRound(this.sessionId, this.job.id, round.id, signal);
+        if (signal.aborted) return;
+        extra.replaceChildren();
+        for (const [label, rows] of [["Context changes", detail.context_deltas], ["Recorded verification evidence", detail.verification_evidence]]) {
+          const disclosure = element("details", "trajectory-section");
+          disclosure.append(element("summary", "", label), element("pre", "", JSON.stringify(rows, null, 2)));
+          extra.append(disclosure);
+        }
+      } catch (error) {
+        if (signal.aborted) return;
+        extra.textContent = `Could not load call details: ${error.message}. Close and reopen to retry.`;
+        loaded = false;
+        this.onError(error);
+      }
+    };
+    return {body, load};
   }
   tool(tool) {
     const node = element(

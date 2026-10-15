@@ -375,6 +375,17 @@
           </div>
           <label for="create-model">Model</label
           ><select id="create-model"></select>
+          <fieldset id="restart-settings" hidden disabled>
+            <legend>Execution limits</legend>
+            <label for="restart-plan-mode">Planning mode (legacy workflow)</label>
+            <select id="restart-plan-mode"><option value="auto">Auto</option><option value="force">Required</option><option value="off">Off</option></select>
+            <label for="restart-max_steps">Maximum steps</label><input id="restart-max_steps" type="number" min="1" step="1" required />
+            <label for="restart-max_llm_calls">Maximum model calls</label><input id="restart-max_llm_calls" type="number" min="1" step="1" required />
+            <label for="restart-max_tokens">Token budget</label><input id="restart-max_tokens" type="number" min="1" step="1" required />
+            <label for="restart-max_duration_seconds">Time budget (seconds)</label><input id="restart-max_duration_seconds" type="number" min="1" step="1" required />
+            <label for="restart-max_window_chars">Context window (characters)</label><input id="restart-max_window_chars" type="number" min="1" step="1" required />
+            <p id="restart-context-note" class="muted small"></p>
+          </fieldset>
           <label for="create-knowledge">Knowledge bases (optional)</label>
           <select
             id="create-knowledge"

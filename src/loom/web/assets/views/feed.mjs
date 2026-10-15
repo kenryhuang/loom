@@ -733,10 +733,11 @@ export class FeedView {
     if (this.messages.has(message.id)) return;
     this.emptyState?.remove();
     const result = message.role === "assistant",
-      node = element("article", `message-card ${result ? "result" : "user"}`);
+      node = element(result ? "details" : "article", `message-card ${result ? "result" : "user"}`);
     node.dataset.key = `message:${message.id}`;
     if (result) {
-      node.append(element("small", "", "Loom"));
+      node.open = this.detailMode ?? true;
+      node.append(element("summary", "", "Final result"));
       node.append(renderResult(reportContent(message.content)));
     } else {
       node.append(element("small", "", "Task · You"));

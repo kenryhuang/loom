@@ -73,32 +73,31 @@ function renderStatistics(root, base, {artifact} = {}) {
         `${seconds(r.duration.average_ms)} / ${seconds(r.duration.p95_ms)}`, seconds(r.duration.max_ms), `${r.duration.measured}/${r.calls}`]));
   });
 
-  const time = panel(root, "Runtime cost");
+  const time = panel(root, "Runtime cost", true);
   cards(time, [["Run time · sum", seconds(timing.wall_ms)], ["Session span", seconds(timing.session_span_ms)]]);
-  distribution(time, "Lifecycle", Object.entries(timing.states_ms).map(([k, v]) => [label(k), v]), seconds);
-  distribution(time, "Running activity", Object.entries(timing.running_activity_ms).map(([k, v]) => [label(k), v]), seconds);
+  const runtimeCharts = element("div", "runtime-charts"); time.append(runtimeCharts);
+  distribution(runtimeCharts, "Lifecycle", Object.entries(timing.states_ms).map(([k, v]) => [label(k), v]), seconds);
+  distribution(runtimeCharts, "Running activity", Object.entries(timing.running_activity_ms).map(([k, v]) => [label(k), v]), seconds);
   table(disclosure(time, "Lifecycle timeline"), ["Run", "State", "From", "To", "Time"], timing.intervals.map(i =>
     [i.run_id, label(i.state), new Date(i.start_ms).toLocaleString(), new Date(i.end_ms).toLocaleString(), seconds(i.end_ms - i.start_ms)]));
   if (timing.limitations?.length) {
     const notes = disclosure(time, "Measurement notes"); for (const text of timing.limitations) notes.append(element("p", "muted small", text));
   }
 
-  const model = panel(root, "Model & token cost");
-  cards(model, [["Reported tokens", number(models.total_tokens.known)], ["Usage coverage", `${number(models.total_tokens.measured_calls)} / ${number(models.calls)}`]]);
-  distribution(model, "Token split", [["Input", models.prompt_tokens.known], ["Output", models.completion_tokens.known]]);
-  const modelTable = element("div"); model.append(modelTable);
-  grouping(model.firstChild, "Group model statistics", [["by_model", "By model"], ["by_role", "By purpose"], ["by_stage", "By stage"]], key => {
-    modelTable.replaceChildren();
-    table(modelTable, ["Model / group", "Calls", "In", "Out", "Total", "Usage", "Time"], models[key].map(r =>
-      [label(r.name), r.calls, number(r.prompt_tokens.known), number(r.completion_tokens.known), number(r.total_tokens.known),
-        `${r.total_tokens.measured_calls}/${r.calls}`, seconds(r.duration.total_ms)]));
-    table(disclosure(modelTable, "Call performance"), ["Model / group", "Success", "Failed", "Cancelled", "Incomplete", "Unknown", "Avg / P95", "Max", "Timed"], models[key].map(r =>
-      [label(r.name), r.success, r.failed, r.cancelled, r.incomplete, r.unknown, `${seconds(r.duration.average_ms)} / ${seconds(r.duration.p95_ms)}`,
-        seconds(r.duration.max_ms), `${r.duration.measured}/${r.calls}`]));
-  });
-  table(disclosure(model, "Token distribution"), ["Tokens", "Average", "Maximum", "Missing calls"],
-    [["Input", models.prompt_tokens], ["Output", models.completion_tokens], ["Total", models.total_tokens]].map(([name, r]) =>
-      [name, number(r.average), number(r.max), r.missing_calls]));
+  const model = panel(root, "Model & token cost", true);
+  const measuredCell = (value, count, calls, definition) => {
+    const cell = element("span", "", value);
+    cell.title = `${definition} · ${count || 0}/${calls} calls measured`;
+    return cell;
+  };
+  table(model, ["Model", "Calls", "TTFT · avg / P95", "TPS · avg / P95", "Duration · avg / P95"], models.by_model.map(r =>
+    [r.name, number(r.calls),
+      measuredCell(`${seconds(r.ttft?.average_ms)} / ${seconds(r.ttft?.p95_ms)}`, r.ttft?.measured, r.calls, "Request → first output (including reasoning and tool calls)"),
+      measuredCell(`${number(r.tps?.average)} / ${number(r.tps?.p95)}`, r.tps?.measured, r.calls, "Output tokens / seconds from first output to completion; arithmetic mean of measured calls"),
+      measuredCell(`${seconds(r.duration.average_ms)} / ${seconds(r.duration.p95_ms)}`, r.duration.measured, r.calls, "Request → response completion")]));
+  table(model, ["Model", "Token in · total / max", "Token out · total / max"], models.by_model.map(r =>
+    [r.name, ...[r.prompt_tokens, r.completion_tokens].map(t => measuredCell(
+      `${number(t.measured_calls ? t.known : null)} / ${number(t.max)}`, t.measured_calls, r.calls, "Provider-reported tokens; total includes measured calls only"))]));
 
   const output = panel(root, "Outputs");
   output.firstChild.append(badge(`${outputs.workspace_files.length} files`), badge(`${outputs.artifacts.length} artifacts`));
@@ -114,6 +113,7 @@ function renderStatistics(root, base, {artifact} = {}) {
   }
   const completeness = panel(root, "Data quality");
   const rows = [["Missing token usage", quality.missing_usage_calls], ["Missing call duration", quality.missing_call_durations],
+    ["Missing TTFT", quality.missing_ttft_calls || 0], ["Missing TPS", quality.missing_tps_calls || 0],
     ["Missing call starts", quality.calls_without_start], ["Missing call endings", quality.calls_without_terminal],
     ["Missing artifacts", quality.missing_artifacts.length], ["Unscoped events", quality.unscoped_call_events],
     ["Duplicate records", quality.duplicate_records], ["Missing timestamps", timing.missing_timestamp_events], ["Clock reversals", timing.clock_reversals]];

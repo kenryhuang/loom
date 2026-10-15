@@ -3,13 +3,23 @@ import test from "node:test";
 import { JSDOM } from "jsdom";
 import { FeedView } from "../../src/loom/web/assets/views/feed.mjs";
 import { builtinPresenters } from "../../src/loom/web/assets/activity/presenters.mjs";
-import { meaningfulFields } from "../../src/loom/web/assets/activity/event-details.mjs";
+import { meaningfulFields, eventPresentation } from "../../src/loom/web/assets/activity/event-details.mjs";
 import { renderVerificationArtifact } from "../../src/loom/web/assets/views/activity-row.mjs";
 import {
   outputValue,
   modelText,
 } from "../../src/loom/web/assets/activity/content.mjs";
 const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+test("context compaction exposes the effective cap and retained evidence", () => {
+  const view = eventPresentation("context.compacted", {before_chars: 30000, after_chars: 10000,
+    effective_limit_chars: 24000, task_limit_chars: 2400000, plugin_limit_chars: 24000,
+    schema_chars: 6420, reserve_chars: 2400, available_chars: 15180, headroom_chars: 5180,
+    retained_exchanges: 1, excerpted_messages: 1});
+  assert.match(view.subject, /67% saved/);
+  const fields = Object.fromEntries(view.sections.map(s => [s.label, s.value]));
+  assert.equal(fields["effective window chars"], "24000");
+  assert.equal(fields["retained exchanges"], "1");
+});
 const event = (seq, type, payload = {}, run_id = "run") => ({
   seq,
   type,

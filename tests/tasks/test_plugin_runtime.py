@@ -458,3 +458,67 @@ def test_writable_directory_cannot_request_shared_lock(tmp_path):
     }
     with pytest.raises(ValueError, match="exclusive"):
         TaskAssembly(TaskRequest("Write", task_spec=spec))
+
+
+def test_compaction_retains_latest_large_tool_result_and_progress_with_full_archive():
+    artifacts = []
+    manager = BoundedContextManager({'max_window_chars': 24000},
+                                    publish_artifact=lambda value, kind: artifacts.append(value) or {'sha256': 'a' * 64})
+    call = LlmToolCall('latest', 'read_file', '{"path":"src/data/planets.ts"}')
+    content = 'ORBITAL PARAMETERS\n' + 'file contents\n' * 2000 + '\nFINAL EXPORT'
+    messages = [LlmMessage('system', 'S' * 7000), LlmMessage('user', 'goal'),
+                LlmMessage('assistant', '', tool_calls=(call,)), LlmMessage('tool', content, tool_call_id='latest'),
+                LlmMessage('user', 'Continue the implementation', name='execution_progress')]
+    window, event = manager.compact(messages, 2400000, schema_chars=6420)
+    assert event['effective_limit_chars'] == 24000
+    assert event['available_chars'] == 15180
+    assert event['excerpted_messages'] == 1
+    assert event['retained_exchanges'] == 1
+    assert manager.size(window) <= event['target_chars'] < event['available_chars']
+    tool = next(m for m in window if m.role == 'tool')
+    assert 'ORBITAL PARAMETERS' in tool.content and 'FINAL EXPORT' in tool.content
+    assert '[Excerpt:' in tool.content and tool.tool_call_id == 'latest'
+    assert next(m for m in window if m.tool_calls).tool_calls == (call,)
+    assert window[-1].name == 'execution_progress'
+    assert artifacts[0]['messages'][1]['content'] == content
+    again, repeat = manager.compact(window, 2400000, schema_chars=6420)
+    assert repeat is None and again == window
+
+
+def test_compaction_leaves_headroom_and_chains_full_archives():
+    artifacts = []
+    manager = BoundedContextManager({'recent_exchanges': 10},
+                                    publish_artifact=lambda value, kind: artifacts.append(value) or {'sha256': str(len(artifacts)) * 64})
+    messages = [LlmMessage('system', 'instructions'), LlmMessage('user', 'goal')]
+    for i in range(8):
+        messages.extend([LlmMessage('assistant', '', tool_calls=(LlmToolCall(str(i), 'read', '{}'),)),
+                         LlmMessage('tool', str(i) * 800, tool_call_id=str(i))])
+    window, first = manager.compact(messages, 4000)
+    assert first['headroom_chars'] >= first['available_chars'] * .25
+    window += [LlmMessage('assistant', '', tool_calls=(LlmToolCall('new', 'read', '{}'),)),
+               LlmMessage('tool', 'new evidence ' * 1000, tool_call_id='new')]
+    window, second = manager.compact(window, 4000)
+    assert second and any(m.tool_call_id == 'new' for m in window)
+    assert artifacts[-1]['previous_archive']['sha256'] == '1' * 64
+    assert any(m['name'] == 'context_summary' for m in artifacts[-1]['messages'])
+
+
+def test_compaction_retains_json_action_and_actual_shell_output():
+    artifacts = []
+    manager = BoundedContextManager({'max_window_chars': 24000},
+                                    publish_artifact=lambda value, kind: artifacts.append(value) or {'sha256': 'b' * 64})
+    action = LlmMessage('assistant', json.dumps({'reasoning': 'Inspect orbital data', 'action': {'kind': 'shell_execute'}}))
+    result = json.dumps({'argv': ['long command ' * 1200], 'exit_code': 0,
+                         'stdout': 'ORBITAL DATA\n' + 'observed data\n' * 1800 + '\nFINAL FINDING', 'stderr': ''})
+    messages = [LlmMessage('system', 'S' * 7000), LlmMessage('user', 'goal'), action,
+                LlmMessage('user', result, name='shell_execute'),
+                LlmMessage('user', 'Continue', name='execution_progress')]
+    window, event = manager.compact(messages, 2400000, schema_chars=6420)
+    assert action in window
+    output = json.loads(next(m.content for m in window if m.name == 'shell_execute'))
+    assert output['exit_code'] == 0
+    assert 'ORBITAL DATA' in output['stdout'] and 'FINAL FINDING' in output['stdout']
+    assert 'context_excerpt' in output and 'argv' not in output
+    assert event['retained_exchanges'] == 1 and event['excerpted_messages'] == 1
+    assert manager.size(window) <= event['target_chars']
+    assert artifacts[0]['messages'][1]['content'] == result

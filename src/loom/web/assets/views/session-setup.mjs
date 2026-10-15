@@ -29,6 +29,9 @@ export class SessionSetupView {
     });
   }
   configure(catalog) {
+    this.abort?.abort(); this.abort = null;
+    this.get("setup-recommend").textContent = "Recommend with LLM";
+    this.get("create-submit").disabled = false;
     this.catalog = catalog;
     const available = Boolean(
       catalog.setup_recommendation && catalog.models.length,
@@ -46,10 +49,52 @@ export class SessionSetupView {
     }
     this.renderAcceptance(catalog.acceptance);
   }
+  loadTask(task, bases) {
+    this.editing = true;
+    this.get("create-spec").value = JSON.stringify(task.task_spec, null, 2);
+    for (const key of ["objective", "title", "workspace", "model"]) {
+      const input = this.get(`create-${key}`);
+      if (key === "model" && task.model && ![...input.options].some(o => o.value === task.model)) {
+        const option = element("option", "", `${task.model} (unavailable)`); option.value = task.model; input.append(option);
+      }
+      input.value = task[key] || "";
+    }
+    const knowledge = this.get("create-knowledge"); knowledge.replaceChildren();
+    const ids = task.knowledge_base_ids || [];
+    for (const base of [...bases, ...ids.filter(id => !bases.some(b => b.id === id)).map(id => ({id, name: `${id} (unavailable)`}))]) {
+      const option = element("option", "", base.name); option.value = base.id; option.selected = ids.includes(base.id); knowledge.append(option);
+    }
+    const selected = task.external_tool_ids || [];
+    const tools = this.catalog.external_tools || [];
+    const unavailable = selected.filter(id => !tools.some(t => t.id === id)).map(id => ({id, connector_name: "Unavailable", name: id, description: "Detach this tool or enable it before restarting.", kind: "mcp"}));
+    toolChoices(this.get("create-external-tools"), [...tools, ...unavailable], selected);
+    this.get("restart-plan-mode").value = task.plan_mode;
+    for (const [key, value] of Object.entries(task.limits)) this.get(`restart-${key}`).value = value;
+    const cap = task.task_spec?.context?.max_window_chars;
+    const effective = Math.min(task.limits.max_window_chars, cap ?? task.limits.max_window_chars);
+    this.get("restart-context-note").textContent = `Currently effective: ${effective.toLocaleString()} characters${cap < task.limits.max_window_chars ? " (limited by the context plugin)" : ""}. Save & restart applies the value above to both task and built-in context plugin limits.`;
+    this.get("setup-status").textContent = "Review the current task configuration. Save & restart builds a fresh plan and acceptance checks; previous messages and results remain background.";
+    this.get("setup-acceptance-status").textContent = "A new acceptance plan will be prepared after restart using the updated task and workspace.";
+  }
+  restartChanges(payload) {
+    payload.model = this.get("create-model").value || null;
+    payload.workspace = this.get("create-workspace").value.trim() || null;
+    payload.plan_mode = this.get("restart-plan-mode").value;
+    payload.limits = {};
+    for (const input of this.get("restart-settings").querySelectorAll("input")) {
+      const value = Number(input.value);
+      if (!Number.isSafeInteger(value) || value <= 0) throw new Error("Execution limits must be positive integers.");
+      payload.limits[input.id.replace("restart-", "")] = value;
+    }
+    if (!payload.objective) throw new Error("Enter the task to restart.");
+    if (["bounded_context", "research_context"].includes(payload.task_spec?.context?.plugin))
+      payload.task_spec.context.max_window_chars = payload.limits.max_window_chars;
+  }
   renderAcceptance(acceptance, recommended = false) {
     this.get("setup-acceptance-status").textContent = (recommended
       ? "This recommended setup includes automatic task acceptance. " : "") +
-      "The acceptance plan is prepared after creation from the task and bound workspace. No workspace has been inspected or checks run yet.";
+      (this.editing ? "The acceptance plan is prepared after restart from the updated task and workspace."
+        : "The acceptance plan is prepared after creation from the task and bound workspace. No workspace has been inspected or checks run yet.");
     const limits = acceptance?.defaults;
     this.get("setup-acceptance-budget").textContent = limits
       ? `Default limits: ${limits.max_repairs} repair rounds · ${limits.max_model_calls} planning/review calls · ${limits.max_seconds}s acceptance time · Input budget: ${limits.context_window_percent ?? 60}% of the verification model context (estimated tokens). Calls share the task budget.`
@@ -91,13 +136,17 @@ export class SessionSetupView {
         (kind === "context" ? "bounded_context" : "legacy_planning");
       if ([...select.options].some((option) => option.value === defaultId))
         select.value = defaultId;
+      else if (template?.task_spec?.[kind]?.plugin) {
+        const option = element("option", "", `${defaultId} (unavailable)`); option.value = defaultId; select.append(option); select.value = defaultId;
+      }
       this.get(`setup-${kind}-reason`).textContent = "";
     }
   }
   renderCollections(selected, reasons = {}) {
     const root = this.get("create-collections");
     root.replaceChildren();
-    for (const item of this.catalog?.tool_collections || []) {
+    const available = this.catalog?.tool_collections || [];
+    for (const item of [...available, ...selected.filter(id => !available.some(c => c.id === id)).map(id => ({id, label: id, description: "Unavailable collection; detach or install before restarting."}))]) {
       const label = element("label", "setup-collection"),
         check = element("input");
       check.type = "checkbox";
@@ -205,7 +254,7 @@ export class SessionSetupView {
       this.recommendation = { fingerprint, result };
       this.renderAcceptance(result.acceptance || this.catalog.acceptance, true);
       this.get("setup-status").textContent =
-        `${result.rationale}\nReview the configuration below and make any changes before creating. Setup model: ${result.model} · ${result.usage.total_tokens || 0} reported tokens.`;
+        `${result.rationale}\nReview the configuration below before ${this.editing ? "saving and restarting" : "creating"}. Setup model: ${result.model} · ${result.usage.total_tokens || 0} reported tokens.`;
       if (
         result.tool_collections.includes("knowledge") &&
         !this.get("create-knowledge").selectedOptions.length
@@ -218,7 +267,7 @@ export class SessionSetupView {
       this.get("create-error").textContent =
         `${error.message} You can retry or configure manually.`;
       this.get("setup-status").textContent =
-        "Recommendation did not complete. No session was created.";
+        this.editing ? "Recommendation did not complete. The task has not changed." : "Recommendation did not complete. No session was created.";
     } finally {
       if (this.abort === abort) {
         this.get("setup-recommend").disabled = false;
@@ -269,20 +318,25 @@ export class SessionSetupView {
       payload.workspace = workspace;
       spec.session_environment ||= { plugin: "session" };
       const resources = spec.session_environment.resources || [];
+      const resourceId = spec.execution_runtime?.workspace_resource || "workspace";
+      const existing = resources.find(r => r.id === resourceId);
       spec.session_environment.resources = [
-        ...resources.filter((r) => r.id !== "workspace"),
+        ...resources.filter((r) => r.id !== resourceId),
         {
-          id: "workspace",
+          id: resourceId,
           kind: "directory",
           uri: workspace,
-          access: "read-write",
+          access: existing?.access || "read-write",
         },
       ];
       spec.execution_runtime = {
         ...spec.execution_runtime,
         plugin: spec.execution_runtime?.plugin || "native_os",
-        workspace_resource: "workspace",
+        workspace_resource: resourceId,
       };
+    } else if (this.editing && spec.execution_runtime?.workspace_resource) {
+      spec.session_environment.resources = (spec.session_environment.resources || []).filter(r => r.id !== spec.execution_runtime.workspace_resource);
+      delete spec.execution_runtime.workspace_resource;
     }
     payload.task_spec = spec;
   }

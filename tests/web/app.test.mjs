@@ -88,7 +88,7 @@ test("browser app connects to real service, answers input, creates sessions, con
       $("event-feed").querySelector(".result h1").textContent,
       "浏览器结果",
     );
-    assert.equal($("event-feed").querySelector(".result").tagName, "ARTICLE");
+    assert.equal($("event-feed").querySelector(".result").tagName, "DETAILS");
     await until(() => !$("event-feed").querySelector(".process-group").open);
     assert.equal($("event-feed").querySelector(".process-group").open, false);
     assert.equal($("session-objective"), null);
@@ -182,6 +182,22 @@ test("browser app connects to real service, answers input, creates sessions, con
         .querySelector('[data-panel="budget"]')
         .textContent.includes("500,000"),
     );
+    const edit = [...document.querySelectorAll('[data-panel="info"] button')].find(b => b.textContent === "Edit task");
+    assert.equal(edit.disabled, false);
+    edit.click();
+    await until(() => !$("create-page").hidden && $("create-submit").textContent === "Save & restart");
+    assert.equal($("create-title").value, "Browser demo");
+    assert.equal($("restart-max_tokens").value, "500000");
+    assert.equal($("create-template").value, "current-task");
+    $("create-objective").value = "Analyze the updated task";
+    $("create-title").value = "Edited task";
+    $("restart-max_tokens").value = "600000";
+    $("setup-workflow").value = "legacy_planning";
+    $("restart-plan-mode").value = "off";
+    submit("create-form");
+    await until(() => $("create-page").hidden && $("session-title").textContent === "Edited task" && $("task-status").textContent === "idle");
+    assert.equal($("event-feed").querySelectorAll(".result").length, 2);
+    assert.match(document.querySelector('[data-panel="budget"]').textContent, /600,000/);
     $("disconnect").click();
     assert.equal($("auth-dialog").open, true);
     assert.equal($("connection").textContent, "Disconnected");

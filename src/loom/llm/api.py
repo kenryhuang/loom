@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
@@ -113,6 +114,8 @@ class LlmResponse:
     tool_calls: tuple[LlmToolCall, ...] = ()
     usage: TokenUsage = TokenUsage()
     finish_reason: str = "stop"
+    duration_ms: float | None = None
+    ttft_ms: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tool_calls", tuple(self.tool_calls))
@@ -783,6 +786,44 @@ def create_llm_step_function(
 
 
 async def request_llm_response(
+    provider: Any,
+    messages: Sequence[LlmMessage],
+    tools: tuple[dict[str, Any], ...] | None = None,
+    cancellation: Any = None,
+    tool_choice: Any = None,
+    *,
+    stream: bool = False,
+    emit_event: Any = None,
+    event_metadata: Mapping[str, Any] | None = None,
+    now: Any = now_iso,
+) -> Result:
+    """Measure client-observed latency, including a tool-choice fallback attempt."""
+    started = time.monotonic()
+    first_token = None
+    stream_end = None
+
+    async def measured_emit(event):
+        nonlocal first_token, stream_end
+        if first_token is None and (
+            event.get("delta") or (event["type"] == "llm.tool_call.started" and event.get("tool_name"))
+        ):
+            first_token = time.monotonic()
+        if event["type"] == "llm.stream.completed":
+            stream_end = time.monotonic()
+        return await _emit_llm_call_event(emit_event, event)
+
+    response = await _request_llm_response(
+        provider, messages, tools, cancellation, tool_choice, stream=stream,
+        emit_event=measured_emit, event_metadata=event_metadata, now=now,
+    )
+    if not response.ok:
+        return response
+    ended = stream_end if stream_end is not None else time.monotonic()
+    return ok(replace(response.value, duration_ms=(ended - started) * 1000,
+                      ttft_ms=(first_token - started) * 1000 if first_token is not None else None))
+
+
+async def _request_llm_response(
     provider: Any,
     messages: Sequence[LlmMessage],
     tools: tuple[dict[str, Any], ...] | None = None,
@@ -1884,7 +1925,7 @@ def _parse_openai_chat_response(payload: Any) -> Result:
                 usage.get("completion_tokens", 0),
                 usage.get("total_tokens", 0),
             ),
-            finish_reason=choice.get("finish_reason", "unknown"),
+            finish_reason="refusal" if message.get("refusal") else choice.get("finish_reason", "unknown"),
         )
     )
 

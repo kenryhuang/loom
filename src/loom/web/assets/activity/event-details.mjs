@@ -30,6 +30,16 @@ export function meaningfulFields(value) {
 }
 
 export function eventPresentation(kind, data) {
+  if (kind === "context.compacted") {
+    const n = value => value == null ? "—" : Number(value).toLocaleString();
+    const saved = data.before_chars - data.after_chars;
+    return {title: "Context compacted", subject: `${n(data.before_chars)} → ${n(data.after_chars)} chars · ${Math.round(saved / Math.max(1, data.before_chars) * 100)}% saved`,
+      sections: meaningfulFields({effective_window_chars: data.effective_limit_chars, task_limit_chars: data.task_limit_chars,
+        plugin_limit_chars: data.plugin_limit_chars, tool_schema_chars: data.schema_chars, reply_reserve_chars: data.reserve_chars,
+        available_message_chars: data.available_chars, remaining_headroom_chars: data.headroom_chars,
+        retained_exchanges: data.retained_exchanges, excerpted_messages: data.excerpted_messages,
+        archive: data.artifact?.sha256})};
+  }
   if (kind?.startsWith("acceptance.plan.")) {
     // A proposed plan is not yet accepted; the snapshot may still contain an older plan.
     const plan = kind === "acceptance.plan.proposed" ? data.proposal : data.acceptance?.plan;

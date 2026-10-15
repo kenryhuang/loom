@@ -138,6 +138,8 @@ class AcceptanceController:
             if old:
                 self.data["history"].append(old)
             self.data.pop("replan_from", None)
+            self.data.pop("pending_verification", None)
+            self.data.pop("protocol", None)
             self.assembly._acceptance_evidence = []
             self.data.update(
                 goal=value,
@@ -181,6 +183,7 @@ class AcceptanceController:
 
     def public(self):
         return {**{k: deepcopy(self.data[k]) for k in ("state", "reason", "revision", "plan", "results", "attempts", "elapsed_seconds", "goal_digest")},
+                "protocol": deepcopy(self.data.get("protocol")),
                 "input_budget": deepcopy(self.data.get("input_budget"))}
 
     def input_budget(self, prompt="", content=""):
@@ -195,12 +198,15 @@ class AcceptanceController:
                 "max_prompt_chars": self.config["max_prompt_chars"], "input_chars": len(prompt) + len(content),
                 "token_count_basis": "estimate_ascii_3_non_ascii_utf8"}
 
-    async def model(self, runtime, stage, prompt, payload):
+    async def model(self, runtime, stage, prompt, payload, *, protocol=None, mode="text", raw_response=False):
+        from loom.llm.structured import ProtocolError, native_schema, parse_response
+
         remaining = self.config["max_seconds"] - self.data["elapsed_seconds"]
         if self.data["model_calls"] >= self.config["max_model_calls"] or remaining <= 0:
             raise AcceptanceBlocked("Acceptance verification budget exhausted")
         text = json.dumps(payload, ensure_ascii=False)
-        budget = self.input_budget(prompt, text)
+        schema_text = json.dumps(native_schema(protocol.schema), ensure_ascii=False) if protocol and mode == "json_schema" else ""
+        budget = self.input_budget(prompt, text + schema_text)
         self.data["input_budget"] = budget
         if self.config["max_prompt_chars"] is not None and budget["input_chars"] > self.config["max_prompt_chars"]:
             raise AcceptanceBlocked(
@@ -215,21 +221,62 @@ class AcceptanceController:
         self.data["model_calls"] += 1
         started = time.monotonic()
         try:
-            response = await self.assembly.acceptance_model_request(runtime, stage, prompt, text, min(remaining, 60))
-            raw = response.content or ""
-            if raw.strip().startswith("```"):
-                fenced = raw.strip().split("\n", 1)
-                raw = fenced[1].rsplit("```", 1)[0] if len(fenced) == 2 else ""
-            value = json.loads(raw)
+            options = {"protocol": protocol, "mode": mode} if protocol else {}
+            response = await self.assembly.acceptance_model_request(runtime, stage, prompt, text, min(remaining, 60), **options)
+            if raw_response:
+                return response
+            value, _ = parse_response(response)
             if not isinstance(value, dict):
                 raise AcceptanceResponseInvalid("Acceptance response must be a JSON object")
             return value
-        except json.JSONDecodeError as exc:
-            raise AcceptanceResponseInvalid(f"Acceptance {stage} response is not valid JSON: {exc.msg}") from exc
+        except ProtocolError as exc:
+            if raw_response:
+                raise
+            raise AcceptanceResponseInvalid(str(exc)) from exc
         except TimeoutError as exc:
             raise AcceptanceBlocked(f"Acceptance {stage} request timed out") from exc
         finally:
             self.data["elapsed_seconds"] += time.monotonic() - started
+
+    async def structured(self, runtime, stage, prompt, payload, protocol, validate):
+        from loom.llm.request_options import materialize_request_options
+        from loom.llm.structured import ProtocolExhausted, output_mode, request_structured
+
+        provider = self.assembly.acceptance_provider
+        mode_key = digest({"model": getattr(provider, "model", None), "endpoint": getattr(provider, "base_url", None),
+                           "options": materialize_request_options(getattr(provider, "request_options", {}))})
+        cached = self.data.get("protocol_mode", {})
+        mode = cached["mode"] if cached.get("provider_digest") == mode_key else output_mode(provider)
+
+        async def send(value, attempt, mode):
+            return await self.model(runtime, stage if attempt == 1 else stage + "_repair", prompt, value,
+                                    protocol=protocol, mode=mode, raw_response=True)
+
+        async def event(kind, fields):
+            self.data["protocol"] = {**{k: v for k, v in fields.items() if k != "proposal"}, "stage": stage, "state": kind}
+            if kind == "fallback":
+                self.data["protocol_mode"] = {"provider_digest": mode_key, "mode": fields["mode"]}
+            if kind == "proposed":
+                if stage == "plan":
+                    await self.emit(runtime, "acceptance.plan.proposed", proposal=fields["proposal"])
+                return
+            if stage == "plan" and kind == "rejected":
+                await self.emit(runtime, "acceptance.plan.rejected", validation_error=fields["validation_error"],
+                                proposal_attempt=fields["attempt"], protocol=fields)
+            elif stage == "plan" and kind == "retrying":
+                await self.emit(runtime, "acceptance.plan.repairing", protocol=fields)
+            else:
+                await self.emit(runtime, "llm.protocol." + kind, protocol=fields)
+
+        try:
+            result = await request_structured(protocol=protocol, payload=payload, send=send, validate=validate, event=event,
+                                              mode=mode)
+        except ProtocolExhausted as exc:
+            label = "Acceptance plan remained invalid after one correction" if stage == "plan" else "Acceptance verification protocol recovery exhausted"
+            if not exc.retryable:
+                label = f"Acceptance {stage} protocol {exc.code}"
+            raise AcceptanceBlocked(f"{label}: {exc}") from exc
+        return result.value
 
     def validate_plan(self, proposal):
         rows = proposal.get("criteria")
@@ -369,36 +416,9 @@ class AcceptanceController:
             payload["migration"] = {"previous_plan": self.data["replan_from"],
                                     "instruction": "Preserve every requirement of this legacy plan. Replace unavailable external "
                                     "verifiers using the supported schemas; retain genuine external approval as unresolved."}
-        # A malformed proposal is a planner error, not a failed task acceptance check.
-        # Correct it once using the actual contract, within the same task/acceptance budgets.
-        for attempt in range(2):
-            proposal = None
-            try:
-                proposal = await self.model(runtime, "plan" if attempt == 0 else "plan_repair", PLAN_PROMPT, payload)
-            except AcceptanceResponseInvalid as exc:
-                error = str(exc)
-            else:
-                await self.emit(runtime, "acceptance.plan.proposed", proposal=proposal)
-                try:
-                    plan = self.validate_plan(proposal)
-                except (ValueError, TypeError) as exc:
-                    error = str(exc)
-                else:
-                    break
-            self.data["reason"] = "Correcting invalid acceptance plan: " + error
-            await self.emit(runtime, "acceptance.plan.rejected", validation_error=error, proposal_attempt=attempt + 1)
-            if attempt == 1:
-                raise AcceptanceBlocked("Acceptance plan remained invalid after one correction: " + error)
-            payload = {
-                **payload,
-                "repair": {
-                    "validation_error": error,
-                    "previous_proposal": proposal,
-                    "instruction": "Return a corrected complete acceptance plan matching the schemas. Preserve the full user goal; "
-                    "express supported outcomes rather than discovery steps. Do not remove requirements to evade validation.",
-                },
-            }
-            await self.emit(runtime, "acceptance.plan.repairing")
+        from loom.tasks.acceptance_protocols import plan_protocol
+
+        plan = await self.structured(runtime, "plan", PLAN_PROMPT, payload, plan_protocol(self.assembly), self.validate_plan)
         self.data["revision"] += 1
         self.data["plan"] = {
             **plan,
@@ -461,7 +481,6 @@ class AcceptanceController:
                               for row in self.data["results"] if row["status"] != "passed")
             raise AcceptanceBlocked(f"Acceptance repair limit reached ({self.data['attempts']}/{self.config['max_repairs'] + 1} attempts); "
                                     f"unmet checks retained: {unmet or self.data['reason']}")
-        self.data["attempts"] += 1
         self.data.update(candidate=candidate, state="verifying", reason="Checking completion candidate", results=[])
         self.verifying = True
         await self.emit(runtime, "acceptance.verifying")
@@ -471,75 +490,77 @@ class AcceptanceController:
                 try:
                     policy.validate(candidate)
                 except ValueError as exc:
+                    self.data["attempts"] += 1
                     self.data.update(state="needs_repair", reason=str(exc), results=[{
                         "criterion_id": "diagnosis-evidence", "status": "failed", "reason": str(exc),
                         "method": "report_schema_and_references", "evidence_ids": []}])
                     await self.emit(runtime, "acceptance.gate.blocked", results=self.data["results"])
                     return False
             before = self.fingerprint(candidate)
-            evidence = [{"id": "candidate", "content": candidate, "sha256": digest(candidate)}]
-            evidence.extend(self.assembly.acceptance_evidence())
-            for path in self.assembly._workspace_reports:
-                document = bound_path(self.root, path)
-                if document.stat().st_size > 24000:
-                    raise AcceptanceBlocked("Workspace report exceeds bounded review size; use scoped artifact checks")
-                evidence.append({"id": f"report:{path}", "content": document.read_text(encoding="utf-8")})
-            semantics = []
-            for criterion in self.data["plan"]["criteria"]:
-                if criterion["verifier"] == "semantic":
-                    semantics.append(criterion)
-                    continue
-                await self.emit(runtime, "verification.started", criterion_id=criterion["id"], description=criterion["description"])
-                started = time.monotonic()
-                remaining = self.config["max_seconds"] - self.data["elapsed_seconds"]
-                if remaining <= 0:
-                    raise AcceptanceBlocked("Acceptance time budget exhausted")
+            pending = self.data.get("pending_verification")
+            if pending and pending["binding"] == before:
+                from loom.service.contracts import ServiceError
+
+                evidence_ref = pending["evidence_ref"]
                 try:
-                    async with asyncio.timeout(remaining):
-                        row, detail = await self.check(criterion, runtime)
-                except (TimeoutError, OSError, ValueError) as exc:
-                    row, detail = {"status": "blocked", "reason": str(exc) or "Check timed out"}, {}
-                finally:
-                    self.data["elapsed_seconds"] += time.monotonic() - started
-                row.update(criterion_id=criterion["id"], method=criterion["verifier"], evidence_ids=[criterion["id"]])
-                self.data["results"].append(row)
-                evidence.append({"id": criterion["id"], "result": row, "detail": detail})
-                row["artifact"] = self.assembly.publish_artifact(
-                    {"criterion": criterion, "result": deepcopy(row), "detail": detail, "binding_before": before}, "verification"
+                    evidence = self.assembly.read_artifact(evidence_ref["sha256"])["evidence"]
+                except (ValueError, OSError, KeyError, ServiceError) as exc:
+                    raise AcceptanceBlocked("Saved verification evidence is unavailable; restore its artifact before resuming") from exc
+                self.data["results"] = deepcopy(pending["results"])
+                semantics = [c for c in self.data["plan"]["criteria"] if c["verifier"] == "semantic"]
+            else:
+                self.data.pop("pending_verification", None)
+                evidence = [{"id": "candidate", "content": candidate, "sha256": digest(candidate)}]
+                evidence.extend(self.assembly.acceptance_evidence())
+                for path in self.assembly._workspace_reports:
+                    document = bound_path(self.root, path)
+                    if document.stat().st_size > 24000:
+                        raise AcceptanceBlocked("Workspace report exceeds bounded review size; use scoped artifact checks")
+                    evidence.append({"id": f"report:{path}", "content": document.read_text(encoding="utf-8")})
+                semantics = []
+                for criterion in self.data["plan"]["criteria"]:
+                    if criterion["verifier"] == "semantic":
+                        semantics.append(criterion)
+                        continue
+                    await self.emit(runtime, "verification.started", criterion_id=criterion["id"], description=criterion["description"])
+                    started = time.monotonic()
+                    remaining = self.config["max_seconds"] - self.data["elapsed_seconds"]
+                    if remaining <= 0:
+                        raise AcceptanceBlocked("Acceptance time budget exhausted")
+                    try:
+                        async with asyncio.timeout(remaining):
+                            row, detail = await self.check(criterion, runtime)
+                    except (TimeoutError, OSError, ValueError) as exc:
+                        row, detail = {"status": "blocked", "reason": str(exc) or "Check timed out"}, {}
+                    finally:
+                        self.data["elapsed_seconds"] += time.monotonic() - started
+                    row.update(criterion_id=criterion["id"], method=criterion["verifier"], evidence_ids=[criterion["id"]])
+                    self.data["results"].append(row)
+                    evidence.append({"id": criterion["id"], "result": row, "detail": detail})
+                    row["artifact"] = self.assembly.publish_artifact(
+                        {"criterion": criterion, "result": deepcopy(row), "detail": detail, "binding_before": before}, "verification"
+                    )
+                    await self.emit(runtime, "verification.completed", result=row)
+                evidence_ref = self.assembly.publish_artifact(
+                    {"goal": self.data["goal"], "plan": self.data["plan"], "binding_before": before, "evidence": evidence}, "verification_evidence"
                 )
-                await self.emit(runtime, "verification.completed", result=row)
-            evidence_ref = self.assembly.publish_artifact(
-                {"goal": self.data["goal"], "plan": self.data["plan"], "binding_before": before, "evidence": evidence}, "verification_evidence"
-            )
             # Fail fast on deterministic failures; do not spend a judgment call explaining a known failed check.
             if all(r["status"] == "passed" for r in self.data["results"]) and not self.data["plan"]["unresolved_requirements"]:
+                self.data["pending_verification"] = {"binding": before, "results": deepcopy(self.data["results"]), "evidence_ref": evidence_ref}
                 await self.emit(runtime, "verification.started", criterion_id="goal", description="Checking goal coverage and evidence")
-                value = await self.model(
-                    runtime,
-                    "verify",
-                    VERIFY_PROMPT,
+                from loom.tasks.acceptance_protocols import validate_verification, verification_protocol
+
+                rows = await self.structured(
+                    runtime, "verify", VERIFY_PROMPT,
                     {"goal": self.data["goal"], "criteria": semantics, "acceptance_plan": self.data["plan"], "evidence": evidence},
+                    verification_protocol(semantics, evidence), lambda value: validate_verification(value, semantics, evidence),
                 )
-                rows = value.get("results")
-                expected = {c["id"] for c in semantics}
-                if not isinstance(rows, list) or len(rows) != len(expected) or any(not isinstance(r, dict) for r in rows):
-                    raise AcceptanceBlocked("Verifier must return one result per semantic criterion")
-                if {r.get("criterion_id") for r in rows} != expected:
-                    raise AcceptanceBlocked("Verifier returned missing or unknown criteria")
-                available = {e["id"] for e in evidence}
-                for row in rows:
-                    if row.get("status") not in {"passed", "failed", "blocked"} or not isinstance(row.get("reason"), str) or not row["reason"].strip():
-                        raise AcceptanceBlocked("Invalid semantic verification result")
-                    refs = row.get("evidence_ids", [])
-                    if (
-                        not isinstance(refs, list)
-                        or any(not isinstance(r, str) or r not in available for r in refs)
-                        or (row["status"] == "passed" and not refs)
-                    ):
-                        raise AcceptanceBlocked("Semantic verification requires registered evidence")
-                    recorded = {**row, "method": "semantic", "assurance": "model_judgment", "artifact": evidence_ref}
-                    self.data["results"].append(recorded)
-                    await self.emit(runtime, "verification.completed", result=recorded)
+                recorded = [{**row, "method": "semantic", "assurance": "model_judgment", "artifact": evidence_ref} for row in rows]
+                self.data["results"].extend(recorded)
+                for row in recorded:
+                    await self.emit(runtime, "verification.completed", result=row)
+            self.data.pop("pending_verification", None)
+            self.data["attempts"] += 1
             after = self.fingerprint(candidate)
             passed = (
                 before == after

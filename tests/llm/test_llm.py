@@ -1894,3 +1894,43 @@ def make_runtime(call_tool=None, events=None):
             "call_tool": staticmethod(call_tool or default_call_tool),
         },
     )()
+
+
+@pytest.mark.parametrize("kind, field", [("reasoning.delta", "reasoning_delta"), ("content.delta", "content_delta"),
+                                        ("tool_call.arguments.delta", "tool_arguments_delta"), ("tool_call.started", "tool_name")])
+def test_request_records_monotonic_first_output_without_requiring_trace_callback(monkeypatch, kind, field):
+    from types import SimpleNamespace
+
+    clock = [10.0]
+    monkeypatch.setattr("loom.llm.api.time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    class Provider:
+        model = "timed"
+
+        async def stream_chat(self, messages, **kwargs):
+            clock[0] = 11.0
+            yield LlmStreamEvent(kind="content.delta", content_delta="")
+            clock[0] = 12.0
+            yield LlmStreamEvent(kind=kind, **{field: "output"})
+            clock[0] = 15.0
+            yield LlmStreamEvent(kind="completed", response=LlmResponse(content="done"))
+
+    response = asyncio.run(llm_module.request_llm_response(Provider(), [], stream=True)).unwrap()
+    assert response.ttft_ms == 2000
+    assert response.duration_ms == 5000
+
+
+def test_nonstream_call_records_duration_without_inventing_ttft(monkeypatch):
+    from types import SimpleNamespace
+
+    clock = [10.0]
+    monkeypatch.setattr("loom.llm.api.time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    class Provider:
+        async def chat(self, *args, **kwargs):
+            clock[0] = 13.0
+            return ok(LlmResponse(content="done"))
+
+    response = asyncio.run(llm_module.request_llm_response(Provider(), [])).unwrap()
+    assert response.duration_ms == 3000
+    assert response.ttft_ms is None

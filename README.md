@@ -111,9 +111,14 @@ press Enter to begin.
 
 Task controls have distinct meanings: **Complete task** closes the task, and
 **Reopen task** enables new messages without starting execution. **Restart task**
-runs the current goal again with a new run, empty execution context, fresh plan and
-acceptance checks, and reset run budgets. History and artifacts remain available;
-workspace files are used as they currently exist. Pending guidance is included once.
+runs the current goal again with a new run, fresh plan and acceptance checks, and
+reset run budgets. Earlier conversation and results are retained as bounded background;
+old checkpoints and acceptance results are not reused. Workspace files remain as they are.
+Use **Session info → Details → Edit task → Save & restart** to change the objective,
+model, workspace, execution limits, context/workflow plugins, tool collections, knowledge
+bases, and external tools. Changes are validated and saved atomically with restart;
+external bindings are refreshed from the registry. An explicitly edited objective becomes
+the new request; otherwise pending guidance is included once.
 You can restart directly from idle, paused, failed, or completed state after the
 previous worker exits. TUI provides the same controls; CLI: `loom session restart SESSION_ID`.
 

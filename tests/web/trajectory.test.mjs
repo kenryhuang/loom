@@ -23,6 +23,8 @@ function fixture(id = "one") {
           summary: "<script>alert(1)</script>",
           status: "complete",
           duration_ms: 100,
+          ttft_ms: 20,
+          tps: 62.5,
           request_ref: ref(1),
           response_ref: ref(2),
           evidence_refs: [],
@@ -38,6 +40,7 @@ function fixture(id = "one") {
           run_id: "run",
           tool_id: "read_file",
           status: "failed",
+          duration_ms: 40,
           exit_code: 2,
           input_ref: ref(3),
           raw_output_ref: ref(4),
@@ -113,20 +116,35 @@ test("trajectory renders measured facts, filters calls and reads paginated evide
   view.selectTab(0);
   assert.equal(view.body.hidden, false);
   assert.match(root.textContent, /15/);
-  assert.equal(root.querySelectorAll(".trajectory-round").length, 1);
+  assert.equal(root.querySelectorAll('table[aria-label="Model calls"] .call-explorer-row').length, 1);
+  assert.equal(root.querySelectorAll(".dashboard-calls table").length, 2);
+  assert.match(root.querySelector('table[aria-label="Model calls"] tbody').textContent, /20 ms62.5 tok\/s105100 msSuccess/);
+  const toolToggle = root.querySelector('table[aria-label="Tool calls"] .call-explorer-toggle');
+  const toolDetail = root.querySelector('table[aria-label="Tool calls"] .call-explorer-detail');
+  toolToggle.click();
+  assert.equal(toolDetail.hidden, false);
+  assert.match(toolDetail.textContent, /InputOutputFile missing/);
+  toolToggle.click();
+  assert.equal(toolDetail.hidden, true);
   assert.equal(root.querySelector("script"), null);
   view.updateState({ session_id: "one", event_cursor: 11 });
   assert.match(view.status.textContent, /New events available/);
   view.statusFilter.value = "failed";
   view.statusFilter.dispatchEvent(new dom.window.Event("input"));
-  assert.equal(root.querySelectorAll(".trajectory-round").length, 1);
+  assert.equal(root.querySelectorAll('table[aria-label="Model calls"] .call-explorer-row').length, 0);
+  assert.equal(root.querySelectorAll('table[aria-label="Tool calls"] .call-explorer-row').length, 1);
   view.search.value = "missing-query";
   view.search.dispatchEvent(new dom.window.Event("input"));
   assert.match(view.timeline.textContent, /No calls match/);
-  view.search.value = "read_file";
+  view.statusFilter.value = "";
+  view.search.value = "one";
   view.search.dispatchEvent(new dom.window.Event("input"));
-  const call = root.querySelector(".trajectory-round");
-  call.open = true;
+  const call = root.querySelector('table[aria-label="Model calls"] .call-explorer-detail');
+  const toggle = root.querySelector('table[aria-label="Model calls"] .call-explorer-toggle');
+  assert.equal(call.hidden, true);
+  toggle.click();
+  assert.equal(call.hidden, false);
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.match(call.textContent, /Recorded verification evidence/);
   await view.showEvidence(ref(1));
@@ -211,11 +229,11 @@ test("one run selector scopes statistics and call explorer together and survives
   assert.equal(root.querySelectorAll(".trajectory-heading select").length, 1);
   assert.match(root.querySelector(".trace-dashboard").textContent, /Raw events7/);
   assert.match(root.querySelector(".trace-dashboard").textContent, /No checks recorded/);
-  assert.equal(root.querySelectorAll(".trajectory-round").length, 1);
-  assert.equal(root.querySelector(".trajectory-round").dataset.roundId, "round-other");
+  assert.equal(root.querySelectorAll('table[aria-label="Model calls"] .call-explorer-row').length, 1);
+  assert.equal(root.querySelector('table[aria-label="Model calls"] .call-explorer-row').dataset.callId, "round-other");
   await view.open(api, "one", 10);
   assert.equal(view.runFilter.value, "other");
   assert.match(root.querySelector(".trace-dashboard").textContent, /Raw events7/);
-  assert.equal(root.querySelector(".trajectory-round").dataset.roundId, "round-other");
+  assert.equal(root.querySelector('table[aria-label="Model calls"] .call-explorer-row').dataset.callId, "round-other");
   view.close(); dom.window.close();
 });

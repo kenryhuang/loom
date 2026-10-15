@@ -1,5 +1,6 @@
 import {SettingsView} from "./views/settings.mjs";
 import {ExternalToolsView, bindExternalTools} from "./views/external-tools.mjs";
+import {canRestartTask} from "./state.mjs";
 import { SessionApi } from "./api.mjs";
 import { SessionController } from "./controller.mjs";
 import { element, renderResult } from "./markdown.mjs";
@@ -15,6 +16,7 @@ import { TrajectoryView } from "./views/trajectory.mjs";
 const $ = (id) => document.getElementById(id);
 let controller,
   catalog,
+  editingTask = null,
   evaluationId = null,
   sending = false;
 const sessionSetup = new SessionSetupView($("create-page"), {
@@ -140,6 +142,7 @@ $("new-knowledge").addEventListener("click", () =>
 );
 $("refresh-knowledge").addEventListener("click", () => knowledgeList.refresh());
 const panels = new PanelsView($("session-panels"), builtinPanels(), {
+  editTask: () => editTask().catch(showError),
   command: (kind, payload) => controller.command(kind, payload),
   error: showError,
   artifact: openArtifact,
@@ -372,7 +375,7 @@ function renderControls() {
     button.title = {
       complete_task: "Close this task; preserve its run history and verification results",
       reopen_task: "Reopen for new messages; execution starts when you send a task or choose Restart task",
-      restart_task: "Run the current goal from scratch with a fresh plan, acceptance checks and budget, using current workspace files",
+      restart_task: "Reassemble the current task with current tool bindings, a fresh plan and budget; keep earlier results as background",
     }[command.id] || command.label;
     button.addEventListener("click", async () => {
       button.dataset.busy = "true";
@@ -442,6 +445,7 @@ async function login(token) {
 
 function disconnect() {
   sessionSetup.abort?.abort();
+  editingTask = null; editorMode(false);
   externalTools.close();
   settings.close();
   $("settings-page").replaceChildren();
@@ -482,6 +486,7 @@ function populateCreate() {
   $("session-panels").hidden = false;
   $("create-template").replaceChildren();
   for (const template of [
+    ...(editingTask ? [currentTaskTemplate()] : []),
     ...catalog.templates,
     { id: "custom", label: "Custom specification" },
   ]) {
@@ -499,9 +504,41 @@ function populateCreate() {
   sessionSetup.configure(catalog);
   templateChanged();
 }
+function currentTaskTemplate() {
+  return {id: "current-task", label: "Current task configuration", description: "Adjust the existing assembly or choose another task type.", task_spec: editingTask.task.task_spec};
+}
+function selectedTemplate() {
+  return $("create-template").value === "current-task" && editingTask
+    ? currentTaskTemplate() : catalog?.templates.find(t => t.id === $("create-template").value);
+}
+function editorMode(editing) {
+  sessionSetup.editing = editing;
+  $("create-page").querySelector("h2").textContent = editing ? "Edit task" : "New session";
+  $("create-page").setAttribute("aria-label", editing ? "Edit task" : "New session");
+  $("create-submit").textContent = editing ? "Save & restart" : "Create session";
+  $("create-objective").required = editing;
+  $("restart-settings").hidden = !editing;
+  $("restart-settings").disabled = !editing;
+  $("cancel-create").setAttribute("aria-label", editing ? "Cancel task editing" : "Cancel new session");
+}
+async function editTask() {
+  const active = controller, sid = active?.selectedId;
+  if (!sid || !canRestartTask(active.projection.snapshot)) return;
+  const [nextCatalog, bases] = await Promise.all([active.api.catalog(), active.api.json("/v1/knowledge-bases")]);
+  if (controller !== active || active.selectedId !== sid) return;
+  const snapshot = active.projection.snapshot;
+  if (!canRestartTask(snapshot)) throw new Error("Pause execution before editing the task.");
+  editingTask = {id: sid, revision: snapshot.task.revision, task: structuredClone(snapshot.task)};
+  catalog = nextCatalog;
+  populateCreate(); editorMode(true);
+  sessionSetup.loadTask(editingTask.task, bases.knowledge_bases);
+  $("create-error").textContent = "";
+  $("setup-knowledge-reasons").textContent = "";
+  activateComponent("sessions"); setWorkspaceMode("create"); $("create-objective").focus();
+}
 function templateChanged() {
   const id = $("create-template").value,
-    template = catalog?.templates.find((item) => item.id === id);
+    template = selectedTemplate();
   $("template-description").textContent =
     template?.description ||
     "Provide a task specification for the installed plugins.";
@@ -576,13 +613,15 @@ $("refresh-sessions").addEventListener("click", () =>
   controller?.refresh().catch(showError),
 );
 $("new-session").addEventListener("click", async () => {
+  const wasEditing = Boolean(editingTask);
+  editingTask = null; editorMode(false);
+  if (wasEditing) $("create-form").reset();
   $("create-error").textContent = "";
   const setupController = controller;
   if (setupController) {try {const next = await setupController.api.catalog();
     if (controller === setupController) catalog = next;} catch (error) {showError(error); return;}}
   if (controller !== setupController) return;
-  sessionSetup.configure(catalog);
-  templateChanged();
+  populateCreate();
   $("setup-knowledge-reasons").textContent = "";
   activateComponent("sessions");
   setWorkspaceMode("create");
@@ -612,9 +651,7 @@ $("create-form").addEventListener("submit", async (event) => {
   $("create-submit").disabled = true;
   $("create-error").textContent = "";
   try {
-    const template = catalog.templates.find(
-        (item) => item.id === $("create-template").value,
-      ),
+    const template = selectedTemplate(),
       payload = {};
     if ($("create-objective").value.trim())
       payload.objective = $("create-objective").value.trim();
@@ -626,11 +663,22 @@ $("create-form").addEventListener("submit", async (event) => {
     if ($("create-model").value) payload.model = $("create-model").value;
     if ($("create-template").value === "custom")
       payload.task_spec = JSON.parse($("create-spec").value);
-    else if (template.task_spec)
+    else if (template?.task_spec)
       payload.task_spec = structuredClone(template.task_spec);
     if ($("create-workspace").value.trim())
       payload.workspace = $("create-workspace").value.trim();
     sessionSetup.apply(payload, template);
+    if (editingTask) {
+      const active = controller, edit = editingTask;
+      if (active?.selectedId !== edit.id) throw new Error("Session changed. Reopen task settings.");
+      sessionSetup.restartChanges(payload);
+      await active.api.command(edit.id, "restart_task", {task: payload}, {revision: edit.revision});
+      if (controller !== active || active.selectedId !== edit.id) return;
+      editingTask = null; editorMode(false);
+      $("create-form").reset();
+      await active.refresh(); await select(edit.id);
+      return;
+    }
     const active = controller,
       result = await active.api.create(payload);
     if (controller !== active) return;
@@ -645,6 +693,7 @@ $("create-form").addEventListener("submit", async (event) => {
   }
 });
 $("cancel-create").addEventListener("click", () => {
+  if (editingTask) { editingTask = null; editorMode(false); $("create-form").reset(); populateCreate(); }
   setWorkspaceMode(false);
   $("new-session").focus();
 });

@@ -185,3 +185,21 @@ def test_paused_tool_update_rejects_unsafe_boundaries_without_mutation(tmp_path,
     finally:
         service.active.clear()
         service.close()
+
+
+def test_restart_refreshes_registered_external_tool_metadata(tmp_path):
+    service = LoomService(tmp_path / 'service')
+    try:
+        connection = service.store.external_tools.save(cli_config())
+        tid = connection['tools'][0]['id']
+        sid = service.create('bound', {'external_tool_ids': [tid]})['session_id']
+        old = service.snapshot(sid)['task']['external_tool_bindings'][0]
+        config = cli_config()
+        config['description'] = 'Updated search capability'
+        service.store.external_tools.save(config, connection['id'])
+        command(service, sid, 'restart_task', task={'objective': 'Use the updated tool'})
+        new = service.snapshot(sid)['task']['external_tool_bindings'][0]
+        assert new != old
+        assert new == service.store.external_tools.resolve([tid])[0]
+    finally:
+        service.close()

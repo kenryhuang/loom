@@ -26,6 +26,14 @@ test("dashboard separates acceptance, visualizes measured costs and preserves ev
   const grouping = root.querySelector('[aria-label="Group tool statistics"]');
   grouping.value = "by_family"; grouping.dispatchEvent(new dom.window.Event("change"));
   assert.match(root.textContent, /command/);
+  const model = [...root.querySelectorAll(".dashboard-panel")].find(n => n.querySelector("h3")?.textContent === "Model & token cost");
+  assert.equal(model.querySelectorAll("table").length, 2);
+  assert.equal(model.querySelectorAll("details, select, .dashboard-stats, figure").length, 0);
+  assert.deepEqual([...model.querySelectorAll("table:first-of-type thead")][0].textContent,
+    "ModelCallsTTFT · avg / P95TPS · avg / P95Duration · avg / P95");
+  assert.match(model.textContent, /1 s \/ 1.5 s20 \/ 30/);
+  assert.match(model.textContent, /Token in · total \/ maxToken out · total \/ maxmodel15 \/ 105 \/ 10/);
+  assert.match(model.querySelector("tbody span").title, /2\/3 calls measured/);
   dom.window.close();
 });
 

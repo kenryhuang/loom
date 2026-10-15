@@ -57,8 +57,11 @@ class SessionProjection:
             self.snapshot["task"].update(objective=data["objective"], goal_revision=data["goal_revision"])
             if "title" in data:
                 self.snapshot["title"] = self.snapshot["task"]["title"] = data["title"]
-        elif kind == "task.knowledge.changed":
+        elif kind in {"task.knowledge.changed", "task.external_tools.changed", "task.configuration.changed"}:
             self.snapshot["task"].update(deepcopy(data))
+            if kind == "task.configuration.changed":
+                self.snapshot["title"] = data["title"]
+                self._budget()
         elif kind == "task.budget.changed":
             self.snapshot["task"].setdefault("limits", {})["max_tokens"] = data["max_tokens"]
             self._budget()

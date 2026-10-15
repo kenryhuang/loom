@@ -70,7 +70,8 @@ test("feed keeps snapshot messages chronological with readable answer and lazy a
     /https:\/\/example.test/,
   );
   assert.match(root.querySelector(".event-detail").textContent, /facts/);
-  assert.equal(root.querySelector(".result").tagName, "ARTICLE");
+  assert.equal(root.querySelector(".result").tagName, "DETAILS");
+  assert.equal(root.querySelector(".result > summary").textContent, "Final result");
   assert.equal(root.querySelector(".result h1").textContent, "Result");
   assert.equal(root.querySelector(".result strong").textContent, "Done");
   dom.window.close();
@@ -483,7 +484,16 @@ test("expand/fold all includes nested details, new events and results and surviv
     content: "Fresh session",
     seq: 1,
   });
-  assert.equal(root.querySelector(".result").tagName, "ARTICLE");
+  assert.equal(root.querySelector(".result").tagName, "DETAILS");
+  assert.equal(root.querySelector(".result").open, true);
+  root.querySelector(".result").open = false;
+  const freshSnapshot = {
+    ...state(),
+    messages: [{ id: "fresh", role: "assistant", content: "Fresh session", seq: 1 }],
+  };
+  feed.restore({ snapshot: freshSnapshot, events: [] });
+  assert.equal(root.querySelector(".result").open, false);
+  assert.equal(root.querySelector(".result .markdown").textContent.trim(), "Fresh session");
   dom.window.close();
 });
 

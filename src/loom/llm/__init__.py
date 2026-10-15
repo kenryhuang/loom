@@ -25,6 +25,7 @@ from loom.llm.api import (
     to_llm_tool,
     to_llm_tools,
 )
+from loom.llm.structured import ProtocolError, ProtocolExhausted, StructuredProtocol, StructuredResult, request_structured
 
 __all__ = [
     "EnvOpenAIConfig",
@@ -34,6 +35,10 @@ __all__ = [
     "LlmStreamEvent",
     "LlmToolCall",
     "OpenAIProvider",
+    "ProtocolError",
+    "ProtocolExhausted",
+    "StructuredProtocol",
+    "StructuredResult",
     "TokenTracker",
     "TokenUsage",
     "ToolSelectionConfig",
@@ -48,6 +53,7 @@ __all__ = [
     "create_token_tracker",
     "load_env_openai_config",
     "request_llm_response",
+    "request_structured",
     "to_llm_tool",
     "to_llm_tools",
 ]

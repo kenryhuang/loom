@@ -21,8 +21,6 @@ async def execute(state, bridge, config_path, provider_factory, plugin_registry_
         bridge.input_cursor = inputs[-1]["seq"]
     bridge.fresh_turn = fresh_turn
     bridge.turn_messages = [m for m in state["messages"] if not inputs or m["seq"] < inputs[0]["seq"]]
-    if state['run'].get('restart_from_scratch'):
-        bridge.turn_messages = []  # Prior results remain in the trace, not in the new investigation's model context.
     provider = (
         provider_factory(state)
         if provider_factory

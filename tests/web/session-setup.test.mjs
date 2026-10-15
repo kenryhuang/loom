@@ -201,3 +201,30 @@ test("recommended knowledge and plugins remain editable and reach the final spec
   assert.ok(payload.task_spec.tools.collections.includes("knowledge"));
   dom.window.close();
 });
+
+
+test("task editing preserves existing plugin options, unavailable bindings and validates restart limits", () => {
+  const {dom, view, $, root} = setup({});
+  const spec = {session_environment: {plugin: "session", resources: [{id: "source", kind: "directory", uri: "/old", access: "read-only"}]},
+    execution_runtime: {plugin: "native_os", workspace_resource: "source"}, context: {plugin: "bounded_context", max_window_chars: 7000},
+    workflow: {plugin: "legacy_planning", mode: "off"}, tools: {collections: ["filesystem", "task_control"]}};
+  const task = {objective: "Inspect again", title: "Existing", workspace: "/old", model: "removed-model", plan_mode: "off", task_spec: spec,
+    knowledge_base_ids: ["missing-kb"], external_tool_ids: ["missing-tool"], limits: {
+      max_steps: 10, max_llm_calls: 20, max_tokens: 30000, max_duration_seconds: 60, max_window_chars: 9000}};
+  view.configure({...catalog, plugins: {context: [{id: "bounded_context"}], workflow: [{id: "legacy_planning"}]}});
+  view.template({task_spec: spec}); view.loadTask(task, []);
+  assert.equal($("create-model").value, "removed-model");
+  assert.equal($("create-knowledge").selectedOptions[0].value, "missing-kb");
+  assert.equal(root.querySelector('#create-external-tools input:checked').value, "missing-tool");
+  $("create-workspace").value = "/new";
+  const payload = {objective: task.objective, task_spec: structuredClone(spec), knowledge_base_ids: ["missing-kb"]};
+  view.apply(payload, {task_spec: spec}); view.restartChanges(payload);
+  assert.match($("restart-context-note").textContent, /7,000 characters \(limited by the context plugin\)/);
+  assert.equal(payload.task_spec.context.max_window_chars, 9000);
+  assert.deepEqual(payload.task_spec.session_environment.resources, [{id: "source", kind: "directory", uri: "/new", access: "read-only"}]);
+  assert.deepEqual(payload.limits, task.limits);
+  assert.equal(payload.model, "removed-model");
+  $("restart-max_tokens").value = "0";
+  assert.throws(() => view.restartChanges(payload), /positive integers/);
+  dom.window.close();
+});

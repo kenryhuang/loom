@@ -1,6 +1,7 @@
 const duration = {measured: 2, missing: 1, total_ms: 8000, average_ms: 4000, p95_ms: 6000, max_ms: 6000};
 const tokens = {known: 15, measured_calls: 2, missing_calls: 1, average: 7.5, max: 10};
 const counts = {calls: 3, success: 1, failed: 1, cancelled: 0, incomplete: 1, unknown: 0, success_rate: .5, duration,
+  ttft: {...duration, average_ms: 1000, p95_ms: 1500}, tps: {measured: 2, missing: 1, average: 20, p95: 30},
   failure_reasons: {timeout: 1}, truncated_outputs: 1, explicit_retries: 0, repeated_inputs: 1,
   prompt_tokens: tokens, completion_tokens: {...tokens, known: 5}, total_tokens: {...tokens, known: 20}};
 export function statistics() {
@@ -19,4 +20,3 @@ export function statistics() {
     calls: {tools: [{tool: "shell_execute", status: "failed", failure_reason: "timeout", duration_ms: 6000, role: "solver", seq: 5, evidence_refs: [{line_number: 5}]}]},
     outputs: {workspace_files: ["report.md"], artifacts: [{kind: "report", relative_path: "report.json", sha256: "report"}]}};
 }
-

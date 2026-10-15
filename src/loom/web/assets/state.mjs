@@ -1,5 +1,10 @@
 /** Protocol projection, independent of transport and DOM. */
 export class EventGap extends Error {}
+export function canRestartTask(state) {
+  return ["idle", "paused", "failed", "completed"].includes(state.task.state)
+    && state.run?.state !== "running" && !state.workspace_blocked?.length
+    && !(state.input_request?.state === "pending" && state.input_request.kind === "recovery");
+}
 export function canUpdateTaskTools(state) {
   return ["idle", "completed", "paused"].includes(state.task.state)
     && (!state.run || ["completed", "stopped", "suspended"].includes(state.run.state))
@@ -71,8 +76,9 @@ export class SessionProjection {
         goal_revision: data.goal_revision,
       });
       if (data.title) state.title = state.task.title = data.title;
-    } else if (kind === "task.knowledge.changed") {
+    } else if (["task.knowledge.changed", "task.external_tools.changed", "task.configuration.changed"].includes(kind)) {
       Object.assign(state.task, structuredClone(data));
+      if (kind === "task.configuration.changed") { state.title = data.title; this.budget(); }
     } else if (kind === "task.budget.changed") {
       state.task.limits.max_tokens = data.max_tokens;
       this.budget();

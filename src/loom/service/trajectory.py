@@ -18,7 +18,7 @@ from loom.service.contracts import ServiceError, canonical, new_id
 from loom.trace_analysis import build_episode_graph
 from loom.trace_analysis.links import tool_output
 
-VERSION = "session-trajectory.4.5"
+VERSION = "session-trajectory.4.6"
 
 
 def session_records(events, read_artifact):
@@ -118,6 +118,11 @@ def analyze_session_trace(source, coverage):
     from loom.evaluation.behavior_facts import build_behavior_facts
 
     behavior = build_behavior_facts(source, legacy=facts, source_coverage=coverage)
+    model_metrics = {row["id"]: row for row in behavior["base"]["statistics"]["calls"]["models"]}
+    for row in rounds:
+        measured = model_metrics[row["id"]]
+        row.update({key: measured[key] for key in ("duration_ms", "ttft_ms", "tps", "performance_basis", "duration_basis")})
+        row["status"] = {"success": "complete", "incomplete": "partial"}.get(measured["status"], measured["status"])
     call_metrics = {row["id"]: row for row in behavior["base"]["statistics"]["calls"]["tools"]}
     for row in tools:
         measured = call_metrics[row["id"]]
@@ -188,6 +193,22 @@ class SessionTrajectory:
                     "SELECT body FROM events WHERE session_id=? AND seq<=? AND json_extract(body,'$.type') NOT LIKE 'llm.%.delta' "
                     "AND json_extract(body,'$.type') NOT LIKE 'llm.stream.%' AND json_extract(body,'$.type') NOT LIKE 'llm.tool_call.%' ORDER BY seq",
                     (body["session_id"], body["source_cursor"]))]
+                # Keep only the first meaningful stream output per call for legacy TTFT.
+                # Full token streams are deliberately excluded from the analysis snapshot.
+                first_outputs = db.execute(
+                    "SELECT body FROM events WHERE session_id=? AND seq IN ("
+                    "SELECT MIN(seq) FROM events WHERE session_id=? AND seq<=? "
+                    "AND json_extract(body,'$.payload.llm_call_id') IS NOT NULL AND ("
+                    "(json_extract(body,'$.type') IN ('llm.content.delta','llm.reasoning.delta',"
+                    "'llm.reasoning_context.delta','llm.tool_call.arguments.delta') "
+                    "AND length(json_extract(body,'$.payload.delta')) > 0) OR "
+                    "(json_extract(body,'$.type')='llm.tool_call.started' AND length(json_extract(body,'$.payload.tool_name')) > 0)) "
+                    "GROUP BY json_extract(body,'$.run_id'),json_extract(body,'$.payload.loop_id'),"
+                    "json_extract(body,'$.payload.trace_id'),json_extract(body,'$.payload.step_number'),json_extract(body,'$.payload.llm_call_id'))",
+                    (body["session_id"], body["session_id"], body["source_cursor"]),
+                )
+                events.extend(json.loads(row[0]) for row in first_outputs)
+                events.sort(key=lambda event: event["seq"])
                 event_counts = {row[0]: row[1] for row in db.execute(
                     "SELECT json_extract(body,'$.type'),COUNT(*) FROM events WHERE session_id=? AND seq<=? GROUP BY json_extract(body,'$.type')",
                     (body["session_id"], body["source_cursor"]))}

@@ -26,6 +26,8 @@ COMMAND_TYPES = frozenset(
     }
 )
 LIMITS = {"max_steps": 100, "max_llm_calls": 200, "max_tokens": 10_000_000, "max_duration_seconds": 1800, "max_window_chars": 240_000}
+EDITABLE_TASK_FIELDS = frozenset({"objective", "title", "workspace", "model", "plan_mode", "limits", "task_spec",
+                                 "knowledge_base_ids", "external_tool_ids"})
 
 
 class ServiceError(Exception):
@@ -154,6 +156,14 @@ def validate_command(command: Any) -> dict:
     if kind == "submit_message":
         allowed = {"content"}
         text(payload.get("content"), "content")
+    elif kind == "restart_task":
+        allowed = {"task", "reason"}
+        if "task" in payload:
+            changes = object_value(payload["task"], "task")
+            if set(changes) - EDITABLE_TASK_FIELDS:
+                raise ServiceError("Unknown editable task fields")
+        if "reason" in payload:
+            text(payload["reason"], "reason")
     elif kind == "set_knowledge_bases":
         allowed = {"knowledge_base_ids"}
         ids = payload.get("knowledge_base_ids")

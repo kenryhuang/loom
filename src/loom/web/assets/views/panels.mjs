@@ -1,5 +1,5 @@
 import { element } from "../markdown.mjs";
-import { parseBudget, canUpdateTaskTools } from "../state.mjs";
+import { parseBudget, canUpdateTaskTools, canRestartTask } from "../state.mjs";
 
 function panel(title) {
   const root = element("section", "panel");
@@ -33,14 +33,17 @@ export class PanelsView {
 
 export function builtinPanels() {
   return new PanelRegistry()
-    .register("info", () => {
+    .register("info", (actions) => {
       const root = panel("Details"),
         body = element("div");
       root.append(body);
+      const edit = element("button", "quiet", "Edit task");
+      edit.type = "button"; edit.onclick = () => actions.editTask?.(); root.append(edit);
       let signature;
       return {
         element: root,
         update(state) {
+          edit.disabled = !canRestartTask(state);
           const rows = [
             ["Session", state.session_id],
             ["Workspace", state.task.workspace || "—"],

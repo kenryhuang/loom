@@ -931,6 +931,9 @@ wheels = [
 name = "loom"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "jsonschema" },
+]
 
 [package.optional-dependencies]
 external-tools = [
@@ -964,6 +967,7 @@ tui = [
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", marker = "extra == 'knowledge-graph'", specifier = ">=4.12,<5" },
+    { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "jsonschema", marker = "extra == 'external-tools'", specifier = ">=4.23,<5" },
     { name = "lightrag-hku", marker = "extra == 'knowledge-graph'", specifier = "==1.5.7" },
     { name = "mcp", marker = "extra == 'external-tools'", specifier = ">=1.30,<2" },
