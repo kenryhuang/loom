@@ -1,3 +1,4 @@
+import {renderGoalSummary, GOAL_SCHEMA} from "./goal-loops.mjs";
 import { renderBehaviorEvaluation } from "./behavior-evaluation.mjs";
 import { element } from "../markdown.mjs";
 import { badge, number, seconds, label, disclosure } from "./dashboard.mjs";
@@ -10,6 +11,9 @@ const DIMENSIONS = {
   verify_gate: "Verification",
 };
 const stageLabel = (stage) => {
+  if (stage?.startsWith("structure:")) return "Reconstructing goals and phase occurrences";
+  if (stage?.startsWith("reconcile:")) return "Reconciling goal boundaries";
+  if (stage?.startsWith("diagnose:")) return "Diagnosing goal execution";
   if (stage?.startsWith("scan:")) return "Scanning behavior index";
   if (stage?.startsWith("focus:")) return "Analyzing behavior segment";
   if (stage === "synthesis") return "Summarizing findings";
@@ -26,7 +30,7 @@ const button = (text, action) => {
 };
 
 export class EvaluationView {
-  constructor(root, { api, sessionId, analysisId, signal, evidence, onError, onResult }) {
+  constructor(root, { api, sessionId, analysisId, signal, evidence, onError, onResult, onExplore }) {
     Object.assign(this, {
       root,
       api,
@@ -36,6 +40,7 @@ export class EvaluationView {
       evidence,
       onError,
       onResult,
+      onExplore,
     });
     this.generation = 0;
     this.timer = null;
@@ -82,7 +87,7 @@ export class EvaluationView {
         const option = element(
           "option",
           "",
-          version === "v3"
+          version === "goal_loops_v1" ? "Goal loops · Execution & cost" : version === "v3"
             ? "v3 · Behavior evaluation"
             : "v2 · Legacy effectiveness",
         );
@@ -93,7 +98,13 @@ export class EvaluationView {
       const versionLabel = element("label", "", "Analysis version");
       versionLabel.append(this.version);
       this.settingsFields.append(versionLabel);
-      this.version.addEventListener("change", () => this.applyDefaults());
+      this.runSelect = element("select"); this.runSelect.setAttribute("aria-label", "Evaluation run scope");
+      for (const id of catalog.run_ids || []) {const option = element("option", "", id); option.value = id; this.runSelect.append(option);}
+      this.runSelect.value = catalog.run_ids?.at(-1) || "";
+      this.runLabel = element("label", "", "Run scope"); this.runLabel.append(this.runSelect); this.toolbar.prepend(this.runLabel);
+      const scopeVisibility = () => { this.runLabel.hidden = this.version.value !== "goal_loops_v1"; };
+      scopeVisibility();
+      this.version.addEventListener("change", () => { this.applyDefaults(); scopeVisibility(); });
       this.fields = {};
       for (const [key, label] of [
         ["max_calls", "Max calls"],
@@ -144,6 +155,7 @@ export class EvaluationView {
         this.start.textContent = "Run deep evaluation";
         this.start.disabled = !this.catalog.models.length;
         this.model.disabled = this.version.disabled = false;
+        if (this.runSelect) {this.runSelect.disabled = false; this.runLabel.hidden = this.version.value !== "goal_loops_v1";}
         for (const field of Object.values(this.fields)) field.disabled = false;
         if (this.history) this.history.value = "";
         this.renderedData = null;
@@ -156,7 +168,7 @@ export class EvaluationView {
       const actions = element("div", "deep-actions");
       actions.append(this.start, this.cancel, this.fresh); this.toolbar.append(actions);
       const notes = disclosure(this.settingsPanel, "Budget accounting");
-      notes.append(element("p", "muted small", "Evaluator usage is separate from task usage. Token budgets are checked between calls; an in-flight response can exceed the limit. Review limit: focused segments in v3, first rounds in v2."));
+      notes.append(element("p", "muted small", "Evaluator usage is separate from task usage. Token budgets are checked between calls; an in-flight response can exceed the limit. Review limit: focused segments in v3, first rounds in v2, diagnosed goals in Goal loops (all source batches are reviewed first)."));
       this.status.textContent = catalog.models.length ? "" : "Configure a judge model to run evaluation.";
       this.status.hidden = !!catalog.models.length;
       this.results.append(element("p", "empty-state", "No evaluation yet"));
@@ -215,12 +227,14 @@ export class EvaluationView {
           : this.catalog.defaults_by_version?.[this.version.value] || {}),
         model: this.model.value,
         analysis_version: this.version.value,
+        ...(this.version.value === "goal_loops_v1" ? {run_id: this.runSelect.value} : {}),
       };
       for (const [key, input] of Object.entries(this.fields))
         options[key] = Number(input.value);
       if (
         resumable &&
         options.model === this.job.model &&
+        (options.run_id || null) === (this.job.run_id || null) &&
         this.version.value === (this.job.analysis_version || "v2") &&
         Object.keys(this.job.settings).every(
           (key) =>
@@ -279,6 +293,7 @@ export class EvaluationView {
       this.model.value = job.model;
       this.model.disabled = active;
       if (this.version) { this.version.value = job.analysis_version || "v2"; this.version.disabled = active; }
+      if (this.runSelect) {this.runSelect.disabled = active; this.runLabel.hidden = job.analysis_version !== "goal_loops_v1"; if (job.run_id) this.runSelect.value = job.run_id;}
       for (const [key, input] of Object.entries(this.fields)) {
         input.value = job.settings[key] ?? this.catalog?.defaults_by_version?.[job.analysis_version || "v2"]?.[key] ?? this.catalog?.defaults[key] ?? "";
         input.disabled = active;
@@ -300,21 +315,26 @@ export class EvaluationView {
     if (!this.progress) return;
     this.progress.hidden = false;
     const active = ["queued", "running"].includes(job.state);
+    const goalLoops = job.analysis_version === "goal_loops_v1";
     const behavior = job.analysis_version === "v3";
-    const total = behavior
+    const total = goalLoops ? job.total_packets : behavior
       ? job.selected_segments
       : (job.selected_rounds ?? job.total_rounds);
-    const reviewed = behavior
+    const reviewed = goalLoops ? job.reviewed_packets || 0 : behavior
       ? job.reviewed_segments || 0
       : job.reviewed_rounds || 0;
     const call = job.current_call;
     const heading = element("header", "dashboard-panel-heading");
     heading.append(element("h3", "", "Evaluation run"), badge(label(job.state), job.state));
     const coverage = element("progress");
-    coverage.setAttribute("aria-label", behavior ? "Reviewed segment coverage" : "Reviewed round coverage");
+    coverage.setAttribute("aria-label", goalLoops ? "Reviewed evidence coverage" : behavior ? "Reviewed segment coverage" : "Reviewed round coverage");
     if (total != null && total > 0) { coverage.max = total; coverage.value = Math.min(reviewed, total); }
     const phases = element("div", "deep-phases");
-    if (behavior) {
+    if (goalLoops) {
+      for (const [title, value] of [["Structure", `${reviewed} / ${total ?? "—"} evidence pages`], ["Reconciliation", job.reconciliation_complete ? (job.execution_protocol >= 2 && !job.reconciliation_candidates ? "Skipped · no candidates" : "Saved") : "Pending"], ["Diagnosis", `${job.diagnosed_goals || 0} goals`]]) {
+        const phase = element("div", "deep-phase"); phase.append(element("strong", "", title), element("span", "", value)); phases.append(phase);
+      }
+    } else if (behavior) {
       for (const [family, title, detail, done] of [
         ["scan", "Scan", `${job.scanned_pages || 0} / ${job.scan_pages ?? "—"} pages`, job.scan_complete],
         ["focus", "Analyze", `${reviewed} / ${job.selected_segments ?? "—"} segments`, job.scan_complete && job.selected_segments != null && reviewed >= job.selected_segments],
@@ -416,6 +436,9 @@ export class EvaluationView {
     const filters = [...this.results.querySelectorAll("[data-deep-filter]")].map(n => [n.dataset.deepFilter, n.value]);
     this.results.replaceChildren();
     this.renderedData = signature;
+    if (data.schema_version === GOAL_SCHEMA) {
+      renderGoalSummary(this.results, data, this.onExplore); return;
+    }
     if (data.schema_version === "loom.evaluation.bundle.v3") {
       renderBehaviorEvaluation(this, data);
       for (const [key, value] of filters) {

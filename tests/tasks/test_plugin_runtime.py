@@ -114,7 +114,9 @@ async def test_workflow_revision_does_not_complete_the_running_node():
 
         async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
             self.calls += 1
+            names = {tool["function"]["name"] for tool in tools or ()}
             if self.calls == 1:
+                assert "finish" in names and "complete_node" not in names
                 value = {
                     "base_revision": 0,
                     "reason": "Findings require follow-up",
@@ -124,8 +126,10 @@ async def test_workflow_revision_does_not_complete_the_running_node():
             if self.calls == 2:
                 # A revision boundary must keep the current node running.
                 assert "Current node: first" in str(messages)
+                assert "complete_node" in names and "finish" not in names
                 return ok(LlmResponse("", (LlmToolCall("complete", "complete_node", json.dumps({"evidence": "Investigation complete"})),)))
             assert "Current node: follow-up" in str(messages)
+            assert "finish" in names and "complete_node" not in names
             return await super().chat(messages, tools, cancellation, tool_choice)
 
     provider = Provider()
@@ -135,6 +139,49 @@ async def test_workflow_revision_does_not_complete_the_running_node():
     assert workflow["revision"] == 1 and provider.calls == 3
     assert [node["status"] for node in workflow["nodes"]] == ["succeeded", "succeeded"]
     assert workflow["nodes"][0]["provenance"] == "Investigation complete"
+
+
+@pytest.mark.asyncio
+async def test_final_node_advertises_finish_and_completes_in_one_model_call():
+    class Provider(AnswerProvider):
+        calls = 0
+
+        async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
+            self.calls += 1
+            names = {tool["function"]["name"] for tool in tools or ()}
+            assert "finish" in names and "complete_node" not in names
+            assert "This is the final workflow node" in str(messages[0].content)
+            return ok(LlmResponse("", (LlmToolCall("done", "finish", json.dumps({"report": "Supported final report"})),)))
+
+    provider = Provider()
+    request = TaskRequest("Explain a concept", task_spec={"workflow": {"plugin": "dynamic"}})
+    result = (await run_generic_task(request, provider=provider)).unwrap()
+    assert provider.calls == 1
+    assert result.output == "Supported final report"
+    assert thaw_json(result.run_result.context.state.scratch)["workflow"]["workflow"]["nodes"][0]["status"] == "succeeded"
+
+
+@pytest.mark.parametrize("has_finish", [True, False])
+def test_restored_final_node_refreshes_controls_and_keeps_completion_available(has_finish):
+    from loom.workflows.dynamic import DynamicWorkflowPolicy
+
+    refs = (ToolRef("finish", "Submit report"),) if has_finish else ()
+    workflow = DynamicWorkflowPolicy({})
+    workflow.configure_normal_tool_refs(refs)
+    workflow.controller.nodes = workflow.controller.validate([
+        {"id": "task", "objective": "Explain", "status": "running", "executor_config": {"allowed_tools": []}},
+    ])
+    workflow._active = "task"
+    restored = DynamicWorkflowPolicy({})
+    restored.configure_normal_tool_refs(refs)
+    restored.restore(workflow.snapshot()).unwrap()
+    context = make_task_context(TaskRequest("Explain")).unwrap()
+    context = restored.project_context(context)
+    names = {ref.id for ref in context.affordances.tools}
+    assert ("finish" in names) == has_finish
+    assert ("complete_node" in names) != has_finish
+    guidance = next(c for c in context.identity.constraints if c.id == "dynamic-workflow")
+    assert ("This is the final workflow node" in str(guidance)) == has_finish
 
 
 @pytest.mark.asyncio

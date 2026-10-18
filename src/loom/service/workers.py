@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import multiprocessing
 import os
 import signal
 import subprocess
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from loom.runtime.checkpoints import decode, encode
+from loom.service.contracts import canonical
+from loom.service.worker_transport import WorkerTransport
 
 
 def process_identity(pid):
@@ -59,7 +63,8 @@ class WorkerBridge:
     def __init__(self, connection, state):
         self.connection = connection
         self.state = state
-        self.serial = 0
+        self.transport = WorkerTransport(connection, state)
+        self._evidence_artifacts = OrderedDict()
         self.checkpoint = decode(state.get("checkpoint_value"))
         self.counters = decode(state["run"].get("counters", encode({})))
         self.input_cursor = state["input_cursor"]
@@ -67,20 +72,26 @@ class WorkerBridge:
             self.input_cursor = state["messages"][0]["seq"]
 
     def rpc(self, kind, payload):
-        self.serial += 1
-        self.connection.send(
-            {
-                "epoch": self.state["epoch"],
-                "attempt_id": self.state["run"]["attempt_id"],
-                "record_id": str(self.serial),
-                "type": kind,
-                "payload": encode(payload),
-            }
-        )
-        response = self.connection.recv()
-        if "error" in response:
-            raise RuntimeError(response["error"])
-        return decode(response["value"])
+        digest = None
+        if kind == "publish_artifact" and payload.get("kind") == "acceptance_tool_evidence":
+            digest = hashlib.sha256(canonical(payload["value"]).encode()).hexdigest()
+            if digest in self._evidence_artifacts:
+                if self.transport.error:
+                    raise RuntimeError("Worker transport failed") from self.transport.error
+                self._evidence_artifacts.move_to_end(digest)
+                return dict(self._evidence_artifacts[digest])
+        request = self.transport.request(kind, payload)
+        self.transport.enqueue(request)
+        result = request.future.result()
+        if digest is not None:
+            # Only cache confirmed durable references, never tool execution results.
+            self._evidence_artifacts[digest] = dict(result)
+            if len(self._evidence_artifacts) > 128:
+                self._evidence_artifacts.popitem(last=False)
+        return result
+
+    def close(self):
+        self.transport.close()
 
     def boundary(self, checkpoint):
         self.checkpoint = checkpoint
@@ -109,8 +120,13 @@ class WorkerBridge:
 
         from loom.core import ok
 
-        self.rpc("event", event)
-        await asyncio.sleep(0)
+        request = self.transport.request("event", event)
+        if not self.transport.enqueue(request, block=False):
+            await asyncio.to_thread(self.transport.enqueue, request)
+        if not request.delta:
+            await asyncio.shield(asyncio.wrap_future(request.future))
+        else:
+            await asyncio.sleep(0)
         return ok(None)
 
 
@@ -127,6 +143,8 @@ def worker_main(connection, state, config_path, provider_factory, plugin_registr
         with contextlib.suppress(EOFError, BrokenPipeError, OSError):
             bridge.rpc("failure", {"message": str(exc), "type": type(exc).__name__})
     finally:
+        with contextlib.suppress(RuntimeError, OSError):
+            bridge.close()
         connection.close()
 
 

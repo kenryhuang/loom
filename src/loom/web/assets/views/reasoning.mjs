@@ -1,3 +1,4 @@
+import {GoalLoopView, GOAL_SCHEMA} from "./goal-loops.mjs";
 import {element} from "../markdown.mjs";
 import {badge, cards, disclosure, distribution, label, number, panel, seconds, table} from "./dashboard.mjs";
 
@@ -117,6 +118,10 @@ export class ReasoningView {
     this.limit = 200; this.role = "all"; this.expandedCycles = new Set(); this.update(null);
   }
   update(data, job) {
+    if (data?.schema_version === GOAL_SCHEMA) {
+      this.goalView ||= new GoalLoopView(this.root, {evidence: this.evidence});
+      this.signature = null; this.goalView.update(data); return;
+    }
     const signature = JSON.stringify([data, this.baseProcess, job?.state, job?.stage]);
     if (signature === this.signature) return;
     this.signature = signature;

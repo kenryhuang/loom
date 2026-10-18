@@ -711,7 +711,8 @@ test("hidden bookkeeping cannot evict model failures and uncertain operations st
   );
   for (let seq = 3; seq < 30; seq++)
     feed.append(
-      event(seq, "llm.tool_call.started", { tool_call_id: String(seq) }),
+      seq % 2 ? event(seq, "llm.tool_call.started", { tool_call_id: String(seq) }) :
+        event(seq, "artifact.created", {artifact: {kind: "acceptance_tool_evidence", sha256: String(seq)}}),
     );
   feed.append(event(30, "operation.uncertain", { operation_id: "run:write" }));
   assert.equal(feed.events.length, 3);

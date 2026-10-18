@@ -1934,3 +1934,74 @@ def test_nonstream_call_records_duration_without_inventing_ttft(monkeypatch):
     response = asyncio.run(llm_module.request_llm_response(Provider(), [])).unwrap()
     assert response.duration_ms == 3000
     assert response.ttft_ms is None
+
+
+def test_stream_metrics_separate_delta_delivery_and_final_persistence(monkeypatch):
+    from types import SimpleNamespace
+
+    clock = [0.0]
+    monkeypatch.setattr("loom.llm.api.time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    class Provider:
+        model = "timed"
+
+        async def stream_chat(self, messages, **kwargs):
+            clock[0] += 1
+            yield LlmStreamEvent(kind="content.delta", content_delta="hello")
+            clock[0] += 2
+            yield LlmStreamEvent(kind="completed", response=LlmResponse(content="hello", stream_metrics={"http_receive_ms": 3000}))
+
+    async def emit(event):
+        clock[0] += {"llm.stream.started": 0.1, "llm.content.delta": 0.2, "llm.stream.completed": 0.3}[event["type"]]
+        return ok(None)
+
+    response = asyncio.run(llm_module.request_llm_response(Provider(), [], stream=True, emit_event=emit)).unwrap()
+    assert response.duration_ms == pytest.approx(3300)
+    assert response.stream_metrics == pytest.approx({
+        "http_receive_ms": 3000, "event_emit_ms": 600, "delta_emit_ms": 200,
+        "completion_emit_ms": 300, "delta_events": 1,
+    })
+
+
+def test_http_receive_timing_is_independent_of_slow_consumer(monkeypatch):
+    import threading
+
+    from loom.llm import api
+
+    received = threading.Event()
+    lines = [b'data: {"choices":[{"delta":{"content":"hello"}}]}\n', b'\n', b'data: [DONE]\n', b'\n']
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def __iter__(self):
+            yield from lines
+            received.set()
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", lambda request: Response())
+
+    async def run():
+        metrics = {}
+        chunks = api._urlopen_stream_chunks("https://test.invalid/chat", {"body": {}, "headers": {}}, metrics=metrics)
+        result = [await anext(chunks)]
+        assert await asyncio.to_thread(received.wait, 2)
+        received_ms = metrics["http_receive_ms"]
+        await asyncio.sleep(0.05)
+        result.extend([chunk async for chunk in chunks])
+        assert result == lines
+        assert metrics["http_receive_ms"] == received_ms
+        assert metrics["receive_queue_max_lag_ms"] >= 40
+        assert metrics["received_bytes"] == sum(map(len, lines))
+        assert metrics["received_chunks"] == len(lines)
+
+        provider = create_openai_provider(api_key="test", model="test")
+        response = (await llm_module.request_llm_response(provider, [], stream=True)).unwrap()
+        assert response.content == "hello"
+        assert response.stream_metrics["http_receive_ms"] >= 0
+        assert response.stream_metrics["received_chunks"] == len(lines)
+
+    asyncio.run(run())

@@ -14,6 +14,10 @@ from pathlib import Path
 from loom.core import err, make_loom_error, now_iso, ok
 from loom.evaluation.diagnostics import ANALYZER_VERSION, DIMENSIONS, PROMPT_VERSION, FactAnalysis
 from loom.evaluation.effectiveness_judge import judge_effectiveness, unverified_criteria
+from loom.evaluation.goal_loops import ANALYZER as GOAL_ANALYZER
+from loom.evaluation.goal_loops import ENGINE as GOAL_ENGINE
+from loom.evaluation.goal_loops import PROMPT as GOAL_PROMPT
+from loom.evaluation.goal_loops.execution import LEGACY_VERSION
 from loom.evolution.diagnoses import proposals_from_diagnoses
 from loom.service.contracts import ServiceError, canonical, new_id
 from loom.service.insights import build_insights
@@ -25,6 +29,7 @@ DEFAULTS = {"max_calls": 80, "max_tokens": 1000000, "max_seconds": 1800,
             "max_evidence_chars": 400000, "max_prompt_chars": 100000, "batch_rounds": 8, "max_read_rounds": 4, "max_rounds": 10000, "max_call_seconds": 120}
 V3_DEFAULTS = {**DEFAULTS, "max_calls": 24, "max_tokens": 120000, "max_seconds": 600,
                "max_rounds": 8, "max_read_rounds": 1, "max_evidence_chars": 120000, "max_prompt_chars": 48000}
+GOAL_DEFAULTS = {**V3_DEFAULTS, "max_read_rounds": 2, "max_evidence_chars": 400000}
 BOUNDS = {"max_calls": (1, 500), "max_tokens": (100, 10000000), "max_seconds": (1, 7200),
           "max_evidence_chars": (1000, 5000000), "max_prompt_chars": (10000, 200000),
           "batch_rounds": (1, 16), "max_read_rounds": (0, 10), "max_rounds": (1, 10000), "max_call_seconds": (1, 600)}
@@ -35,7 +40,7 @@ def _behavior_facts(source, factual, body):
     from loom.evaluation.behavior_facts import build_behavior_facts
 
     existing = factual.get("behavior")
-    if existing and (body.get("analyzer_version") != current_version or existing.get("analyzer_version") == current_version):
+    if existing and (body.get("analyzer_version") not in {current_version, GOAL_ANALYZER} or existing.get("analyzer_version") == current_version):
         return existing
     return build_behavior_facts(source, source_coverage=factual.get("summary", {}).get("coverage"))
 
@@ -65,8 +70,9 @@ class SessionSemantic:
             if loaded.ok:
                 default = loaded.value.evaluation_model or loaded.value.default_model
                 models = [{"id": key, "label": f"{key} · {value.model}"} for key, value in loaded.value.models.items()]
-        return {"models": models, "default_model": default, "defaults": V3_DEFAULTS, "defaults_by_version": {"v2": DEFAULTS, "v3": V3_DEFAULTS},
-                "bounds": BOUNDS, "analysis_versions": ["v3", "v2"], "default_analysis_version": "v3"}
+        return {"models": models, "default_model": default, "defaults": V3_DEFAULTS,
+                "defaults_by_version": {"v2": DEFAULTS, "v3": V3_DEFAULTS, GOAL_ENGINE: GOAL_DEFAULTS},
+                "bounds": BOUNDS, "analysis_versions": [GOAL_ENGINE, "v3", "v2"], "default_analysis_version": "v3"}
 
     def close(self):
         self.closed.set()
@@ -88,10 +94,14 @@ class SessionSemantic:
         return body
 
     def list(self, sid, aid):
-        self.trajectory._load(sid, aid)
+        parent = self.trajectory._load(sid, aid)
         with self.store.transaction() as db:
             rows = [json.loads(row[0]) for row in db.execute("SELECT body FROM semantic_jobs WHERE session_id=? ORDER BY rowid DESC", (sid,))]
-        return {"jobs": [self._public(row) for row in rows if row["analysis_id"] == aid], **self.options()}
+        runs = []
+        if parent["state"] == "completed":
+            source, _ = self.trajectory._data(parent)
+            runs = list(dict.fromkeys(e.run_id for e in source.events if e.run_id))
+        return {"jobs": [self._public(row) for row in rows if row["analysis_id"] == aid], "run_ids": runs, **self.options()}
 
     def _public(self, body):
         public = {k: v for k, v in body.items() if k not in {"checkpoint", "config_digest"}}
@@ -104,6 +114,14 @@ class SessionSemantic:
         result = self._public(body)
         if body.get("result"):
             result["evaluation"] = json.loads(self.store.artifacts.read(body["result"]["sha256"]))
+            if body.get("analysis_version") == GOAL_ENGINE:
+                from loom.evaluation.goal_loops.execution_view import VERSION as execution_version
+                from loom.evaluation.goal_loops.execution_view import execution_view
+
+                bundle = result["evaluation"]
+                if bundle.get("execution_view", {}).get("version") != execution_version:
+                    source, _ = self.trajectory._data(self.trajectory._load(sid, aid))
+                    bundle["execution_view"] = execution_view(source, bundle)
             semantic = result['evaluation'].get('semantic', {})
             process = semantic.get('reasoning_process')
             if body.get('analysis_version') == 'v3' and process:
@@ -115,6 +133,12 @@ class SessionSemantic:
                     _, factual = self.trajectory._data(self.trajectory._load(sid, aid))
                     semantic['reasoning_process'] = build_reasoning_process(factual['behavior'], semantic)
                     semantic['reasoning_process']['graph']['projection_basis'] = 'pinned_source_and_saved_judgments_no_model_call'
+        elif body.get("analysis_version") == GOAL_ENGINE:
+            from loom.evaluation.goal_loops.review import project
+
+            source, factual = self.trajectory._data(self.trajectory._load(sid, aid))
+            semantic = project(source, _behavior_facts(source, factual, body), body["run_id"], body["checkpoint"])
+            result["evaluation"] = self._result(body, source, factual, semantic)
         elif body.get("analysis_version") == "v3" and body.get("checkpoint"):
             # Expose validated local results while subsequent stages are still running.
             from loom.evaluation.behavior_judge import partial_semantic
@@ -138,6 +162,14 @@ class SessionSemantic:
         return result
 
     def _result(self, body, source, factual, semantic):
+        if body.get("analysis_version") == GOAL_ENGINE:
+            return {**semantic, "analysis_id": body["id"],
+                    "source": {**semantic["source"], "analysis_id": body["analysis_id"], "snapshot_boundary": body["source_cursor"]},
+                    "analyzer": {**semantic["analyzer"], "model_config_digest": body["config_digest"],
+                                 "semantic_settings_digest": hashlib.sha256(canonical({k: v for k, v in body["settings"].items()
+                                     if k not in RESOURCE_LIMITS}).encode()).hexdigest()},
+                    "evaluator_usage": {**semantic["evaluator_usage"], "elapsed_seconds": body["elapsed_seconds"]},
+                    "evaluator": {"model": body["model"], "config_digest": body["config_digest"]}}
         if body.get("analysis_version") == "v3":
             from loom.evaluation.behavior import evaluation_payload
 
@@ -149,29 +181,31 @@ class SessionSemantic:
                 "source_sha256": source.source_sha256}
 
     def start(self, sid, aid, options):
-        if not isinstance(options, dict) or set(options) - {"model", "resume_id", "analysis_version", *DEFAULTS}:
+        if not isinstance(options, dict) or set(options) - {"model", "resume_id", "analysis_version", "run_id", *DEFAULTS}:
             raise ServiceError("Invalid evaluation options")
         resume_id = options.get("resume_id")
         if resume_id is not None and (not isinstance(resume_id, str) or not resume_id):
             raise ServiceError("Invalid resume_id")
         resumed = self._load(sid, aid, resume_id) if resume_id else None
         version = options.get("analysis_version", resumed.get("analysis_version", "v2") if resumed else "v3")
-        if version not in {"v2", "v3"}:
-            raise ServiceError("analysis_version must be v2 or v3")
+        if version not in {"v2", "v3", GOAL_ENGINE}:
+            raise ServiceError("Unsupported analysis_version")
         from loom.evaluation.behavior_contracts import ANALYZER_VERSION as V3_ANALYZER
         from loom.evaluation.behavior_contracts import PROMPT_VERSION as V3_PROMPT
 
-        analyzer_version = V3_ANALYZER if version == "v3" else ANALYZER_VERSION
-        prompt_version = V3_PROMPT if version == "v3" else PROMPT_VERSION
-        settings = {**(V3_DEFAULTS if version == "v3" else DEFAULTS),
+        analyzer_version = GOAL_ANALYZER if version == GOAL_ENGINE else V3_ANALYZER if version == "v3" else ANALYZER_VERSION
+        prompt_version = GOAL_PROMPT if version == GOAL_ENGINE else V3_PROMPT if version == "v3" else PROMPT_VERSION
+        settings = {**(GOAL_DEFAULTS if version == GOAL_ENGINE else V3_DEFAULTS if version == "v3" else DEFAULTS),
                     **(resumed["settings"] if resumed else {})}
         for key, value in options.items():
-            if key in {"model", "resume_id", "analysis_version"}:
+            if key in {"model", "resume_id", "analysis_version", "run_id"}:
                 continue
             low, high = BOUNDS[key]
             if type(value) is not int or not low <= value <= high:
                 raise ServiceError(f"{key} must be an integer between {low} and {high}")
             settings[key] = value
+        if version == GOAL_ENGINE and settings["max_prompt_chars"] < 20000:
+            raise ServiceError("Goal-loop max_prompt_chars must be at least 20000 to fit the structured protocol and evidence")
         available = self.options()
         model = options.get("model") or (resumed["model"] if resumed else available["default_model"])
         if not isinstance(model, str) or model not in {row["id"] for row in available["models"]}:
@@ -179,10 +213,17 @@ class SessionSemantic:
         parent = self.trajectory._load(sid, aid)
         if parent["state"] != "completed":
             raise ServiceError("Wait for factual analysis to complete", 409)
+        run_id = options.get("run_id", resumed.get("run_id") if resumed else None)
+        if version == GOAL_ENGINE:
+            source, _ = self.trajectory._data(parent)
+            if not isinstance(run_id, str) or run_id not in {e.run_id for e in source.events if e.run_id}:
+                raise ServiceError("Select a run recorded in this snapshot")
+        elif run_id is not None:
+            raise ServiceError("run_id is supported only for goal-loop analysis")
         digest = hashlib.sha256(Path(self.config_path).read_bytes()).hexdigest() if self.config_path else "test"
         identity = {"source": parent["source"]["sha256"], "model": model, "config": digest,
                     "version": VERSION, "analysis_version": version, "analyzer": analyzer_version, "prompt": prompt_version, "settings": settings,
-                    "session": sid, "analysis": aid}
+                    "session": sid, "analysis": aid, **({"run_id": run_id} if version == GOAL_ENGINE else {})}
         key = hashlib.sha256(canonical(identity).encode()).hexdigest()
         with self.lock, self.store.transaction() as db:
             self.store._load(db, sid)
@@ -196,9 +237,11 @@ class SessionSemantic:
                 resumed = json.loads(db.execute("SELECT body FROM semantic_jobs WHERE id=?", (resume_id,)).fetchone()[0])
                 if resumed["state"] in {"queued", "running", "completed"}:
                     raise ServiceError("Only stopped evaluations can be resumed", 409)
+                protocol_upgrade = (version == GOAL_ENGINE and
+                                    (resumed["analyzer_version"], resumed["prompt_version"]) == LEGACY_VERSION)
                 if (model != resumed["model"] or digest != resumed["config_digest"]
-                        or resumed.get("analysis_version", "v2") != version
-                        or resumed["analyzer_version"] != analyzer_version or resumed["prompt_version"] != prompt_version
+                        or resumed.get("analysis_version", "v2") != version or resumed.get("run_id") != run_id
+                        or (not protocol_upgrade and (resumed["analyzer_version"] != analyzer_version or resumed["prompt_version"] != prompt_version))
                         or any(settings[k] != resumed["settings"].get(k, DEFAULTS[k]) for k in DEFAULTS if k not in RESOURCE_LIMITS)):
                     raise ServiceError("Resume must keep the same model, snapshot and analysis settings; only resource limits may change")
                 if any(settings[k] < resumed["settings"][k] for k in RESOURCE_LIMITS):
@@ -211,6 +254,7 @@ class SessionSemantic:
                 raise ServiceError("Evaluation queue is full", 429)
             body = previous or {"id": new_id("evaluation"), "session_id": sid, "analysis_id": aid,
                                 "source_cursor": parent["source_cursor"], "model": model, "settings": settings,
+                                **({"run_id": run_id} if version == GOAL_ENGINE else {}),
                                 "config_digest": digest, "analysis_version": version, "analyzer_version": analyzer_version, "prompt_version": prompt_version,
                                 "created_at": now_iso(), "checkpoint": {}, "usage": {"calls": 0, "total_tokens": 0, "unreported_calls": 0},
                                 "elapsed_seconds": 0}
@@ -221,7 +265,7 @@ class SessionSemantic:
                 limits = ", ".join(f"{k} > {consumed[k]}" for k in exhausted)
                 raise ServiceError(f"Budget exhausted. Increase total limits ({limits}) to resume saved batches", 409)
             body.pop("result", None)
-            body.update(state="queued", error=None, settings=settings)
+            body.update(state="queued", error=None, settings=settings, analyzer_version=analyzer_version, prompt_version=prompt_version)
             db.execute("INSERT OR REPLACE INTO semantic_jobs VALUES(?,?,?,?)", (body["id"], sid, key, canonical(body)))
             self.cancels[body["id"]] = threading.Event()
             self.pool.submit(self._work, body)
@@ -288,6 +332,19 @@ class SessionSemantic:
 
         async def run(source, facts, provider):
             def checkpoint(value):
+                if body.get("analysis_version") == GOAL_ENGINE:
+                    body["checkpoint"] = value
+                    body.update(completed_batches=len(value.get("stages", {})),
+                                structure_complete=value.get("structure_complete", False),
+                                reconciliation_complete=value.get("reconciliation_complete", False),
+                                reviewed_packets=len(value.get("packet_status", {})),
+                                total_packets=sum(map(len, value.get("batches", []))),
+                                diagnosed_goals=len(value.get("diagnosed_goals", [])),
+                                execution_protocol=value.get("execution_protocol", 1),
+                                reconciliation_candidates=len(value.get("reconcile_candidates", [])),
+                                split_requests=len(value.get("splits", [])), review_gaps=len(value.get("review_gaps", [])))
+                    persist()
+                    return
                 if body.get("analysis_version") == "v3":
                     body["checkpoint"] = value
                     body["scanned_pages"] = sum(k.startswith("scan:") for k in value.get("stages", {}))
@@ -313,7 +370,12 @@ class SessionSemantic:
                 if body["completed_batches"] > previous_batches:
                     progress("batch.saved", f"Saved {body['completed_batches']} batches · {body['reviewed_rounds']} rounds reviewed")
                 persist()
-            if body.get("analysis_version") == "v3":
+            if body.get("analysis_version") == GOAL_ENGINE:
+                from loom.evaluation.goal_loops.review import review
+                work = review(source, facts, provider, run_id=body["run_id"], checkpoint=body["checkpoint"],
+                              save_checkpoint=checkpoint, event_sink=Sink(), settings=settings,
+                              remaining_seconds=lambda: settings["max_seconds"] - prior_elapsed - (time.monotonic() - started))
+            elif body.get("analysis_version") == "v3":
                 from loom.evaluation.behavior_judge import judge_behavior
 
                 work = judge_behavior(source, facts, provider, event_sink=Sink(), checkpoint=body["checkpoint"], save_checkpoint=checkpoint,
@@ -364,7 +426,7 @@ class SessionSemantic:
                 if not created.ok:
                     raise ValueError(created.error.message)
                 provider = created.value
-            if body.get("analysis_version") == "v3":
+            if body.get("analysis_version") in {"v3", GOAL_ENGINE}:
                 behavior = _behavior_facts(source, result, body)
                 result = {**result, "behavior": behavior}
                 body["total_segments"] = len(behavior["segments"])
@@ -393,6 +455,8 @@ class SessionSemantic:
                                                 if row["status"] == "supported" else row for row in semantic["verification"]]
                 verified = {row["criterion_id"]: row for row in semantic["verification"]}
                 semantic["verification"] = [verified.get(row["criterion_id"], row) for row in unverified_criteria(facts)]
+            if stop.is_set() or self.closed.is_set():
+                raise InterruptedError("Evaluation stopped; completed stages retained")
             payload = self._result(body, source, result, semantic)
             ref = self.store.artifacts.publish(payload, "trajectory_evaluation")
             with self.store.transaction() as db:

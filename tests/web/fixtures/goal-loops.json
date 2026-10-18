@@ -1,0 +1,2419 @@
+{
+  "schema_version": "loom.goal-loop-analysis.v1",
+  "source": {
+    "digest": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+    "run_id": "run",
+    "scope_digest": "f8622d827e6fb3089b6edc88",
+    "snapshot_boundary": 9,
+    "adapter_version": "goal-loops.1"
+  },
+  "analyzer": {
+    "version": "goal-loops.1",
+    "prompt_version": "goal-loops-rubric.1"
+  },
+  "graph_revision": 3,
+  "goals": [
+    {
+      "id": "goal:76f0015ff22e1876b2cb3d72",
+      "parent_goal_id": null,
+      "objective": "Investigate <script>unsafe()</script>",
+      "conditions": [
+        {
+          "id": "goal:64997be025007ad183f5e6c3:objective",
+          "description": "Investigate the problem",
+          "required": true,
+          "origin": "request_user_message",
+          "status": "unverified"
+        }
+      ],
+      "evidence_refs": [
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 1,
+          "event_hash": null,
+          "field_path": "messages.0.content",
+          "start": 0,
+          "end": 23
+        }
+      ],
+      "source_goal_id": "goal:64997be025007ad183f5e6c3",
+      "origin_line": 1,
+      "basis": "recorded",
+      "confidence": null,
+      "goal_disposition": "unknown",
+      "completion_claim": "unknown",
+      "end_line": 9,
+      "supersedes": null,
+      "recorded_execution_status": "completed",
+      "execution_state": "ended",
+      "end_boundary": "explicit",
+      "verification": []
+    }
+  ],
+  "attempts": [
+    {
+      "goal_id": "goal:76f0015ff22e1876b2cb3d72",
+      "approach": "Inspect and submit",
+      "outcome": "Recorded only",
+      "rationale": "Visible activity",
+      "confidence": "medium",
+      "id": "attempt:7e336c67053ef04b5eb71141",
+      "evidence_refs": [
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 2,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 3,
+          "event_hash": null,
+          "field_path": "input",
+          "start": 0,
+          "end": 17
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 4,
+          "event_hash": null,
+          "field_path": "output",
+          "start": 0,
+          "end": 56
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 6,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 7,
+          "event_hash": null,
+          "field_path": "input",
+          "start": 0,
+          "end": 17
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 8,
+          "event_hash": null,
+          "field_path": "output",
+          "start": 0,
+          "end": 56
+        }
+      ],
+      "basis": "inferred",
+      "start_line": 2,
+      "end_line": 8
+    }
+  ],
+  "phases": [
+    {
+      "attempt_id": "attempt:7e336c67053ef04b5eb71141",
+      "kind": "investigation",
+      "question": "What is recorded?",
+      "known_before": "",
+      "actions": "Read recorded source",
+      "observations": "Visible result",
+      "delta": "Source available",
+      "remaining_questions": "Completion not established",
+      "next_reason": "",
+      "call_ids": [
+        "llm:run:trace1:1:1",
+        "llm:run:trace2:2:2",
+        "tool:run:trace1:1:tool1",
+        "tool:run:trace2:2:tool2"
+      ],
+      "rationale": "Recorded calls",
+      "confidence": "medium",
+      "allocation": "serves",
+      "id": "phase:7740941316aef3995b434dc7",
+      "evidence_refs": [
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 2,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 3,
+          "event_hash": null,
+          "field_path": "input",
+          "start": 0,
+          "end": 17
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 4,
+          "event_hash": null,
+          "field_path": "output",
+          "start": 0,
+          "end": 56
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 6,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 7,
+          "event_hash": null,
+          "field_path": "input",
+          "start": 0,
+          "end": 17
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 8,
+          "event_hash": null,
+          "field_path": "output",
+          "start": 0,
+          "end": 56
+        }
+      ],
+      "basis": "inferred",
+      "start_line": 2,
+      "end_line": 8
+    },
+    {
+      "attempt_id": "attempt:7e336c67053ef04b5eb71141",
+      "kind": "verification",
+      "question": "Did the test pass?",
+      "known_before": "",
+      "actions": "Read recorded source",
+      "observations": "Visible result",
+      "delta": "Test rejected the first hypothesis",
+      "remaining_questions": "Completion not established",
+      "next_reason": "",
+      "call_ids": [
+        "llm:run:trace1:1:1",
+        "llm:run:trace2:2:2",
+        "tool:run:trace1:1:tool1",
+        "tool:run:trace2:2:tool2"
+      ],
+      "rationale": "Recorded calls",
+      "confidence": "medium",
+      "allocation": "serves",
+      "id": "phase:feedback",
+      "evidence_refs": [
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 2,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 3,
+          "event_hash": null,
+          "field_path": "input",
+          "start": 0,
+          "end": 17
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 4,
+          "event_hash": null,
+          "field_path": "output",
+          "start": 0,
+          "end": 56
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 6,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 7,
+          "event_hash": null,
+          "field_path": "input",
+          "start": 0,
+          "end": 17
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 8,
+          "event_hash": null,
+          "field_path": "output",
+          "start": 0,
+          "end": 56
+        }
+      ],
+      "basis": "inferred",
+      "start_line": 7,
+      "end_line": 8
+    },
+    {
+      "attempt_id": "attempt:7e336c67053ef04b5eb71141",
+      "kind": "investigation",
+      "question": "Investigate the rejected hypothesis",
+      "known_before": "",
+      "actions": "Read recorded source",
+      "observations": "Visible result",
+      "delta": "Narrowed the cause",
+      "remaining_questions": "Completion not established",
+      "next_reason": "",
+      "call_ids": [
+        "llm:run:trace1:1:1",
+        "llm:run:trace2:2:2",
+        "tool:run:trace1:1:tool1",
+        "tool:run:trace2:2:tool2"
+      ],
+      "rationale": "Recorded calls",
+      "confidence": "medium",
+      "allocation": "serves",
+      "id": "phase:again",
+      "evidence_refs": [
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 2,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 3,
+          "event_hash": null,
+          "field_path": "input",
+          "start": 0,
+          "end": 17
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 4,
+          "event_hash": null,
+          "field_path": "output",
+          "start": 0,
+          "end": 56
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 6,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 7,
+          "event_hash": null,
+          "field_path": "input",
+          "start": 0,
+          "end": 17
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 8,
+          "event_hash": null,
+          "field_path": "output",
+          "start": 0,
+          "end": 56
+        }
+      ],
+      "basis": "inferred",
+      "start_line": 9,
+      "end_line": 10
+    }
+  ],
+  "activities": [],
+  "relations": [
+    {
+      "id": "rel",
+      "source_id": "phase:feedback",
+      "target_id": "phase:again",
+      "kind": "reopens",
+      "layer": "semantic",
+      "basis": "inferred",
+      "evidence_refs": [
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 2,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 3,
+          "event_hash": null,
+          "field_path": "input",
+          "start": 0,
+          "end": 17
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 4,
+          "event_hash": null,
+          "field_path": "output",
+          "start": 0,
+          "end": 56
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 6,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 7,
+          "event_hash": null,
+          "field_path": "input",
+          "start": 0,
+          "end": 17
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 8,
+          "event_hash": null,
+          "field_path": "output",
+          "start": 0,
+          "end": 56
+        }
+      ],
+      "rationale": "Verification failure led to another investigation"
+    }
+  ],
+  "diagnostics": [
+    {
+      "id": "d",
+      "goal_id": "goal:76f0015ff22e1876b2cb3d72",
+      "observation": "Repeated investigation needs review",
+      "interpretation": "No new change is recorded",
+      "alternative": "Input may have changed",
+      "improvement": "Compare results before repeating",
+      "call_ids": [
+        "llm:run:trace1:1:1",
+        "llm:run:trace2:2:2",
+        "tool:run:trace1:1:tool1",
+        "tool:run:trace2:2:tool2"
+      ],
+      "evidence_refs": [
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 2,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 3,
+          "event_hash": null,
+          "field_path": "input",
+          "start": 0,
+          "end": 17
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 4,
+          "event_hash": null,
+          "field_path": "output",
+          "start": 0,
+          "end": 56
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 6,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 7,
+          "event_hash": null,
+          "field_path": "input",
+          "start": 0,
+          "end": 17
+        },
+        {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 8,
+          "event_hash": null,
+          "field_path": "output",
+          "start": 0,
+          "end": 56
+        }
+      ]
+    }
+  ],
+  "validation_diagnostics": [],
+  "aliases": {},
+  "facts": {
+    "events": [
+      {
+        "source_ref": {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 1,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 1,
+        "seq": null,
+        "event_id": "line-1",
+        "type": "llm.requested",
+        "at": null,
+        "refs": [],
+        "call_ids": [
+          "llm:run:trace1:1:1"
+        ]
+      },
+      {
+        "source_ref": {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 2,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 2,
+        "seq": null,
+        "event_id": "line-2",
+        "type": "llm.completed",
+        "at": null,
+        "refs": [
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 2,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": null,
+            "end": null
+          }
+        ],
+        "call_ids": [
+          "llm:run:trace1:1:1"
+        ]
+      },
+      {
+        "source_ref": {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 3,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 3,
+        "seq": null,
+        "event_id": "line-3",
+        "type": "tool.started",
+        "at": null,
+        "refs": [
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 3,
+            "event_hash": null,
+            "field_path": "input",
+            "start": null,
+            "end": null
+          }
+        ],
+        "call_ids": [
+          "tool:run:trace1:1:tool1"
+        ]
+      },
+      {
+        "source_ref": {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 4,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 4,
+        "seq": null,
+        "event_id": "line-4",
+        "type": "tool.completed",
+        "at": null,
+        "refs": [
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 4,
+            "event_hash": null,
+            "field_path": "output",
+            "start": null,
+            "end": null
+          }
+        ],
+        "call_ids": [
+          "tool:run:trace1:1:tool1"
+        ]
+      },
+      {
+        "source_ref": {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 5,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 5,
+        "seq": null,
+        "event_id": "line-5",
+        "type": "llm.requested",
+        "at": null,
+        "refs": [],
+        "call_ids": [
+          "llm:run:trace2:2:2"
+        ]
+      },
+      {
+        "source_ref": {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 6,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 6,
+        "seq": null,
+        "event_id": "line-6",
+        "type": "llm.completed",
+        "at": null,
+        "refs": [
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 6,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": null,
+            "end": null
+          }
+        ],
+        "call_ids": [
+          "llm:run:trace2:2:2"
+        ]
+      },
+      {
+        "source_ref": {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 7,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 7,
+        "seq": null,
+        "event_id": "line-7",
+        "type": "tool.started",
+        "at": null,
+        "refs": [
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 7,
+            "event_hash": null,
+            "field_path": "input",
+            "start": null,
+            "end": null
+          }
+        ],
+        "call_ids": [
+          "tool:run:trace2:2:tool2"
+        ]
+      },
+      {
+        "source_ref": {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 8,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 8,
+        "seq": null,
+        "event_id": "line-8",
+        "type": "tool.completed",
+        "at": null,
+        "refs": [
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 8,
+            "event_hash": null,
+            "field_path": "output",
+            "start": null,
+            "end": null
+          }
+        ],
+        "call_ids": [
+          "tool:run:trace2:2:tool2"
+        ]
+      },
+      {
+        "source_ref": {
+          "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+          "line_number": 9,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 9,
+        "seq": null,
+        "event_id": "line-9",
+        "type": "run.completed",
+        "at": null,
+        "refs": [],
+        "call_ids": []
+      }
+    ],
+    "verification": [],
+    "statistics": {
+      "schema_version": "loom.base-facts.v2",
+      "scope": "run",
+      "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+      "basic": {
+        "events": {
+          "raw": 9,
+          "analyzed": 9,
+          "by_type": {
+            "llm.requested": 2,
+            "llm.completed": 2,
+            "tool.started": 2,
+            "tool.completed": 2,
+            "run.completed": 1
+          }
+        },
+        "runs": 1,
+        "steps": 2,
+        "step_states": {
+          "incomplete": 2
+        },
+        "step_attempts": 0,
+        "run_attempts": 0,
+        "goal_changes": 0,
+        "acceptance": null,
+        "interruptions": {
+          "pauses": 0,
+          "input_waits": 0,
+          "uncertain_operations": 0
+        }
+      },
+      "tools": {
+        "calls": 2,
+        "success": 2,
+        "failed": 0,
+        "cancelled": 0,
+        "incomplete": 0,
+        "unknown": 0,
+        "success_rate": 1.0,
+        "duration": {
+          "measured": 0,
+          "missing": 2,
+          "total_ms": null,
+          "average_ms": null,
+          "p95_ms": null,
+          "max_ms": null
+        },
+        "failure_reasons": {},
+        "truncated_outputs": 0,
+        "explicit_retries": 0,
+        "ttft": {
+          "measured": 0,
+          "missing": 2,
+          "total_ms": null,
+          "average_ms": null,
+          "p95_ms": null,
+          "max_ms": null
+        },
+        "tps": {
+          "measured": 0,
+          "missing": 2,
+          "average": null,
+          "p95": null,
+          "max": null
+        },
+        "prompt_tokens": {
+          "known": 0,
+          "measured_calls": 0,
+          "missing_calls": 2,
+          "average": null,
+          "max": null
+        },
+        "completion_tokens": {
+          "known": 0,
+          "measured_calls": 0,
+          "missing_calls": 2,
+          "average": null,
+          "max": null
+        },
+        "total_tokens": {
+          "known": 0,
+          "measured_calls": 0,
+          "missing_calls": 2,
+          "average": null,
+          "max": null
+        },
+        "repeated_inputs": 1,
+        "by_tool": [
+          {
+            "name": "read_file",
+            "calls": 2,
+            "success": 2,
+            "failed": 0,
+            "cancelled": 0,
+            "incomplete": 0,
+            "unknown": 0,
+            "success_rate": 1.0,
+            "duration": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "failure_reasons": {},
+            "truncated_outputs": 0,
+            "explicit_retries": 0,
+            "ttft": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "tps": {
+              "measured": 0,
+              "missing": 2,
+              "average": null,
+              "p95": null,
+              "max": null
+            },
+            "prompt_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "completion_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "total_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "repeated_inputs": 1
+          }
+        ],
+        "by_family": [
+          {
+            "name": "file_read",
+            "calls": 2,
+            "success": 2,
+            "failed": 0,
+            "cancelled": 0,
+            "incomplete": 0,
+            "unknown": 0,
+            "success_rate": 1.0,
+            "duration": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "failure_reasons": {},
+            "truncated_outputs": 0,
+            "explicit_retries": 0,
+            "ttft": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "tps": {
+              "measured": 0,
+              "missing": 2,
+              "average": null,
+              "p95": null,
+              "max": null
+            },
+            "prompt_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "completion_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "total_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "repeated_inputs": 1
+          }
+        ],
+        "by_role": [
+          {
+            "name": "solver",
+            "calls": 2,
+            "success": 2,
+            "failed": 0,
+            "cancelled": 0,
+            "incomplete": 0,
+            "unknown": 0,
+            "success_rate": 1.0,
+            "duration": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "failure_reasons": {},
+            "truncated_outputs": 0,
+            "explicit_retries": 0,
+            "ttft": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "tps": {
+              "measured": 0,
+              "missing": 2,
+              "average": null,
+              "p95": null,
+              "max": null
+            },
+            "prompt_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "completion_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "total_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "repeated_inputs": 1
+          }
+        ]
+      },
+      "models": {
+        "calls": 2,
+        "success": 2,
+        "failed": 0,
+        "cancelled": 0,
+        "incomplete": 0,
+        "unknown": 0,
+        "success_rate": 1.0,
+        "duration": {
+          "measured": 0,
+          "missing": 2,
+          "total_ms": null,
+          "average_ms": null,
+          "p95_ms": null,
+          "max_ms": null
+        },
+        "failure_reasons": {},
+        "truncated_outputs": 0,
+        "explicit_retries": 0,
+        "ttft": {
+          "measured": 0,
+          "missing": 2,
+          "total_ms": null,
+          "average_ms": null,
+          "p95_ms": null,
+          "max_ms": null
+        },
+        "tps": {
+          "measured": 0,
+          "missing": 2,
+          "average": null,
+          "p95": null,
+          "max": null
+        },
+        "prompt_tokens": {
+          "known": 0,
+          "measured_calls": 0,
+          "missing_calls": 2,
+          "average": null,
+          "max": null
+        },
+        "completion_tokens": {
+          "known": 0,
+          "measured_calls": 0,
+          "missing_calls": 2,
+          "average": null,
+          "max": null
+        },
+        "total_tokens": {
+          "known": 30,
+          "measured_calls": 2,
+          "missing_calls": 0,
+          "average": 15.0,
+          "max": 15
+        },
+        "repeated_inputs": 0,
+        "by_model": [
+          {
+            "name": "unknown",
+            "calls": 2,
+            "success": 2,
+            "failed": 0,
+            "cancelled": 0,
+            "incomplete": 0,
+            "unknown": 0,
+            "success_rate": 1.0,
+            "duration": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "failure_reasons": {},
+            "truncated_outputs": 0,
+            "explicit_retries": 0,
+            "ttft": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "tps": {
+              "measured": 0,
+              "missing": 2,
+              "average": null,
+              "p95": null,
+              "max": null
+            },
+            "prompt_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "completion_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "total_tokens": {
+              "known": 30,
+              "measured_calls": 2,
+              "missing_calls": 0,
+              "average": 15.0,
+              "max": 15
+            },
+            "repeated_inputs": 0
+          }
+        ],
+        "by_role": [
+          {
+            "name": "solver",
+            "calls": 2,
+            "success": 2,
+            "failed": 0,
+            "cancelled": 0,
+            "incomplete": 0,
+            "unknown": 0,
+            "success_rate": 1.0,
+            "duration": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "failure_reasons": {},
+            "truncated_outputs": 0,
+            "explicit_retries": 0,
+            "ttft": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "tps": {
+              "measured": 0,
+              "missing": 2,
+              "average": null,
+              "p95": null,
+              "max": null
+            },
+            "prompt_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "completion_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "total_tokens": {
+              "known": 30,
+              "measured_calls": 2,
+              "missing_calls": 0,
+              "average": 15.0,
+              "max": 15
+            },
+            "repeated_inputs": 0
+          }
+        ],
+        "by_stage": [
+          {
+            "name": "solver",
+            "calls": 2,
+            "success": 2,
+            "failed": 0,
+            "cancelled": 0,
+            "incomplete": 0,
+            "unknown": 0,
+            "success_rate": 1.0,
+            "duration": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "failure_reasons": {},
+            "truncated_outputs": 0,
+            "explicit_retries": 0,
+            "ttft": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "tps": {
+              "measured": 0,
+              "missing": 2,
+              "average": null,
+              "p95": null,
+              "max": null
+            },
+            "prompt_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "completion_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "total_tokens": {
+              "known": 30,
+              "measured_calls": 2,
+              "missing_calls": 0,
+              "average": 15.0,
+              "max": 15
+            },
+            "repeated_inputs": 0
+          }
+        ]
+      },
+      "timing": {
+        "basis": "recorded_lifecycle_and_timestamp_intervals",
+        "wall_ms": null,
+        "session_span_ms": null,
+        "states_ms": {
+          "running": 0,
+          "queued": 0,
+          "waiting_input": 0,
+          "paused": 0,
+          "inactive": 0,
+          "unknown": 0
+        },
+        "running_activity_ms": {
+          "model_only": 0,
+          "tool_only": 0,
+          "overlap": 0,
+          "unattributed": 0
+        },
+        "runs": [],
+        "intervals": [],
+        "clock_reversals": 0,
+        "missing_timestamp_events": 9,
+        "limitations": [
+          "Call durations are cumulative and can overlap. Acceptance is a purpose, not an additional time slice.",
+          "Unattributed time is not measured framework overhead. Provider-internal retries and queue time require explicit instrumentation."
+        ]
+      },
+      "calls": {
+        "models": [
+          {
+            "id": "llm:run:trace1:1:1",
+            "run_id": "run",
+            "role": "solver",
+            "has_start": true,
+            "has_terminal": true,
+            "stage": "solver",
+            "started_at": null,
+            "ended_at": null,
+            "duration_ms": null,
+            "duration_basis": "missing_or_invalid",
+            "retry_of": null,
+            "evidence_refs": [
+              {
+                "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+                "line_number": 1,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              },
+              {
+                "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+                "line_number": 2,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              }
+            ],
+            "seq": 1,
+            "model": "unknown",
+            "status": "success",
+            "llm_call_id": "1",
+            "usage": {
+              "round_id": "llm:run:trace1:1:1",
+              "run_id": "run",
+              "llm_call_id": "1",
+              "prompt_tokens": null,
+              "completion_tokens": null,
+              "total_tokens": 15,
+              "usage_status": "partial",
+              "usage_record_count": 1,
+              "evidence_refs": [
+                {
+                  "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+                  "line_number": 2,
+                  "event_hash": null,
+                  "field_path": "response.usage",
+                  "start": null,
+                  "end": null
+                }
+              ],
+              "accounting_basis": "provider_reported",
+              "character_token_estimate": null
+            },
+            "ttft_ms": null,
+            "tps": null,
+            "performance_basis": "missing"
+          },
+          {
+            "id": "llm:run:trace2:2:2",
+            "run_id": "run",
+            "role": "solver",
+            "has_start": true,
+            "has_terminal": true,
+            "stage": "solver",
+            "started_at": null,
+            "ended_at": null,
+            "duration_ms": null,
+            "duration_basis": "missing_or_invalid",
+            "retry_of": null,
+            "evidence_refs": [
+              {
+                "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+                "line_number": 5,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              },
+              {
+                "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+                "line_number": 6,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              }
+            ],
+            "seq": 5,
+            "model": "unknown",
+            "status": "success",
+            "llm_call_id": "2",
+            "usage": {
+              "round_id": "llm:run:trace2:2:2",
+              "run_id": "run",
+              "llm_call_id": "2",
+              "prompt_tokens": null,
+              "completion_tokens": null,
+              "total_tokens": 15,
+              "usage_status": "partial",
+              "usage_record_count": 1,
+              "evidence_refs": [
+                {
+                  "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+                  "line_number": 6,
+                  "event_hash": null,
+                  "field_path": "response.usage",
+                  "start": null,
+                  "end": null
+                }
+              ],
+              "accounting_basis": "provider_reported",
+              "character_token_estimate": null
+            },
+            "ttft_ms": null,
+            "tps": null,
+            "performance_basis": "missing"
+          }
+        ],
+        "tools": [
+          {
+            "id": "tool:run:trace1:1:tool1",
+            "run_id": "run",
+            "role": "solver",
+            "has_start": true,
+            "has_terminal": true,
+            "stage": "solver",
+            "started_at": null,
+            "ended_at": null,
+            "duration_ms": null,
+            "duration_basis": "missing_or_invalid",
+            "retry_of": null,
+            "evidence_refs": [
+              {
+                "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+                "line_number": 3,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              },
+              {
+                "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+                "line_number": 4,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              }
+            ],
+            "seq": 3,
+            "tool": "read_file",
+            "tool_call_id": "tool1",
+            "family": "file_read",
+            "status": "success",
+            "failure_reason": null,
+            "output_truncated": false,
+            "exit_code": null,
+            "input_signature": "edc039d3636b32936a6bf6864e747b979dbedfa2d5aa76d6b2b778fe1739c3e0"
+          },
+          {
+            "id": "tool:run:trace2:2:tool2",
+            "run_id": "run",
+            "role": "solver",
+            "has_start": true,
+            "has_terminal": true,
+            "stage": "solver",
+            "started_at": null,
+            "ended_at": null,
+            "duration_ms": null,
+            "duration_basis": "missing_or_invalid",
+            "retry_of": null,
+            "evidence_refs": [
+              {
+                "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+                "line_number": 7,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              },
+              {
+                "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+                "line_number": 8,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              }
+            ],
+            "seq": 7,
+            "tool": "read_file",
+            "tool_call_id": "tool2",
+            "family": "file_read",
+            "status": "success",
+            "failure_reason": null,
+            "output_truncated": false,
+            "exit_code": null,
+            "input_signature": "edc039d3636b32936a6bf6864e747b979dbedfa2d5aa76d6b2b778fe1739c3e0"
+          }
+        ]
+      },
+      "outputs": {
+        "artifacts": [],
+        "workspace_files": []
+      },
+      "quality": {
+        "missing_artifacts": [],
+        "missing_usage_calls": 0,
+        "usage_statuses": {
+          "partial": 2
+        },
+        "unscoped_call_events": 0,
+        "calls_without_start": 0,
+        "calls_without_terminal": 0,
+        "duplicate_records": 0,
+        "missing_call_durations": 4,
+        "success_rate_basis": "success / (success + failed); cancelled, incomplete and unknown excluded",
+        "token_basis": "provider_reported; missing usage is not zero; semantic efficiency is not assessed",
+        "retry_basis": "explicit retry_of only; repeated calls are not automatically retries",
+        "unavailable": [
+          "provider cache/reasoning usage unless recorded",
+          "provider-internal attempts",
+          "monetary cost"
+        ],
+        "missing_ttft_calls": 2,
+        "missing_tps_calls": 2
+      },
+      "execution_status": "completed"
+    }
+  },
+  "graph": {
+    "nodes": [
+      {
+        "id": "goal:76f0015ff22e1876b2cb3d72",
+        "kind": "goal",
+        "evidence_refs": [
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 1,
+            "event_hash": null,
+            "field_path": "messages.0.content",
+            "start": 0,
+            "end": 23
+          }
+        ]
+      },
+      {
+        "id": "attempt:7e336c67053ef04b5eb71141",
+        "kind": "attempt",
+        "evidence_refs": [
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 2,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": 0,
+            "end": 11
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 3,
+            "event_hash": null,
+            "field_path": "input",
+            "start": 0,
+            "end": 17
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 4,
+            "event_hash": null,
+            "field_path": "output",
+            "start": 0,
+            "end": 56
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 6,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": 0,
+            "end": 11
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 7,
+            "event_hash": null,
+            "field_path": "input",
+            "start": 0,
+            "end": 17
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 8,
+            "event_hash": null,
+            "field_path": "output",
+            "start": 0,
+            "end": 56
+          }
+        ]
+      },
+      {
+        "id": "phase:7740941316aef3995b434dc7",
+        "kind": "phase",
+        "evidence_refs": [
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 2,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": 0,
+            "end": 11
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 3,
+            "event_hash": null,
+            "field_path": "input",
+            "start": 0,
+            "end": 17
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 4,
+            "event_hash": null,
+            "field_path": "output",
+            "start": 0,
+            "end": 56
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 6,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": 0,
+            "end": 11
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 7,
+            "event_hash": null,
+            "field_path": "input",
+            "start": 0,
+            "end": 17
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 8,
+            "event_hash": null,
+            "field_path": "output",
+            "start": 0,
+            "end": 56
+          }
+        ]
+      }
+    ],
+    "relations": [
+      {
+        "id": "edge:dd7923a0eeb8fb2d15ebcc6f",
+        "source_id": "goal:76f0015ff22e1876b2cb3d72",
+        "target_id": "attempt:7e336c67053ef04b5eb71141",
+        "layer": "containment",
+        "kind": "contains",
+        "basis": "derived",
+        "evidence_refs": []
+      },
+      {
+        "id": "edge:4384cdcf33a31ecba990a1dc",
+        "source_id": "attempt:7e336c67053ef04b5eb71141",
+        "target_id": "phase:7740941316aef3995b434dc7",
+        "layer": "containment",
+        "kind": "contains",
+        "basis": "derived",
+        "evidence_refs": []
+      },
+      {
+        "id": "rel",
+        "source_id": "phase:feedback",
+        "target_id": "phase:again",
+        "kind": "reopens",
+        "layer": "semantic",
+        "basis": "inferred",
+        "evidence_refs": [
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 2,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": 0,
+            "end": 11
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 3,
+            "event_hash": null,
+            "field_path": "input",
+            "start": 0,
+            "end": 17
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 4,
+            "event_hash": null,
+            "field_path": "output",
+            "start": 0,
+            "end": 56
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 6,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": 0,
+            "end": 11
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 7,
+            "event_hash": null,
+            "field_path": "input",
+            "start": 0,
+            "end": 17
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 8,
+            "event_hash": null,
+            "field_path": "output",
+            "start": 0,
+            "end": 56
+          }
+        ],
+        "rationale": "Verification failure led to another investigation"
+      }
+    ]
+  },
+  "cost_ledger": {
+    "atoms": [
+      {
+        "id": "llm:run:trace1:1:1",
+        "run_id": "run",
+        "role": "solver",
+        "has_start": true,
+        "has_terminal": true,
+        "stage": "solver",
+        "started_at": null,
+        "ended_at": null,
+        "duration_ms": null,
+        "duration_basis": "missing_or_invalid",
+        "retry_of": null,
+        "evidence_refs": [
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 1,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 2,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          }
+        ],
+        "seq": 1,
+        "model": "unknown",
+        "status": "success",
+        "llm_call_id": "1",
+        "usage": {
+          "round_id": "llm:run:trace1:1:1",
+          "run_id": "run",
+          "llm_call_id": "1",
+          "prompt_tokens": null,
+          "completion_tokens": null,
+          "total_tokens": 15,
+          "usage_status": "partial",
+          "usage_record_count": 1,
+          "evidence_refs": [
+            {
+              "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+              "line_number": 2,
+              "event_hash": null,
+              "field_path": "response.usage",
+              "start": null,
+              "end": null
+            }
+          ],
+          "accounting_basis": "provider_reported",
+          "character_token_estimate": null
+        },
+        "ttft_ms": null,
+        "tps": null,
+        "performance_basis": "missing",
+        "kind": "model",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "total_tokens": 15,
+        "usage_status": "partial"
+      },
+      {
+        "id": "llm:run:trace2:2:2",
+        "run_id": "run",
+        "role": "solver",
+        "has_start": true,
+        "has_terminal": true,
+        "stage": "solver",
+        "started_at": null,
+        "ended_at": null,
+        "duration_ms": null,
+        "duration_basis": "missing_or_invalid",
+        "retry_of": null,
+        "evidence_refs": [
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 5,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 6,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          }
+        ],
+        "seq": 5,
+        "model": "unknown",
+        "status": "success",
+        "llm_call_id": "2",
+        "usage": {
+          "round_id": "llm:run:trace2:2:2",
+          "run_id": "run",
+          "llm_call_id": "2",
+          "prompt_tokens": null,
+          "completion_tokens": null,
+          "total_tokens": 15,
+          "usage_status": "partial",
+          "usage_record_count": 1,
+          "evidence_refs": [
+            {
+              "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+              "line_number": 6,
+              "event_hash": null,
+              "field_path": "response.usage",
+              "start": null,
+              "end": null
+            }
+          ],
+          "accounting_basis": "provider_reported",
+          "character_token_estimate": null
+        },
+        "ttft_ms": null,
+        "tps": null,
+        "performance_basis": "missing",
+        "kind": "model",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "total_tokens": 15,
+        "usage_status": "partial"
+      },
+      {
+        "id": "tool:run:trace1:1:tool1",
+        "run_id": "run",
+        "role": "solver",
+        "has_start": true,
+        "has_terminal": true,
+        "stage": "solver",
+        "started_at": null,
+        "ended_at": null,
+        "duration_ms": null,
+        "duration_basis": "missing_or_invalid",
+        "retry_of": null,
+        "evidence_refs": [
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 3,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 4,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          }
+        ],
+        "seq": 3,
+        "tool": "read_file",
+        "tool_call_id": "tool1",
+        "family": "file_read",
+        "status": "success",
+        "failure_reason": null,
+        "output_truncated": false,
+        "exit_code": null,
+        "input_signature": "edc039d3636b32936a6bf6864e747b979dbedfa2d5aa76d6b2b778fe1739c3e0",
+        "kind": "tool",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "total_tokens": null,
+        "usage_status": null
+      },
+      {
+        "id": "tool:run:trace2:2:tool2",
+        "run_id": "run",
+        "role": "solver",
+        "has_start": true,
+        "has_terminal": true,
+        "stage": "solver",
+        "started_at": null,
+        "ended_at": null,
+        "duration_ms": null,
+        "duration_basis": "missing_or_invalid",
+        "retry_of": null,
+        "evidence_refs": [
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 7,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          },
+          {
+            "source_sha256": "30159311df330e2e75b03e8d6f221597ea913660f7f32b1a06f028b5c6cf8aa6",
+            "line_number": 8,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          }
+        ],
+        "seq": 7,
+        "tool": "read_file",
+        "tool_call_id": "tool2",
+        "family": "file_read",
+        "status": "success",
+        "failure_reason": null,
+        "output_truncated": false,
+        "exit_code": null,
+        "input_signature": "edc039d3636b32936a6bf6864e747b979dbedfa2d5aa76d6b2b778fe1739c3e0",
+        "kind": "tool",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "total_tokens": null,
+        "usage_status": null
+      }
+    ],
+    "assignments": [
+      {
+        "cost_atom_id": "llm:run:trace1:1:1",
+        "owner": "phase:7740941316aef3995b434dc7",
+        "related_ids": [
+          "phase:7740941316aef3995b434dc7"
+        ],
+        "allocation_basis": "inferred_unique_activity",
+        "uncertainty_reason": null
+      },
+      {
+        "cost_atom_id": "llm:run:trace2:2:2",
+        "owner": "phase:7740941316aef3995b434dc7",
+        "related_ids": [
+          "phase:7740941316aef3995b434dc7"
+        ],
+        "allocation_basis": "inferred_unique_activity",
+        "uncertainty_reason": null
+      },
+      {
+        "cost_atom_id": "tool:run:trace1:1:tool1",
+        "owner": "phase:7740941316aef3995b434dc7",
+        "related_ids": [
+          "phase:7740941316aef3995b434dc7"
+        ],
+        "allocation_basis": "inferred_unique_activity",
+        "uncertainty_reason": null
+      },
+      {
+        "cost_atom_id": "tool:run:trace2:2:tool2",
+        "owner": "phase:7740941316aef3995b434dc7",
+        "related_ids": [
+          "phase:7740941316aef3995b434dc7"
+        ],
+        "allocation_basis": "inferred_unique_activity",
+        "uncertainty_reason": null
+      }
+    ],
+    "totals": {
+      "model_calls": 2,
+      "tool_calls": 2,
+      "prompt_tokens": {
+        "known_sum": 0,
+        "measured_count": 0,
+        "eligible_count": 2,
+        "conflict_count": 0
+      },
+      "completion_tokens": {
+        "known_sum": 0,
+        "measured_count": 0,
+        "eligible_count": 2,
+        "conflict_count": 0
+      },
+      "total_tokens": {
+        "known_sum": 30,
+        "measured_count": 2,
+        "eligible_count": 2,
+        "conflict_count": 0
+      },
+      "model_duration_ms": {
+        "known_sum": 0,
+        "measured_count": 0,
+        "eligible_count": 2,
+        "conflict_count": 0
+      },
+      "tool_duration_ms": {
+        "known_sum": 0,
+        "measured_count": 0,
+        "eligible_count": 2,
+        "conflict_count": 0
+      },
+      "wall_span_ms": null,
+      "observed_busy_union_ms": null
+    },
+    "by_owner": {
+      "goal:76f0015ff22e1876b2cb3d72": {
+        "exclusive": {
+          "model_calls": 0,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "inclusive": {
+          "model_calls": 2,
+          "tool_calls": 2,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 30,
+            "measured_count": 2,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        }
+      },
+      "phase:7740941316aef3995b434dc7": {
+        "exclusive": {
+          "model_calls": 2,
+          "tool_calls": 2,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 30,
+            "measured_count": 2,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "inclusive": {
+          "model_calls": 2,
+          "tool_calls": 2,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 30,
+            "measured_count": 2,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        }
+      },
+      "analysis:unassigned": {
+        "exclusive": {
+          "model_calls": 0,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "inclusive": {
+          "model_calls": 0,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        }
+      },
+      "analysis:shared": {
+        "exclusive": {
+          "model_calls": 0,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "inclusive": {
+          "model_calls": 0,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        }
+      },
+      "attempt:7e336c67053ef04b5eb71141": {
+        "exclusive": {
+          "model_calls": 0,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "inclusive": {
+          "model_calls": 2,
+          "tool_calls": 2,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 30,
+            "measured_count": 2,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        }
+      }
+    },
+    "conserved": true
+  },
+  "coverage": {
+    "status": "complete",
+    "source_events": 9,
+    "eligible_calls": 4,
+    "reviewed_calls": 4,
+    "assigned_calls": 4,
+    "unassigned_calls": 0,
+    "pending_calls": 0,
+    "source_packets": 9,
+    "reviewed_packets": 9,
+    "classified_packets": 6,
+    "unknown_packets": 3,
+    "pending_packets": 0,
+    "structure_complete": true,
+    "reconciliation_complete": true,
+    "diagnosed_goals": [
+      "goal:76f0015ff22e1876b2cb3d72"
+    ],
+    "diagnosis_windows": {
+      "goal:76f0015ff22e1876b2cb3d72": {
+        "available_packets": 6,
+        "delivered_packet_ids": [
+          "p:4af22be8f1a3ad451e67f067",
+          "p:7536980fb360d436694cf037",
+          "p:7a624e6b60260419ebcac045",
+          "p:81be087287adbcee5c20bc36",
+          "p:b746689cfc63ed1bbeb1a491",
+          "p:d14e7485ae7f5430f19ec8b4"
+        ],
+        "partial": false
+      }
+    },
+    "packet_states": {
+      "e:1": "reviewed_unknown",
+      "p:81be087287adbcee5c20bc36": "classified",
+      "p:7a624e6b60260419ebcac045": "classified",
+      "p:7536980fb360d436694cf037": "classified",
+      "e:5": "reviewed_unknown",
+      "p:b746689cfc63ed1bbeb1a491": "classified",
+      "p:d14e7485ae7f5430f19ec8b4": "classified",
+      "p:4af22be8f1a3ad451e67f067": "classified",
+      "e:9": "reviewed_unknown"
+    },
+    "attributed_known_tokens": 30,
+    "known_tokens": 30,
+    "source_quality": {
+      "missing_artifacts": [],
+      "missing_usage_calls": 0,
+      "usage_statuses": {
+        "partial": 2
+      },
+      "unscoped_call_events": 0,
+      "calls_without_start": 0,
+      "calls_without_terminal": 0,
+      "duplicate_records": 0,
+      "missing_call_durations": 4,
+      "success_rate_basis": "success / (success + failed); cancelled, incomplete and unknown excluded",
+      "token_basis": "provider_reported; missing usage is not zero; semantic efficiency is not assessed",
+      "retry_basis": "explicit retry_of only; repeated calls are not automatically retries",
+      "unavailable": [
+        "provider cache/reasoning usage unless recorded",
+        "provider-internal attempts",
+        "monetary cost"
+      ],
+      "missing_ttft_calls": 2,
+      "missing_tps_calls": 2
+    },
+    "limitations": [
+      "Unrecorded provider transport retries cannot be reconstructed",
+      "Snapshot omits most stream deltas; source lines differ from session sequence numbers"
+    ]
+  },
+  "evaluator_usage": {
+    "calls": 3,
+    "prompt_tokens": 60,
+    "completion_tokens": 30,
+    "total_tokens": 90,
+    "unreported_calls": 0
+  }
+}

@@ -84,6 +84,8 @@ export function modelSummary(details, status, stage) {
 }
 export function builtinRenderers() {
   return new RendererRegistry()
+    .register("internal-tool-evidence", event => event.type === "artifact.created" &&
+      event.payload.artifact?.kind === "acceptance_tool_evidence", () => ({hidden: true}))
     .register("acceptance-round", isAcceptanceRound, acceptanceDescriptor)
     .register("verification-artifact", event => event.type === "artifact.created" &&
       ["verification_evidence", "verification"].includes(event.payload.artifact?.kind), event => ({

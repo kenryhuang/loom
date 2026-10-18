@@ -164,12 +164,14 @@ export class ActivityRow {
     this.tool = element("span", "activity-tool");
     this.subject = element("span", "activity-subject");
     this.outcome = element("span", "activity-outcome");
+    this.timestamp = element("time", "activity-timestamp");
     this.summary.append(
       this.status,
       this.title,
       this.tool,
       this.subject,
       this.outcome,
+      this.timestamp,
     );
     this.body = element("div", "event-detail");
     this.content = element("div", "activity-content");
@@ -203,6 +205,20 @@ export class ActivityRow {
     this.tool.hidden = !activity.toolName;
     set(this.subject, activity.subject);
     set(this.outcome, activity.outcome);
+    const at = activity.timestamp ? new Date(activity.timestamp) : null;
+    if (at && Number.isFinite(at.getTime())) {
+      const time = at.toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"});
+      const full = at.toLocaleString(undefined, {timeZoneName: "short"});
+      set(this.timestamp, time);
+      this.timestamp.dateTime = at.toISOString();
+      this.timestamp.title = full;
+      this.timestamp.setAttribute("aria-label", `Action time: ${full}`);
+    } else {
+      set(this.timestamp, "—");
+      this.timestamp.removeAttribute("datetime");
+      this.timestamp.title = "Timestamp unavailable";
+      this.timestamp.setAttribute("aria-label", "Timestamp unavailable");
+    }
     this.subject.title = activity.subject;
     if (this.node.open) this.renderDetails();
   }

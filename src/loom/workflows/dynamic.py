@@ -75,16 +75,27 @@ class DynamicWorkflowPolicy:
             ),
             ToolRef(
                 "complete_node",
-                "Complete the active workflow node with evidence; the next dependency-ready node runs afterwards.",
+                "Complete a non-final workflow node with evidence so the next node can run. "
+                "For the final node, use finish with the final report when available.",
                 input_schema={"type": "object", "properties": {"evidence": {"type": "string"}, "artifact_refs": {"type": "array"}}, "required": ["evidence"]},
             ),
         )
 
     def visible_tool_refs(self, refs):
+        refs = tuple(refs)
         node = next((node for node in self.controller.nodes if node["id"] == self._active), None)
+        has_finish = any(ref.id == "finish" for ref in refs)
         if node and "allowed_tools" in node["executor_config"]:
-            refs = tuple(ref for ref in refs if ref.id in node["executor_config"]["allowed_tools"] or ref.id == "revise_acceptance_plan")
-        return (*refs, *self.tool_refs())
+            # Completion is a workflow control, like revising acceptance; a
+            # restriction on work tools must not strand the final node.
+            refs = tuple(ref for ref in refs if ref.id in node["executor_config"]["allowed_tools"] or ref.id in {"revise_acceptance_plan", "finish"})
+        controls = self.tool_refs()
+        if node and has_finish:
+            if self.is_final_node():
+                controls = tuple(ref for ref in controls if ref.id != "complete_node")
+            else:
+                refs = tuple(ref for ref in refs if ref.id != "finish")
+        return (*refs, *controls)
 
     def step_policy(self, _context):
         return LlmStepPolicy()
@@ -130,6 +141,30 @@ class DynamicWorkflowPolicy:
         scratch = dict(context.state.scratch or {})
         scratch.update(workflow=self.snapshot(), plan=self.plan_view())
         return replace(context, state=replace(context.state, scratch=scratch))
+
+    def project_context(self, context):
+        context = self.project_state(context)
+        node = next((node for node in self.controller.nodes if node["id"] == self._active), None)
+        if node is None:
+            return context
+        completion = "Use complete_node with evidence when this node is done."
+        if self.is_final_node() and any(ref.id == "finish" for ref in self._normal_refs):
+            completion = (
+                "This is the final workflow node. Use finish with the final report when the work is ready; "
+                "finish verifies task acceptance and completes this node. No separate node-completion call is needed."
+            )
+        constraint = Constraint(
+            "dynamic-workflow",
+            f"Current node: {node['id']}: {node['objective']}. "
+            f"Workflow revision {self.controller.revision}: {json_value(self.controller.nodes)}. "
+            "Apply current user guidance to unfinished work; earlier node wording does not override newer user requirements. "
+            f"{completion} Use revise_workflow to change future work.",
+        )
+        return replace(
+            context,
+            identity=replace(context.identity, constraints=(*[c for c in context.identity.constraints if c.id != constraint.id], constraint)),
+            affordances=replace(context.affordances, tools=self.visible_tool_refs(self._normal_refs)),
+        )
 
     async def _emit(self, kind):
         if self._runtime:
@@ -234,18 +269,7 @@ class DynamicWorkflowPolicy:
             self._runtime, self._context = runtime, context
             try:
                 await self._emit("workflow.node.started")
-                constraint = Constraint(
-                    "dynamic-workflow",
-                    f"Current node: {node['id']}: {node['objective']}. "
-                    f"Workflow revision {self.controller.revision}: {json_value(self.controller.nodes)}. "
-                    "Apply current user guidance to unfinished work; earlier node wording does not override newer user requirements. "
-                    "Use complete_node when this node is done, revise_workflow to change future work, and finish for the final report.",
-                )
-                prompt = replace(
-                    self.project_state(context),
-                    identity=replace(context.identity, constraints=(*[c for c in context.identity.constraints if c.id != constraint.id], constraint)),
-                    affordances=replace(context.affordances, tools=self.visible_tool_refs(self._normal_refs)),
-                )
+                prompt = self.project_context(context)
                 if node["executor_kind"] == "llm":
                     result = await definition.step(prompt, runtime)
                     node = next(item for item in self.controller.nodes if item["id"] == self._active)

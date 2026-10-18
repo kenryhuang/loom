@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import sqlite3
 import threading
 import time
 from dataclasses import replace
@@ -14,6 +15,7 @@ from loom.runtime.checkpoints import decode, encode, plain
 from loom.service.contracts import ServiceError, canonical, new_id, stream_key, validate_command
 from loom.service.scheduler import ready_sessions
 from loom.service.store import SessionStore
+from loom.service.worker_transport import BATCH_BYTES, BATCH_EVENTS, DELTA_TYPES
 from loom.service.workers import process_identity, reap_group, spawn_attempt
 from loom.tasks.runner import _report_from_run_result
 
@@ -217,6 +219,82 @@ class LoomService:
     def _save_operation(self, db, sid, oid, op):
         db.execute("INSERT OR REPLACE INTO operations VALUES(?,?,?)", (oid, sid, canonical(op)))
 
+    def _worker_event(self, state, emit, db, value):
+        run, sid = state["run"], state["session_id"]
+        event = plain(value)
+        if event["type"].endswith(".delta") and isinstance(event.get("delta"), str):
+            offsets = run.setdefault("stream_offsets", {})
+            key = stream_key(event)
+            event["offset"] = offsets.get(key, 0)
+            offsets[key] = event["offset"] + len(event["delta"])
+            streams = run.setdefault("streams", {})
+            origins = run.setdefault("stream_origins", {})
+            text = streams.get(key, "") + event["delta"]
+            dropped = max(0, len(text) - state["task"]["limits"]["max_window_chars"])
+            streams[key] = text[dropped:]
+            origins[key] = origins.get(key, 0) + dropped
+        if event["type"] == "run.wrapping_up":
+            run["reason"] = "Wrapping up: " + event["reason"]
+        if event["type"] == "llm.completed":
+            prefix = f"{event['llm_call_id']}:"
+            for field in ("streams", "stream_origins", "stream_offsets"):
+                run[field] = {k: v for k, v in run.get(field, {}).items() if not k.startswith(prefix)}
+        if event.get("acceptance") is not None:
+            state["acceptance"] = event["acceptance"]
+            state["acceptance_run_id"] = run["id"]
+        if event["type"] == "workspace.probed":
+            state["workspace_profile"] = event.get("profile")
+        if event["type"] == "verification.started":
+            state["acceptance_current_check"] = event.get("description")
+        elif event["type"] in {"verification.completed", "acceptance.gate.passed", "acceptance.gate.blocked"}:
+            state["acceptance_current_check"] = None
+        if event["type"].startswith(("plan.", "workflow.")):
+            state["plan_run_id"] = run["id"]
+            state["task"]["plan_revision"] += 1
+            state["plan_event"] = event
+            for key in ("plan", "workflow_route", "workflow"):
+                if key in event:
+                    state[key] = event[key]
+            oid = run.get("current_operation")
+            if oid:
+                row = db.execute("SELECT body FROM operations WHERE id=?", (oid,)).fetchone()
+                op = json.loads(row[0])
+                terminal_event = {
+                    "enter_plan": "plan.entered",
+                    "submit_plan": "plan.submitted",
+                    "update_plan": "plan.updated",
+                    "continue_react": "workflow.route.selected",
+                    "revise_workflow": "workflow.revised",
+                    "complete_node": "workflow.node.completed",
+                    "finish": "workflow.node.completed",
+                }.get(op["call"]["name"])
+                if event["type"] == terminal_event:
+                    cp = self._checkpoint_value(state)
+                    participant = (cp or {}).get("planning", {})
+                    observation = Observation(
+                        new_id("obs"),
+                        op["call"]["name"],
+                        {
+                            "accepted": True,
+                            "plan": state.get("plan", participant.get("plan")),
+                            "route": state.get("workflow_route", participant.get("route")),
+                            **({"workflow": state["workflow"]} if "workflow" in state else {}),
+                            **({"completed": True, "report": json.loads(op["call"]["arguments"]).get("report", "")} if op["call"]["name"] == "finish" else {}),
+                        },
+                        now_iso(),
+                        metadata={"controlFlow": {"stepBoundary": True, "reason": "recovered_transition"}},
+                    )
+                    op.update(status="reconciled", result=encode({"ok": True, "value": observation}))
+                    self._save_operation(db, sid, oid, op)
+        if len(canonical(event).encode()) > 32768:
+            ref = self.store.artifact_in_transaction(db, sid, event, "event_detail")
+            event = {
+                **{k: event[k] for k in ("type", "trace_id", "llm_call_id", "tool_call_id", "tool_id", "at") if k in event},
+                "artifact": ref,
+                "summary": "Large execution detail; open artifact to read the full content",
+            }
+        emit(event["type"], event)
+
     def worker_record(self, sid, record):
         def handle(state, emit, db):
             run = state["run"]
@@ -237,84 +315,19 @@ class LoomService:
             value = decode(record["payload"])
             kind = record["type"]
             response = None
-            if kind == "event":
-                event = plain(value)
-                if event["type"].endswith(".delta") and isinstance(event.get("delta"), str):
-                    offsets = run.setdefault("stream_offsets", {})
-                    key = stream_key(event)
-                    event["offset"] = offsets.get(key, 0)
-                    offsets[key] = event["offset"] + len(event["delta"])
-                    streams = run.setdefault("streams", {})
-                    origins = run.setdefault("stream_origins", {})
-                    text = streams.get(key, "") + event["delta"]
-                    dropped = max(0, len(text) - state["task"]["limits"]["max_window_chars"])
-                    streams[key] = text[dropped:]
-                    origins[key] = origins.get(key, 0) + dropped
-                if event["type"] == "run.wrapping_up":
-                    run["reason"] = "Wrapping up: " + event["reason"]
-                if event["type"] == "llm.completed":
-                    prefix = f"{event['llm_call_id']}:"
-                    for field in ("streams", "stream_origins", "stream_offsets"):
-                        run[field] = {k: v for k, v in run.get(field, {}).items() if not k.startswith(prefix)}
-                if event.get("acceptance") is not None:
-                    state["acceptance"] = event["acceptance"]
-                    state["acceptance_run_id"] = run["id"]
-                if event["type"] == "workspace.probed":
-                    state["workspace_profile"] = event.get("profile")
-                if event["type"] == "verification.started":
-                    state["acceptance_current_check"] = event.get("description")
-                elif event["type"] in {"verification.completed", "acceptance.gate.passed", "acceptance.gate.blocked"}:
-                    state["acceptance_current_check"] = None
-                if event["type"].startswith(("plan.", "workflow.")):
-                    state["plan_run_id"] = run["id"]
-                    state["task"]["plan_revision"] += 1
-                    state["plan_event"] = event
-                    for key in ("plan", "workflow_route", "workflow"):
-                        if key in event:
-                            state[key] = event[key]
-                    oid = run.get("current_operation")
-                    if oid:
-                        row = db.execute("SELECT body FROM operations WHERE id=?", (oid,)).fetchone()
-                        op = json.loads(row[0])
-                        terminal_event = {
-                            "enter_plan": "plan.entered",
-                            "submit_plan": "plan.submitted",
-                            "update_plan": "plan.updated",
-                            "continue_react": "workflow.route.selected",
-                            "revise_workflow": "workflow.revised",
-                            "complete_node": "workflow.node.completed",
-                            "finish": "workflow.node.completed",
-                        }.get(op["call"]["name"])
-                        if event["type"] == terminal_event:
-                            cp = self._checkpoint_value(state)
-                            participant = (cp or {}).get("planning", {})
-                            observation = Observation(
-                                new_id("obs"),
-                                op["call"]["name"],
-                                {
-                                    "accepted": True,
-                                    "plan": state.get("plan", participant.get("plan")),
-                                    "route": state.get("workflow_route", participant.get("route")),
-                                    **({"workflow": state["workflow"]} if "workflow" in state else {}),
-                                    **(
-                                        {"completed": True, "report": json.loads(op["call"]["arguments"]).get("report", "")}
-                                        if op["call"]["name"] == "finish"
-                                        else {}
-                                    ),
-                                },
-                                now_iso(),
-                                metadata={"controlFlow": {"stepBoundary": True, "reason": "recovered_transition"}},
-                            )
-                            op.update(status="reconciled", result=encode({"ok": True, "value": observation}))
-                            self._save_operation(db, sid, oid, op)
-                if len(canonical(event).encode()) > 32768:
-                    ref = self.store.artifact_in_transaction(db, sid, event, "event_detail")
-                    event = {
-                        **{k: event[k] for k in ("type", "trace_id", "llm_call_id", "tool_call_id", "tool_id", "at") if k in event},
-                        "artifact": ref,
-                        "summary": "Large execution detail; open artifact to read the full content",
-                    }
-                emit(event["type"], event)
+            if kind in {"event", "event_batch"}:
+                if kind == "event_batch":
+                    if (
+                        not isinstance(value, list)
+                        or not 1 <= len(value) <= BATCH_EVENTS
+                        or any(not isinstance(e, dict) or e.get("type") not in DELTA_TYPES or not isinstance(e.get("delta"), str) for e in value)
+                        or len(canonical(value).encode()) > BATCH_BYTES * 4
+                    ):
+                        raise ServiceError("Invalid worker delta batch")
+                    for event in value:
+                        self._worker_event(state, emit, db, event)
+                else:
+                    self._worker_event(state, emit, db, value)
             elif kind == "boundary":
                 previous = decode(run.get("counters", encode({})))
                 used = getattr(previous.get("usage"), "total_tokens", 0)
@@ -602,7 +615,7 @@ class LoomService:
                             try:
                                 result = self.worker_record(sid, record)
                                 attempt.connection.send({"value": encode(result)})
-                            except ServiceError as exc:
+                            except (ServiceError, sqlite3.Error) as exc:
                                 attempt.connection.send({"error": str(exc)})
                     except (EOFError, BrokenPipeError, OSError):
                         pass

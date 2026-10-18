@@ -421,7 +421,7 @@ def test_edit_and_restart_uses_new_assembly_and_retains_old_results_as_backgroun
         calls = [e for e in service.events(sid, limit=1000) if e['type'] == 'llm.requested' and e['run_id'] == second['run']['id']]
         names = {t['function']['name'] for e in calls for t in e['payload'].get('tools') or []}
         assert 'read_file' not in names and 'shell_execute' not in names
-        assert 'complete_node' in names and 'create_report' in names
+        assert 'finish' in names and 'complete_node' not in names and 'create_report' in names
     finally:
         service.close()
 

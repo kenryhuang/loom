@@ -182,7 +182,7 @@ def schema_issues(validator, value):
 
 
 async def request_structured(*, protocol, payload, send, validate=lambda value: value,
-                             event=None, mode="text", max_corrections=1):
+                             event=None, mode="text", max_corrections=1, retry_truncated=True):
     """send(payload, attempt, mode) owns cancellation, tracing and total budgets.
 
     A correction never runs tools. Only a fully validated response is returned.
@@ -234,7 +234,7 @@ async def request_structured(*, protocol, payload, send, validate=lambda value: 
             await emit("fallback", code=exc.code, issues=exc.issues)
         except ProtocolError as exc:
             await emit("rejected", code=exc.code, issues=exc.issues, validation_error=str(exc))
-            if not exc.retryable or corrections >= max_corrections:
+            if not exc.retryable or corrections >= max_corrections or (exc.code == "truncated" and not retry_truncated):
                 await emit("exhausted", code=exc.code, issues=exc.issues)
                 raise ProtocolExhausted(exc.code, exc.issues, retryable=exc.retryable) from exc
             corrections += 1

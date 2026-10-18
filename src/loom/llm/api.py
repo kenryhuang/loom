@@ -116,6 +116,7 @@ class LlmResponse:
     finish_reason: str = "stop"
     duration_ms: float | None = None
     ttft_ms: float | None = None
+    stream_metrics: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tool_calls", tuple(self.tool_calls))
@@ -801,6 +802,7 @@ async def request_llm_response(
     started = time.monotonic()
     first_token = None
     stream_end = None
+    emit_metrics = {"event_emit_ms": 0.0, "delta_emit_ms": 0.0, "completion_emit_ms": 0.0, "delta_events": 0}
 
     async def measured_emit(event):
         nonlocal first_token, stream_end
@@ -810,7 +812,17 @@ async def request_llm_response(
             first_token = time.monotonic()
         if event["type"] == "llm.stream.completed":
             stream_end = time.monotonic()
-        return await _emit_llm_call_event(emit_event, event)
+        emit_started = time.monotonic()
+        try:
+            return await _emit_llm_call_event(emit_event, event)
+        finally:
+            elapsed = (time.monotonic() - emit_started) * 1000
+            emit_metrics["event_emit_ms"] += elapsed
+            if event["type"].endswith(".delta"):
+                emit_metrics["delta_emit_ms"] += elapsed
+                emit_metrics["delta_events"] += 1
+            elif event["type"] == "llm.stream.completed":
+                emit_metrics["completion_emit_ms"] += elapsed
 
     response = await _request_llm_response(
         provider, messages, tools, cancellation, tool_choice, stream=stream,
@@ -820,7 +832,8 @@ async def request_llm_response(
         return response
     ended = stream_end if stream_end is not None else time.monotonic()
     return ok(replace(response.value, duration_ms=(ended - started) * 1000,
-                      ttft_ms=(first_token - started) * 1000 if first_token is not None else None))
+                      ttft_ms=(first_token - started) * 1000 if first_token is not None else None,
+                      stream_metrics={**(response.value.stream_metrics or {}), **emit_metrics} if stream_end is not None else None))
 
 
 async def _request_llm_response(
@@ -1057,6 +1070,8 @@ class OpenAIProvider:
             raise _OpenAIHTTPError(status, payload)
 
         async for event in _parse_openai_sse_stream(response.get("chunks", ())):
+            if event.kind == "completed" and event.response is not None and response.get("stream_metrics") is not None:
+                event = replace(event, response=replace(event.response, stream_metrics=dict(response["stream_metrics"])))
             yield event
 
     async def _send(self, url: str, request: dict[str, Any]) -> dict[str, Any]:
@@ -1086,7 +1101,8 @@ class OpenAIProvider:
         if self.http_client is not None:
             return await self.http_client(url, request)
 
-        return {"status": 200, "ok": True, "chunks": _urlopen_stream_chunks(url, request)}
+        metrics: dict[str, Any] = {}
+        return {"status": 200, "ok": True, "chunks": _urlopen_stream_chunks(url, request, metrics=metrics), "stream_metrics": metrics}
 
 
 def create_openai_provider(**config: Any) -> OpenAIProvider:
@@ -2012,16 +2028,26 @@ async def _aiter_chunks(chunks: Any):
         yield chunk
 
 
-async def _urlopen_stream_chunks(url: str, request: dict[str, Any]):
+async def _urlopen_stream_chunks(url: str, request: dict[str, Any], *, metrics: dict[str, Any] | None = None):
     import asyncio
     import threading
 
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[Any] = asyncio.Queue()
     sentinel = object()
+    started = time.monotonic()
+    if metrics is None:
+        metrics = {}
+    metrics.update(received_bytes=0, received_chunks=0, receive_queue_max_lag_ms=0.0)
 
     def put(item: Any) -> None:
-        loop.call_soon_threadsafe(queue.put_nowait, item)
+        received = time.monotonic()
+        if isinstance(item, bytes):
+            metrics.setdefault("http_first_chunk_ms", (received - started) * 1000)
+            metrics["http_receive_ms"] = (received - started) * 1000
+            metrics["received_bytes"] += len(item)
+            metrics["received_chunks"] += 1
+        loop.call_soon_threadsafe(queue.put_nowait, (item, received))
 
     def read_stream() -> None:
         req = urllib.request.Request(
@@ -2044,7 +2070,10 @@ async def _urlopen_stream_chunks(url: str, request: dict[str, Any]):
     threading.Thread(target=read_stream, daemon=True).start()
 
     while True:
-        item = await queue.get()
+        item, received = await queue.get()
+        lag = (time.monotonic() - received) * 1000
+        metrics["receive_queue_max_lag_ms"] = max(metrics["receive_queue_max_lag_ms"], lag)
+        metrics["receive_queue_end_lag_ms"] = lag
         if item is sentinel:
             return
         if isinstance(item, BaseException):

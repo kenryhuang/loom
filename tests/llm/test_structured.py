@@ -131,3 +131,17 @@ async def test_provider_refusal_is_not_misreported_as_a_json_format_failure():
     with pytest.raises(ProtocolError) as error:
         parse_response(response)
     assert error.value.code == 'refused' and not error.value.retryable
+
+
+@pytest.mark.asyncio
+async def test_truncated_retry_can_be_delegated_to_smaller_work_scheduler():
+    for retry, expected in [(False, [1]), (True, [1, 2])]:
+        calls = []
+
+        async def send(payload, attempt, mode, calls=calls):
+            calls.append(attempt)
+            return LlmResponse(content='{', finish_reason='length')
+
+        with pytest.raises(ProtocolExhausted) as error:
+            await request_structured(protocol=PROTOCOL, payload={}, send=send, retry_truncated=retry)
+        assert error.value.code == 'truncated' and calls == expected

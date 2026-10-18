@@ -239,6 +239,7 @@ export class TrajectoryView {
         evidence: (ref) => this.showEvidence(ref),
         onError: this.onError,
         onResult: (result, job) => this.reasoningView.update(result, job),
+        onExplore: () => this.selectTab(2),
       });
       this.evaluationView.open();
     } else {

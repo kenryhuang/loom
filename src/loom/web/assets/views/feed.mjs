@@ -640,7 +640,9 @@ export class FeedView {
       record.node.open = true;
       record.failureExpanded = true;
     }
-    record.view.update(activity);
+    const timedSources = (descriptor.sources || []).filter(source => source.timestamp && Number.isFinite(Date.parse(source.timestamp)));
+    const timeSource = timedSources.find(source => /\.(started|requested)$/.test(source.type)) || timedSources[0];
+    record.view.update({...activity, timestamp: timeSource?.timestamp});
     if (!group.latestSeq || descriptor.seq >= group.latestSeq) {
       group.latestSeq = descriptor.seq;
       group.latest = [activity.title, activity.subject, activity.outcome]

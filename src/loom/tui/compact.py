@@ -497,6 +497,8 @@ class CompactEventFeedWidget(EventFeedWidget):
 
     def present(self, event: TuiEvent) -> None:
         kind, data = event.event_type, event.data
+        if kind == "artifact.created" and data.get("artifact", {}).get("kind") == "acceptance_tool_evidence":
+            return
         run = event.run_id or self.current_run
         if kind in ROUND_EVENTS and data.get("acceptance"):
             value = data["acceptance"]
