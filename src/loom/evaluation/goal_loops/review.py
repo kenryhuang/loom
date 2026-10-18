@@ -14,6 +14,7 @@ from loom.evaluation.goal_loops.execution import reconciliation_candidates, reco
 from loom.evaluation.goal_loops.facts import packets, run_facts
 from loom.evaluation.goal_loops.projection import process_graph
 from loom.evaluation.goal_loops.state import apply_patch, overlaps, root_of
+from loom.evaluation.goal_loops.utility import accept_assessments, action_facts, project_utility, review_units
 from loom.evaluation.provider import evaluator_provider
 from loom.llm.api import LlmMessage, request_llm_response
 from loom.llm.structured import ProtocolExhausted, UnsupportedFormat, output_mode, protocol_provider, request_structured, unsupported_format
@@ -52,6 +53,7 @@ def project(source, facts, run_id, checkpoint):
         goal["verification"] = [v for v in view["verification"] if goal["origin_line"] <= v["line"] <= goal["end_line"]] if goal["id"] in root_ids else []
     for diagnostic in state["diagnostics"]:
         diagnostic["involved_cost"] = summarize([a for a in view["atoms"] if a["id"] in diagnostic["call_ids"]])
+    utility = project_utility(action_facts(source, facts, view), checkpoint.get("action_utility", {}))
     bundle = dict(
         schema_version=SCHEMA,
         source=dict(
@@ -68,7 +70,8 @@ def project(source, facts, run_id, checkpoint):
         graph=process_graph(state),
         cost_ledger=accounting,
         coverage=dict(
-            status="complete" if checkpoint.get("complete") and not checkpoint.get("review_gaps") else "partial",
+            status="complete" if checkpoint.get("complete") and not checkpoint.get("review_gaps") and not utility["coverage"]["pending"] else "partial",
+            utility_complete=not utility["coverage"]["pending"],
             pipeline_complete=checkpoint.get("complete", False),
             source_events=len(view["records"]),
             eligible_calls=len(view["atoms"]),
@@ -97,6 +100,7 @@ def project(source, facts, run_id, checkpoint):
             limitations=view["limitations"] + checkpoint.get("limitations", []),
         ),
         evaluator_usage=deepcopy(checkpoint.get("usage", {})),
+        action_utility=utility,
     )
 
     from loom.evaluation.goal_loops.execution_view import execution_view
@@ -112,6 +116,7 @@ class SplitRequest(ValueError):
 async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint, event_sink, settings, remaining_seconds):
     view = run_facts(source, facts, run_id)
     original = packets(source, view)
+    utility_facts = action_facts(source, facts, view)
     registry = {p["id"]: p for p in original}
     expected = dict(source=source.source_sha256, scope=view["scope_digest"], analyzer=ANALYZER, prompt=PROMPT, model=getattr(provider, "model", "unknown"))
     upgraded = upgrade_checkpoint(checkpoint, expected)
@@ -134,6 +139,7 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         limitations=[],
         diagnosed_goals=[],
         diagnosis_windows={},
+        action_utility={},
         usage=dict(calls=0, prompt_tokens=0, completion_tokens=0, total_tokens=0, unreported_calls=0),
     )
     for key, value in defaults.items():
@@ -184,6 +190,10 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
             family = current["family"]
             index = objects()
             delivered = {pid: registry[pid] for pid in current["packet_ids"] if pid in registry}
+            if family == "utility" and all(cid in cp["action_utility"] for cid in current["action_ids"]):
+                work["pending"].pop(0)
+                await save()
+                continue
             if family == "structure" and not any(p.get("evidence_ref") for p in delivered.values()):
                 record_review(cp, delivered, set(), registry)
                 work["pending"].pop(0)
@@ -211,6 +221,18 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
                 goal_id=current.get("goal_id"),
                 coverage=dict(total_packets=len(original), reviewed_packets=len(cp["packet_status"]), diagnostic_window_only=family == "diagnose"),
             )
+            if family == "utility":
+                payload.update(
+                    target_actions=[r for r in utility_facts if r["id"] in current["action_ids"]],
+                    action_index=[{k: r[k] for k in ("id", "kind", "tool", "start_line", "end_line")} for r in utility_facts
+                                  if r["goal_id"] == current.get("goal_id")][-80:],
+                    evidence_window=dict(candidate_pages=current.get("evidence_candidates"), delivered_pages=len(delivered),
+                                         partial=current.get("evidence_partial", False) or current.get("depth", 0) > 0),
+                )
+            elif family == "diagnose":
+                scope_ids = {i for p in delivered.values() for i in p["call_ids"]}
+                payload["action_utility"] = [{k: r.get(k) for k in ("call_id", "necessity", "value", "novelty", "delta", "reason", "improvement")}
+                                             for cid, r in cp["action_utility"].items() if cid in scope_ids][:16]
             if family != "reconcile":
                 visible = list(index.values())
                 if family == "diagnose":
@@ -337,7 +359,17 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
                     issues.extend(
                         dict(field="diagnostics", key=r["key"], reason="Diagnostic belongs to another goal") for r in rows if r["goal_id"] != current["goal_id"]
                     )
+            utility_refs, utility_issues = set(), []
+            if family == "utility":
+                cp["action_utility"], utility_refs, utility_issues = accept_assessments(
+                    patch.get("assessments", []), delivered, utility_facts, current["action_ids"], cp["action_utility"]
+                )
+                for cid in current["action_ids"]:
+                    if cid in cp["action_utility"]:
+                        cp["action_utility"][cid].setdefault("evidence_window", payload["evidence_window"])
             state, references, domain_issues = apply_patch(cp["entities"], patch, delivered, view["atoms"], revision)
+            references.update(utility_refs)
+            issues.extend(utility_issues)
             state["validation_diagnostics"].extend({**i, "stage": revision} for i in issues)
             cp["entities"] = state
             cp["graph_revision"] += 1
@@ -402,6 +434,11 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
     if not cp["reconcile_candidates"]:
         await activity("reconcile", "stage.skipped", "No duplicate candidates; reconciliation skipped without a model call")
     await save()
+    if "utility_groups" not in cp:
+        cp["utility_groups"] = review_units(utility_facts, {p["id"]: p for p in original}, view, settings["max_prompt_chars"] // 3)
+    await save()
+    for i, group in enumerate(cp["utility_groups"]):
+        await stage(f"utility:{i}", unit("utility", group["packet_ids"], **{k: v for k, v in group.items() if k != "packet_ids"}))
     if "diagnosis_groups" not in cp:
         accounting = ledger(view, cp["entities"])
         goals = [g for g in cp["entities"]["goals"] if not g.get("superseded_by")]

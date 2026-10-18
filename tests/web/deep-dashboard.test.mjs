@@ -112,3 +112,20 @@ test("historical unknown judgments expose missing answers and rejected citations
   assert.match(reasons.textContent, /Citation outside read range1/);
   abort.abort(); dom.window.close();
 });
+
+test("queued evaluations show position and occupied slots instead of stale call activity", () => {
+  const {dom, root, abort, view} = setup(); view.progress = root;
+  const job = {id: "queued", state: "queued", usage: {calls: 0, total_tokens: 0},
+    current_call: {state: "waiting", stage: "structure:2"},
+    queue: {position: 2, workers: 2, running: [
+      {id: "other", session_id: "sess_other", model: "glm", stage: "utility:1"},
+      {id: "slow", session_id: "sess_slow", model: "main", stage: "structure:5"},
+    ]}};
+  view.renderProgress(job);
+  const status = root.querySelector(".evaluation-current").textContent;
+  assert.match(status, /Queue position 2 · 2 \/ 2 evaluators running/);
+  assert.match(status, /glm · sess_other · Evaluating action utility/);
+  assert.match(status, /main · sess_slow · Reconstructing/);
+  assert.doesNotMatch(status, /Waiting for evaluator response/);
+  abort.abort(); dom.window.close();
+});

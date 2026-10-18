@@ -1,9 +1,11 @@
+import json
 from copy import deepcopy
 
 from loom.evaluation.behavior_facts import build_behavior_facts
 from loom.evaluation.goal_loops.execution_view import execution_view, time_partition
 from loom.evaluation.goal_loops.facts import run_facts
 from loom.evaluation.goal_loops.review import initial_state, project
+from loom.service.contracts import canonical
 from tests.evaluation.test_behavior_sequence import action, source
 
 
@@ -52,6 +54,17 @@ def test_time_partition_handles_nested_parallel_calls_gaps_and_unknown_intervals
     assert time_partition([])["wall_span_ms"] is None
 
 
+def test_projected_report_with_frozen_stream_metrics_is_json_serializable():
+    store, bundle = sample()
+    encoded = canonical(bundle)
+    restored = json.loads(encoded)
+    for call in restored["execution_view"]["calls"]:
+        if call["kind"] == "model":
+            assert call["stream_metrics"] == {"http_receive_ms": 9000, "delta_emit_ms": 20}
+    # Projection must not mutate the immutable trace payload.
+    assert execution_view(store, bundle) == restored["execution_view"]
+
+
 def test_projection_expands_window_without_reassigning_calls_or_cost():
     store, bundle = sample()
     ledger = deepcopy(bundle["cost_ledger"])
@@ -85,7 +98,10 @@ def test_round_graph_uses_exact_invocation_ids_and_public_source_excerpts():
 
 
 def test_missing_tool_invocation_ids_are_not_reconstructed_from_proximity():
-    store = source(action(1))
+    events = action(1)
+    for event in events[2:]:
+        event.pop("llm_call_id")
+    store = source(events)
     facts = build_behavior_facts(store)
     bundle = project(store, facts, "run", {})
     assert len(bundle["execution_view"]["rounds"]) == 2
@@ -104,3 +120,23 @@ def test_reused_tool_ids_in_other_traces_do_not_link_to_wrong_model():
     assert len(result["rounds"]) == 2
     assert all(len(r["tool_call_ids"]) == 1 for r in result["rounds"])
     assert len({r["tool_call_ids"][0] for r in result["rounds"]}) == 2
+
+
+def test_managed_json_finish_links_report_generation_without_native_tool_calls():
+    events = action(1, tool='finish', inp={'report': 'Final report'})
+    for event in events[:2]:
+        event['llm_call_id'] = 'trace1-llm-7'
+    events[1]['response']['content'] = json.dumps({'action': {'kind': 'tool', 'target': 'finish', 'input': {'report': 'Final report'}}})
+    for event in events[2:]:
+        event.pop('llm_call_id')
+        event['tool_call_id'] = 'trace1-json-0-7'
+    store = source(events)
+    bundle = project(store, build_behavior_facts(store), 'run', {})
+    flow = bundle['execution_view']['action_flow']
+    assert [r['kind'] for r in flow['actions']] == ['final_answer', 'final_answer']
+    assert flow['actions'][0]['title'] == 'Working · Preparing finish'
+    # Two occurrences of the same model ID are ambiguous, even with the same JSON action.
+    events = events[:2] + deepcopy(events[:2]) + events[2:]
+    store = source(events)
+    view = project(store, build_behavior_facts(store), 'run', {})['execution_view']
+    assert not any(e['kind'] == 'invokes' for e in view['edges'])

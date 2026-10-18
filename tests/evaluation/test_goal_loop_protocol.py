@@ -90,7 +90,7 @@ async def test_single_attempt_skips_reconciliation_model_call():
         settings=GOAL_DEFAULTS,
         remaining_seconds=lambda: 600,
     )
-    assert [r["stage"].split(":")[0] for r in judge.requests] == ["structure", "diagnose"]
+    assert [r["stage"].split(":")[0] for r in judge.requests] == ["structure", "utility", "diagnose"]
     assert cp["reconciliation_complete"] and cp["reconcile_candidates"] == []
     assert all(r["response_contract"]["version"] == 2 for r in judge.requests)
     assert "source_sha256" not in json.dumps(judge.requests[0]["evidence_packets"])
@@ -231,7 +231,7 @@ async def test_old_checkpoint_upgrade_retains_structure_costs_and_only_restarts_
     assert cp["batches"] == original["batches"]
     assert cp["protocol_migrations"][0]["unfinished"]["reconcile:0"] == {"next_round": 2}
     assert sum(r["stage"].startswith("structure:") for r in judge.requests) == 1
-    assert cp["usage"]["calls"] == 2
+    assert cp["usage"]["calls"] == 3
     for field in ("source", "scope", "model"):
         wrong = {**cp["identity"], field: "different"}
         with pytest.raises(ValueError, match="identity changed"):
@@ -244,7 +244,7 @@ async def test_reconcile_only_mutates_supplied_pair_with_both_endpoint_evidence(
     source, facts, run = example()
     _, state, delivered = fixture_state()
     state["attempts"].append({**deepcopy(state["attempts"][0]), "id": "second"})
-    cp = dict(entities=state, stages={"structure:0": {}}, batches=[list(delivered)], diagnosis_groups=[])
+    cp = dict(entities=state, stages={"structure:0": {}}, batches=[list(delivered)], diagnosis_groups=[], utility_groups=[])
     first = state["attempts"][0]["id"]
 
     class PairJudge:

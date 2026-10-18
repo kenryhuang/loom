@@ -43,17 +43,15 @@ def classify(call):
     if name.startswith("ext_") and call.get("target_key") == "query":
         return "research", "External search", "external tool query parameter"
     if name in {"shell_execute", "run_command", "execute_command"}:
+        from loom.evaluation.goal_loops.action_classification import inspection_command
+
         command = (call.get("target") or "").strip()
         if re.match(
             r"^(?:npx\s+tsc\b|(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:test|build|lint|typecheck)\b|(?:\S*/)?pytest\b|python(?:3)?\s+-m\s+pytest\b|cargo\s+(?:test|check)\b|go\s+test\b)",
             command,
         ):
             return "verification", "Build / test / type check", "recognized command prefix"
-        if (
-            re.match(r"^(?:find|ls|cat|head|tail|rg|grep|pwd)\b", command)
-            and not re.search(r"[;&]|(?<![2\d])>(?!&)|-(?:exec|delete)\b|--pre\b", command)
-            and all(re.match(r"^(?:find|ls|cat|head|tail|rg|grep|pwd)\b", part.strip()) for part in command.split("|"))
-        ):
+        if inspection_command(command):
             return "research", "Inspect workspace", "recognized inspection command"
         return "other", "Run command", "command purpose not established"
     return "other", call.get("tool") or "Tool call", "unclassified tool"
@@ -65,7 +63,9 @@ def action_flow(calls, rounds):
     invoked = {r["model_call_id"]: [by_id[i] for i in r["tool_call_ids"]] for r in rounds if r.get("model_call_id")}
     for ordinal, call in enumerate(sorted(calls, key=lambda c: c["start_line"]), 1):
         tools = invoked.get(call["id"], [])
-        classes = [classify(t) for t in tools] or [classify(call)]
+        subjects = tools or [call]
+        classifications = [t.get("classification") or dict(zip(("kind", "title", "basis"), classify(t), strict=True)) for t in subjects]
+        classes = [(c["kind"], c["title"], c["basis"]) for c in classifications]
         kinds = {c[0] for c in classes}
         kind = next(iter(kinds)) if len(kinds) == 1 else "mixed"
         if call["kind"] == "model":
@@ -85,6 +85,9 @@ def action_flow(calls, rounds):
             target=target,
             status=call["status"],
             basis=list(dict.fromkeys(c[2] for c in classes)),
+            classification_inferred=any(c.get("inferred", False) for c in classifications),
+            classification_evidence=[r for c in classifications for r in c.get("evidence_refs", [])],
+            classification_reasons=list(dict.fromkeys(c["rationale"] for c in classifications if c.get("rationale"))),
             call_ids=[call["id"]],
             start_line=call["start_line"],
             started_at=call.get("started_at"),
@@ -163,11 +166,12 @@ def action_flow(calls, rounds):
             shared_ms=shared_segments[segment["id"]],
             failed_actions=sum(a["status"] == "failed" for a in members),
             missing_intervals=sum(a["missing_intervals"] for a in members),
+            inferred_actions=sum(a["classification_inferred"] for a in members),
         )
     wall = max(changes) - min(changes) if changes else None
     assert wall is None or isclose(sum(s["elapsed_ms"] for s in segments) + gap + parallel, wall, abs_tol=0.001)
     return dict(
-        version="action-flow.2",
+        version="action-flow.3",
         gaps=gaps,
         actions=actions,
         segments=segments,
@@ -176,5 +180,5 @@ def action_flow(calls, rounds):
         wall_span_ms=wall,
         missing_intervals=sum(a["missing_intervals"] for a in actions),
         timing_basis="timestamp partition; nested model time counted under its model action; simultaneous model actions shared",
-        classification_basis="each model and tool call is a separate action; model purpose follows explicit invocation IDs",
+        classification_basis="recorded operations, then cited saved assessments or declared action intent; model purpose follows recorded invocation links",
     )

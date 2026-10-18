@@ -19,6 +19,14 @@ def empty_patch():
     return {key: [] for key in PATCH["properties"]}
 
 
+def utility_assessment(cid, refs, **overrides):
+    row = dict(call_id=cid, necessity="supporting", value="limited", novelty="unknown", role="evidence",
+                delta="Observed output", reason="Useful local evidence; downstream use uncertain", counterfactual="May need another check",
+                improvement="Compare the next decision with this result", confidence="low", refs=refs,
+                contribution_refs=[], comparison_call_ids=[], comparison_refs=[], acceptance_refs=[])
+    return {**row, **overrides}
+
+
 class GoalJudge:
     model = "goal-fixture"
 
@@ -30,6 +38,10 @@ class GoalJudge:
         self.requests.append(payload)
         result = empty_patch()
         refs = [p["id"] for p in payload["evidence_packets"] if p.get("content")]
+        if payload["stage"].startswith("utility:"):
+            result = {"assessments": [utility_assessment(r["id"], [p["id"] for p in payload["evidence_packets"]
+                                                    if r["id"] in p.get("call_ids", []) and p.get("content")][:1])
+                                      for r in payload["target_actions"]]}
         if payload["stage"].startswith("structure:") and refs:
             root = payload["roots"][0]["id"]
             result["attempts"] = [
@@ -243,7 +255,7 @@ async def test_schema_bad_row_does_not_erase_valid_patch():
         async def chat(self, *args, **kwargs):
             response = (await super().chat(*args, **kwargs)).unwrap()
             data = json.loads(response.content)
-            data["goals"].append({"key": "invalid", "parent_id": 99})
+            data.setdefault("goals", []).append({"key": "invalid", "parent_id": 99})
             return ok(LlmResponse(content=json.dumps(data), usage=response.usage))
 
     store, facts, run = example()

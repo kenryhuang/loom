@@ -1,5 +1,6 @@
 import {element} from '../markdown.mjs';
 import {cards, disclosure, label, panel, seconds, table} from './dashboard.mjs';
+import {utilityDetails, utilityLabel, utilitySummary} from './action-utility.mjs';
 
 const button=(text, action, cls='quiet')=>{const b=element('button',cls,text);b.type='button';b.addEventListener('click',action);return b;};
 const elapsed=row=>`${seconds(row.elapsed_ms)}${row.shared_ms ? ` + ${seconds(row.shared_ms)} shared` : ''}${row.missing_intervals ? ' + unknown' : ''}`;
@@ -24,6 +25,7 @@ export function renderActionFlow(root, data, {evidence, advanced, selected, sele
   cards(summary,[['Call span',seconds(flow.wall_span_ms)],
     ['Working · model',seconds(flow.segments.reduce((n,s)=>n+s.model_ms,0))],
     ['Tool execution',seconds(flow.segments.reduce((n,s)=>n+s.tool_ms,0))],['Between calls',seconds(flow.gap_ms)]]);
+  utilitySummary(summary,data.action_utility);
   if(flow.parallel_ms) summary.append(element('p','muted',`Concurrent actions · ${seconds(flow.parallel_ms)} shared`));
   if(flow.missing_intervals) summary.append(element('p','muted',`${flow.missing_intervals} calls have no complete timing; totals are partial`));
   const rail=element('nav','action-flow-rail');rail.setAttribute('aria-label','Execution stages');
@@ -36,6 +38,7 @@ export function renderActionFlow(root, data, {evidence, advanced, selected, sele
     node.append(element('strong','',stage.label),element('span','action-flow-time',elapsed(stage)),
       element('span','muted',`Working ${seconds(stage.model_ms)} · Tools ${seconds(stage.tool_ms)}`),
       element('span','muted',`${stage.model_calls} model · ${stage.tool_calls} tool${stage.failed_actions?` · ${stage.failed_actions} failed`:''}`));
+    if(stage.inferred_actions) node.append(element('span','muted',`${stage.inferred_actions} actions · inferred purpose`));
     const meter=element('span','action-flow-meter'),fill=element('span');fill.style.width=`${stage.elapsed_ms/max*100}%`;meter.append(fill);node.append(meter);
     rail.append(node);
   }
@@ -58,6 +61,7 @@ export function renderActionFlow(root, data, {evidence, advanced, selected, sele
         details.append(element('p','muted','HTTP time includes connection, provider and network time. Queue lag and emission wait may overlap; do not add them. Final persistence wait follows the measured model duration.'));
       }
     }
+    utilityDetails(details,call.utility,evidence);
     const refs=disclosure(details,'Recorded statements and results');refs.open=true;
     const block=element('section','action-flow-source');block.append(element('strong','',`${call.tool||call.model} · ${duration(action)}`));
     block.append(element('p','execution-excerpt',call.kind==='model'?call.statement:call.observation));
@@ -66,11 +70,14 @@ export function renderActionFlow(root, data, {evidence, advanced, selected, sele
     refs.append(block);
     const basis=disclosure(details,'Classification and timing');
     basis.append(element('p','',action.basis.join(' · ')),element('p','muted',`Exclusive timeline time: ${elapsed(action)}. Rows show recorded call durations; stage totals partition timestamps. Nested model time is excluded from the enclosing tool; overlapping rows must not be summed.`));
+    if(action.classification_inferred) basis.append(element('p','muted','Purpose is inferred; it does not establish that the action succeeded or the check was sufficient.'));
+    for(const reason of action.classification_reasons||[]) basis.append(element('p','',reason));
+    for(const ref of action.classification_evidence||[]) basis.append(button(`L${ref.line_number}`,()=>evidence(ref)));
   };
   const rows=[],expanders=[];
   for(const action of actions){
     for(const gap of flow.gaps||[]) if(gap.next_action_ids[0]===action.id){
-      rows.push(['—',element('span','action-flow-gap','Gap · unclassified'), 'Between recorded calls', clock(gap.started_ms),clock(gap.ended_ms),seconds(gap.duration_ms),'—']);
+      rows.push(['—',element('span','action-flow-gap','Gap · unclassified'), 'Between recorded calls', clock(gap.started_ms),clock(gap.ended_ms),seconds(gap.duration_ms),'—','—']);
     }
     let detailRow;
     const toggle=button(action.title,()=>{
@@ -83,18 +90,18 @@ export function renderActionFlow(root, data, {evidence, advanced, selected, sele
     const show=()=>{
       detailRow=element('tr','action-flow-detail-row');
       const cell=element('td'),details=element('section','action-flow-detail');
-      cell.colSpan=7;details.id=`action-detail-${action.ordinal}`;
+      cell.colSpan=8;details.id=`action-detail-${action.ordinal}`;
       inspect(action,details);cell.append(details);detailRow.append(cell);
       toggle.closest('tr').after(detailRow);
     };
     expanders.push(()=>{if(expandedActions.has(action.id)) show();});
     rows.push([action.ordinal,toggle,action.target||'—',
-      clock(action.started_at),clock(action.ended_at),duration(action),label(action.status)]);
+      clock(action.started_at),clock(action.ended_at),duration(action),utilityLabel(calls.get(action.id)?.utility),label(action.status)]);
   }
-  const timeline=table(pane,['#','Action','Model / target','Started','Ended','Call time','Status'],rows);
+  const timeline=table(pane,['#','Action','Model / target','Started','Ended','Call time','Utility','Status'],rows);
   timeline.classList.add('action-flow-table');
   for(const row of timeline.tBodies[0].rows) if(row.querySelector('.action-flow-gap')) row.classList.add('action-flow-gap-row');
   for(const expand of expanders) expand();
   const notes=disclosure(root,'How this view is grouped');
-  notes.append(element('p','muted','Each Working model call and each tool execution has its own row. Consecutive actions with the same purpose form a stage; model purpose uses explicit tool invocation links. Gaps are uncovered timestamp intervals, not a diagnosis of framework overhead. No additional evaluation is needed.'));
+  notes.append(element('p','muted','Each Working model call and tool execution has its own row. Model purpose follows recorded native or JSON action links. Classification uses recorded operations, then cited saved assessments or declared action intent; inferred purposes are marked. Gaps are uncovered timestamp intervals, not a diagnosis of framework overhead. No additional evaluation is needed.'));
 }

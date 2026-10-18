@@ -67,6 +67,7 @@ def evaluation(tmp_path):
             scope = {"loop_id": "l", "trace_id": "t", "step_number": 0, "llm_call_id": f"c{i}"}
             emit("llm.requested", {**scope, "messages": [{"role": "user", "content": "Inspect"}], "tools": []})
             emit("llm.completed", {**scope, "response": {"content": "Plan next check",
+                "stream_metrics": {"http_receive_ms": 9000, "delta_emit_ms": 20},
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}})
     store.update(sid, record)
     trajectory = SessionTrajectory(store)
@@ -346,3 +347,39 @@ def test_saved_graph_upgrade_keeps_snapshot_judgments_and_usage_without_llm_call
     assert upgraded['evaluation']['semantic']['reasoning_transitions'] == original['evaluation']['semantic']['reasoning_transitions']
     assert json.loads(store.artifacts.read(body['result']['sha256']))['semantic']['reasoning_process']['graph']['schema_version'].endswith('.v2')
     assert trajectory.start(sid)['id'] == aid
+
+
+def test_parallel_evaluations_report_queue_cancel_immediately_and_dispatch_next(evaluation):
+    _, _, semantic, provider, sid, aid = evaluation
+    provider.block_after = 0
+    jobs = [semantic.start(sid, aid, {"analysis_version": "v2", "max_calls": limit}) for limit in (10, 11, 12, 13)]
+    deadline = time.monotonic() + 5
+    while provider.calls < 2:
+        assert time.monotonic() < deadline
+        time.sleep(.01)
+    assert [semantic.get(sid, aid, j["id"])["state"] for j in jobs] == ["running", "running", "queued", "queued"]
+    queued = semantic.get(sid, aid, jobs[2]["id"])
+    assert queued["queue"]["position"] == 1
+    assert queued["queue"]["workers"] == 2
+    assert {row["id"] for row in queued["queue"]["running"]} == {j["id"] for j in jobs[:2]}
+    assert semantic.get(sid, aid, jobs[3]["id"])["queue"]["position"] == 2
+    with pytest.raises(ServiceError, match="queue is full"):
+        semantic.start(sid, aid, {"analysis_version": "v2", "max_calls": 14})
+    cancelled = semantic.cancel(sid, aid, jobs[2]["id"])
+    assert cancelled["state"] == "cancelled"
+    assert cancelled["usage"]["calls"] == 0
+    assert provider.calls == 2  # Cancelling queued work does not wait for or invoke a provider.
+    assert semantic.get(sid, aid, jobs[3]["id"])["queue"]["position"] == 1
+    replacement = semantic.start(sid, aid, {"analysis_version": "v2", "max_calls": 14})
+    assert semantic.get(sid, aid, replacement["id"])["queue"]["position"] == 2
+    provider.block_after = None
+    semantic.cancel(sid, aid, jobs[0]["id"])
+    assert wait_job(semantic, sid, aid, jobs[0]["id"])["state"] == "cancelled"
+    assert wait_job(semantic, sid, aid, jobs[3]["id"])["state"] == "completed"
+    assert wait_job(semantic, sid, aid, replacement["id"])["state"] == "completed"
+    # The other slow evaluation neither blocks dispatch nor gets cancelled with its sibling.
+    assert semantic.get(sid, aid, jobs[1]["id"])["state"] == "running"
+    semantic.cancel(sid, aid, jobs[1]["id"])
+    assert wait_job(semantic, sid, aid, jobs[1]["id"])["state"] == "cancelled"
+    resumed = semantic.start(sid, aid, {"resume_id": jobs[2]["id"]})
+    assert wait_job(semantic, sid, aid, resumed["id"])["state"] == "completed"

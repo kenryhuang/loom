@@ -160,6 +160,11 @@ test('action flow is the default: compact stages and one row per recorded action
   const dom=new JSDOM('<main></main>');globalThis.document=dom.window.document;
   const data=JSON.parse(readFileSync(new URL('./fixtures/execution-view.json',import.meta.url)));
   data.execution_view.calls[0].stream_metrics={http_receive_ms:9000,receive_queue_max_lag_ms:20,delta_emit_ms:30,completion_emit_ms:50};
+  data.execution_view.calls[0].utility={status:'reviewed',necessity:'supporting',value:'material',novelty:'new',role:'decision',confidence:'medium',
+    delta:'Connected inspection to a concrete test',reason:'Later verification used this decision',counterfactual:'An alternative inspection would be needed',
+    improvement:'Check whether the same evidence can support fewer reads',evidence_refs:[],contribution_refs:[{line_number:4,field_path:'output'}],
+    comparison_refs:[],acceptance_refs:[],evidence_window:{partial:true}};
+  data.action_utility={coverage:{eligible:6,reviewed:1,pending:5,unknown:0},value_counts:{material:1},rows:[data.execution_view.calls[0].utility]};
   const root=document.querySelector('main'),refs=[],view=new GoalLoopView(root,{evidence:r=>refs.push(r)});view.update(data);
   assert.equal(root.querySelector('.goal-process-graph'),null);
   assert.equal(root.querySelectorAll('.action-flow-stage').length,1);
@@ -181,6 +186,10 @@ test('action flow is the default: compact stages and one row per recorded action
   assert.match(root.querySelector('.action-flow-detail').textContent,/HTTP stream received/);
   assert.match(root.querySelector('.action-flow-detail').textContent,/Receive queue · max lag/);
   assert.match(root.querySelector('.action-flow-detail').textContent,/Final persistence wait/);
+  assert.match(root.querySelector('.action-flow-detail').textContent,/Connected inspection to a concrete test/);
+  assert.match(root.querySelector('.action-flow-detail').textContent,/Partial evidence window/);
+  assert.match(root.textContent,/Action utility reviewed/);
+  click(root,'L4 · output');assert.equal(refs.at(-1).line_number,4);
   click(root,'L2');assert.equal(refs.at(-1).line_number,2);
   toggle.click();assert.equal(toggle.getAttribute('aria-expanded'),'false');
   assert.equal(root.querySelector('.action-flow-detail'),null);
@@ -202,5 +211,23 @@ test('selecting another action stage replaces the action rows without showing ol
   assert.equal(root.querySelectorAll('tbody tr').length,1);assert.match(root.textContent,/Edit file/);
   assert.equal(root.querySelector('.goal-process-graph'),null);assert.equal(view.selectedActionStage,'edited');
   view.update(data);assert.equal(root.querySelector('.action-flow-stage[aria-pressed="true"]').textContent.includes('Edit / implement'),true);
+  dom.window.close();
+});
+
+test('inferred action purposes show their basis and clickable classification evidence', () => {
+  const dom=new JSDOM('<main></main>');globalThis.document=dom.window.document;
+  const data=JSON.parse(readFileSync(new URL('./fixtures/execution-view.json',import.meta.url)));
+  const flow=data.execution_view.action_flow, ref={line_number:42,field_path:'response.content'};
+  Object.assign(flow.actions[0],{classification_inferred:true,classification_reasons:['Declared numeric cross-check'],
+    classification_evidence:[ref],basis:['inferred from declared action purpose']});
+  flow.segments[0].inferred_actions=1;
+  const root=document.querySelector('main'),refs=[];
+  new GoalLoopView(root,{evidence:r=>refs.push(r)}).update(data);
+  assert.match(root.querySelector('.action-flow-stage').textContent,/1 actions · inferred purpose/);
+  click(root,'Working · Preparing read_file');
+  const details=root.querySelector('.action-flow-detail');
+  assert.match(details.textContent,/Declared numeric cross-check/);
+  assert.match(details.textContent,/does not establish that the action succeeded/);
+  click(root,'L42');assert.deepEqual(refs.at(-1),ref);
   dom.window.close();
 });

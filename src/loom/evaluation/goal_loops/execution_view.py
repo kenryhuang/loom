@@ -5,10 +5,13 @@ from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import asdict
 
+from loom.core.models import thaw_json
 from loom.evaluation.base_metrics import timestamp
 from loom.evaluation.goal_loops.costs import summarize
+from loom.trace_analysis import build_episode_graph
+from loom.trace_analysis.links import linked_tools_for_round
 
-VERSION = "goal-execution-view.4"
+VERSION = "goal-execution-view.6"
 
 
 def time_partition(calls):
@@ -59,9 +62,10 @@ def _unwrap(value):
 
 
 def execution_view(source, bundle):
+    utility = {r["call_id"]: r for r in bundle.get("action_utility", {}).get("rows", [])}
     atoms = bundle["cost_ledger"]["atoms"]
     assignments = {r["cost_atom_id"]: r for r in bundle["cost_ledger"]["assignments"]}
-    rows, proposed = [], defaultdict(list)
+    rows = []
     for atom in atoms:
         refs = atom.get("evidence_refs", [])
         events = [source.event(ref) for ref in refs]
@@ -91,6 +95,7 @@ def execution_view(source, bundle):
             )
         }
         row.update(
+            utility=utility.get(atom["id"]),
             start_line=min((r["line_number"] for r in refs), default=0),
             end_line=max((r["line_number"] for r in refs), default=0),
             evidence_refs=refs,
@@ -102,13 +107,10 @@ def execution_view(source, bundle):
         if atom["kind"] == "model":
             response = end.payload.get("response", {}) if end else {}
             if isinstance(response, Mapping):
-                row["stream_metrics"] = response.get("stream_metrics")
+                row["stream_metrics"] = thaw_json(response.get("stream_metrics"))
                 content = response.get("content")
                 row["statement"], row["statement_truncated"] = _preview(content or "", 1600)
                 row["statement_refs"] = [asdict(source.ref(end, "response.content", start=0, end=len(row["statement"])))] if content else []
-                for tool in response.get("tool_calls") or []:
-                    if isinstance(tool, Mapping) and tool.get("id") and end:
-                        proposed[(end.run_id, end.payload.get("trace_id"), tool["id"])].append(row)
         else:
             inp = start.payload.get("input", {}) if start else {}
             row["input"], row["input_truncated"] = _preview(inp, 1000)
@@ -128,16 +130,13 @@ def execution_view(source, bundle):
         rows.append(row)
     by_id = {r["id"]: r for r in rows}
     nodes, edges, rounds = [], [], []
-    for atom in atoms:
-        row = by_id[atom["id"]]
-        if row["kind"] != "tool":
+    graph = build_episode_graph(source.events)
+    for model in graph.llm_rounds:
+        if model.id not in by_id or model.completed_event is None:
             continue
-        event = next((source.event(r) for r in atom["evidence_refs"] if source.event(r).event_type == "tool.started"), None)
-        if event:
-            candidates = proposed.get((event.run_id, event.payload.get("trace_id"), atom.get("tool_call_id")), [])
-            candidates = [m for m in candidates if m["end_line"] <= row["start_line"]]
-            if len(candidates) == 1:
-                row["caller_id"] = candidates[0]["id"]
+        for tool, basis in linked_tools_for_round(graph, model):
+            if tool.id in by_id and by_id[model.id]["end_line"] <= by_id[tool.id]["start_line"]:
+                by_id[tool.id].update(caller_id=model.id, caller_basis=basis)
     for row in rows:
         identifier = row["id"]
         if row["kind"] == "model":
@@ -153,7 +152,7 @@ def execution_view(source, bundle):
         else:
             nodes.append(dict(id=identifier, kind="action", call_id=identifier, evidence_refs=row.get("input_refs", [])))
             if row.get("caller_id"):
-                edges.append(dict(source_id=row["caller_id"], target_id=identifier, kind="invokes", basis="recorded_tool_call_id"))
+                edges.append(dict(source_id=row["caller_id"], target_id=identifier, kind="invokes", basis=row["caller_basis"]))
             else:
                 rounds.append(dict(id=identifier, model_call_id=None, tool_call_ids=[identifier], start_line=row["start_line"]))
             if row.get("observation_refs"):
@@ -211,7 +210,10 @@ def execution_view(source, bundle):
     in_windows = {i for s in phases.values() for i in s["call_ids"]}
     run = scope(rows, {r["id"] for r in rows if r["owner"] != "analysis:unassigned"})
     run["outside_phase_call_ids"] = [r["id"] for r in rows if r["id"] not in in_windows]
+    from loom.evaluation.goal_loops.action_classification import classify_actions
     from loom.evaluation.goal_loops.action_flow import action_flow
+
+    classify_actions(source, rows, bundle)
 
     return dict(
         action_flow=action_flow(rows, rounds),

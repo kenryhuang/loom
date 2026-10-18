@@ -7,6 +7,7 @@ from loom.evaluation.goal_loops.facts import identity
 from loom.evaluation.goal_loops.state import overlaps
 
 LEGACY_VERSION = ("goal-loops.1", "goal-loops-rubric.1")
+UPGRADABLE_VERSIONS = {LEGACY_VERSION, ("goal-loops.2", "goal-loops-rubric.2")}
 PROTOCOL_VERSION = 2
 
 
@@ -16,7 +17,8 @@ def upgrade_checkpoint(checkpoint, expected):
     if not old or old == expected:
         return cp
     comparable = {k: v for k, v in old.items() if k not in {"analyzer", "prompt"}}
-    if (old.get("analyzer"), old.get("prompt")) != LEGACY_VERSION or comparable != {k: v for k, v in expected.items() if k not in {"analyzer", "prompt"}}:
+    expected_source = {k: v for k, v in expected.items() if k not in {"analyzer", "prompt"}}
+    if (old.get("analyzer"), old.get("prompt")) not in UPGRADABLE_VERSIONS or comparable != expected_source:
         raise ValueError("Goal-loop checkpoint identity changed; start a new evaluation")
     cp.setdefault("protocol_migrations", []).append(
         dict(
@@ -26,6 +28,7 @@ def upgrade_checkpoint(checkpoint, expected):
             unfinished=deepcopy(cp.get("stage_work", {})),
             reconcile_groups=deepcopy(cp.get("reconcile_groups", [])),
             graph_revision=cp.get("graph_revision", 0),
+            diagnostics=deepcopy(cp.get("entities", {}).get("diagnostics", [])),
         )
     )
     cp["identity"] = expected
@@ -33,12 +36,15 @@ def upgrade_checkpoint(checkpoint, expected):
     cp["stage_work"] = {}
     # Retain validated entities, revisions, source coverage, completed structural work and usage.
     # Recompute downstream candidates under the narrower protocol, without resending old work.
-    cp["stages"] = {k: v for k, v in cp.get("stages", {}).items() if k.startswith("structure:")}
+    retained = ("structure:", "reconcile:") if old.get("analyzer") == "goal-loops.2" else ("structure:",)
+    cp["stages"] = {k: v for k, v in cp.get("stages", {}).items() if k.startswith(retained)}
     for key in ("reconcile_groups", "reconcile_candidates", "reconciliation_complete", "diagnosis_groups", "complete"):
         cp.pop(key, None)
     cp["diagnosed_goals"] = []
     cp["diagnosis_windows"] = {}
-    cp.setdefault("limitations", []).append("Execution protocol upgraded to v2; saved structure and usage retained; downstream stages rescheduled")
+    if cp.get("entities"):
+        cp["entities"]["diagnostics"] = []  # Regenerated against utility, retained above for audit.
+    cp.setdefault("limitations", []).append("Action utility enabled; saved structure and usage retained; downstream stages rescheduled")
     return cp
 
 
@@ -73,7 +79,9 @@ def split_unit(unit, registry, derived):
     depth = unit.get("depth", 0)
     if depth >= 6:
         return []
-    if unit["family"] == "reconcile":
+    if unit["family"] == "utility" and len(unit.get("action_ids", [])) > 1:
+        field = "action_ids"
+    elif unit["family"] == "reconcile":
         field = "candidate_ids"
         if len(unit.get(field, [])) < 2:
             return []

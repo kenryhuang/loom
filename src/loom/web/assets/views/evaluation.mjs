@@ -13,6 +13,7 @@ const DIMENSIONS = {
 const stageLabel = (stage) => {
   if (stage?.startsWith("structure:")) return "Reconstructing goals and phase occurrences";
   if (stage?.startsWith("reconcile:")) return "Reconciling goal boundaries";
+  if (stage?.startsWith("utility:")) return "Evaluating action utility";
   if (stage?.startsWith("diagnose:")) return "Diagnosing goal execution";
   if (stage?.startsWith("scan:")) return "Scanning behavior index";
   if (stage?.startsWith("focus:")) return "Analyzing behavior segment";
@@ -363,7 +364,18 @@ export class EvaluationView {
     const current = element("p", "evaluation-current");
     current.setAttribute("role", "status");
     current.hidden = !active;
-    if (active && call?.state === "waiting") {
+    if (job.state === "queued") {
+      const queue = job.queue;
+      const running = queue?.running || [];
+      current.textContent = queue
+        ? `Queue position ${queue.position ?? "—"} · ${running.length} / ${queue.workers} evaluators running`
+        : "Queued · Waiting for an evaluator slot";
+      for (const other of running) {
+        const row = element("span", "", ` · ${other.model} · ${other.session_id} · ${stageLabel(other.stage)}`);
+        row.style.display = "block";
+        current.append(row);
+      }
+    } else if (active && call?.state === "waiting") {
       const elapsed = Math.max(0, Math.floor((job.elapsed_seconds || 0) - (call.started_elapsed_seconds || 0)));
       current.textContent = `${activityLabel(call)} · Waiting for evaluator response · ${elapsed}s${behavior ? ` / ${call.timeout_seconds ?? job.settings?.max_call_seconds ?? 120}s` : ""}`;
     } else if (active) current.textContent = stageLabel(job.stage);

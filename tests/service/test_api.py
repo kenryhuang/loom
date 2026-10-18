@@ -319,6 +319,50 @@ def test_semantic_api_validates_scope_and_runs_evaluation_without_task_events(ap
         client._json(route + "/missing")
 
 
+def test_goal_loop_http_polling_and_publication_preserve_stream_metrics(api):
+    from tests.evaluation.test_goal_loops import GoalJudge
+
+    service, server, client, path = api
+    server.semantic.provider_factory = lambda _: GoalJudge()
+    sid = new(client, path)
+    metrics = {"http_receive_ms": 9000, "delta_emit_ms": 20}
+
+    def record(state, emit, db):
+        state["run"] = {"id": "r", "state": "running"}
+        emit("run.started", {})
+        scope = {"loop_id": "l", "trace_id": "t", "step_number": 0, "llm_call_id": "c"}
+        emit("llm.requested", {**scope, "messages": [{"role": "user", "content": "Inspect"}], "tools": []})
+        emit("llm.completed", {**scope, "response": {"content": "Plan next check", "stream_metrics": metrics,
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}})
+
+    service.store.update(sid, record)
+    base = f"/v1/sessions/{sid}/trajectory"
+    aid = client._json(base, {})["id"]
+    deadline = time.monotonic() + 10
+    while client._json(f"{base}/{aid}")["state"] != "completed":
+        assert time.monotonic() < deadline
+        time.sleep(.01)
+    route = f"{base}/{aid}/evaluation"
+    job = client._json(route, {"analysis_version": "goal_loops_v1", "run_id": "r", "max_calls": 1})
+
+    def poll(identifier):
+        while time.monotonic() < deadline:
+            result = client._json(f"{route}/{identifier}")
+            assert result["evaluation"]["execution_view"]["calls"][0]["stream_metrics"] == metrics
+            if result["state"] not in {"queued", "running"}:
+                return result
+            time.sleep(.01)
+        pytest.fail("Evaluation did not finish")
+
+    partial = poll(job["id"])
+    assert partial["state"] == "budget_exhausted", partial.get("error")
+    resumed = client._json(route, {"resume_id": job["id"], "max_calls": 12})
+    completed = poll(resumed["id"])
+    assert completed["state"] == "completed", completed.get("error")
+    saved = json.loads(client.artifact(sid, completed["result"]["sha256"]))
+    assert saved["execution_view"]["calls"][0]["stream_metrics"] == metrics
+
+
 def test_session_soft_delete_hides_history_and_is_idempotent(api):
     service, server, client, directory = api
     sid = client.create({"title": "Disposable", "task_spec": {"tools": {"collections": ["task_control"]}}})["session_id"]

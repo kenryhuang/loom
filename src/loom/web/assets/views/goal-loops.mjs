@@ -1,4 +1,5 @@
 import {renderActionFlow} from "./action-flow.mjs";
+import {utilitySummary} from './action-utility.mjs';
 import {element} from "../markdown.mjs";
 import {badge, cards, disclosure, label, number, panel, seconds, table} from "./dashboard.mjs";
 
@@ -26,6 +27,7 @@ function evidenceLinks(root, refs, evidence) {
 export function renderGoalSummary(root, data, explore) {
   const c = data.coverage, cost = data.cost_ledger.totals;
   const block = panel(root, "Goal-loop analysis", true);
+  utilitySummary(block,data.action_utility);
   cards(block, [["Run", data.source.run_id], ["Evidence reviewed", `${c.reviewed_packets} / ${c.source_packets}`],
     ["Calls attributed", `${c.assigned_calls} / ${c.eligible_calls}`], ["Known tokens", amount(cost, "total_tokens")]]);
   block.append(badge(c.status === "complete" ? "Pipeline complete" : label(c.status)), element("p", "muted", `Structure ${c.structure_complete ? "reviewed" : "partial"} · Reconciliation ${c.reconciliation_complete ? "saved" : "pending"} · ${c.diagnosed_goals.length} goals diagnosed`));

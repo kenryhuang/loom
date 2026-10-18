@@ -2,5 +2,5 @@
 
 ENGINE = "goal_loops_v1"
 SCHEMA = "loom.goal-loop-analysis.v1"
-ANALYZER = "goal-loops.2"
-PROMPT = "goal-loops-rubric.2"
+ANALYZER = "goal-loops.3"
+PROMPT = "goal-loops-rubric.3"

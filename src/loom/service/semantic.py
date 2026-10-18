@@ -17,13 +17,15 @@ from loom.evaluation.effectiveness_judge import judge_effectiveness, unverified_
 from loom.evaluation.goal_loops import ANALYZER as GOAL_ANALYZER
 from loom.evaluation.goal_loops import ENGINE as GOAL_ENGINE
 from loom.evaluation.goal_loops import PROMPT as GOAL_PROMPT
-from loom.evaluation.goal_loops.execution import LEGACY_VERSION
+from loom.evaluation.goal_loops.execution import UPGRADABLE_VERSIONS
 from loom.evolution.diagnoses import proposals_from_diagnoses
 from loom.service.contracts import ServiceError, canonical, new_id
 from loom.service.insights import build_insights
 from loom.tasks.config import create_provider_from_task_config, load_task_config
 
 VERSION = "session-semantic.1"
+EVALUATION_WORKERS = 2
+MAX_ACTIVE_EVALUATIONS = 4
 RESOURCE_LIMITS = {"max_calls", "max_tokens", "max_seconds"}
 DEFAULTS = {"max_calls": 80, "max_tokens": 1000000, "max_seconds": 1800,
             "max_evidence_chars": 400000, "max_prompt_chars": 100000, "batch_rounds": 8, "max_read_rounds": 4, "max_rounds": 10000, "max_call_seconds": 120}
@@ -52,7 +54,8 @@ class SessionSemantic:
         self.lock = threading.RLock()
         self.closed = threading.Event()
         self.cancels = {}
-        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="loom-evaluation")
+        self.futures = {}
+        self.pool = ThreadPoolExecutor(max_workers=EVALUATION_WORKERS, thread_name_prefix="loom-evaluation")
         with self.store.transaction() as db:
             db.execute("CREATE TABLE IF NOT EXISTS semantic_jobs(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, cache_key TEXT UNIQUE, body TEXT NOT NULL)")
             for row in db.execute("SELECT id,body FROM semantic_jobs").fetchall():
@@ -112,6 +115,8 @@ class SessionSemantic:
     def get(self, sid, aid, identifier):
         body = self._load(sid, aid, identifier)
         result = self._public(body)
+        if body["state"] == "queued":
+            result["queue"] = self._queue_info(identifier)
         if body.get("result"):
             result["evaluation"] = json.loads(self.store.artifacts.read(body["result"]["sha256"]))
             if body.get("analysis_version") == GOAL_ENGINE:
@@ -160,6 +165,17 @@ class SessionSemantic:
                                          for r in reviews.values()) for status in ("effective", "ineffective", "mixed", "unknown")} for d in DIMENSIONS}}}
             result["evaluation"] = self._result(body, source, factual, semantic)
         return result
+
+    def _queue_info(self, identifier):
+        with self.store.transaction() as db:
+            jobs = [json.loads(row[0]) for row in db.execute(
+                "SELECT body FROM semantic_jobs WHERE json_extract(body,'$.state') IN ('queued','running') ORDER BY rowid"
+            )]
+        queued = [job["id"] for job in jobs if job["state"] == "queued"]
+        return {"position": queued.index(identifier) + 1 if identifier in queued else None,
+                "workers": EVALUATION_WORKERS,
+                "running": [{key: job.get(key) for key in ("id", "session_id", "model", "stage")}
+                            for job in jobs if job["state"] == "running"]}
 
     def _result(self, body, source, factual, semantic):
         if body.get("analysis_version") == GOAL_ENGINE:
@@ -238,7 +254,7 @@ class SessionSemantic:
                 if resumed["state"] in {"queued", "running", "completed"}:
                     raise ServiceError("Only stopped evaluations can be resumed", 409)
                 protocol_upgrade = (version == GOAL_ENGINE and
-                                    (resumed["analyzer_version"], resumed["prompt_version"]) == LEGACY_VERSION)
+                                    (resumed["analyzer_version"], resumed["prompt_version"]) in UPGRADABLE_VERSIONS)
                 if (model != resumed["model"] or digest != resumed["config_digest"]
                         or resumed.get("analysis_version", "v2") != version or resumed.get("run_id") != run_id
                         or (not protocol_upgrade and (resumed["analyzer_version"] != analyzer_version or resumed["prompt_version"] != prompt_version))
@@ -250,7 +266,7 @@ class SessionSemantic:
             if previous and previous["state"] in {"queued", "running", "completed"}:
                 return self._public(previous)
             active = db.execute("SELECT COUNT(*) FROM semantic_jobs WHERE json_extract(body,'$.state') IN ('queued','running')").fetchone()[0]
-            if active >= 4:
+            if active >= MAX_ACTIVE_EVALUATIONS:
                 raise ServiceError("Evaluation queue is full", 429)
             body = previous or {"id": new_id("evaluation"), "session_id": sid, "analysis_id": aid,
                                 "source_cursor": parent["source_cursor"], "model": model, "settings": settings,
@@ -268,7 +284,7 @@ class SessionSemantic:
             body.update(state="queued", error=None, settings=settings, analyzer_version=analyzer_version, prompt_version=prompt_version)
             db.execute("INSERT OR REPLACE INTO semantic_jobs VALUES(?,?,?,?)", (body["id"], sid, key, canonical(body)))
             self.cancels[body["id"]] = threading.Event()
-            self.pool.submit(self._work, body)
+            self.futures[body["id"]] = self.pool.submit(self._work, body)
             return self._public(body)
 
     def cancel(self, sid, aid, identifier):
@@ -277,6 +293,16 @@ class SessionSemantic:
             flag = self.cancels.get(identifier)
             if flag:
                 flag.set()
+            future = self.futures.get(identifier)
+            if future and future.cancel():
+                body.update(state="cancelled", error="Evaluation cancelled before starting", current_call=None)
+                body["progress"] = [*body.get("progress", []), {
+                    "kind": "cancelled", "message": body["error"], "at": now_iso(),
+                    "elapsed_seconds": body["elapsed_seconds"],
+                }][-100:]
+                self._save(body)
+                self.futures.pop(identifier, None)
+                self.cancels.pop(identifier, None)
         return self._public(body)
 
     def _work(self, body):
@@ -475,3 +501,4 @@ class SessionSemantic:
             with self.lock:
                 persist()
                 self.cancels.pop(body["id"], None)
+                self.futures.pop(body["id"], None)
