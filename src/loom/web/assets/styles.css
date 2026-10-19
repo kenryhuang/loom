@@ -2109,3 +2109,29 @@ dialog h1 {
 .action-utility-label { display: grid; gap: 3px; }
 .action-utility-detail { border-top: 1px solid var(--border, #d8dee8); margin-top: 12px; padding-top: 8px; overflow-wrap: anywhere; }
 .action-utility-refs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-block: 8px; }
+
+.incremental-graph { min-width:0; max-width:100%; }
+.incremental-graph svg { display:block; width:100%; height:auto; }
+.incremental-graph svg [role=button] { cursor:pointer; }
+.incremental-graph .goal-loop-main, .incremental-graph .goal-loop-tree { min-width:0; }
+.incremental-graph .goal-report { white-space:pre-wrap; overflow-wrap:anywhere; max-width:100%; }
+.incremental-graph .goal-tree-row { flex-wrap:wrap; overflow-wrap:anywhere; }
+
+/* Deep evaluation result: two views, dependency graph, contextual detail. */
+.skeleton-toolbar { align-items:center; gap:12px; }
+.skeleton-toolbar .trajectory-tabs { display:flex; gap:4px; border-bottom:1px solid var(--line); margin-right:auto; }
+.skeleton-toolbar [role=tab] { border:0; border-radius:0; padding:10px 16px; background:transparent; border-bottom:2px solid transparent; color:var(--muted); }
+.skeleton-toolbar [role=tab][aria-selected=true] { border-bottom-color:var(--accent); color:var(--accent); font-weight:600; }
+.skeleton-workspace { display:grid; grid-template-columns:minmax(0,1fr); margin-top:12px; }
+.skeleton-main,.skeleton-tab-panel { min-width:0; max-width:100%; }
+.skeleton-canvas { max-width:100%; overflow:auto; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
+.incremental-graph .skeleton-canvas svg { display:block; width:100%; max-height:none; font-family:inherit; }
+.skeleton-legend { display:flex; flex-wrap:wrap; gap:16px; color:var(--muted); font-size:11px; margin:6px 0 12px; }
+.skeleton-detail { margin-top:16px; overflow-wrap:anywhere; }
+.skeleton-report { max-width:1080px; margin:16px auto; overflow-wrap:anywhere; }
+.skeleton-report .markdown { line-height:1.6; }
+.skeleton-report .base-table-scroll { max-width:100%; }
+.skeleton-canvas [role=button]:focus rect { stroke:var(--accent); stroke-width:3; }
+.skeleton-inspector { position:fixed; z-index:60; right:24px; top:76px; width:min(560px,calc(100vw - 48px)); max-height:calc(100vh - 100px); overflow:auto; background:var(--panel); border:1px solid var(--line); border-radius:10px; box-shadow:0 12px 40px #0003; }
+.skeleton-inspector .skeleton-detail { margin:0; border:0; }
+.skeleton-inspector .dashboard-panel-heading { position:sticky; top:0; background:var(--panel); z-index:1; }

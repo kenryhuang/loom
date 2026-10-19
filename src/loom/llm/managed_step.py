@@ -110,7 +110,7 @@ class ManagedStep:
             if suspended is not None:
                 return suspended
             self.assembly.context = cp["context"]
-            if not await self.assembly.prepare_completion(value.get("report", "")):
+            if not await self.assembly.prepare_completion(value.get("report", ""), reuse_current=True):
                 cp.pop("terminal", None)
                 return self._result(cp, runtime, "paused", self.assembly.acceptance.data["reason"])
         await self._interrupt_batch(cp, runtime, "Task completed")

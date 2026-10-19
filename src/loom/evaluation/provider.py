@@ -20,7 +20,8 @@ def evaluator_provider(provider, *, output_tokens, timeout_seconds, install_http
         options["enable_thinking"] = False
     if "reasoning_effort" in options:
         options["reasoning_effort"] = "low"
-    cap = min(output_tokens, getattr(provider, "max_completion_tokens", None) or output_tokens)
+    # None explicitly removes the solver's output cap for metadata-based evaluation.
+    cap = None if output_tokens is None else min(output_tokens, getattr(provider, "max_completion_tokens", None) or output_tokens)
     overrides = {"max_completion_tokens": cap, "request_options": options}
     if install_http and isinstance(provider, OpenAIProvider) and provider.http_client is None:
         overrides["http_client"] = bounded_http_client(timeout_seconds)

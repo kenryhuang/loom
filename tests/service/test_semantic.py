@@ -253,10 +253,10 @@ class BehaviorProvider:
         return ok(LlmResponse(content=json.dumps(value), usage=TokenUsage(10, 5, 15)))
 
 
-def test_behavior_version_is_default_and_resume_keeps_cumulative_stages(evaluation):
+def test_legacy_behavior_resume_keeps_cumulative_stages(evaluation):
     store, trajectory, semantic, _, sid, aid = evaluation
     semantic.provider_factory = lambda model: BehaviorProvider()
-    assert semantic.options()['default_analysis_version'] == 'v3'
+    assert semantic.options()['default_analysis_version'] == 'goal_graph_v1'
     cursor = store.snapshot(sid)['event_cursor']
     job = semantic.start(sid, aid, {'max_calls': 2})
     partial = wait_job(semantic, sid, aid, job['id'])

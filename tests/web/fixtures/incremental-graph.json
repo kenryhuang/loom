@@ -1,0 +1,4312 @@
+{
+  "schema_version": "loom.goal-loop-analysis.v1",
+  "graph_revision": 1,
+  "source": {
+    "digest": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+    "run_id": "run",
+    "scope_digest": "bdb8f2ecdfabd29256bb049a",
+    "adapter_version": "goal-cards.1"
+  },
+  "analyzer": {
+    "version": "goal-graph.1",
+    "prompt_version": "goal-graph-rubric.1"
+  },
+  "goals": [
+    {
+      "id": "goal:cf9d740df6b1deddf9d53e7d",
+      "parent_goal_id": null,
+      "objective": "Investigate the problem",
+      "conditions": [
+        {
+          "id": "goal:0b7c395918c01cab41cd99d5:objective",
+          "description": "Investigate the problem",
+          "required": true,
+          "origin": "request_user_message",
+          "status": "unverified"
+        }
+      ],
+      "evidence_refs": [
+        {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 1,
+          "event_hash": null,
+          "field_path": "messages.0.content",
+          "start": 0,
+          "end": 23
+        }
+      ],
+      "source_goal_id": "goal:0b7c395918c01cab41cd99d5",
+      "origin_line": 1,
+      "basis": "recorded",
+      "confidence": null,
+      "goal_disposition": "unknown",
+      "completion_claim": "unknown",
+      "end_line": 8,
+      "supersedes": null,
+      "execution_state": "unknown",
+      "end_boundary": "snapshot_end",
+      "verification": []
+    },
+    {
+      "id": "goal:0b77ab410fe4a9a15a870edb",
+      "parent_goal_id": "goal:cf9d740df6b1deddf9d53e7d",
+      "objective": "Understand source behavior",
+      "conditions": [
+        "Source explained"
+      ],
+      "evidence_refs": [
+        {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 2,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        }
+      ],
+      "origin_line": 2,
+      "end_line": 8,
+      "basis": "inferred",
+      "goal_disposition": "open",
+      "completion_claim": "unknown",
+      "confidence": "unknown",
+      "execution_state": "unknown",
+      "end_boundary": "snapshot_end",
+      "verification": []
+    }
+  ],
+  "attempts": [
+    {
+      "id": "attempt:6872b474a4f6ed50732920bc",
+      "goal_id": "goal:0b77ab410fe4a9a15a870edb",
+      "approach": "Approach not established",
+      "outcome": "unknown",
+      "evidence_refs": [],
+      "basis": "unknown"
+    }
+  ],
+  "phases": [
+    {
+      "id": "phase:6449b9205f0691bb0a6c62f9",
+      "stage_id": "stage:a9dc2ac08cee87c6844f8077",
+      "goal_id": "goal:0b77ab410fe4a9a15a870edb",
+      "attempt_id": "attempt:6872b474a4f6ed50732920bc",
+      "kind": "investigation",
+      "question": "Understand source behavior",
+      "known_before": "unknown",
+      "actions": "Inspect source",
+      "observations": "Recorded source inspection",
+      "delta": "Recorded source inspection",
+      "remaining_questions": "",
+      "next_reason": "",
+      "allocation": "serves",
+      "call_ids": [
+        "llm:run:trace1:1:1"
+      ],
+      "card_ids": [
+        "caa5db03ab4f1"
+      ],
+      "evidence_refs": [
+        {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 2,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        }
+      ],
+      "basis": "inferred",
+      "confidence": "unknown",
+      "start_line": 1,
+      "end_line": 2,
+      "contribution": "evidence",
+      "status": "success"
+    },
+    {
+      "id": "phase:96a68f1e112687d3e763066d",
+      "stage_id": "stage:a9dc2ac08cee87c6844f8077",
+      "goal_id": "goal:0b77ab410fe4a9a15a870edb",
+      "attempt_id": "attempt:6872b474a4f6ed50732920bc",
+      "kind": "investigation",
+      "question": "Understand source behavior",
+      "known_before": "unknown",
+      "actions": "Inspect source",
+      "observations": "Recorded source inspection",
+      "delta": "Recorded source inspection",
+      "remaining_questions": "",
+      "next_reason": "",
+      "allocation": "serves",
+      "call_ids": [
+        "llm:run:trace2:2:2"
+      ],
+      "card_ids": [
+        "cacbbbeb19b2f",
+        "c32359ddcd98c"
+      ],
+      "evidence_refs": [
+        {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 6,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        }
+      ],
+      "basis": "inferred",
+      "confidence": "unknown",
+      "start_line": 5,
+      "end_line": 6,
+      "contribution": "evidence",
+      "status": "success"
+    },
+    {
+      "id": "phase:4a9f439a6ea222fb93e93a08",
+      "stage_id": "stage:a9dc2ac08cee87c6844f8077",
+      "goal_id": "goal:0b77ab410fe4a9a15a870edb",
+      "attempt_id": "attempt:6872b474a4f6ed50732920bc",
+      "kind": "investigation",
+      "question": "Understand source behavior",
+      "known_before": "unknown",
+      "actions": "Inspect source",
+      "observations": "Recorded source inspection",
+      "delta": "Recorded source inspection",
+      "remaining_questions": "",
+      "next_reason": "",
+      "allocation": "serves",
+      "call_ids": [
+        "tool:run:trace2:2:tool2"
+      ],
+      "card_ids": [
+        "c32359ddcd98c"
+      ],
+      "evidence_refs": [
+        {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 7,
+          "event_hash": null,
+          "field_path": "input.path",
+          "start": 0,
+          "end": 5
+        }
+      ],
+      "basis": "inferred",
+      "confidence": "unknown",
+      "start_line": 7,
+      "end_line": 8,
+      "contribution": "evidence",
+      "status": "success"
+    }
+  ],
+  "activities": [],
+  "relations": [],
+  "diagnostics": [],
+  "validation_diagnostics": [],
+  "aliases": {},
+  "facts": {
+    "events": [
+      {
+        "source_ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 1,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 1,
+        "seq": null,
+        "event_id": "line-1",
+        "type": "llm.requested",
+        "at": null,
+        "refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 1,
+            "event_hash": null,
+            "field_path": "messages.0.content",
+            "start": 0,
+            "end": 23
+          }
+        ],
+        "call_ids": [
+          "llm:run:trace1:1:1"
+        ]
+      },
+      {
+        "source_ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 2,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 2,
+        "seq": null,
+        "event_id": "line-2",
+        "type": "llm.completed",
+        "at": null,
+        "refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 2,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": null,
+            "end": null
+          }
+        ],
+        "call_ids": [
+          "llm:run:trace1:1:1"
+        ]
+      },
+      {
+        "source_ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 3,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 3,
+        "seq": null,
+        "event_id": "line-3",
+        "type": "tool.started",
+        "at": null,
+        "refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 3,
+            "event_hash": null,
+            "field_path": "input",
+            "start": null,
+            "end": null
+          }
+        ],
+        "call_ids": [
+          "tool:run:trace1:1:tool1"
+        ]
+      },
+      {
+        "source_ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 4,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 4,
+        "seq": null,
+        "event_id": "line-4",
+        "type": "tool.completed",
+        "at": null,
+        "refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 4,
+            "event_hash": null,
+            "field_path": "output",
+            "start": null,
+            "end": null
+          }
+        ],
+        "call_ids": [
+          "tool:run:trace1:1:tool1"
+        ]
+      },
+      {
+        "source_ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 5,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 5,
+        "seq": null,
+        "event_id": "line-5",
+        "type": "llm.requested",
+        "at": null,
+        "refs": [],
+        "call_ids": [
+          "llm:run:trace2:2:2"
+        ]
+      },
+      {
+        "source_ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 6,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 6,
+        "seq": null,
+        "event_id": "line-6",
+        "type": "llm.completed",
+        "at": null,
+        "refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 6,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": null,
+            "end": null
+          }
+        ],
+        "call_ids": [
+          "llm:run:trace2:2:2"
+        ]
+      },
+      {
+        "source_ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 7,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 7,
+        "seq": null,
+        "event_id": "line-7",
+        "type": "tool.started",
+        "at": null,
+        "refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 7,
+            "event_hash": null,
+            "field_path": "input",
+            "start": null,
+            "end": null
+          }
+        ],
+        "call_ids": [
+          "tool:run:trace2:2:tool2"
+        ]
+      },
+      {
+        "source_ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 8,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        },
+        "line": 8,
+        "seq": null,
+        "event_id": "line-8",
+        "type": "tool.completed",
+        "at": null,
+        "refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 8,
+            "event_hash": null,
+            "field_path": "output",
+            "start": null,
+            "end": null
+          }
+        ],
+        "call_ids": [
+          "tool:run:trace2:2:tool2"
+        ]
+      }
+    ],
+    "verification": [],
+    "statistics": {
+      "schema_version": "loom.base-facts.v2",
+      "scope": "run",
+      "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+      "basic": {
+        "events": {
+          "raw": 8,
+          "analyzed": 8,
+          "by_type": {
+            "llm.requested": 2,
+            "llm.completed": 2,
+            "tool.started": 2,
+            "tool.completed": 2
+          }
+        },
+        "runs": 1,
+        "steps": 2,
+        "step_states": {
+          "incomplete": 2
+        },
+        "step_attempts": 0,
+        "run_attempts": 0,
+        "goal_changes": 0,
+        "acceptance": null,
+        "interruptions": {
+          "pauses": 0,
+          "input_waits": 0,
+          "uncertain_operations": 0
+        }
+      },
+      "tools": {
+        "calls": 2,
+        "success": 2,
+        "failed": 0,
+        "cancelled": 0,
+        "incomplete": 0,
+        "unknown": 0,
+        "success_rate": 1.0,
+        "duration": {
+          "measured": 0,
+          "missing": 2,
+          "total_ms": null,
+          "average_ms": null,
+          "p95_ms": null,
+          "max_ms": null
+        },
+        "failure_reasons": {},
+        "truncated_outputs": 0,
+        "explicit_retries": 0,
+        "ttft": {
+          "measured": 0,
+          "missing": 2,
+          "total_ms": null,
+          "average_ms": null,
+          "p95_ms": null,
+          "max_ms": null
+        },
+        "tps": {
+          "measured": 0,
+          "missing": 2,
+          "average": null,
+          "p95": null,
+          "max": null
+        },
+        "prompt_tokens": {
+          "known": 0,
+          "measured_calls": 0,
+          "missing_calls": 2,
+          "average": null,
+          "max": null
+        },
+        "completion_tokens": {
+          "known": 0,
+          "measured_calls": 0,
+          "missing_calls": 2,
+          "average": null,
+          "max": null
+        },
+        "total_tokens": {
+          "known": 0,
+          "measured_calls": 0,
+          "missing_calls": 2,
+          "average": null,
+          "max": null
+        },
+        "repeated_inputs": 1,
+        "by_tool": [
+          {
+            "name": "read_file",
+            "calls": 2,
+            "success": 2,
+            "failed": 0,
+            "cancelled": 0,
+            "incomplete": 0,
+            "unknown": 0,
+            "success_rate": 1.0,
+            "duration": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "failure_reasons": {},
+            "truncated_outputs": 0,
+            "explicit_retries": 0,
+            "ttft": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "tps": {
+              "measured": 0,
+              "missing": 2,
+              "average": null,
+              "p95": null,
+              "max": null
+            },
+            "prompt_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "completion_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "total_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "repeated_inputs": 1
+          }
+        ],
+        "by_family": [
+          {
+            "name": "file_read",
+            "calls": 2,
+            "success": 2,
+            "failed": 0,
+            "cancelled": 0,
+            "incomplete": 0,
+            "unknown": 0,
+            "success_rate": 1.0,
+            "duration": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "failure_reasons": {},
+            "truncated_outputs": 0,
+            "explicit_retries": 0,
+            "ttft": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "tps": {
+              "measured": 0,
+              "missing": 2,
+              "average": null,
+              "p95": null,
+              "max": null
+            },
+            "prompt_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "completion_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "total_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "repeated_inputs": 1
+          }
+        ],
+        "by_role": [
+          {
+            "name": "solver",
+            "calls": 2,
+            "success": 2,
+            "failed": 0,
+            "cancelled": 0,
+            "incomplete": 0,
+            "unknown": 0,
+            "success_rate": 1.0,
+            "duration": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "failure_reasons": {},
+            "truncated_outputs": 0,
+            "explicit_retries": 0,
+            "ttft": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "tps": {
+              "measured": 0,
+              "missing": 2,
+              "average": null,
+              "p95": null,
+              "max": null
+            },
+            "prompt_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "completion_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "total_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "repeated_inputs": 1
+          }
+        ]
+      },
+      "models": {
+        "calls": 2,
+        "success": 2,
+        "failed": 0,
+        "cancelled": 0,
+        "incomplete": 0,
+        "unknown": 0,
+        "success_rate": 1.0,
+        "duration": {
+          "measured": 0,
+          "missing": 2,
+          "total_ms": null,
+          "average_ms": null,
+          "p95_ms": null,
+          "max_ms": null
+        },
+        "failure_reasons": {},
+        "truncated_outputs": 0,
+        "explicit_retries": 0,
+        "ttft": {
+          "measured": 0,
+          "missing": 2,
+          "total_ms": null,
+          "average_ms": null,
+          "p95_ms": null,
+          "max_ms": null
+        },
+        "tps": {
+          "measured": 0,
+          "missing": 2,
+          "average": null,
+          "p95": null,
+          "max": null
+        },
+        "prompt_tokens": {
+          "known": 0,
+          "measured_calls": 0,
+          "missing_calls": 2,
+          "average": null,
+          "max": null
+        },
+        "completion_tokens": {
+          "known": 0,
+          "measured_calls": 0,
+          "missing_calls": 2,
+          "average": null,
+          "max": null
+        },
+        "total_tokens": {
+          "known": 30,
+          "measured_calls": 2,
+          "missing_calls": 0,
+          "average": 15.0,
+          "max": 15
+        },
+        "repeated_inputs": 0,
+        "by_model": [
+          {
+            "name": "unknown",
+            "calls": 2,
+            "success": 2,
+            "failed": 0,
+            "cancelled": 0,
+            "incomplete": 0,
+            "unknown": 0,
+            "success_rate": 1.0,
+            "duration": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "failure_reasons": {},
+            "truncated_outputs": 0,
+            "explicit_retries": 0,
+            "ttft": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "tps": {
+              "measured": 0,
+              "missing": 2,
+              "average": null,
+              "p95": null,
+              "max": null
+            },
+            "prompt_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "completion_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "total_tokens": {
+              "known": 30,
+              "measured_calls": 2,
+              "missing_calls": 0,
+              "average": 15.0,
+              "max": 15
+            },
+            "repeated_inputs": 0
+          }
+        ],
+        "by_role": [
+          {
+            "name": "solver",
+            "calls": 2,
+            "success": 2,
+            "failed": 0,
+            "cancelled": 0,
+            "incomplete": 0,
+            "unknown": 0,
+            "success_rate": 1.0,
+            "duration": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "failure_reasons": {},
+            "truncated_outputs": 0,
+            "explicit_retries": 0,
+            "ttft": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "tps": {
+              "measured": 0,
+              "missing": 2,
+              "average": null,
+              "p95": null,
+              "max": null
+            },
+            "prompt_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "completion_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "total_tokens": {
+              "known": 30,
+              "measured_calls": 2,
+              "missing_calls": 0,
+              "average": 15.0,
+              "max": 15
+            },
+            "repeated_inputs": 0
+          }
+        ],
+        "by_stage": [
+          {
+            "name": "solver",
+            "calls": 2,
+            "success": 2,
+            "failed": 0,
+            "cancelled": 0,
+            "incomplete": 0,
+            "unknown": 0,
+            "success_rate": 1.0,
+            "duration": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "failure_reasons": {},
+            "truncated_outputs": 0,
+            "explicit_retries": 0,
+            "ttft": {
+              "measured": 0,
+              "missing": 2,
+              "total_ms": null,
+              "average_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            },
+            "tps": {
+              "measured": 0,
+              "missing": 2,
+              "average": null,
+              "p95": null,
+              "max": null
+            },
+            "prompt_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "completion_tokens": {
+              "known": 0,
+              "measured_calls": 0,
+              "missing_calls": 2,
+              "average": null,
+              "max": null
+            },
+            "total_tokens": {
+              "known": 30,
+              "measured_calls": 2,
+              "missing_calls": 0,
+              "average": 15.0,
+              "max": 15
+            },
+            "repeated_inputs": 0
+          }
+        ]
+      },
+      "timing": {
+        "basis": "recorded_lifecycle_and_timestamp_intervals",
+        "wall_ms": null,
+        "session_span_ms": null,
+        "states_ms": {
+          "running": 0,
+          "queued": 0,
+          "waiting_input": 0,
+          "paused": 0,
+          "inactive": 0,
+          "unknown": 0
+        },
+        "running_activity_ms": {
+          "model_only": 0,
+          "tool_only": 0,
+          "overlap": 0,
+          "unattributed": 0
+        },
+        "runs": [],
+        "intervals": [],
+        "clock_reversals": 0,
+        "missing_timestamp_events": 8,
+        "limitations": [
+          "Call durations are cumulative and can overlap. Acceptance is a purpose, not an additional time slice.",
+          "Unattributed time is not measured framework overhead. Provider-internal retries and queue time require explicit instrumentation."
+        ]
+      },
+      "calls": {
+        "models": [
+          {
+            "id": "llm:run:trace1:1:1",
+            "run_id": "run",
+            "role": "solver",
+            "has_start": true,
+            "has_terminal": true,
+            "stage": "solver",
+            "started_at": null,
+            "ended_at": null,
+            "duration_ms": null,
+            "duration_basis": "missing_or_invalid",
+            "retry_of": null,
+            "evidence_refs": [
+              {
+                "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+                "line_number": 1,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              },
+              {
+                "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+                "line_number": 2,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              }
+            ],
+            "seq": 1,
+            "model": "unknown",
+            "status": "success",
+            "llm_call_id": "1",
+            "usage": {
+              "round_id": "llm:run:trace1:1:1",
+              "run_id": "run",
+              "llm_call_id": "1",
+              "prompt_tokens": null,
+              "completion_tokens": null,
+              "total_tokens": 15,
+              "usage_status": "partial",
+              "usage_record_count": 1,
+              "evidence_refs": [
+                {
+                  "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+                  "line_number": 2,
+                  "event_hash": null,
+                  "field_path": "response.usage",
+                  "start": null,
+                  "end": null
+                }
+              ],
+              "accounting_basis": "provider_reported",
+              "character_token_estimate": null
+            },
+            "ttft_ms": null,
+            "tps": null,
+            "performance_basis": "missing"
+          },
+          {
+            "id": "llm:run:trace2:2:2",
+            "run_id": "run",
+            "role": "solver",
+            "has_start": true,
+            "has_terminal": true,
+            "stage": "solver",
+            "started_at": null,
+            "ended_at": null,
+            "duration_ms": null,
+            "duration_basis": "missing_or_invalid",
+            "retry_of": null,
+            "evidence_refs": [
+              {
+                "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+                "line_number": 5,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              },
+              {
+                "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+                "line_number": 6,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              }
+            ],
+            "seq": 5,
+            "model": "unknown",
+            "status": "success",
+            "llm_call_id": "2",
+            "usage": {
+              "round_id": "llm:run:trace2:2:2",
+              "run_id": "run",
+              "llm_call_id": "2",
+              "prompt_tokens": null,
+              "completion_tokens": null,
+              "total_tokens": 15,
+              "usage_status": "partial",
+              "usage_record_count": 1,
+              "evidence_refs": [
+                {
+                  "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+                  "line_number": 6,
+                  "event_hash": null,
+                  "field_path": "response.usage",
+                  "start": null,
+                  "end": null
+                }
+              ],
+              "accounting_basis": "provider_reported",
+              "character_token_estimate": null
+            },
+            "ttft_ms": null,
+            "tps": null,
+            "performance_basis": "missing"
+          }
+        ],
+        "tools": [
+          {
+            "id": "tool:run:trace1:1:tool1",
+            "run_id": "run",
+            "role": "solver",
+            "has_start": true,
+            "has_terminal": true,
+            "stage": "solver",
+            "started_at": null,
+            "ended_at": null,
+            "duration_ms": null,
+            "duration_basis": "missing_or_invalid",
+            "retry_of": null,
+            "evidence_refs": [
+              {
+                "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+                "line_number": 3,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              },
+              {
+                "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+                "line_number": 4,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              }
+            ],
+            "seq": 3,
+            "tool": "read_file",
+            "tool_call_id": "tool1",
+            "family": "file_read",
+            "status": "success",
+            "failure_reason": null,
+            "output_truncated": false,
+            "exit_code": null,
+            "input_signature": "edc039d3636b32936a6bf6864e747b979dbedfa2d5aa76d6b2b778fe1739c3e0"
+          },
+          {
+            "id": "tool:run:trace2:2:tool2",
+            "run_id": "run",
+            "role": "solver",
+            "has_start": true,
+            "has_terminal": true,
+            "stage": "solver",
+            "started_at": null,
+            "ended_at": null,
+            "duration_ms": null,
+            "duration_basis": "missing_or_invalid",
+            "retry_of": null,
+            "evidence_refs": [
+              {
+                "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+                "line_number": 7,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              },
+              {
+                "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+                "line_number": 8,
+                "event_hash": null,
+                "field_path": null,
+                "start": null,
+                "end": null
+              }
+            ],
+            "seq": 7,
+            "tool": "read_file",
+            "tool_call_id": "tool2",
+            "family": "file_read",
+            "status": "success",
+            "failure_reason": null,
+            "output_truncated": false,
+            "exit_code": null,
+            "input_signature": "edc039d3636b32936a6bf6864e747b979dbedfa2d5aa76d6b2b778fe1739c3e0"
+          }
+        ]
+      },
+      "outputs": {
+        "artifacts": [],
+        "workspace_files": []
+      },
+      "quality": {
+        "missing_artifacts": [],
+        "missing_usage_calls": 0,
+        "usage_statuses": {
+          "partial": 2
+        },
+        "unscoped_call_events": 0,
+        "calls_without_start": 0,
+        "calls_without_terminal": 0,
+        "duplicate_records": 0,
+        "missing_call_durations": 4,
+        "success_rate_basis": "success / (success + failed); cancelled, incomplete and unknown excluded",
+        "token_basis": "provider_reported; missing usage is not zero; semantic efficiency is not assessed",
+        "retry_basis": "explicit retry_of only; repeated calls are not automatically retries",
+        "unavailable": [
+          "provider cache/reasoning usage unless recorded",
+          "provider-internal attempts",
+          "monetary cost"
+        ],
+        "missing_ttft_calls": 2,
+        "missing_tps_calls": 2
+      },
+      "execution_status": "not_started"
+    }
+  },
+  "extraction": {
+    "version": "goal-cards.1",
+    "cards": [
+      {
+        "id": "caa5db03ab4f1",
+        "call_ids": [
+          "llm:run:trace1:1:1"
+        ],
+        "kind": "model",
+        "name": "unknown",
+        "status": "success",
+        "start_line": 1,
+        "end_line": 2,
+        "features": {},
+        "excerpts": [
+          {
+            "ref": "ead300176be19",
+            "text": "Investigate",
+            "omitted_chars": 0
+          }
+        ],
+        "refs": [
+          "ead300176be19"
+        ],
+        "raw_refs": [
+          "e9ea074eef744"
+        ],
+        "captured": [],
+        "presented": [],
+        "adopted": "not_assessed",
+        "actor": {
+          "trace": "trace1",
+          "loop": "loop",
+          "role": "solver"
+        },
+        "complete": true
+      },
+      {
+        "id": "c1aeabc0616e8",
+        "call_ids": [
+          "tool:run:trace1:1:tool1"
+        ],
+        "kind": "tool",
+        "name": "read_file",
+        "status": "success",
+        "start_line": 3,
+        "end_line": 4,
+        "features": {
+          "arguments": {
+            "path": {
+              "ref": "e18fa34d5df48",
+              "text": "a.txt",
+              "omitted_chars": 0
+            }
+          },
+          "result": {
+            "path": {
+              "ref": "ead8f6ebc7da4",
+              "text": "a.txt",
+              "omitted_chars": 0
+            },
+            "truncated": {
+              "ref": "ea2d0eb6d9996",
+              "text": "false",
+              "omitted_chars": 0
+            }
+          }
+        },
+        "excerpts": [],
+        "refs": [
+          "e18fa34d5df48",
+          "ead8f6ebc7da4",
+          "ea2d0eb6d9996"
+        ],
+        "raw_refs": [
+          "ecd45c2fdafea",
+          "e6ddf7573d9f0"
+        ],
+        "captured": [
+          {
+            "ref": "e6ddf7573d9f0",
+            "chars": 56,
+            "truncated": false
+          }
+        ],
+        "presented": [],
+        "adopted": "not_assessed",
+        "actor": {
+          "trace": "trace1",
+          "loop": "loop",
+          "role": "solver"
+        },
+        "caller_id": "llm:run:trace1:1:1",
+        "presentation_status": "unknown",
+        "complete": false
+      },
+      {
+        "id": "cacbbbeb19b2f",
+        "call_ids": [
+          "llm:run:trace2:2:2"
+        ],
+        "kind": "model",
+        "name": "unknown",
+        "status": "success",
+        "start_line": 5,
+        "end_line": 6,
+        "features": {},
+        "excerpts": [
+          {
+            "ref": "e8542740f142c",
+            "text": "Investigate",
+            "omitted_chars": 0
+          }
+        ],
+        "refs": [
+          "e8542740f142c"
+        ],
+        "raw_refs": [
+          "e441aab346d43"
+        ],
+        "captured": [],
+        "presented": [],
+        "adopted": "not_assessed",
+        "actor": {
+          "trace": "trace2",
+          "loop": "loop",
+          "role": "solver"
+        },
+        "complete": true
+      },
+      {
+        "id": "c32359ddcd98c",
+        "call_ids": [
+          "tool:run:trace2:2:tool2"
+        ],
+        "kind": "tool",
+        "name": "read_file",
+        "status": "success",
+        "start_line": 7,
+        "end_line": 8,
+        "features": {
+          "arguments": {
+            "path": {
+              "ref": "e181e3edd6e4f",
+              "text": "a.txt",
+              "omitted_chars": 0
+            }
+          },
+          "result": {
+            "path": {
+              "ref": "e47c349c60776",
+              "text": "a.txt",
+              "omitted_chars": 0
+            },
+            "truncated": {
+              "ref": "e17f1ab2ee096",
+              "text": "false",
+              "omitted_chars": 0
+            }
+          }
+        },
+        "excerpts": [],
+        "refs": [
+          "e181e3edd6e4f",
+          "e47c349c60776",
+          "e17f1ab2ee096"
+        ],
+        "raw_refs": [
+          "e0ef552dbc1f7",
+          "ec09236b7fbe7"
+        ],
+        "captured": [
+          {
+            "ref": "ec09236b7fbe7",
+            "chars": 56,
+            "truncated": false
+          }
+        ],
+        "presented": [],
+        "adopted": "not_assessed",
+        "actor": {
+          "trace": "trace2",
+          "loop": "loop",
+          "role": "solver"
+        },
+        "caller_id": "llm:run:trace2:2:2",
+        "presentation_status": "unknown",
+        "complete": false
+      }
+    ],
+    "record_index": [
+      {
+        "line": 1,
+        "type": "llm.requested",
+        "call_ids": [
+          "llm:run:trace1:1:1"
+        ],
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 1,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        }
+      },
+      {
+        "line": 2,
+        "type": "llm.completed",
+        "call_ids": [
+          "llm:run:trace1:1:1"
+        ],
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 2,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        }
+      },
+      {
+        "line": 3,
+        "type": "tool.started",
+        "call_ids": [
+          "tool:run:trace1:1:tool1"
+        ],
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 3,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        }
+      },
+      {
+        "line": 4,
+        "type": "tool.completed",
+        "call_ids": [
+          "tool:run:trace1:1:tool1"
+        ],
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 4,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        }
+      },
+      {
+        "line": 5,
+        "type": "llm.requested",
+        "call_ids": [
+          "llm:run:trace2:2:2"
+        ],
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 5,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        }
+      },
+      {
+        "line": 6,
+        "type": "llm.completed",
+        "call_ids": [
+          "llm:run:trace2:2:2"
+        ],
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 6,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        }
+      },
+      {
+        "line": 7,
+        "type": "tool.started",
+        "call_ids": [
+          "tool:run:trace2:2:tool2"
+        ],
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 7,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        }
+      },
+      {
+        "line": 8,
+        "type": "tool.completed",
+        "call_ids": [
+          "tool:run:trace2:2:tool2"
+        ],
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 8,
+          "event_hash": null,
+          "field_path": null,
+          "start": null,
+          "end": null
+        }
+      }
+    ],
+    "registry": {
+      "e9ea074eef744": {
+        "id": "e9ea074eef744",
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 2,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": null,
+          "end": null
+        },
+        "line": 2
+      },
+      "ead300176be19": {
+        "id": "ead300176be19",
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 2,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        },
+        "line": 2
+      },
+      "e441aab346d43": {
+        "id": "e441aab346d43",
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 6,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": null,
+          "end": null
+        },
+        "line": 6
+      },
+      "e8542740f142c": {
+        "id": "e8542740f142c",
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 6,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        },
+        "line": 6
+      },
+      "ecd45c2fdafea": {
+        "id": "ecd45c2fdafea",
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 3,
+          "event_hash": null,
+          "field_path": "input",
+          "start": null,
+          "end": null
+        },
+        "line": 3
+      },
+      "e18fa34d5df48": {
+        "id": "e18fa34d5df48",
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 3,
+          "event_hash": null,
+          "field_path": "input.path",
+          "start": 0,
+          "end": 5
+        },
+        "line": 3
+      },
+      "e6ddf7573d9f0": {
+        "id": "e6ddf7573d9f0",
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 4,
+          "event_hash": null,
+          "field_path": "output",
+          "start": null,
+          "end": null
+        },
+        "line": 4
+      },
+      "ead8f6ebc7da4": {
+        "id": "ead8f6ebc7da4",
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 4,
+          "event_hash": null,
+          "field_path": "output.path",
+          "start": 0,
+          "end": 5
+        },
+        "line": 4
+      },
+      "ea2d0eb6d9996": {
+        "id": "ea2d0eb6d9996",
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 4,
+          "event_hash": null,
+          "field_path": "output.truncated",
+          "start": 0,
+          "end": 5
+        },
+        "line": 4
+      },
+      "e0ef552dbc1f7": {
+        "id": "e0ef552dbc1f7",
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 7,
+          "event_hash": null,
+          "field_path": "input",
+          "start": null,
+          "end": null
+        },
+        "line": 7
+      },
+      "e181e3edd6e4f": {
+        "id": "e181e3edd6e4f",
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 7,
+          "event_hash": null,
+          "field_path": "input.path",
+          "start": 0,
+          "end": 5
+        },
+        "line": 7
+      },
+      "ec09236b7fbe7": {
+        "id": "ec09236b7fbe7",
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 8,
+          "event_hash": null,
+          "field_path": "output",
+          "start": null,
+          "end": null
+        },
+        "line": 8
+      },
+      "e47c349c60776": {
+        "id": "e47c349c60776",
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 8,
+          "event_hash": null,
+          "field_path": "output.path",
+          "start": 0,
+          "end": 5
+        },
+        "line": 8
+      },
+      "e17f1ab2ee096": {
+        "id": "e17f1ab2ee096",
+        "ref": {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 8,
+          "event_hash": null,
+          "field_path": "output.truncated",
+          "start": 0,
+          "end": 5
+        },
+        "line": 8
+      }
+    },
+    "fetched_ranges": [],
+    "delivered_ranges": []
+  },
+  "stages": [
+    {
+      "id": "stage:a9dc2ac08cee87c6844f8077",
+      "goal_id": "goal:0b77ab410fe4a9a15a870edb",
+      "attempt_id": "attempt:6872b474a4f6ed50732920bc",
+      "title": "Understand source behavior",
+      "kind": "investigation",
+      "evidence_refs": [
+        {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 2,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        }
+      ]
+    }
+  ],
+  "record_assessments": [
+    {
+      "card_id": "caa5db03ab4f1",
+      "stage_ids": [
+        "stage:a9dc2ac08cee87c6844f8077"
+      ],
+      "status": "reviewed",
+      "purpose": "Inspect source",
+      "expected": "unknown",
+      "expected_refs": [],
+      "delta": "Recorded source inspection",
+      "contribution": "evidence",
+      "necessity": "unknown",
+      "redundancy": "not_established",
+      "prior_card_ids": [],
+      "uptake_card_ids": [],
+      "refs": [
+        "ead300176be19"
+      ],
+      "evidence_refs": [
+        {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 2,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        }
+      ],
+      "knowledge_cutoff": 8,
+      "expected_evidence_refs": []
+    },
+    {
+      "card_id": "c1aeabc0616e8",
+      "stage_ids": [],
+      "status": "unknown",
+      "purpose": "Inspect source",
+      "expected": "unknown",
+      "expected_refs": [],
+      "delta": "Recorded source inspection",
+      "contribution": "evidence",
+      "necessity": "unknown",
+      "redundancy": "not_established",
+      "prior_card_ids": [],
+      "uptake_card_ids": [],
+      "refs": [
+        "e18fa34d5df48"
+      ],
+      "evidence_refs": [
+        {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 3,
+          "event_hash": null,
+          "field_path": "input.path",
+          "start": 0,
+          "end": 5
+        }
+      ],
+      "knowledge_cutoff": 8,
+      "expected_evidence_refs": []
+    },
+    {
+      "card_id": "cacbbbeb19b2f",
+      "stage_ids": [
+        "stage:a9dc2ac08cee87c6844f8077"
+      ],
+      "status": "reviewed",
+      "purpose": "Inspect source",
+      "expected": "unknown",
+      "expected_refs": [],
+      "delta": "Recorded source inspection",
+      "contribution": "evidence",
+      "necessity": "unknown",
+      "redundancy": "not_established",
+      "prior_card_ids": [],
+      "uptake_card_ids": [],
+      "refs": [
+        "e8542740f142c"
+      ],
+      "evidence_refs": [
+        {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 6,
+          "event_hash": null,
+          "field_path": "response.content",
+          "start": 0,
+          "end": 11
+        }
+      ],
+      "knowledge_cutoff": 8,
+      "expected_evidence_refs": []
+    },
+    {
+      "card_id": "c32359ddcd98c",
+      "stage_ids": [
+        "stage:a9dc2ac08cee87c6844f8077"
+      ],
+      "status": "reviewed",
+      "purpose": "Inspect source",
+      "expected": "unknown",
+      "expected_refs": [],
+      "delta": "Recorded source inspection",
+      "contribution": "evidence",
+      "necessity": "unknown",
+      "redundancy": "not_established",
+      "prior_card_ids": [],
+      "uptake_card_ids": [],
+      "refs": [
+        "e181e3edd6e4f"
+      ],
+      "evidence_refs": [
+        {
+          "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+          "line_number": 7,
+          "event_hash": null,
+          "field_path": "input.path",
+          "start": 0,
+          "end": 5
+        }
+      ],
+      "knowledge_cutoff": 8,
+      "expected_evidence_refs": []
+    }
+  ],
+  "closures": {},
+  "criterion_coverage": [
+    {
+      "goal_id": "goal:cf9d740df6b1deddf9d53e7d",
+      "conditions": [
+        {
+          "id": "goal:0b7c395918c01cab41cd99d5:objective",
+          "description": "Investigate the problem",
+          "required": true,
+          "origin": "request_user_message",
+          "status": "unverified"
+        }
+      ],
+      "closure": null,
+      "verification_refs": []
+    }
+  ],
+  "skeleton": {
+    "graph_revision": 1,
+    "projection_version": "goal-skeleton-projection.1",
+    "nodes": [
+      {
+        "id": "node:phase:6449b9205f0691bb0a6c62f9",
+        "stage_id": "stage:a9dc2ac08cee87c6844f8077",
+        "goal_id": "goal:0b77ab410fe4a9a15a870edb",
+        "objective": "Understand source behavior",
+        "kind": "investigation",
+        "member_ids": [
+          "phase:6449b9205f0691bb0a6c62f9"
+        ],
+        "card_ids": [
+          "caa5db03ab4f1"
+        ],
+        "call_ids": [
+          "llm:run:trace1:1:1"
+        ],
+        "key_delta": "Recorded source inspection",
+        "outcome_or_gap": "Closure not established at this point",
+        "start_line": 1,
+        "end_line": 2,
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 2,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": 0,
+            "end": 11
+          }
+        ],
+        "boundary": false,
+        "retain_reason": "contiguous_work"
+      },
+      {
+        "id": "node:c1aeabc0616e8",
+        "stage_id": null,
+        "goal_id": null,
+        "kind": "unassigned",
+        "objective": "read_file",
+        "member_ids": [],
+        "card_ids": [
+          "c1aeabc0616e8"
+        ],
+        "call_ids": [
+          "tool:run:trace1:1:tool1"
+        ],
+        "key_delta": "Recorded source inspection",
+        "outcome_or_gap": "unknown",
+        "start_line": 3,
+        "end_line": 4,
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 3,
+            "event_hash": null,
+            "field_path": "input.path",
+            "start": 0,
+            "end": 5
+          }
+        ],
+        "boundary": true,
+        "retain_reason": "unexplained_activity"
+      },
+      {
+        "id": "node:phase:96a68f1e112687d3e763066d",
+        "stage_id": "stage:a9dc2ac08cee87c6844f8077",
+        "goal_id": "goal:0b77ab410fe4a9a15a870edb",
+        "objective": "Understand source behavior",
+        "kind": "investigation",
+        "member_ids": [
+          "phase:96a68f1e112687d3e763066d",
+          "phase:4a9f439a6ea222fb93e93a08"
+        ],
+        "card_ids": [
+          "cacbbbeb19b2f",
+          "c32359ddcd98c"
+        ],
+        "call_ids": [
+          "llm:run:trace2:2:2",
+          "tool:run:trace2:2:tool2"
+        ],
+        "key_delta": "Recorded source inspection",
+        "outcome_or_gap": "Closure not established at this point",
+        "start_line": 5,
+        "end_line": 8,
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 6,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": 0,
+            "end": 11
+          },
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 7,
+            "event_hash": null,
+            "field_path": "input.path",
+            "start": 0,
+            "end": 5
+          }
+        ],
+        "boundary": false,
+        "retain_reason": "contiguous_work"
+      }
+    ],
+    "edges": [],
+    "ordering": "source order is layout only, not causation",
+    "granularity": "contiguous stable stages; critical changes retained"
+  },
+  "graph": {
+    "nodes": [
+      {
+        "id": "phase:6449b9205f0691bb0a6c62f9",
+        "kind": "phase"
+      },
+      {
+        "id": "phase:96a68f1e112687d3e763066d",
+        "kind": "phase"
+      },
+      {
+        "id": "phase:4a9f439a6ea222fb93e93a08",
+        "kind": "phase"
+      }
+    ],
+    "relations": []
+  },
+  "cost_ledger": {
+    "atoms": [
+      {
+        "id": "llm:run:trace1:1:1",
+        "run_id": "run",
+        "role": "solver",
+        "has_start": true,
+        "has_terminal": true,
+        "stage": "solver",
+        "started_at": null,
+        "ended_at": null,
+        "duration_ms": null,
+        "duration_basis": "missing_or_invalid",
+        "retry_of": null,
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 1,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          },
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 2,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          }
+        ],
+        "seq": 1,
+        "model": "unknown",
+        "status": "success",
+        "llm_call_id": "1",
+        "usage": {
+          "round_id": "llm:run:trace1:1:1",
+          "run_id": "run",
+          "llm_call_id": "1",
+          "prompt_tokens": null,
+          "completion_tokens": null,
+          "total_tokens": 15,
+          "usage_status": "partial",
+          "usage_record_count": 1,
+          "evidence_refs": [
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 2,
+              "event_hash": null,
+              "field_path": "response.usage",
+              "start": null,
+              "end": null
+            }
+          ],
+          "accounting_basis": "provider_reported",
+          "character_token_estimate": null
+        },
+        "ttft_ms": null,
+        "tps": null,
+        "performance_basis": "missing",
+        "kind": "model",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "total_tokens": 15,
+        "usage_status": "partial"
+      },
+      {
+        "id": "llm:run:trace2:2:2",
+        "run_id": "run",
+        "role": "solver",
+        "has_start": true,
+        "has_terminal": true,
+        "stage": "solver",
+        "started_at": null,
+        "ended_at": null,
+        "duration_ms": null,
+        "duration_basis": "missing_or_invalid",
+        "retry_of": null,
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 5,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          },
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 6,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          }
+        ],
+        "seq": 5,
+        "model": "unknown",
+        "status": "success",
+        "llm_call_id": "2",
+        "usage": {
+          "round_id": "llm:run:trace2:2:2",
+          "run_id": "run",
+          "llm_call_id": "2",
+          "prompt_tokens": null,
+          "completion_tokens": null,
+          "total_tokens": 15,
+          "usage_status": "partial",
+          "usage_record_count": 1,
+          "evidence_refs": [
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 6,
+              "event_hash": null,
+              "field_path": "response.usage",
+              "start": null,
+              "end": null
+            }
+          ],
+          "accounting_basis": "provider_reported",
+          "character_token_estimate": null
+        },
+        "ttft_ms": null,
+        "tps": null,
+        "performance_basis": "missing",
+        "kind": "model",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "total_tokens": 15,
+        "usage_status": "partial"
+      },
+      {
+        "id": "tool:run:trace1:1:tool1",
+        "run_id": "run",
+        "role": "solver",
+        "has_start": true,
+        "has_terminal": true,
+        "stage": "solver",
+        "started_at": null,
+        "ended_at": null,
+        "duration_ms": null,
+        "duration_basis": "missing_or_invalid",
+        "retry_of": null,
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 3,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          },
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 4,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          }
+        ],
+        "seq": 3,
+        "tool": "read_file",
+        "tool_call_id": "tool1",
+        "family": "file_read",
+        "status": "success",
+        "failure_reason": null,
+        "output_truncated": false,
+        "exit_code": null,
+        "input_signature": "edc039d3636b32936a6bf6864e747b979dbedfa2d5aa76d6b2b778fe1739c3e0",
+        "kind": "tool",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "total_tokens": null,
+        "usage_status": null
+      },
+      {
+        "id": "tool:run:trace2:2:tool2",
+        "run_id": "run",
+        "role": "solver",
+        "has_start": true,
+        "has_terminal": true,
+        "stage": "solver",
+        "started_at": null,
+        "ended_at": null,
+        "duration_ms": null,
+        "duration_basis": "missing_or_invalid",
+        "retry_of": null,
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 7,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          },
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 8,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          }
+        ],
+        "seq": 7,
+        "tool": "read_file",
+        "tool_call_id": "tool2",
+        "family": "file_read",
+        "status": "success",
+        "failure_reason": null,
+        "output_truncated": false,
+        "exit_code": null,
+        "input_signature": "edc039d3636b32936a6bf6864e747b979dbedfa2d5aa76d6b2b778fe1739c3e0",
+        "kind": "tool",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "total_tokens": null,
+        "usage_status": null
+      }
+    ],
+    "assignments": [
+      {
+        "cost_atom_id": "llm:run:trace1:1:1",
+        "owner": "phase:6449b9205f0691bb0a6c62f9",
+        "related_ids": [
+          "phase:6449b9205f0691bb0a6c62f9"
+        ],
+        "allocation_basis": "inferred_unique_activity",
+        "uncertainty_reason": null
+      },
+      {
+        "cost_atom_id": "llm:run:trace2:2:2",
+        "owner": "phase:96a68f1e112687d3e763066d",
+        "related_ids": [
+          "phase:96a68f1e112687d3e763066d"
+        ],
+        "allocation_basis": "inferred_unique_activity",
+        "uncertainty_reason": null
+      },
+      {
+        "cost_atom_id": "tool:run:trace1:1:tool1",
+        "owner": "analysis:unassigned",
+        "related_ids": [],
+        "allocation_basis": "unknown",
+        "uncertainty_reason": null
+      },
+      {
+        "cost_atom_id": "tool:run:trace2:2:tool2",
+        "owner": "phase:4a9f439a6ea222fb93e93a08",
+        "related_ids": [
+          "phase:4a9f439a6ea222fb93e93a08"
+        ],
+        "allocation_basis": "inferred_unique_activity",
+        "uncertainty_reason": null
+      }
+    ],
+    "totals": {
+      "model_calls": 2,
+      "tool_calls": 2,
+      "prompt_tokens": {
+        "known_sum": 0,
+        "measured_count": 0,
+        "eligible_count": 2,
+        "conflict_count": 0
+      },
+      "completion_tokens": {
+        "known_sum": 0,
+        "measured_count": 0,
+        "eligible_count": 2,
+        "conflict_count": 0
+      },
+      "total_tokens": {
+        "known_sum": 30,
+        "measured_count": 2,
+        "eligible_count": 2,
+        "conflict_count": 0
+      },
+      "model_duration_ms": {
+        "known_sum": 0,
+        "measured_count": 0,
+        "eligible_count": 2,
+        "conflict_count": 0
+      },
+      "tool_duration_ms": {
+        "known_sum": 0,
+        "measured_count": 0,
+        "eligible_count": 2,
+        "conflict_count": 0
+      },
+      "wall_span_ms": null,
+      "observed_busy_union_ms": null
+    },
+    "by_owner": {
+      "analysis:shared": {
+        "exclusive": {
+          "model_calls": 0,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "inclusive": {
+          "model_calls": 0,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        }
+      },
+      "goal:0b77ab410fe4a9a15a870edb": {
+        "exclusive": {
+          "model_calls": 0,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "inclusive": {
+          "model_calls": 2,
+          "tool_calls": 1,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 30,
+            "measured_count": 2,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        }
+      },
+      "analysis:unassigned": {
+        "exclusive": {
+          "model_calls": 0,
+          "tool_calls": 1,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "inclusive": {
+          "model_calls": 0,
+          "tool_calls": 1,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        }
+      },
+      "phase:96a68f1e112687d3e763066d": {
+        "exclusive": {
+          "model_calls": 1,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 15,
+            "measured_count": 1,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "inclusive": {
+          "model_calls": 1,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 15,
+            "measured_count": 1,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        }
+      },
+      "phase:6449b9205f0691bb0a6c62f9": {
+        "exclusive": {
+          "model_calls": 1,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 15,
+            "measured_count": 1,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "inclusive": {
+          "model_calls": 1,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 15,
+            "measured_count": 1,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        }
+      },
+      "attempt:6872b474a4f6ed50732920bc": {
+        "exclusive": {
+          "model_calls": 0,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "inclusive": {
+          "model_calls": 0,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        }
+      },
+      "goal:cf9d740df6b1deddf9d53e7d": {
+        "exclusive": {
+          "model_calls": 0,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "inclusive": {
+          "model_calls": 2,
+          "tool_calls": 1,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 30,
+            "measured_count": 2,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        }
+      },
+      "phase:4a9f439a6ea222fb93e93a08": {
+        "exclusive": {
+          "model_calls": 0,
+          "tool_calls": 1,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "inclusive": {
+          "model_calls": 0,
+          "tool_calls": 1,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        }
+      }
+    },
+    "conserved": true
+  },
+  "coverage": {
+    "status": "complete",
+    "pipeline_complete": true,
+    "source_events": 8,
+    "source_cards": 4,
+    "reviewed_cards": 4,
+    "pending_cards": 0,
+    "unknown_cards": 1,
+    "pending_card_ids": [],
+    "eligible_calls": 4,
+    "assigned_calls": 3,
+    "unassigned_calls": 1,
+    "reviewed_calls": 4,
+    "source_packets": 4,
+    "reviewed_packets": 4,
+    "structure_complete": true,
+    "reconciliation_complete": true,
+    "diagnosed_goals": [],
+    "diagnostic_scope": "Only cited findings; unreported goals are not declared efficient",
+    "review_gaps": [],
+    "limitations": [
+      "Unrecorded provider transport retries cannot be reconstructed",
+      "Snapshot omits most stream deltas; source lines differ from session sequence numbers",
+      "Card review does not establish full raw-output review",
+      "Semantic completeness is separate from task acceptance"
+    ]
+  },
+  "evaluator_usage": {
+    "calls": 1,
+    "prompt_tokens": 100,
+    "completion_tokens": 50,
+    "total_tokens": 150,
+    "unreported_calls": 0,
+    "reservations": [
+      {
+        "id": "request:1",
+        "batch_id": "batch:0fcbbcfd70a51265d74bdf77",
+        "input_digest": "d316741e65592428a1626266",
+        "base_revision": 0,
+        "reserved_tokens": 8671,
+        "input_estimate": 6071,
+        "estimation": "utf8_bytes_plus_protocol_allowance_not_tokenizer",
+        "state": "settled",
+        "usage": {
+          "prompt_tokens": 100,
+          "completion_tokens": 50,
+          "total_tokens": 150
+        }
+      }
+    ]
+  },
+  "execution_view": {
+    "action_flow": {
+      "version": "action-flow.3",
+      "gaps": [],
+      "actions": [
+        {
+          "id": "llm:run:trace1:1:1",
+          "ordinal": 1,
+          "kind": "research",
+          "activity": "model",
+          "title": "Working · Preparing read_file",
+          "target": "unknown",
+          "status": "success",
+          "basis": [
+            "tool identity"
+          ],
+          "classification_inferred": false,
+          "classification_evidence": [
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 3,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            },
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 4,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            }
+          ],
+          "classification_reasons": [],
+          "call_ids": [
+            "llm:run:trace1:1:1"
+          ],
+          "start_line": 1,
+          "started_at": null,
+          "ended_at": null,
+          "duration_ms": null,
+          "duration_basis": "missing_or_invalid",
+          "elapsed_ms": 0,
+          "shared_ms": 0,
+          "missing_intervals": 1,
+          "segment_id": "stage:llm:run:trace1:1:1"
+        },
+        {
+          "id": "tool:run:trace1:1:tool1",
+          "ordinal": 2,
+          "kind": "research",
+          "activity": "tool",
+          "title": "read_file",
+          "target": "a.txt",
+          "status": "success",
+          "basis": [
+            "tool identity"
+          ],
+          "classification_inferred": false,
+          "classification_evidence": [
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 3,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            },
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 4,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            }
+          ],
+          "classification_reasons": [],
+          "call_ids": [
+            "tool:run:trace1:1:tool1"
+          ],
+          "start_line": 3,
+          "started_at": null,
+          "ended_at": null,
+          "duration_ms": null,
+          "duration_basis": "missing_or_invalid",
+          "elapsed_ms": 0,
+          "shared_ms": 0,
+          "missing_intervals": 1,
+          "segment_id": "stage:llm:run:trace1:1:1"
+        },
+        {
+          "id": "llm:run:trace2:2:2",
+          "ordinal": 3,
+          "kind": "research",
+          "activity": "model",
+          "title": "Working · Preparing read_file",
+          "target": "unknown",
+          "status": "success",
+          "basis": [
+            "tool identity"
+          ],
+          "classification_inferred": false,
+          "classification_evidence": [
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 7,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            },
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 8,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            }
+          ],
+          "classification_reasons": [],
+          "call_ids": [
+            "llm:run:trace2:2:2"
+          ],
+          "start_line": 5,
+          "started_at": null,
+          "ended_at": null,
+          "duration_ms": null,
+          "duration_basis": "missing_or_invalid",
+          "elapsed_ms": 0,
+          "shared_ms": 0,
+          "missing_intervals": 1,
+          "segment_id": "stage:llm:run:trace1:1:1"
+        },
+        {
+          "id": "tool:run:trace2:2:tool2",
+          "ordinal": 4,
+          "kind": "research",
+          "activity": "tool",
+          "title": "read_file",
+          "target": "a.txt",
+          "status": "success",
+          "basis": [
+            "tool identity"
+          ],
+          "classification_inferred": false,
+          "classification_evidence": [
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 7,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            },
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 8,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            }
+          ],
+          "classification_reasons": [],
+          "call_ids": [
+            "tool:run:trace2:2:tool2"
+          ],
+          "start_line": 7,
+          "started_at": null,
+          "ended_at": null,
+          "duration_ms": null,
+          "duration_basis": "missing_or_invalid",
+          "elapsed_ms": 0,
+          "shared_ms": 0,
+          "missing_intervals": 1,
+          "segment_id": "stage:llm:run:trace1:1:1"
+        }
+      ],
+      "segments": [
+        {
+          "id": "stage:llm:run:trace1:1:1",
+          "kind": "research",
+          "label": "Research",
+          "action_ids": [
+            "llm:run:trace1:1:1",
+            "tool:run:trace1:1:tool1",
+            "llm:run:trace2:2:2",
+            "tool:run:trace2:2:tool2"
+          ],
+          "elapsed_ms": 0,
+          "shared_ms": 0,
+          "model_ms": 0,
+          "tool_ms": 0,
+          "model_calls": 2,
+          "tool_calls": 2,
+          "failed_actions": 0,
+          "missing_intervals": 4,
+          "inferred_actions": 0
+        }
+      ],
+      "gap_ms": 0,
+      "parallel_ms": 0,
+      "wall_span_ms": null,
+      "missing_intervals": 4,
+      "timing_basis": "timestamp partition; nested model time counted under its model action; simultaneous model actions shared",
+      "classification_basis": "recorded operations, then cited saved assessments or declared action intent; model purpose follows recorded invocation links"
+    },
+    "version": "goal-execution-view.6",
+    "basis": "fixed_source_projection_no_model_call",
+    "calls": [
+      {
+        "id": "llm:run:trace1:1:1",
+        "kind": "model",
+        "model": "unknown",
+        "tool": null,
+        "role": "solver",
+        "stage": "solver",
+        "family": null,
+        "status": "success",
+        "duration_ms": null,
+        "started_at": null,
+        "ended_at": null,
+        "ttft_ms": null,
+        "tps": null,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "total_tokens": 15,
+        "usage_status": "partial",
+        "duration_basis": "missing_or_invalid",
+        "utility": null,
+        "start_line": 1,
+        "end_line": 2,
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 1,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          },
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 2,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          }
+        ],
+        "owner": "phase:6449b9205f0691bb0a6c62f9",
+        "related_ids": [
+          "phase:6449b9205f0691bb0a6c62f9"
+        ],
+        "caller_id": null,
+        "category": "model",
+        "stream_metrics": null,
+        "statement": "Investigate",
+        "statement_truncated": false,
+        "statement_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 2,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": 0,
+            "end": 11
+          }
+        ],
+        "classification": {
+          "kind": "other",
+          "title": "Model response",
+          "basis": "no linked action",
+          "inferred": false,
+          "evidence_refs": [
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 1,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            },
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 2,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            }
+          ]
+        }
+      },
+      {
+        "id": "llm:run:trace2:2:2",
+        "kind": "model",
+        "model": "unknown",
+        "tool": null,
+        "role": "solver",
+        "stage": "solver",
+        "family": null,
+        "status": "success",
+        "duration_ms": null,
+        "started_at": null,
+        "ended_at": null,
+        "ttft_ms": null,
+        "tps": null,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "total_tokens": 15,
+        "usage_status": "partial",
+        "duration_basis": "missing_or_invalid",
+        "utility": null,
+        "start_line": 5,
+        "end_line": 6,
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 5,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          },
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 6,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          }
+        ],
+        "owner": "phase:96a68f1e112687d3e763066d",
+        "related_ids": [
+          "phase:96a68f1e112687d3e763066d"
+        ],
+        "caller_id": null,
+        "category": "model",
+        "stream_metrics": null,
+        "statement": "Investigate",
+        "statement_truncated": false,
+        "statement_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 6,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": 0,
+            "end": 11
+          }
+        ],
+        "classification": {
+          "kind": "other",
+          "title": "Model response",
+          "basis": "no linked action",
+          "inferred": false,
+          "evidence_refs": [
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 5,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            },
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 6,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            }
+          ]
+        }
+      },
+      {
+        "id": "tool:run:trace1:1:tool1",
+        "kind": "tool",
+        "model": null,
+        "tool": "read_file",
+        "role": "solver",
+        "stage": "solver",
+        "family": "file_read",
+        "status": "success",
+        "duration_ms": null,
+        "started_at": null,
+        "ended_at": null,
+        "ttft_ms": null,
+        "tps": null,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "total_tokens": null,
+        "usage_status": null,
+        "duration_basis": "missing_or_invalid",
+        "utility": null,
+        "start_line": 3,
+        "end_line": 4,
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 3,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          },
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 4,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          }
+        ],
+        "owner": "analysis:unassigned",
+        "related_ids": [],
+        "caller_id": "llm:run:trace1:1:1",
+        "category": "file_read",
+        "input": "\"{'path': 'a.txt'}\"",
+        "input_truncated": false,
+        "target": "a.txt",
+        "target_key": "path",
+        "input_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 3,
+            "event_hash": null,
+            "field_path": "input",
+            "start": null,
+            "end": null
+          }
+        ],
+        "observation": "same",
+        "observation_truncated": false,
+        "observation_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 4,
+            "event_hash": null,
+            "field_path": "output",
+            "start": null,
+            "end": null
+          }
+        ],
+        "caller_basis": "explicit_parent_id",
+        "classification": {
+          "kind": "research",
+          "title": "Read file",
+          "basis": "tool identity",
+          "inferred": false,
+          "evidence_refs": [
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 3,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            },
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 4,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            }
+          ]
+        }
+      },
+      {
+        "id": "tool:run:trace2:2:tool2",
+        "kind": "tool",
+        "model": null,
+        "tool": "read_file",
+        "role": "solver",
+        "stage": "solver",
+        "family": "file_read",
+        "status": "success",
+        "duration_ms": null,
+        "started_at": null,
+        "ended_at": null,
+        "ttft_ms": null,
+        "tps": null,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "total_tokens": null,
+        "usage_status": null,
+        "duration_basis": "missing_or_invalid",
+        "utility": null,
+        "start_line": 7,
+        "end_line": 8,
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 7,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          },
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 8,
+            "event_hash": null,
+            "field_path": null,
+            "start": null,
+            "end": null
+          }
+        ],
+        "owner": "phase:4a9f439a6ea222fb93e93a08",
+        "related_ids": [
+          "phase:4a9f439a6ea222fb93e93a08"
+        ],
+        "caller_id": "llm:run:trace2:2:2",
+        "category": "file_read",
+        "input": "\"{'path': 'a.txt'}\"",
+        "input_truncated": false,
+        "target": "a.txt",
+        "target_key": "path",
+        "input_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 7,
+            "event_hash": null,
+            "field_path": "input",
+            "start": null,
+            "end": null
+          }
+        ],
+        "observation": "same",
+        "observation_truncated": false,
+        "observation_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 8,
+            "event_hash": null,
+            "field_path": "output",
+            "start": null,
+            "end": null
+          }
+        ],
+        "caller_basis": "explicit_parent_id",
+        "classification": {
+          "kind": "research",
+          "title": "Read file",
+          "basis": "tool identity",
+          "inferred": false,
+          "evidence_refs": [
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 7,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            },
+            {
+              "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+              "line_number": 8,
+              "event_hash": null,
+              "field_path": null,
+              "start": null,
+              "end": null
+            }
+          ]
+        }
+      }
+    ],
+    "nodes": [
+      {
+        "id": "llm:run:trace1:1:1",
+        "kind": "public_statement",
+        "call_id": "llm:run:trace1:1:1",
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 2,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": 0,
+            "end": 11
+          }
+        ]
+      },
+      {
+        "id": "llm:run:trace2:2:2",
+        "kind": "public_statement",
+        "call_id": "llm:run:trace2:2:2",
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 6,
+            "event_hash": null,
+            "field_path": "response.content",
+            "start": 0,
+            "end": 11
+          }
+        ]
+      },
+      {
+        "id": "tool:run:trace1:1:tool1",
+        "kind": "action",
+        "call_id": "tool:run:trace1:1:tool1",
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 3,
+            "event_hash": null,
+            "field_path": "input",
+            "start": null,
+            "end": null
+          }
+        ]
+      },
+      {
+        "id": "tool:run:trace1:1:tool1:result",
+        "kind": "observation",
+        "call_id": "tool:run:trace1:1:tool1",
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 4,
+            "event_hash": null,
+            "field_path": "output",
+            "start": null,
+            "end": null
+          }
+        ]
+      },
+      {
+        "id": "tool:run:trace2:2:tool2",
+        "kind": "action",
+        "call_id": "tool:run:trace2:2:tool2",
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 7,
+            "event_hash": null,
+            "field_path": "input",
+            "start": null,
+            "end": null
+          }
+        ]
+      },
+      {
+        "id": "tool:run:trace2:2:tool2:result",
+        "kind": "observation",
+        "call_id": "tool:run:trace2:2:tool2",
+        "evidence_refs": [
+          {
+            "source_sha256": "5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906",
+            "line_number": 8,
+            "event_hash": null,
+            "field_path": "output",
+            "start": null,
+            "end": null
+          }
+        ]
+      }
+    ],
+    "edges": [
+      {
+        "source_id": "llm:run:trace1:1:1",
+        "target_id": "tool:run:trace1:1:tool1",
+        "kind": "invokes",
+        "basis": "explicit_parent_id"
+      },
+      {
+        "source_id": "tool:run:trace1:1:tool1",
+        "target_id": "tool:run:trace1:1:tool1:result",
+        "kind": "returns",
+        "basis": "recorded_call_pair"
+      },
+      {
+        "source_id": "llm:run:trace2:2:2",
+        "target_id": "tool:run:trace2:2:tool2",
+        "kind": "invokes",
+        "basis": "explicit_parent_id"
+      },
+      {
+        "source_id": "tool:run:trace2:2:tool2",
+        "target_id": "tool:run:trace2:2:tool2:result",
+        "kind": "returns",
+        "basis": "recorded_call_pair"
+      },
+      {
+        "source_id": "llm:run:trace1:1:1",
+        "target_id": "llm:run:trace2:2:2",
+        "kind": "source_order",
+        "basis": "archive_order_not_causal_adoption"
+      }
+    ],
+    "rounds": [
+      {
+        "id": "llm:run:trace1:1:1",
+        "model_call_id": "llm:run:trace1:1:1",
+        "tool_call_ids": [
+          "tool:run:trace1:1:tool1"
+        ],
+        "start_line": 1
+      },
+      {
+        "id": "llm:run:trace2:2:2",
+        "model_call_id": "llm:run:trace2:2:2",
+        "tool_call_ids": [
+          "tool:run:trace2:2:tool2"
+        ],
+        "start_line": 5
+      }
+    ],
+    "phases": {
+      "phase:6449b9205f0691bb0a6c62f9": {
+        "call_ids": [
+          "llm:run:trace1:1:1"
+        ],
+        "related_call_ids": [
+          "llm:run:trace1:1:1"
+        ],
+        "other_call_ids": [],
+        "unassigned_call_ids": [],
+        "timing": {
+          "model_only_ms": 0,
+          "tool_only_ms": 0,
+          "overlap_ms": 0,
+          "gap_ms": 0,
+          "wall_span_ms": null,
+          "start_ms": null,
+          "end_ms": null,
+          "measured_calls": 0,
+          "missing_intervals": 1,
+          "basis": "recorded_timestamps; gaps are unobserved intervals, not proven idle time"
+        },
+        "related_timing": {
+          "model_only_ms": 0,
+          "tool_only_ms": 0,
+          "overlap_ms": 0,
+          "gap_ms": 0,
+          "wall_span_ms": null,
+          "start_ms": null,
+          "end_ms": null,
+          "measured_calls": 0,
+          "missing_intervals": 1,
+          "basis": "recorded_timestamps; gaps are unobserved intervals, not proven idle time"
+        },
+        "costs": {
+          "model_calls": 1,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 15,
+            "measured_count": 1,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "related_costs": {
+          "model_calls": 1,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 15,
+            "measured_count": 1,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "start_line": 1,
+        "end_line": 2,
+        "basis": "phase_evidence_window_not_ownership"
+      },
+      "phase:96a68f1e112687d3e763066d": {
+        "call_ids": [
+          "llm:run:trace2:2:2"
+        ],
+        "related_call_ids": [
+          "llm:run:trace2:2:2"
+        ],
+        "other_call_ids": [],
+        "unassigned_call_ids": [],
+        "timing": {
+          "model_only_ms": 0,
+          "tool_only_ms": 0,
+          "overlap_ms": 0,
+          "gap_ms": 0,
+          "wall_span_ms": null,
+          "start_ms": null,
+          "end_ms": null,
+          "measured_calls": 0,
+          "missing_intervals": 1,
+          "basis": "recorded_timestamps; gaps are unobserved intervals, not proven idle time"
+        },
+        "related_timing": {
+          "model_only_ms": 0,
+          "tool_only_ms": 0,
+          "overlap_ms": 0,
+          "gap_ms": 0,
+          "wall_span_ms": null,
+          "start_ms": null,
+          "end_ms": null,
+          "measured_calls": 0,
+          "missing_intervals": 1,
+          "basis": "recorded_timestamps; gaps are unobserved intervals, not proven idle time"
+        },
+        "costs": {
+          "model_calls": 1,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 15,
+            "measured_count": 1,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "related_costs": {
+          "model_calls": 1,
+          "tool_calls": 0,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 15,
+            "measured_count": 1,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "start_line": 5,
+        "end_line": 6,
+        "basis": "phase_evidence_window_not_ownership"
+      },
+      "phase:4a9f439a6ea222fb93e93a08": {
+        "call_ids": [
+          "tool:run:trace2:2:tool2"
+        ],
+        "related_call_ids": [
+          "tool:run:trace2:2:tool2"
+        ],
+        "other_call_ids": [],
+        "unassigned_call_ids": [],
+        "timing": {
+          "model_only_ms": 0,
+          "tool_only_ms": 0,
+          "overlap_ms": 0,
+          "gap_ms": 0,
+          "wall_span_ms": null,
+          "start_ms": null,
+          "end_ms": null,
+          "measured_calls": 0,
+          "missing_intervals": 1,
+          "basis": "recorded_timestamps; gaps are unobserved intervals, not proven idle time"
+        },
+        "related_timing": {
+          "model_only_ms": 0,
+          "tool_only_ms": 0,
+          "overlap_ms": 0,
+          "gap_ms": 0,
+          "wall_span_ms": null,
+          "start_ms": null,
+          "end_ms": null,
+          "measured_calls": 0,
+          "missing_intervals": 1,
+          "basis": "recorded_timestamps; gaps are unobserved intervals, not proven idle time"
+        },
+        "costs": {
+          "model_calls": 0,
+          "tool_calls": 1,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "related_costs": {
+          "model_calls": 0,
+          "tool_calls": 1,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 0,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "start_line": 7,
+        "end_line": 8,
+        "basis": "phase_evidence_window_not_ownership"
+      }
+    },
+    "goals": {
+      "goal:cf9d740df6b1deddf9d53e7d": {
+        "call_ids": [
+          "llm:run:trace1:1:1",
+          "llm:run:trace2:2:2",
+          "tool:run:trace1:1:tool1",
+          "tool:run:trace2:2:tool2"
+        ],
+        "related_call_ids": [
+          "llm:run:trace1:1:1",
+          "llm:run:trace2:2:2",
+          "tool:run:trace2:2:tool2"
+        ],
+        "other_call_ids": [
+          "tool:run:trace1:1:tool1"
+        ],
+        "unassigned_call_ids": [
+          "tool:run:trace1:1:tool1"
+        ],
+        "timing": {
+          "model_only_ms": 0,
+          "tool_only_ms": 0,
+          "overlap_ms": 0,
+          "gap_ms": 0,
+          "wall_span_ms": null,
+          "start_ms": null,
+          "end_ms": null,
+          "measured_calls": 0,
+          "missing_intervals": 4,
+          "basis": "recorded_timestamps; gaps are unobserved intervals, not proven idle time"
+        },
+        "related_timing": {
+          "model_only_ms": 0,
+          "tool_only_ms": 0,
+          "overlap_ms": 0,
+          "gap_ms": 0,
+          "wall_span_ms": null,
+          "start_ms": null,
+          "end_ms": null,
+          "measured_calls": 0,
+          "missing_intervals": 3,
+          "basis": "recorded_timestamps; gaps are unobserved intervals, not proven idle time"
+        },
+        "costs": {
+          "model_calls": 2,
+          "tool_calls": 2,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 30,
+            "measured_count": 2,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "related_costs": {
+          "model_calls": 2,
+          "tool_calls": 1,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 30,
+            "measured_count": 2,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "basis": "effective_root_revision_window"
+      },
+      "goal:0b77ab410fe4a9a15a870edb": {
+        "call_ids": [
+          "llm:run:trace1:1:1",
+          "llm:run:trace2:2:2",
+          "tool:run:trace2:2:tool2"
+        ],
+        "related_call_ids": [
+          "llm:run:trace1:1:1",
+          "llm:run:trace2:2:2",
+          "tool:run:trace2:2:tool2"
+        ],
+        "other_call_ids": [],
+        "unassigned_call_ids": [],
+        "timing": {
+          "model_only_ms": 0,
+          "tool_only_ms": 0,
+          "overlap_ms": 0,
+          "gap_ms": 0,
+          "wall_span_ms": null,
+          "start_ms": null,
+          "end_ms": null,
+          "measured_calls": 0,
+          "missing_intervals": 3,
+          "basis": "recorded_timestamps; gaps are unobserved intervals, not proven idle time"
+        },
+        "related_timing": {
+          "model_only_ms": 0,
+          "tool_only_ms": 0,
+          "overlap_ms": 0,
+          "gap_ms": 0,
+          "wall_span_ms": null,
+          "start_ms": null,
+          "end_ms": null,
+          "measured_calls": 0,
+          "missing_intervals": 3,
+          "basis": "recorded_timestamps; gaps are unobserved intervals, not proven idle time"
+        },
+        "costs": {
+          "model_calls": 2,
+          "tool_calls": 1,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 30,
+            "measured_count": 2,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "related_costs": {
+          "model_calls": 2,
+          "tool_calls": 1,
+          "prompt_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "completion_tokens": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "total_tokens": {
+            "known_sum": 30,
+            "measured_count": 2,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "model_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 2,
+            "conflict_count": 0
+          },
+          "tool_duration_ms": {
+            "known_sum": 0,
+            "measured_count": 0,
+            "eligible_count": 1,
+            "conflict_count": 0
+          },
+          "wall_span_ms": null,
+          "observed_busy_union_ms": null
+        },
+        "basis": "attributed_calls_only"
+      }
+    },
+    "run": {
+      "call_ids": [
+        "llm:run:trace1:1:1",
+        "llm:run:trace2:2:2",
+        "tool:run:trace1:1:tool1",
+        "tool:run:trace2:2:tool2"
+      ],
+      "related_call_ids": [
+        "llm:run:trace1:1:1",
+        "llm:run:trace2:2:2",
+        "tool:run:trace2:2:tool2"
+      ],
+      "other_call_ids": [
+        "tool:run:trace1:1:tool1"
+      ],
+      "unassigned_call_ids": [
+        "tool:run:trace1:1:tool1"
+      ],
+      "timing": {
+        "model_only_ms": 0,
+        "tool_only_ms": 0,
+        "overlap_ms": 0,
+        "gap_ms": 0,
+        "wall_span_ms": null,
+        "start_ms": null,
+        "end_ms": null,
+        "measured_calls": 0,
+        "missing_intervals": 4,
+        "basis": "recorded_timestamps; gaps are unobserved intervals, not proven idle time"
+      },
+      "related_timing": {
+        "model_only_ms": 0,
+        "tool_only_ms": 0,
+        "overlap_ms": 0,
+        "gap_ms": 0,
+        "wall_span_ms": null,
+        "start_ms": null,
+        "end_ms": null,
+        "measured_calls": 0,
+        "missing_intervals": 3,
+        "basis": "recorded_timestamps; gaps are unobserved intervals, not proven idle time"
+      },
+      "costs": {
+        "model_calls": 2,
+        "tool_calls": 2,
+        "prompt_tokens": {
+          "known_sum": 0,
+          "measured_count": 0,
+          "eligible_count": 2,
+          "conflict_count": 0
+        },
+        "completion_tokens": {
+          "known_sum": 0,
+          "measured_count": 0,
+          "eligible_count": 2,
+          "conflict_count": 0
+        },
+        "total_tokens": {
+          "known_sum": 30,
+          "measured_count": 2,
+          "eligible_count": 2,
+          "conflict_count": 0
+        },
+        "model_duration_ms": {
+          "known_sum": 0,
+          "measured_count": 0,
+          "eligible_count": 2,
+          "conflict_count": 0
+        },
+        "tool_duration_ms": {
+          "known_sum": 0,
+          "measured_count": 0,
+          "eligible_count": 2,
+          "conflict_count": 0
+        },
+        "wall_span_ms": null,
+        "observed_busy_union_ms": null
+      },
+      "related_costs": {
+        "model_calls": 2,
+        "tool_calls": 1,
+        "prompt_tokens": {
+          "known_sum": 0,
+          "measured_count": 0,
+          "eligible_count": 2,
+          "conflict_count": 0
+        },
+        "completion_tokens": {
+          "known_sum": 0,
+          "measured_count": 0,
+          "eligible_count": 2,
+          "conflict_count": 0
+        },
+        "total_tokens": {
+          "known_sum": 30,
+          "measured_count": 2,
+          "eligible_count": 2,
+          "conflict_count": 0
+        },
+        "model_duration_ms": {
+          "known_sum": 0,
+          "measured_count": 0,
+          "eligible_count": 2,
+          "conflict_count": 0
+        },
+        "tool_duration_ms": {
+          "known_sum": 0,
+          "measured_count": 0,
+          "eligible_count": 1,
+          "conflict_count": 0
+        },
+        "wall_span_ms": null,
+        "observed_busy_union_ms": null
+      },
+      "outside_phase_call_ids": [
+        "tool:run:trace1:1:tool1"
+      ]
+    }
+  },
+  "report": {
+    "graph_revision": 1,
+    "status": "complete",
+    "format": "markdown",
+    "text": "# Goal process analysis\nSource: 5a477de371a45dac20a0234d0d5771a1645cdaed01e49c7ba45beb1575e23906\nRun: run · Revision: 1 · complete\n\n## Goals\n- Investigate the problem — claim: unknown; evidence: unknown; disposition: unknown\n- Understand source behavior — claim: unknown; evidence: unknown; disposition: unknown\n\n## Execution skeleton\n- L1–2 Understand source behavior (1 calls): Recorded source inspection\n  - Closure not established at this point\n- L3–4 read_file (1 calls): Recorded source inspection\n  - unknown\n- L5–8 Understand source behavior (2 calls): Recorded source inspection\n  - Closure not established at this point\n\n## Action contributions\n- caa5db03ab4f1 · reviewed · evidence: Recorded source inspection\n- c1aeabc0616e8 · unknown · evidence: Recorded source inspection\n- cacbbbeb19b2f · reviewed · evidence: Recorded source inspection\n- c32359ddcd98c · reviewed · evidence: Recorded source inspection\n\n## Evidence visibility\nCaptured output, presented context and semantic adoption are separate; previews do not establish full reading.\n\n## Diagnostics\n\n## Authoritative acceptance\nRecorded verifier and host decisions; not independent command replay.\n\n## Coverage\nCards reviewed: 4/4; unknown: 1; pending: 0.\nSummary projection, not a complete evidence package. Original source references are in the JSON bundle."
+  }
+}

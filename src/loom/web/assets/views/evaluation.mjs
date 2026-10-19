@@ -1,3 +1,4 @@
+import {IncrementalGraphView} from "./incremental-graph.mjs";
 import {renderGoalSummary, GOAL_SCHEMA} from "./goal-loops.mjs";
 import { renderBehaviorEvaluation } from "./behavior-evaluation.mjs";
 import { element } from "../markdown.mjs";
@@ -11,6 +12,7 @@ const DIMENSIONS = {
   verify_gate: "Verification",
 };
 const stageLabel = (stage) => {
+  if (stage?.startsWith("batch:")) return "Reviewing goals and action contributions";
   if (stage?.startsWith("structure:")) return "Reconstructing goals and phase occurrences";
   if (stage?.startsWith("reconcile:")) return "Reconciling goal boundaries";
   if (stage?.startsWith("utility:")) return "Evaluating action utility";
@@ -88,7 +90,7 @@ export class EvaluationView {
         const option = element(
           "option",
           "",
-          version === "goal_loops_v1" ? "Goal loops · Execution & cost" : version === "v3"
+          version === "goal_graph_v1" ? "Goal process · Incremental graph" : version === "goal_loops_v1" ? "Goal loops · Execution & cost" : version === "v3"
             ? "v3 · Behavior evaluation"
             : "v2 · Legacy effectiveness",
         );
@@ -103,7 +105,10 @@ export class EvaluationView {
       for (const id of catalog.run_ids || []) {const option = element("option", "", id); option.value = id; this.runSelect.append(option);}
       this.runSelect.value = catalog.run_ids?.at(-1) || "";
       this.runLabel = element("label", "", "Run scope"); this.runLabel.append(this.runSelect); this.toolbar.prepend(this.runLabel);
-      const scopeVisibility = () => { this.runLabel.hidden = this.version.value !== "goal_loops_v1"; };
+      const scopeVisibility = () => {
+        this.runLabel.hidden = !["goal_loops_v1", "goal_graph_v1"].includes(this.version.value);
+        for (const key of ["max_rounds", "max_tokens"]) if(this.fields?.[key]) this.fields[key].parentElement.hidden = this.version.value === "goal_graph_v1";
+      };
       scopeVisibility();
       this.version.addEventListener("change", () => { this.applyDefaults(); scopeVisibility(); });
       this.fields = {};
@@ -127,6 +132,7 @@ export class EvaluationView {
         this.settingsFields.append(wrapper);
         this.fields[key] = input;
       }
+      scopeVisibility();
       this.start = element("button", "primary", "Run deep evaluation");
       this.start.type = "submit";
       this.start.disabled = !catalog.models.length;
@@ -156,7 +162,7 @@ export class EvaluationView {
         this.start.textContent = "Run deep evaluation";
         this.start.disabled = !this.catalog.models.length;
         this.model.disabled = this.version.disabled = false;
-        if (this.runSelect) {this.runSelect.disabled = false; this.runLabel.hidden = this.version.value !== "goal_loops_v1";}
+        if (this.runSelect) {this.runSelect.disabled = false; this.runLabel.hidden = !["goal_loops_v1", "goal_graph_v1"].includes(this.version.value);}
         for (const field of Object.values(this.fields)) field.disabled = false;
         if (this.history) this.history.value = "";
         this.renderedData = null;
@@ -169,7 +175,7 @@ export class EvaluationView {
       const actions = element("div", "deep-actions");
       actions.append(this.start, this.cancel, this.fresh); this.toolbar.append(actions);
       const notes = disclosure(this.settingsPanel, "Budget accounting");
-      notes.append(element("p", "muted small", "Evaluator usage is separate from task usage. Token budgets are checked between calls; an in-flight response can exceed the limit. Review limit: focused segments in v3, first rounds in v2, diagnosed goals in Goal loops (all source batches are reviewed first)."));
+      notes.append(element("p", "muted small", "Evaluator usage is separate from task usage. Incremental graph review records tokens without a token budget or output cap. Time and call limits still apply; unknown usage is marked explicitly. Legacy evaluators check reported usage between requests."));
       this.status.textContent = catalog.models.length ? "" : "Configure a judge model to run evaluation.";
       this.status.hidden = !!catalog.models.length;
       this.results.append(element("p", "empty-state", "No evaluation yet"));
@@ -185,6 +191,7 @@ export class EvaluationView {
       this.history.addEventListener("change", () => this.history.value ? this.follow(this.history.value) : this.fresh.click());
       const historyLabel = element("label", "", "Saved evaluations"); historyLabel.append(this.history);
       this.toolbar.prepend(historyLabel);
+      this.applyDefaults();
       if (catalog.jobs.length) {
         this.history.value = catalog.jobs[0].id;
         this.follow(catalog.jobs[0].id);
@@ -205,6 +212,7 @@ export class EvaluationView {
   applyDefaults() {
     const defaults = this.catalog.defaults_by_version?.[this.version.value] || this.catalog.defaults;
     for (const [key, input] of Object.entries(this.fields)) input.value = defaults[key];
+    for (const key of ["max_rounds", "max_tokens"]) if(this.fields[key]) this.fields[key].parentElement.hidden = this.version.value === "goal_graph_v1";
     this.start.textContent = "Run deep evaluation";
   }
   fail(error) {
@@ -219,7 +227,7 @@ export class EvaluationView {
     try {
       const resumable =
         this.job &&
-        ["failed", "cancelled", "interrupted", "budget_exhausted"].includes(
+        ["failed", "cancelled", "interrupted", "budget_exhausted", "incomplete"].includes(
           this.job.state,
         );
       const options = {
@@ -228,7 +236,7 @@ export class EvaluationView {
           : this.catalog.defaults_by_version?.[this.version.value] || {}),
         model: this.model.value,
         analysis_version: this.version.value,
-        ...(this.version.value === "goal_loops_v1" ? {run_id: this.runSelect.value} : {}),
+        ...(["goal_loops_v1", "goal_graph_v1"].includes(this.version.value) ? {run_id: this.runSelect.value} : {}),
       };
       for (const [key, input] of Object.entries(this.fields))
         options[key] = Number(input.value);
@@ -286,6 +294,7 @@ export class EvaluationView {
         "cancelled",
         "interrupted",
         "budget_exhausted",
+        "incomplete",
       ].includes(job.state)
         ? "Resume evaluation"
         : "Run deep evaluation";
@@ -294,7 +303,12 @@ export class EvaluationView {
       this.model.value = job.model;
       this.model.disabled = active;
       if (this.version) { this.version.value = job.analysis_version || "v2"; this.version.disabled = active; }
-      if (this.runSelect) {this.runSelect.disabled = active; this.runLabel.hidden = job.analysis_version !== "goal_loops_v1"; if (job.run_id) this.runSelect.value = job.run_id;}
+      for (const key of ["max_rounds", "max_tokens"]) if(this.fields[key]) this.fields[key].parentElement.hidden = job.analysis_version === "goal_graph_v1";
+      if(this.catalog.analysis_versions && !this.catalog.analysis_versions.includes(job.analysis_version || "v2")) {
+        this.start.disabled = true;
+        this.start.textContent = "Legacy result · read only";
+      }
+      if (this.runSelect) {this.runSelect.disabled = active; this.runLabel.hidden = !["goal_loops_v1", "goal_graph_v1"].includes(job.analysis_version); if (job.run_id) this.runSelect.value = job.run_id;}
       for (const [key, input] of Object.entries(this.fields)) {
         input.value = job.settings[key] ?? this.catalog?.defaults_by_version?.[job.analysis_version || "v2"]?.[key] ?? this.catalog?.defaults[key] ?? "";
         input.disabled = active;
@@ -316,7 +330,7 @@ export class EvaluationView {
     if (!this.progress) return;
     this.progress.hidden = false;
     const active = ["queued", "running"].includes(job.state);
-    const goalLoops = job.analysis_version === "goal_loops_v1";
+    const goalLoops = ["goal_loops_v1", "goal_graph_v1"].includes(job.analysis_version);
     const behavior = job.analysis_version === "v3";
     const total = goalLoops ? job.total_packets : behavior
       ? job.selected_segments
@@ -331,7 +345,11 @@ export class EvaluationView {
     coverage.setAttribute("aria-label", goalLoops ? "Reviewed evidence coverage" : behavior ? "Reviewed segment coverage" : "Reviewed round coverage");
     if (total != null && total > 0) { coverage.max = total; coverage.value = Math.min(reviewed, total); }
     const phases = element("div", "deep-phases");
-    if (goalLoops) {
+    if (job.analysis_version === "goal_graph_v1") {
+      for (const [title,value] of [["Cards reviewed",`${reviewed} / ${total ?? "—"}`],["Graph revision",job.graph_revision||0],["Conflicts",job.review_gaps||0]]) {
+        const phase=element("div","deep-phase");phase.append(element("strong","",title),element("span","",String(value)));phases.append(phase);
+      }
+    } else if (goalLoops) {
       for (const [title, value] of [["Structure", `${reviewed} / ${total ?? "—"} evidence pages`], ["Reconciliation", job.reconciliation_complete ? (job.execution_protocol >= 2 && !job.reconciliation_candidates ? "Skipped · no candidates" : "Saved") : "Pending"], ["Diagnosis", `${job.diagnosed_goals || 0} goals`]]) {
         const phase = element("div", "deep-phase"); phase.append(element("strong", "", title), element("span", "", value)); phases.append(phase);
       }
@@ -350,16 +368,19 @@ export class EvaluationView {
     const metrics = element("div", "deep-budget-grid");
     for (const [title, used, limit, format] of [
       ["Evaluator calls", job.usage.calls, job.settings?.max_calls, number],
-      ["Reported tokens", job.usage.total_tokens, job.settings?.max_tokens, number],
+      ["Reported tokens", job.usage.total_tokens, job.analysis_version === "goal_graph_v1" ? null : job.settings?.max_tokens, number],
       ["Elapsed", job.elapsed_seconds, job.settings?.max_seconds, v => seconds(v == null ? null : v * 1000)],
     ]) {
       const metric = element("div", "deep-budget"), value = element("div", "deep-budget-value");
-      value.append(element("strong", "", format(used)), element("span", "muted", `/ ${format(limit)}`));
+      value.append(element("strong", "", format(used)));
+      if (limit != null) value.append(element("span", "muted", `/ ${format(limit)}`));
       const gauge = element("div", "deep-budget-track"), fill = element("span");
       gauge.setAttribute("role", "img"); gauge.setAttribute("aria-label", `${title}: ${format(used)} / ${format(limit)}`);
       fill.style.width = `${limit > 0 && used != null ? Math.min(100, used / limit * 100) : 0}%`;
       if (limit > 0 && used >= limit) metric.classList.add("exhausted");
-      gauge.append(fill); metric.append(element("span", "muted", title), value, gauge); metrics.append(metric);
+      gauge.append(fill); metric.append(element("span", "muted", title), value);
+      if (limit != null) metric.append(gauge);
+      metrics.append(metric);
     }
     const current = element("p", "evaluation-current");
     current.setAttribute("role", "status");
@@ -444,6 +465,10 @@ export class EvaluationView {
     const signature = JSON.stringify(data);
     this.onResult?.(data, this.job);
     if (signature === this.renderedData) return;
+    if (data.skeleton?.projection_version) {
+      if (!this.graphView) this.graphView=new IncrementalGraphView(element("section"),{evidence:ref=>this.evidence(ref)});
+      this.results.replaceChildren(this.graphView.root);this.graphView.update(data);this.renderedData=signature;return;
+    }
     const opened = new Set([...this.results.querySelectorAll("details[open][data-detail]")].map(n => n.dataset.detail));
     const filters = [...this.results.querySelectorAll("[data-deep-filter]")].map(n => [n.dataset.deepFilter, n.value]);
     this.results.replaceChildren();

@@ -1,3 +1,4 @@
+import {IncrementalGraphView} from "./incremental-graph.mjs";
 import {renderActionFlow} from "./action-flow.mjs";
 import {utilitySummary} from './action-utility.mjs';
 import {element} from "../markdown.mjs";
@@ -52,6 +53,9 @@ export class GoalLoopView {
     this.render();
   }
   render() {
+    if(this.data.skeleton?.projection_version) {
+      this.incrementalView ||= new IncrementalGraphView(this.root,{evidence:this.evidence});this.incrementalView.update(this.data);return;
+    }
     const data = this.data, c = data.coverage;
     const viewport = this.root.closest(".trajectory-page") || this.root.parentElement;
     const scrollTop = viewport?.scrollTop;

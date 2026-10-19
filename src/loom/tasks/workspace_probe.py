@@ -8,6 +8,10 @@ IGNORE = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache
 CONFIGS = {"pyproject.toml", "package.json", "Makefile", "Cargo.toml", "go.mod", "pytest.ini", "tox.ini", "setup.cfg", "requirements.txt"}
 
 
+class ManifestUnavailable(ValueError):
+    """No complete cache fingerprint; callers may run fresh verification instead."""
+
+
 def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
@@ -77,14 +81,20 @@ def manifest(root, scope, *, max_entries=2048, max_file_bytes=8_000_000, max_tot
             current = pending.pop()
             entries += 1
             if entries > max_entries:
-                raise ValueError(f"Verification scope exceeds {max_entries} entries; narrow scope near {current}")
+                raise ManifestUnavailable(f"Verification scope exceeds {max_entries} entries near {current}")
             # Do not follow symlinks in trees, including links to ancestor directories.
-            path = bound_path(root, current)
+            try:
+                path = bound_path(root, current)
+            except ValueError as exc:
+                if current == name:
+                    raise
+                # An opaque descendant prevents caching, but is never opened.
+                raise ManifestUnavailable(str(exc)) from exc
             lexical = Path(root).resolve()
             for part in Path(current).parts:
                 lexical /= part
                 if lexical.is_symlink():
-                    raise ValueError(f"Verification scope contains a symbolic link: {current}")
+                    raise ManifestUnavailable(f"Verification scope contains a symbolic link: {current}")
             if not path.exists():
                 tree[current] = None
             elif path.is_dir():
@@ -92,18 +102,18 @@ def manifest(root, scope, *, max_entries=2048, max_file_bytes=8_000_000, max_tot
                 # Bound enumeration itself, not just the subsequent file reads.
                 for child in path.iterdir():
                     if entries + len(pending) >= max_entries:
-                        raise ValueError(f"Verification scope exceeds {max_entries} entries; narrow scope near {current}")
+                        raise ManifestUnavailable(f"Verification scope exceeds {max_entries} entries near {current}")
                     pending.append((Path(current) / child.name).as_posix())
             elif path.is_file():
                 if path.stat().st_size > max_file_bytes:
-                    raise ValueError(f"Verification file exceeds {max_file_bytes} bytes: {current}")
+                    raise ManifestUnavailable(f"Verification file exceeds {max_file_bytes} bytes: {current}")
                 with path.open("rb") as stream:
                     raw = stream.read(min(max_file_bytes, max_total_bytes - total_bytes) + 1)
                 total_bytes += len(raw)
                 if len(raw) > max_file_bytes:
-                    raise ValueError(f"Verification file exceeds {max_file_bytes} bytes: {current}")
+                    raise ManifestUnavailable(f"Verification file exceeds {max_file_bytes} bytes: {current}")
                 if total_bytes > max_total_bytes:
-                    raise ValueError(f"Verification scope exceeds {max_total_bytes} total bytes near {current}")
+                    raise ManifestUnavailable(f"Verification scope exceeds {max_total_bytes} total bytes near {current}")
                 tree[current] = hashlib.sha256(raw).hexdigest()
             else:
                 raise ValueError(f"Verification scope requires a regular file or directory: {current}")

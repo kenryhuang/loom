@@ -1,117 +1,97 @@
 # Deep Eval：基于目标闭环的执行过程与成本分析
 
-**最新设计方向：第 18 节“语义优先的执行骨架”（待实施）。**
-默认图围绕总目标、子目标闭环、检查反馈与最终验收组织；动作分类、性能和证据下沉到展开层。
-第 14–17 节记录已实现能力，不代表第 18 节已落地。
+日期：2026-10-17；2026-10-19 补充报告目标、增量建图、图形闭环与分析预算。
 
-2026-10-18 更新：分析器／prompt v3 增加[逐 action 效用评价](action-utility-evaluation.zh-CN.md)。
-结构协调之后按小批评价必要性、结果贡献与增量价值，再供目标级诊断复用。
-Execution flow 行内展示判断和贡献证据；旧报告不生成新判断，预算内未完成部分明确显示未评估。
+状态：**2026-10-19 适配当前仓库：`goal_graph_v1` 增量分析、服务及图形入口已接通；§3–§12 保留目标设计，实际实现范围及未完成项见 §14。模型语义质量和预算仍待真实样例校准。**
 
-日期：2026-10-17。
-
-状态：**首版已实现（2026-10-17），通过确定性／模拟 evaluator 回归；真实任务的语义质量与默认预算仍待人工校准。**
-
-使用方式与实际模块见第 13 节。第 2 节保留实施前的架构基线，用于解释此次改造。
-
-设计交付记录：[设计计划](../exec-plans/completed/deep-eval-goal-loops-design.md)。
+实现范围、验证和边界见 [§14](#14-首版实现与验证记录)。
+本次适配记录：[增量分析实施计划](../exec-plans/deep-eval-incremental-adaptation.md)。
+原始设计：[设计计划](../exec-plans/completed/deep-eval-goal-loops-design.md)。
+目标结果规格：[run_40b063 的执行 skeleton 与证据核对](./deep-eval-run-40b063-skeleton.md)。
 
 ## 1. 定位与边界
 
-本设计深度重构当前 **Reasoning efficiency** 功能，由 Deep evaluation 后台作业产生新的语义分析结果，Reasoning efficiency 展示目标过程图与成本。不是新增一套与现有分析无关的评估系统。
-
-新分析对固定快照中的指定 run 做事后分析：还原 agent 为了什么目标，采取了
+Deep Eval 对不可变的 run trace 做事后分析：还原 agent 为了什么目标，采取了
 哪些方案，取得哪些证据，经历哪些尝试，以及根据什么结束；将实际时间和
 token 成本挂到这个过程中，帮助定位低效执行的原因。
 
-核心产物是 **目标树 + 阶段过程图 + 可核对的成本账本**。诊断是图上的解释，
-不再以几个抽象维度的评价作为主入口。不提供未经校准的综合效率分数。
+核心产物是 **执行 skeleton + 可展开的目标过程 + 可核对的成本账本**。
+skeleton 是实际执行的精简解释：为什么形成这些子目标、什么证据改变了行动、
+哪里取得关键进展、哪里反复调查、最终凭什么验收。目标树表达问题分解，
+occurrence DAG 表达实际推进；不能只列工具名或把每句“接下来”串成流程。
+诊断是图上的解释，不再以几个抽象维度的评价作为主入口。
+不提供未经校准的综合效率分数。
 
 本设计适用于 checklist、DAG、直接执行、研究和编码等任务。目标边界不由
 step、round、执行节点、context 或工具调用数量决定。分析图允许反馈回路，
 不替换执行器 DAG，也不要求 agent 为评估增加计划、笔记或阶段报告。
 
-首版已增加单 run 分析范围。**实施前 service 固定的是整个 session 截至 event_cursor 的快照，Deep evaluation 没有 run_id 输入；页面的 run 筛选不改变评估来源。** 单 run 是需要实现的范围契约，不能作为已有能力复用。
-
-新引擎对运行中快照按未结束轨迹处理，刷新生成
+首版以单个 run 的固定快照为范围；运行中快照按未结束轨迹处理，刷新生成
 新分析，不把旧分析的 source digest 改掉。跨 run 比较使用各自独立的账本；
 跨 run 拼接成同一目标的生命周期留作后续能力。
 
-实现限于离线分析及展示，不修改 runtime、执行 prompt、Context 协议、验收结果或用户任务产物。
+实现只读取历史快照，不改变执行 prompt、memory 协议、验收结果或被评任务的工作区内容。
 
-## 2. 实施前现状与改造边界（2026-10-17 源码基线）
+用户关注的六个问题对应如下，不能用单一“目标完成率”代替：
 
-### 2.1 实际模块分工
+| 问题 | 分析产物 |
+|---|---|
+| 从 thinking 过程提取目标 | 可见意图陈述、目标身份、提出/细化/恢复/修订事件 |
+| 后续每条记录是否相关、推进、冗余 | 逐记录归属与贡献判断，含当时可见证据 |
+| 是否总结、评价并闭环 | 完成声明、证据充分性、剩余问题、结束处置分别记录 |
+| 何时开启新目标 | 目标转换及触发原因；允许交错和恢复旧目标 |
+| 子目标是否服务根目标 | 条件覆盖、结果采用、使能关系与未解释活动 |
+| 最终 acceptance | 候选、验收契约、verifier 结果与宿主裁决链 |
 
-| 现有位置 | 当前职责 | 重构处理 |
+### 1.1 以 run_40b063 报告作为产品目标
+
+[人工报告](./deep-eval-run-40b063-skeleton.md) 是新 Deep Eval 的**目标结果规格**，
+不只是用来举例的 trace。完成标准是让用户从图中读出该报告所解释的思路、
+转折、未决项、效率问题和验收依据，并能展开核对。目标不是复刻措辞或固定
+八个节点，也不是让一个 LLM 最后再自由撰写一篇相似文章。
+
+| 报告能力 | 分析器需持久化的产物 | Deep Eval 中的入口 |
 |---|---|---|
-| `src/loom/service/trajectory.py` | SessionTrajectory 固定 session cursor，后台生成事实分析；恢复 event_detail artifact，保存来源与结果，提供 round/evidence 查询 | 复用快照和证据入口；增加明确的 run 范围适配，不把 UI filter 当成分析过滤 |
-| `src/loom/service/semantic.py` | SessionSemantic 管理独立 evaluator 作业、v2/v3 分派、预算、checkpoint、取消、partial 和 resume | 在此接入新引擎和身份校验，扩展新阶段的进度投影 |
-| `src/loom/trace_analysis/records.py`、`graph.py`、`links.py`、`schemas.py` | 规范化事件，关联 run/step/model/tool 记录及调用结果 | 作为原始关联层；没有单独的 behavior_v3/native.py |
-| `src/loom/evaluation/evidence_store.py` | 固定 source bytes，按 source_sha256、line_number、event_hash、field_path、start/end 校验和读取证据 | 复用精确引用，新增图不能绕开此来源边界 |
-| `src/loom/evaluation/trajectory.py`、`context_analysis.py` | FactAnalysis：task contracts、rounds、工具输出/投递、context deltas、token ledger、verification | 复用事实与可见性记录，不把内容出现等同于被采用 |
-| `src/loom/evaluation/behavior_facts.py`、`behavior_goals.py` | episode、实际生效目标修订、计划、角色、segments 和事实组装 | 保留来源锚点；新增语义目标树，不能把既有 goal revision 当成子目标树 |
-| `src/loom/evaluation/base_metrics.py`、`token_ledger.py` | 模型/工具调用表，usage 完整性与冲突，TTFT/TPS，按模型及 run 汇总，生命周期和活动时间分布 | 作为成本事实来源；新增语义层唯一 owner 和父子汇总 |
-| `src/loom/evaluation/behavior_sequence.py`、`behavior_observations.py`、`observation_cost.py` | 计划与执行绑定、重复结果、事实里程碑、候选窗口及区间成本 | 保留诊断线索；区间成本不是语义目标的排他账本 |
-| `src/loom/evaluation/behavior_judge.py`、`behavior_budget.py`、`focus_evidence.py`、`evidence_review.py` | scan/focus/synthesis，证据投递、有预算选择、局部判断校验和恢复 | 新引擎先识别全局结构，再选择诊断；复用预算/引用原则，不照搬旧 segment 边界 |
-| `src/loom/evaluation/reasoning_activity.py` | 确定性工具分类、公开陈述、调用/结果、验证和运行状态锚点 | 保留 Base-only 过程事实 |
-| `src/loom/evaluation/reasoning_process.py` | focus 的公开判断变化、支持/反驳/采用关系验证及前序索引 | 保留证据/时间/范围校验；补充目标、尝试与阶段合同 |
-| `src/loom/evaluation/reasoning_metrics.py`、`reasoning_graph.py` | 组装问题、claim occurrences、调查循环/窗口、成本与完整执行流投影 | 不能把现有图机械包装成目标闭环；新增语义层级与归属 |
-| `src/loom/evaluation/behavior.py` | evaluation_payload 组装 bundle v3、reasoning_process、报告和 proposals；另有离线入口 | 新 bundle 单独组装，保持旧 schema reader |
-| `src/loom/evolution/behavior.py` | 从旧行为诊断生成 Evolve proposals | 新诊断到 proposal 的映射另行定义；此处不是评估引擎所在包 |
-| `src/loom/web/assets/views/trajectory.mjs` | Trace analysis / Deep evaluation / Reasoning efficiency / Session diagnosis 的容器和数据连接 | 接入范围选择和新旧结果协调 |
-| `src/loom/web/assets/views/evaluation.mjs`、`behavior-evaluation.mjs`、`deep-dashboard.mjs` | evaluator 配置/历史/运行按钮，bundle 分派及 Deep dashboard | 保留作业控制与历史，新增 schema 分派及结构覆盖进度 |
-| `src/loom/web/assets/views/reasoning.mjs` | ReasoningView、三列执行图、连续 round 折叠、问题/角色过滤、证据入口与导出 | 主要重构页面：目标树、attempt/phase 图与成本详情 |
+| 来源、范围与限制 | source、证据索引、处理/诊断覆盖 | 顶部范围说明及证据面板 |
+| 根任务和局部目标 | 生效条件、Goal、意图与结束依据 | 根目标卡和目标树 |
+| 精简执行 skeleton | 关键阶段、成果依赖、反馈及归属 | 默认关系图 |
+| 逐记录贡献 | RecordAssessment、对应 action/result、信息变化 | 展开节点的行动列表 |
+| README 分页与实际可见性 | captured/presented/adopted 的来源与范围 | 证据对照面板 |
+| 声明、开放问题与闭环 | closure、未决项、结果采用和处置 | 子目标闭环图 |
+| 范围/冗余/验证价值 | 有引用、有反例限制的 diagnostics | 诊断标记及关联路径 |
+| 根验收 | criterion coverage、candidate/subject、verifier 与宿主决策 | 验收汇合节点与条件表 |
 
-原稿所列 service/trace_analysis.py、evolve/analysis_facts.py、evolve/behavior_v3/ 和 web/assets/evaluation/ 路径不属于当前项目。上述为实际落点；后文新模块均明确为拟新增。
+文字报告是上述产物的模板投影，与图共享 graph revision、状态和引用；展开、
+筛选、切换图/报告和导出均不再调用 LLM。成本不足时交付带缺口的图和报告，
+不会靠省略限制、自动补闭环来达到外观上的“完整”。
 
-### 2.2 实际数据链路与范围
+设计遵循一条生产路径：**程序抽取事实 → 小批语义分析 → 校验并增量建图 →
+按需补证 → 局部协调 → 图与报告投影**。整个原始 trace、反复增长的 messages、
+所有已完成批次的长摘要，均不得被拼成一次评估模型输入。
 
-```text
-Session events <= source_cursor
-  -> session_records：恢复 event_detail，保留 session_seq / event ID
-  -> EvidenceStore + build_episode_graph
-  -> build_fact_analysis + build_behavior_facts
-  -> summary.base / sequence / reasoning_process（无 evaluator 调用）
-  -> SessionSemantic v3：scan -> selected focus -> synthesis
-  -> evaluation_payload：semantic.reasoning_process + proposals
-  -> EvaluationView.onResult -> ReasoningView.update
-```
+## 2. 现状与改造边界
 
-- SessionTrajectory 缓存键是 session/cursor/trajectory version；保存 trajectory_source 和 trajectory_analysis artifacts。来源不是每个 run 单独的原始 JSONL 文件。
-- 快照排除大量 streaming delta，但额外保留每次调用首个有效流输出以支持旧记录 TTFT；coverage 还记录原始事件总数。**分析行号 L 不等于 session seq**，证据跳转必须保留映射。
-- 自动恢复的是注册为 event_detail 的大事件 payload；不代表所有嵌套 artifact 或历史 workspace 文件都已完整读入。引用不可用／原文截断仍须保留覆盖缺口。
-- Trace analysis 的 run 下拉主要筛选 Base 统计和调用明细；EvaluationView 创建作业只传 analysis ID、版本、模型和预算等选项。SessionSemantic.start 不接受 run_id。
-- ReasoningView 有 Goal / run 作用域选择和 Question/Role 过滤，但这只是已生成结果的展示选择，不缩小 evaluator 的来源。它优先消费 Deep 选中的 semantic.reasoning_process，否则用 Base process。
-- Reasoning efficiency 不自行调用模型；其 Run evaluation 操作切到 Deep evaluation。新版本应保持这一职责划分。
+本次以当前 checkout 的实际代码为准。此前实现记录中的 `src/loom/evolve/`、
+`goal-features/v2–v4` 和对应恢复审计模块不在本仓库，不能作为已实现能力引用。
+原代码是 `goal_loops_v1`（analyzer `goal-loops.3`）：
+`structure → reconcile → utility → diagnose`，要求先完成结构重建再评审行动。
+这条历史引擎继续用于旧结果及其恢复；新默认入口不再经过这些阶段门禁。
 
-新单 run 引擎可以先在完整固定快照上建立 selected-run view，保留原 source_sha256/line_number，并将 run_id、范围摘要和 adapter_version 纳入新作业身份。不重新编号现有证据行。run 外定义和历史投递仅作为有来源的上下文引用，不把其他 run 的调用成本记入当前 run；根目标需恢复本 run 实际生效的合同，不能盲读 session 最新任务状态。若未来物化独立来源，必须显式保存原引用映射，不能混用两个 digest 下的行号。
+| 当前代码位置 | 职责 | 本次处理 |
+|---|---|---|
+| `src/loom/service/trajectory.py` | 固定快照、基础分析、artifact 和证据读取 | 复用；不改变来源摘要 |
+| `src/loom/service/semantic.py` | evaluator 作业、预算、checkpoint、取消与恢复 | 增加独立 `goal_graph_v1` 分派和实时部分图 |
+| `src/loom/evaluation/behavior_facts.py`、`base_metrics.py` | 调用关联、usage、时间、验收事实 | 复用事实，语义判断不改写原始计量 |
+| `src/loom/evaluation/evidence_store.py` | 不可变字段和范围引用 | 用于证据卡、补证及前端跳转 |
+| `src/loom/evaluation/goal_loops/facts.py`、`costs.py` | run/目标版本范围、调用 atom、唯一成本归属 | 新旧引擎共享 |
+| `goal_loops/review.py`、`execution.py`、`utility.py` | 原四阶段评估及恢复 | 保留旧引擎，不作为新图的前置步骤 |
+| `goal_loops/cards.py`、`graph_contract.py`、`graph_state.py`、`incremental.py` | 小型卡片、原子语义组、逐批贡献/闭环和预算 | 本次新增主链路 |
+| `goal_loops/graph_projection.py` | 稳定 stage 的 occurrence 投影、压缩图及报告 | 纯程序生成，不再请求最终 skeleton |
+| `src/loom/web/assets/views/evaluation.mjs`、`incremental-graph.mjs` | 版本选择、增量图、报告、节点/行动/证据 | 新版入口；历史结果使用旧 renderer |
+| `src/loom/web/assets/views/reasoning.mjs`、`goal-loops.mjs` | Reasoning efficiency 展示 | 复用同一份已保存新图，不额外评估 |
 
-### 2.3 已有语义能力及局限
-
-当前 segment 按 `(episode_id, goal_revision_id, loop_id, trace_id, step_number)` 聚合连续非 verification 调用，每段最多四个。scan 扫描紧凑索引，focus 选择预算可容纳的可疑段和正常对照，synthesis 汇总。默认 v3 配额为 24 calls、120,000 tokens、600 秒、最多 8 个 focus segments；max_rounds 这一旧 API 名在 v3 中传入的是 max_segments，不是“只评估 8 个真实 round”。
-
-focus 已提供进展节点/关系、计划及工具策略判断，以及 reasoning_transitions，不只是五个抽象评分。前序 reasoning_context 仅携带至多 8 个 claim 的最近状态和有限观察索引；它不是持久化的完整目标树/尝试历史。scan 完成或所有 selected focus 完成，不等于所有原文都被语义审阅。
-
-当前 Reasoning graph v3 已有起点、公开判断、动作、结果、验证、交付及终点。它区分 flow 与 reasoning 边：调用绑定之外，还按记录顺序补充 continues/next_round/ends 使流程连通。**流程连通不是证据采用或目标因果已还原**。图并非仅展示零散孤立节点，但也没有 Goal -> Attempt -> Phase 的语义层次。
-
-前端 cycle_block 只折叠连续完整的判断/动作/观察 rounds；它与 reasoning_metrics 中从判断变化构建的调查 cycles 都不是本文的新 Goal Loop。现有 questions/goal revisions 也没有结构父目标树或语义 attempt 合同。
-
-部分指标显示 Not measured 是严格端点不足的结果：Base-only 可画事实图，却没有受支持结论端点；adoption lag 还需要精确投递身份。新设计应增加完整过程解释，不能靠取消引用和时间约束把所有缺失项填成数值。
-
-### 2.4 成本、兼容和版本边界
-
-现有 token ledger 以已关联 round 记 provider usage，标记 complete/partial/unknown/duplicate/conflicting，保留 unattributed usage；base_metrics 已有调用 duration、TTFT/TPS、按 run/model 聚合及生命周期区间。observation_cost 和 reasoning_metrics 提供区间查询，但没有任意 Goal/Attempt/Phase 的唯一成本 owner、shared bucket 和层级守恒。
-
-build_episode_graph 可以区分记录中同一调用身份的重复请求 occurrence；这不保证 provider/SDK 内部 transport retries 全部可见。不能把当前 ledger 写成“已覆盖所有物理网络请求”。仅对明确记录的请求/attempt 计量，内部重试不可见则注明限制。
-
-当前版本：trajectory `session-trajectory.4.6`；bundle `loom.evaluation.bundle.v3`；analyzer `behavior-evaluation.3.10`；rubric `behavior-rubric.3.8`；checkpoint `behavior-checkpoint.1`；activity `loom.reasoning-activity.v3`；process `loom.reasoning-process.v2`；graph `loom.reasoning-graph.v3`。它们是不同版本轴，不能统一简称为同一个 v3。
-
-SessionTrajectory._data / SessionSemantic.get 可从同一固定来源及已保存判断升级展示 graph，不调用新模型、不改写不可变 artifact。新语义目标识别不能冒用这种展示升级：必须创建新分析及独立 schema。
-
-当前 semantic service 支持 v2/v3；resume 校验来源、配置、analyzer/prompt 和非资源设置，并复用保存的阶段。它不是历史任意 analyzer 版本的执行器注册中心；“旧版本仍能 resume”需要保持对应实现及身份兼容，不能仅保留旧 JSON 就承诺。
-
-当前 runtime 的 DAG/持续 Context 工作线仍是另一个设计提案，不能把 lane/context fork/join 当作现成的完整 trace 字段。新分析可以预留这些可选 scope；已有 run/loop/trace/step/node 记录按实际可用程度读取，缺失不得推断成已发生的 subagent 交接。
+旧版已区分事实、语义判断、验收和覆盖率；新设计保留这些保障。
+这里的 skeleton 仍是简图名称，**不再是需要 LLM 先生成并验收通过的独立分析阶段**。
 
 ## 3. 分析对象
 
@@ -170,6 +150,41 @@ SessionTrajectory._data / SessionSemantic.get 可从同一固定来源及已保�
 框架行为使用独立 `Activity`：`planning`、`context_management`、`handoff`、
 `submission`、`scheduling`、`waiting`、`unknown`。这些活动可以关联目标，
 但不伪装成业务进展。角色（worker/planner/verifier/coordinator/unknown）是另一个维度。
+
+### 3.4 从意图陈述建立目标，不把每句过渡语当新目标
+
+这里的 thinking 分析指 trace 中可审阅的意图、判断和总结；本样本的
+`llm_response.content` 已提供充分的目标转换线索。保留字段来源，不能因界面
+把一段文字称作 thinking 就假定它是完整内部推理，也不补写未记录的推理。
+
+先锚定根任务和生效条件，再顺序识别局部目标。每条候选意图归一为
+“要使什么结果成立 / 消除什么不确定性 + 服务哪个父目标 + 到什么程度足够”。
+例如“读 README”是动作；“确认 QMD 的功能与使用模型，以形成用户需要的说明”
+是目标。隐含结束条件须标为 inferred，不能升级成宿主验收条件。
+
+同一句话可以同时含有 `conclude(G1)` 和 `introduce(G2)`，分别引用文字范围：
+“I have a good understanding of the README. Now let me examine the CLI commands…”
+前半是理解完成声明，后半提出确定外部文件入库方法的意图；前半本身不证明
+所有 README 内容都已读到，也不证明整个功能分析交付已经完成。
+
+目标身份依据 subject、预期结果、父目标和未解决问题，不能依据措辞变化：
+
+| 新陈述与已有目标的关系 | 处理 |
+|---|---|
+| 同一结果，换文件/命令/搜索词 | 继续原目标，记录方案或调查动作变化 |
+| 将“如何入库”细化为 dispatch、collectionAdd 等问题 | 优先作为原目标的开放问题；有独立结果和结束条件时才拆子目标 |
+| 结果要求改变 | 创建目标 revision，旧证据重新检查适用性 |
+| 新的独立结果，例如从确定方法转为确认文档已入库 | 引入新目标，注明前置成果与转换依据 |
+| 回到此前未解决的问题 | 恢复旧目标；若已明确闭环后出现新反证，则记录 reopen |
+| 仅声称“已充分理解”，随后继续同一调查 | 保留声明与实际继续的差异，不重建一个成功目标 |
+
+direct 执行允许 `plan_status=absent`，并在运行中逐步形成局部目标。必须分清
+任务契约的顺序要求、agent 提交的结构化 plan、公开的局部行动意图和分析器
+事后还原的 skeleton。后者不能反写成“agent 一开始就这样规划”。
+
+维护开放目标集合及各自的问题，而不是一个会被下一句意图覆盖的 current_goal。
+一条记录可以服务多个目标，也可以关联更早的挂起目标；相邻性只是待验证线索。
+无法找到目标的活动保留 unassigned，不能事后任意挂到最近目标来制造覆盖。
 
 ## 4. 图、事实与分析判断
 
@@ -240,6 +255,120 @@ token 数可用于成本明细，不能据此还原意图。
 工具成功、节点提交成功、子目标闭环、根验收通过分开表示。分析器不能覆盖权威验收。
 一个子目标失败后被放弃，也可有明确结论；“闭环”不等于“成功”。
 
+### 4.4 逐记录分析：相关、贡献、采用、必要性分开
+
+先把请求与返回绑定为可判断的行动单元；公开响应按语义片段引用。每个原始
+记录都有处理状态，但 chunk、重复转发、框架心跳不逐个调用 LLM 评价。绑定
+不删除来源：同一 shell 的多个子操作可分别解释，成本仍保留一个 invocation。
+
+对每个单元依次回答：
+
+1. **目的与归属**：当时试图回答什么、改变什么、验证什么；服务哪些目标/条件？
+   关联类型为直接推进、前置使能、风险检查、背景了解、无已证关联或未知。
+2. **预期价值**：在当时可见证据下，这次行动有什么合理的信息或状态收益？
+   未记录理由时只给有依据的推断，不用最终答案倒推当时理应知道。
+3. **实际变化**：返回/陈述增加了哪些证据、排除了什么假设、形成什么决策、
+   改变什么产物、支持什么条件？只新增文本或改了搜索词不自动算进展。
+4. **结果采用**：后续行动是否使用该变化？没有明确采用证据时标为未观察到，
+   不能推断 agent 遗忘，也不能将分析器发现的价值计为 agent 已采用。
+5. **重复或偏离**：哪一份既有证据/状态可以替代它？当时是否可见、仍有效、
+   足以支持同一决策？证据不够时只标重复候选或未知。
+
+贡献按目标分别描述，不强制压成好/坏或单一数值：
+
+| 贡献 | 示例 | 边界 |
+|---|---|---|
+| 获取可用证据 | 定位 CLI 分发，确认参数含义 | 可能尚未消除关键不确定性 |
+| 缩小不确定性 | 无匹配促使放弃 commander 假设 | 无匹配不等于相关命令不存在 |
+| 形成/修正决策 | 确认 BM25 可直接验证，取消 embed 设想 | 提出方案不等于已执行 |
+| 改变目标状态 | 目标文件被索引，产物被修改 | 工具成功不等于要求已满足 |
+| 检查条件/降低特定风险 | 搜索命中目标 URI，直接 get 核对内容 | 与已有检查是否独立需要说明 |
+| 整合与交接 | 把已有证据组织成功能说明和候选 | 可有交付价值，不虚构新事实 |
+| 未观察到增量 / 未知 | 重述已知问题、结果不可见或不足 | 不自动等于无用或失败 |
+
+**关键进展**是使某个结束条件获得支持、解决阻塞下一步的问题、改变方案，
+或产生被后续采用的成果。保留其证据链；不把“读取 500 行”当作关键进展。
+一次合理探索可能没有结果；一次成功调用也可能没有边际价值。相关性、
+预期合理性、实际进展和事后可删减性必须独立，避免用成败倒推行动好坏。
+
+### 4.5 三层证据状态：取到、看到、采用
+
+每个问题的证据状态至少区分：
+
+- `captured`：工具/宿主已保存的内容范围、资源版本及完整性。
+- `presented`：实际进入该 actor 后续请求的正文、预览或摘要范围；仅有可读
+  result ref 表示可访问，不表示全文已经进入上下文。
+- `adopted`：可见陈述、决策或行动中使用了哪项结论，引用支持该判断的记录。
+
+请求日志缺失时 presented 为 unknown。出现于上下文也不证明模型注意到或理解。
+上下文裁剪、分页、角色隔离和资源变化都可能解释再次取证；不能用宿主保留的
+完整 artifact 代替 agent 当时可见状态。版本无法确认时，重读的重复性降级。
+
+例如 `read_file` 返回 `shown_lines=1-400, next_offset=401`，接着读取 401
+不是重复；而先 `head -200` 再读取 1–400 有取证重叠，但仍新增 201–400。
+若两个结果都只以截短预览进入模型，问题还包括信息传递不足，不能把全部重读
+归因于 agent。也不能建议“总是一次读完”：先确定任务需要的内容范围，再选择
+定向读取、续页或已有结果读取，并检查实际呈现是否足够。
+
+### 4.6 子目标闭环与根目标覆盖
+
+每个目标收尾时回答四件事：取得什么结果、哪些条件有支持、尚缺什么、为何
+结束/转移。显式总结与证据闭环分别判断：有总结但没有依据是未支持的声明；
+没有总结但条件已被证据支持，可标 `evidence_supported`，不能伪造 conclusion
+phase；失败、放弃、被取代也可以有完整的处理结论。
+
+新目标出现不自动关闭旧目标。宽泛的“已理解架构”可能仅总结局部进展；若
+“collection add 是否立即索引”仍开放，就不能把确定入库方法标为已完成。
+观察到充分证据、agent 表示足够、agent 转向下一步，三者可以有不同的源锚点。
+缺少记录时不捏造“首次充分”的精确时点。
+
+根层面建立双向覆盖表：`根条件 → 支持它的目标/成果/验证`，以及
+`子目标 → 父条件或使能关系 → 根条件`。仅有父子树不足以证明贡献：
+
+- 每个 required 条件必须可追到相应 subject 的证据和权威验证，缺口显式展示。
+- 探索目标可以通过排除方案或使能后续动作贡献，不必直接产生最终交付物；
+  没有依据的关联保留为未解释分支。
+- 所有子目标都“完成”仍可能漏掉根条件，或结果未被整合；根验收单独检查。
+- 所有根条件通过也不证明路径高效；范围扩大、迟迟不执行或过度验证单独诊断。
+
+acceptance 的终点链为“冻结候选 → 对应契约/subject 的验证 → 宿主 assessment
+与决策 → run 状态”。保留每个 verifier 的实际 subject、协议和限制；文本审阅
+不能描述成重新执行了命令。验收也可能有遗漏，分析器可报告证据不匹配，不能
+改写历史裁决。通过不证明未测试的搜索模式、长期可用性或全部陈述都正确。
+
+### 4.7 如何压缩成执行 skeleton
+
+完整语义图是事实与解释的索引；skeleton 是其可展开投影，不是另外让 LLM
+自由编一份摘要，更不是事后优化出来的理想执行计划。节点表达某目标的一次
+推进片段，最小展示为“目标/问题 → 关键变化 → 结果/未决项”，并带来源引用。
+
+从已验证的逐记录贡献构建投影：
+
+1. 固定根任务、条件和验收边界，保留目标引入、实质方案改变、关键证据/状态
+   变化、失败反馈、闭环声明及验收结果等锚点。
+2. 同一目标内、同一问题且没有关键状态转换的连续调查可以折叠；显示其结果、
+   调用数和唯一成本，展开后仍能看到每条记录。跨目标共用动作保留关联。
+3. 重复调查、无已证进展、被放弃分支也须保留压缩节点及诊断标记，不能只
+   留成功路径，把 15 轮调查画得像一步就找到正确方法。
+4. 每条语义依赖边说明传递的成果，例如“collection 模型/命令参数 → 入库动作”
+   或“目标 URI/特征文本 → 检索验证”；纯时间顺序使用独立样式，不冒充因果。
+5. 后续复用证据增加引用，不复制节点或成本；未解决、取消、来源缺失的分支
+   保留开放端点。默认粒度偏粗，但必须保留影响完成判断或下一步选择的差异。
+
+推荐用 **occurrence DAG** 作默认视图：同一目标被重新打开时创建新的阶段出现，
+失败反馈从先前验证指向后来的调查，而不是指回旧节点。目标树表达归属，
+折叠目标视图可以显示反馈回路，二者不要求同构。DAG 仅包含有依据的前向过程
+和证据依赖；缺少跨 actor 因果顺序时保持偏序，不能为了排版补边。
+
+压缩不能跨越关键分支/汇合/重开边界。若合并不连续阶段会产生 A → B → A
+的投影环，就拆开为 A₁、B、A₂；不能删掉真实依赖强求无环。每个展示节点记录
+member IDs、保留原因和折叠数量；每条压缩边可追溯到原图关系/路径。依赖边
+不能仅因存在另一条可达路径就删除，因为它们可能传递不同证据。
+
+精简质量用“任务与策略可理解、关键转折不丢、失误可见、证据可回溯”评价，
+不以节点越少越好，也不要求唯一最小 DAG。不同合理粒度可共存，但必须绑定
+同一 graph revision、覆盖和成本账本；共享成本仍服从第 6 节。
+
 ## 5. 数据契约草案
 
 新 bundle 使用独立 schema `loom.goal-loop-analysis.v1`，不冒充现有
@@ -248,17 +377,33 @@ token 数可用于成本明细，不能据此还原意图。
 ```text
 AnalysisBundle
   schema_version, analysis_id, graph_revision
-  source {digest, analysis_id, run_id, scope_digest, snapshot_boundary, adapter_version}
+  source {digest, run_id, snapshot_boundary, adapter_version}
   analyzer {version, prompt_version, model_config_digest, semantic_settings_digest}
   facts {events_index_ref, calls_ref, verification_ref, cost_ledger_ref}
+  extraction {version, cards_index_ref, visibility_index_ref, omitted_ranges_ref}
   goals[], attempts[], phases[], activities[], relations[]
+  record_assessments[], criterion_coverage[], skeleton
   cost_assignments[], diagnostics[], coverage, evaluator_usage
+
+EvidenceCard
+  id, source_refs[], kind, actor_id, scope, causal_refs[]
+  facts, excerpts[] {ref, text}, omitted_ranges[], completeness
+  captured_refs[], presented_refs[], availability_boundary
+
+GraphPatch
+  id, batch_id, input_digest, base_graph_revision, knowledge_cutoff
+  upserts[], relations[], assessments[], question_updates[], closure_updates[]
+  aliases[], evidence_requests[], conflicts[], processed_card_ids[]
+
+EvidenceRequest
+  question_id, target_refs[], purpose, max_return_chars, stopping_condition
 
 Goal
   id, parent_goal_id?, revision, supersedes?
   objective, conditions[], origin_refs[], basis, inference?
   execution_scope {node_ids[], context_ids[], actor_ids[]}
   execution_state, goal_disposition, completion_claim, verification[], end_boundary
+  open_questions[], closure {claim_refs[], supported_conditions[], gaps[], disposition_refs[]}
 
 Attempt
   id, goal_id, approach, hypothesis?, expected_result?, predecessor_id?
@@ -276,25 +421,50 @@ Activity
 Relation
   id, source_id, target_id, kind, layer, basis, evidence_refs[], inference?
 
+RecordAssessment
+  id, member_refs[], processing_status, visible_state_refs[]
+  goal_links[] {goal_id, relation, expected_contribution, basis, evidence_refs[]}
+  contributions[] {goal_id, question_or_condition_id?, kind, delta, evidence_refs[]}
+  uptake_refs[], redundancy {status, prior_refs[], visibility_basis?, limitations[]}
+
+CriterionCoverage
+  criterion_id, revision, supporting_goal_ids[], supporting_refs[]
+  verification_refs[], gaps[]
+
+Skeleton
+  graph_revision, projection_version, granularity, coverage_ref
+  nodes[] {id, member_ids[], objective, key_delta, outcome_or_gap, retain_reason}
+  edges[] {source_id, target_id, kind, relation_ids[], evidence_refs[]}
+
+AnalysisCheckpoint
+  source_digest, versions, graph_revision, applied_patch_ids[], batch_cursor
+  goal_index_ref, frontier_refs[], pending_boundaries[], inspected_ranges[]
+  fact_ledger_ref, assignments_ref, evaluator_usage, reservations[], pending_requests[]
+
 CostAssignment
   cost_atom_id, owner {kind, id}, related_phase_ids[], related_goal_ids[]
   allocation_basis, uncertainty_reason?
 ```
 
 所有来源引用解析到固定 snapshot 下的原始 event/field/range，并保留 service seq、
-规范化 event ID、call ID 的映射（service 来源保留其 event_id）。不同来源的同名 call ID 不可直接合并。
+native event ID、call ID 的映射。不同来源的同名 call ID 不可直接合并。
 阶段可含不连续的 `member_refs`；`start..end` 只用于显示跨度，不定义其所有权。
 
 Goal ID 由分析作业分配并持久化，以源锚点支持重放；不能由可变中文标题散列生成。
 新一轮合并保留旧 ID 的 alias/supersedes 关系，graph revision 原子发布；历史 checkpoint
 仍可回看。独立重跑不承诺得到相同语义分段，跨结果比较使用有证据的目标匹配。
 
+EvidenceCard 不是模型摘要：facts 来自版本化解析器，excerpts 是原文摘取并带
+精确范围。卡片 ID、提取器版本及裁剪策略参与输入摘要和缓存键。GraphPatch
+只写增量，不复制完整图；分析器提出的新实体先用批内临时 ID，由宿主分配
+持久 ID。请求补证和语义冲突不是自动完成标志。
+
 ## 6. 成本模型与守恒
 
 ### 6.1 Cost atom：最小计量单位
 
-模型调用以 **trace 可辨识的请求 occurrence/attempt** 为单位；明确记录且可区分的 transport retry
-分别记账。provider/SDK 内部未记录的请求不能从相同输入或耗时中猜出，列入计量限制。转发/重复响应只计一次，无 usage 的失败调用保留未知，不能当作零成本。
+模型调用以已关联的 **物理请求 attempt** 为单位；稳定 call ID 下的 transport retry
+分别记录。转发/重复响应只计一次，无 usage 的失败调用保留未知，不能当作零成本。
 工具成本以实际 invocation 为单位。验证模型同样进入任务成本，不漏计，也不在根验收中重复计。
 
 计量来源优先级：provider usage、显式 duration、同源可比较的起止时间。
@@ -350,70 +520,228 @@ TTFT/TPS 保留为 call 明细与既有模型性能统计的入口，不作为�
 
 Deep Eval 自己的模型、工具读取和分析时间放在 `evaluator_usage`，不进入被评任务账本。
 
-## 7. 分析流水线
+## 7. 从关键提取到增量 skeleton
 
-### A. 固定快照并建立事实账本（确定性）
+当前实现采用 `goal-cards.2` / `goal-graph-rubric.2`：程序抽取小型证据卡，
+每批同时返回目标、稳定 stage、行动贡献、成果依赖、闭环和诊断。宿主生成
+occurrence ID，并将已提交图免费投影为 skeleton 与报告。不存在全量 outline、
+强制 loop 形状检查、等待 skeleton 完成的 action review，也不存在最后一次全文 synthesis。
 
-通过 SessionTrajectory 的固定来源、event_detail 恢复及 EvidenceStore 读取已注册证据，关联 model/tool 请求响应、验证、生命周期、context 及工作流事件，
-建立调用成本和原始证据索引。缺失 artifact、孤立结果、时间冲突保留在 coverage 中。
-不读取当前工作区来替代历史证据，不执行 trace 中的命令，不抓取历史 URL 的当前内容。
+以下小节描述目标协议；本次已接通的边界及尚未实现的高级能力见 §14。
+此前关于 62 张卡、旧 `goal-features/v4` 重放恢复的数字不属于当前 checkout 的
+验证结果，已从实施记录中移除。人工样例仍保留为产品验收目标。
 
-任何情况下，完整事实索引先于语义判断可用。只持有 index excerpt 不等于已审阅原文。
+采用“确定性全量索引、有界语义覆盖、局部补证”的方式。全量索引是程序遍历
+记录和建立引用，不是 LLM 读取所有原文；关键提取也不意味着只挑几段高成本
+记录，其他目标就不再分析。每个业务行动至少有一张卡片进入待处理清单。
 
-### B. 分块识别目标、尝试与阶段（LLM + 校验）
+```mermaid
+flowchart TD
+    source["固定 trace 快照"] --> extract["程序提取证据卡与成本账本"]
+    extract --> batch["新卡片 + 相关目标状态"]
+    batch --> analyze["LLM 分段判断"]
+    analyze --> patch["增量 GraphPatch"]
+    patch --> validate["程序校验并持久化"]
+    validate --> project["更新 skeleton 与报告"]
+    validate --> nextBatch{"仍有待分析卡片且预算足够"}
+    nextBatch -->|"是：只带必要状态"| batch
+    nextBatch -->|"否：完成或标明缺口"| finish["发布当前结果"]
+    analyze -->|"明确缺证且有配额"| read["按引用读取限定范围"]
+    read -->|"补充当前问题"| analyze
+    project --> view["全局图 / 子目标闭环 / 原始证据"]
+```
 
-按调用/结果绑定、明确 actor 与目标版本构造有界批次，长度由证据和模型预算决定；
-不按“每四个 calls”定义语义边界，不切断一个可完整容纳的调用及其返回。
-超长结果保留可分页原文引用和读取范围，摘要不能替代未读正文的证据。
+图中两种循环都受同一预算约束。每个已验证 patch 即可产生可浏览结果，不等到
+所有批次完成后再用一次大模型调用“生成最终 skeleton”。
 
-每批输入包括：根目标/条件、当前批次证据、相关未闭环目标、最近尝试、已支持结论、
-失败反馈、未解决问题与待合并边界。输出结构化 patch：继续哪个目标、新增哪次尝试、
-各 phase 对应哪些原文，以及哪些记录暂时不能分类。
+### 7.1 固定来源并建立事实索引（不调用 LLM）
 
-分析器的工作状态也不能只保留一段不断压缩的摘要：
+恢复注册 artifact，关联 model/tool 请求响应、验证、生命周期、context 及工作流
+事件，建立唯一调用身份、成本账本与原始证据索引。缺失 artifact、孤立结果、
+时间冲突保留在 coverage 中。源快照不变，内容读取受注册引用边界约束。
+不读取当前工作区代替历史证据，不执行 trace 命令，也不抓取历史 URL 的现状。
 
-- 完整实体、证据、边界决策、修订记录持久化，已验证 patch 不因摘要被覆盖。
-- prompt 中仅投影相关目标及开放问题；其余对象通过索引按需读取。
-- 批次边界携带少量重叠证据；相同 source IDs 幂等合并，不重复计费。
-- 挂起目标可以从持久化索引重新激活；不能只记“最近 N 个目标”。
-- 断续或并行的同一目标通过 scope/证据关联，不能按邻近位置强制合并。
-- 批次错误只拒绝非法 patch 部分；保留已通过校验的结果和失败原因，有界修正。
+对实际 `llm_request.messages` 建立内容指纹、角色、来源范围及 presented 映射。
+重复历史前缀只索引一次，保存它在哪些请求中出现、被裁剪或只剩引用；评估模型
+不接收这些历史前缀。请求有插入、重排或变更时按实际内容比较，不假定总是追加。
+工具输出、实际请求预览和 agent 后来的采用声明分别索引。
 
-每个事件得到处理记录：语义已分类、框架活动、已检查但无法分类、待分析或原文不可用。
-“已检查但无法分类”与预算不足导致的“未检查”必须区分。
+复用现有 `evidence_store.py` 的 source digest、event hash、field/range 校验与
+限长读取，以及 service 的作业恢复设施；不复用旧版固定 segment 作为目标边界。
+原始全文仍可本地查阅；本地索引读取量也计入 evaluator I/O，不能称为零成本。
 
-### C. 全局协调结构（确定性检查 + 有界语义复核）
+### 7.2 抽取小型证据卡（不先让 LLM 总结整个 trace）
 
-合并跨块同一目标，检查父子、attempt 边界、目标 revision 和 shared 归属。
-输入是实体索引与争议边界的原文，不把所有 trace 再塞进一次模型调用。
-协调过程分批到达固定点或预算上限；保留冲突集合，不能无限重新分段。
+按固定 schema 和版本化解析规则抽取以下卡片，字段带来源，不用模糊摘要取代
+原文。一个 model response 的正文和它发起的工具调用用 ID 关联，不在多个卡片
+中重复复制完整 response、arguments 和 result。
 
-根目标层面复核父目标与子目标的条件覆盖、各自完成声明和权威验证结果。
-完成完整索引扫描不自动意味着完整语义还原；协调未结束仍显示 provisional graph。
+| 来源 | 默认送入的关键信息 | 留在索引、按需读取 |
+|---|---|---|
+| 任务/契约 | 生效任务、条件 ID/要求、revision、约束 | 重复注入的 system prompt、背景长文 |
+| worker 响应 | 可见意图/总结原文、call ID、actor/scope | 隐藏推理不进入本设计；超长公开正文按范围分卡 |
+| 工具请求/结果 | 工具名、影响对象/参数、状态、错误、返回范围和结果引用 | 完整文件、长日志、重复包装和完整命令输出 |
+| 读取/搜索结果 | 路径、版本（有则取）、shown_lines、truncated、next_offset、命中位置、限定摘录 | 未读正文及无当前用途的匹配上下文 |
+| 写入/执行结果 | 可解析的变更/产物、退出状态、结果中相关事实及原句 | 其余日志；未知格式仍保留有界原文片段和遗漏标记 |
+| 请求可见性 | 对应 tool 消息是正文、预览还是引用，实际覆盖范围 | 重复 messages；有争议时取对应 message 字段 |
+| 验证/结束 | 条件结果、subject、protocol、候选/宿主裁决、限制 | 长评审原文，除非需要核对某条判断 |
+| usage/框架活动 | 确定性账本、计数、关联 ID | chunk、心跳、重复 trace 包装不发给语义模型 |
 
-### D. 分配成本并校验图（确定性）
+提取器不能把“没有匹配到成功字符串”当作失败，也不能把命令中的 `head`、
+`echo` 或外层 returncode 当作所有子操作的真实状态。解析不到的返回保留 unknown，
+并呈现相关片段、结构/大小及未覆盖范围。shell 多个子操作可拆事实片段，但
+保留单个 invocation 身份。不要为了省输入抹掉失败、重复动作或负结果。
 
-检查引用、所有权、包含无环、版本/subject、调用唯一身份及成本守恒。
-事实相邻边与语义因果边分开验证。非法引用不能进入正式节点；不能验证的语义关系
-进入 diagnostics，不使已建立的事实图消失。LLM 不得生成 usage 或 duration 数值。
+“关键”至少含意图变化、未决问题、失败反馈、完成声明、结果变化和验收锚点。
+关键词规则只提示候选边界；没有命中关键词的普通业务行动也有卡片，仍需归属。
+意图原文短则保留完整；长则分段并标记待处理范围，不能只截首尾后宣称已审阅。
+截取结果时保留问题命中位置及邻近上下文，并记录遗漏，避免只展示支持成功的内容。
 
-### E. 针对目标闭环诊断（可选择重点审查）
+本样本可先得到 **20 张 worker 意图卡 + 33 张工具行动卡 + 2 张验证卡**，另附
+根契约和事实账本。这 55 张是有来源关系的输入单元，不是 55 次模型调用；
+真正的卡片大小/补证量需测量。6180 条服务事件与 502 条 observation 不直接
+进入模型，也不通过增加一个“全 trace 摘要调用”绕过成本约束。
 
-基础结构识别覆盖整个可分析来源后，才将剩余预算用于高成本目标、失败循环及正常对照。
-支持在部分结构上提前显示局部诊断，但必须标注范围；不得宣称整个 run 已审查。
-旧版五维可作为专家详情或历史阅读内容，不作为新结果首页的五个主指标。
+### 7.3 动态分段：新证据 + 有界目标状态
 
-### 作业恢复与预算
+按可比较的 actor 顺序及显式因果关系处理卡片。批次优先在调用/结果完整、
+明显目标转换或阶段收尾处切分，但以序列化后的输入预算和预计 patch 大小为
+硬约束。一次调用绑定关系不被切断；超长正文分页，保留同一行动 ID 与缺口。
+token 边界是分析批次边界，不能据此创建新的 Goal/Attempt。
+异步结果跨窗口或尚未返回时保留 pending，并在同一行动 ID 上补回；不能为了
+绑定而拉入未来正文。检查结果如何呈现若需下一条请求，可先留待确认，再只
+补入相应 tool message 的映射，不提前引入下一次响应的判断。
 
-checkpoint 持久化：固定来源、版本、批次游标、已读取范围、实体 patch、开放目标、
-待协调项、cost assignments、已完成诊断、evaluator usage 和 graph revision。
-保存与发布原子化；取消后已发出的调用若晚返回，不得覆盖已取消作业。
+每批请求只有：
 
-恢复要求来源、schema、adapter、prompt、模型配置及语义设置一致，仅允许增加资源预算。
-增加预算不能从头重审已经完成的批次；中断在途调用可重新请求，其未报告 usage 保留未知。
-分析预算沿用显式 call/token/time 上限；新增阶段份额仅控制调度，不改变全局上限。
-先预留成本汇总与结构校验资源，再做可选诊断。默认配额需用样本校准，不能承诺固定
-24 次调用足以完整还原任意长 trace。
+```text
+固定指引与输出 schema + 根任务/当前生效条件
++ 本批新证据卡及引用（knowledge_cutoff 以内）
++ 相关目标：objective、条件、当前结论、开放问题、最近阶段 ID
++ 少量跨批边界引用和本批必须解决的冲突
+```
+
+完整图和历史结论存在持久状态中，不随每轮 prompt 增长。按 actor/scope、资源、
+条件和开放问题索引选择相关目标；候选过多时分批检索，超限保留待协调状态，
+不能因为旧目标没放进 prompt 就断定它不存在。已有挂起目标允许重新召回。
+继承摘要保留证据 ID、known/unknown 和时间界限，不反复总结再总结成无来源叙事。
+
+不向早期批次提供未来的执行结果或最终 acceptance 来评价当时行动。完整事实
+索引可预先存在，但 presented、known_before 和预期合理性按行动时刻裁定；
+事后价值与后续采用通过后来的 patch 补上。语义依赖与时间邻接分别存储。
+
+模型按第 4 节规则匹配/提出目标、逐行动判断贡献，输出 GraphPatch。每张业务
+卡要么获得分析/归属，要么明确 unknown、待补证或未处理，不能在摘要中消失。
+新目标不强制关闭旧目标；现有目标仍有未决项时允许转入尝试。
+
+### 7.4 每批提交 patch，立即更新 skeleton
+
+宿主依序执行：核对 input digest/base revision → 解析临时 ID → 校验源范围、
+时间可用性和关系端点 → 合并实体/贡献 → 更新问题与处置 → 分配唯一成本 →
+发布 graph revision、checkpoint 及 skeleton 投影。
+
+独立合法 patch 组可以提交；包含互相引用的变更作为一个原子组，不能只提交
+其中一半造成悬空边。冲突组进入待协调队列，已有事实图和其他合法组保持可用。
+补证、格式修正和语义合并都有次数上限；校验引用有效不等于证明语义判断正确。
+
+跨批重叠用 source ID/patch ID 幂等处理。被评 run 的调用成本不因重复引用增加；
+**评估器重复输入的 tokens 仍照计**，不能用语义去重掩盖分析成本。已有结论的
+修正通过版本/alias/来源保存，不让新摘要覆盖旧证据，也不把后来的知识写回过去。
+
+一次 patch 只更新受影响目标的阶段和投影，保留稳定节点 ID、用户选中状态与
+展开位置。尚未建立的部分显示待分析边界，不渲染为已结束。即使预算耗尽，
+最后一个已校验的 revision 仍可查看。
+
+### 7.5 按需补证、局部协调与诊断
+
+补证必须提出具体问题和限定范围，例如：
+
+- “E237 是否真的返回完整文件”：读 result 的分页字段及对应 E256 tool message。
+- “E1759 与 E3135 是否同一错误定位”：核对两个 action 参数、返回和中间相关证据。
+- “E3525 是否支持指定文件入库”：查看输出范围，再连接 E3743 的目标 URI 证据。
+
+EvidenceRequest 记录 question、refs、用途、返回上限与停止条件。优先使用已读
+片段/解析事实；仍不足才增量读取。一次返回仍截断时，下一次只请求未读范围。
+同一问题/范围的无增量请求不继续循环；出现新矛盾才可有记录地重新打开。
+缓存本地读取节省 I/O，不意味着重发给 LLM 的内容免 tokens。
+
+按需补证的语义调用只携带当前问题、相关目标状态和新增证据，不重发整批原文。
+基础目标归属或闭环正确性必需的补证优先于可选诊断；不足时保留 unknown。
+所有业务卡都有处理结果之后，再把剩余预算用于高成本、反复失败、未决闭环
+及正常对照。支持显示较早得到的局部诊断，但必须标注审查范围。
+
+全局协调先用程序检查父子无环、引用、subject、条件覆盖、唯一归属、成本守恒
+和 skeleton 的锚点保留。只有歧义边界送 LLM 局部复核，不再把全 trace、完整
+大图或所有批次摘要塞进一次 synthesis。达到稳定点或预算上限即停止，保留
+争议；图的 overview 可以完整，而个别归属/诊断仍为 provisional。
+
+### 7.6 用 run_40b063 演示逐步建图
+
+以下五个窗口是设计演示，不是已测定批次，也不要求固定按 round 数切分。
+实际序列化若超过限制须继续拆分，目标身份仍连续；补证算额外调用。
+
+| 窗口 | 新证据 | 主要 patch | 此时可展示的 skeleton |
+|---|---|---|---|
+| B1 | R1–R3；README 读取和请求可见性事实 | 建 G1；记录捕获重叠、正常续页、预览限制 | 初步调研，目标仍开放 |
+| B2 | R4–R8 | 引入 G2；保留失败搜索 → 改变定位方法；记 dispatch/目标文件信息 | G1 调研 → G2 调查，尚无入库事实 |
+| B3 | R9–R15 | 继续 G2，不建一串新目标；补 G1 finding；记录开放问题/重复调查候选 | 展开 G2 可见持续调查及部分问题解决 |
+| B4 | R16–R18 | 建 G3/G4；连接索引、目标 URI、搜索与 get；补 G2 问题的结果采用 | 方法 → 入库 → 检索，标出范围扩大和证据增强 |
+| B5 | R19–R20、两个 verifier 及宿主裁决 | 结论整合、候选汇合、条件结果与根闭环 | 完整主线；未充分诊断处继续标明限制 |
+
+B3 不预知 B4 会索引 118 个文件；B4 才能补充执行结果与事后采用。B5 验收通过
+不能倒推出 B1–B3 的全部调查必要。每个窗口均发布有效局部图，不需要最后
+重读 B1–B4 才拼接主线。样例图见 [报告图形版](./deep-eval-run-40b063-skeleton.md#31-全局关系图)。
+
+### 7.7 分析预算、调度与恢复
+
+现有 `behavior_v3/review.py` 已有 call/token/time、单次超时、prompt/evidence chars
+和 read rounds 等限制；新引擎复用这些约束的执行思想，另定义输入卡、状态投影
+和 patch 的限额。旧默认值不自动成为新引擎的有效性或经济性承诺。
+
+| 层次 | 限制/记账 | 超限行为 |
+|---|---|---|
+| 作业 | 所有物理模型请求次数、输入+输出 tokens、累计运行时间 | 停止发新请求，保存 partial 及待处理项 |
+| 单请求 | 含指引/schema/状态/证据的总输入、输出上限、超时 | 拆批或缩小补证，不静默丢语义行动 |
+| 工作状态 | 相关目标/边界的输入份额 | 按需检索与分批处理，不传完整历史图 |
+| 证据读取 | 总返回字符数、每问题/批次补证次数、重复范围 | 未解决保留 unknown，禁止无限读原文 |
+| 修正/协调 | 每 patch 修正次数、争议集合的轮次 | 留下冲突，不无限重新分段 |
+| 本地过程 | 索引 I/O、缓存、布局/导出时间与资源上限 | 显示来源/分析缺口，不能把缺失记为无关 |
+
+调度顺序是：保留确定性校验/发布资源 → 推进未处理业务卡 → 解决阻塞基础结构
+的证据缺口 → 协调边界 → 可选诊断。预留少量模型修正份额只是调度措施，仍
+包含在全局上限内；预算不够时减少诊断深度，而不是默默跳过普通行动。
+
+每次发请求前预留完整输入和最大输出；输入按模型适配器的计量或明确标记的
+保守估算计算，不能把字符数冒充精确 tokens。需要硬 token 保证但无法可靠计量
+时不发送该请求。provider usage 返回后对账；未知 usage 保留 reservation 和
+unknown，不能释放成零。transport retry、补证后的再次判断、修正及恢复重发
+都算新的评估请求，必须经过同一 admission；超时/取消的晚返回只补记 usage，
+不改写已取消图。重叠输入和 cached tokens 也记录，是否便宜取决于实际计费。
+
+以小样本试验可采用以下**待验证配额**，不是生产默认或实测消耗：单请求最多
+6k 输入 / 2k 输出；5 次扫描 + 最多 2 次局部补证/协调 + 1 次修正，总请求最多
+8 次、总 tokens 最多 64k，另设时间上限。全部输入开销均包含在 6k 内，输出
+也包含 provider 计入的 reasoning；如发生拆批、重试或补证超额，只能在同一
+总配额中重新调度，必要时返回 partial，不能承诺该配额足以复现报告。
+
+成本模型按实际请求记账：
+
+```text
+分析 tokens = Σ(固定指引 + 根条件 + 状态投影 + 本批卡片/补证 + 本次输出)
+              覆盖 scan、read-review、reconcile、repair、retry
+```
+
+单批与状态投影有界，扫描输入随卡片数量近似线性增长；重新发送累计历史会
+造成重复输入随批次增长。这里是模型输入的设计约束，不是整体耗时复杂度承诺。
+不假定缓存命中，也不以摘要更短代替对质量的验证。默认文字报告和图的生成
+为确定性投影，没有末尾必需的大模型写作费。
+
+checkpoint 保存 source/版本、游标、已提交 patch、完整实体索引、开放问题、
+已呈现/已读取范围、待协调项、账本、usage/reservations 和 graph revision。
+保存/发布原子化；来源、schema、提取器、prompt、模型与语义设置相同时可恢复，
+只增加资源预算不重跑已完成批次。不同设置是新分析，不能静默复用语义结果。
+确定性卡片按 source + extractor version 缓存；已提交语义 patch 按完整输入
+身份复用。中断在途调用可能重发，其未知或重复成本如实保留。
 
 ## 8. 覆盖率、诊断与指标
 
@@ -424,12 +752,21 @@ checkpoint 持久化：固定来源、版本、批次游标、已读取范围、
    同时给出已知 tokens 的归属覆盖，分母仅限有 usage 的调用。
 3. **诊断范围**：已诊断目标和证据窗口；未诊断不等于有效执行。
 
+语义处理范围进一步展示“卡片已审阅 / 原文范围已展开”的区别。程序完成字段
+提取不能记作模型已审阅，模型看过 preview 不能记作全文审阅。概览主线可用、
+根验收记录已定位与所有诊断充分，是不同的完成程度。
+
 图统计必须与 graph revision 绑定。层级可能随识别修正，不能以暂时的目标数量作为
 全 run 覆盖率分母。所有 calls 完成处理仍可能存在 unknown，不能称为完整语义解释。
 
 首版目标指标：时间跨度、模型/工具累计耗时、输入/输出 tokens、调用次数、
 语义尝试数、验证轮次、声明完成和已验证条件。条件总数未知时不显示虚假完成百分比。
 不使用“有效 token 比例”“浪费率”“可节省时间”等缺乏可靠分母的指标。
+
+另设**本次分析成本**，与被评任务成本并列但不相加：按 scan、补证判断、协调、
+修正/重试列出实际请求数、输入/输出/缓存 tokens、耗时与未知 usage；同时显示
+本地读取量、已完成批次和剩余预算。token 占被评 run 的比例可以作为实测比较，
+不能作为跨任务质量分数；货币费用仅在有可靠版本化价格时展示。
 
 诊断对象包括：重复调查、结论被重新打开、已有证据未被采用、失败反馈未改变行动、
 没有可观察进展的长区间、过早完成声明、疑似过度验证、交接断裂、协议/环境阻断。
@@ -444,19 +781,81 @@ checkpoint 持久化：固定来源、版本、批次游标、已读取范围、
 仅缺少 memory_update 或公开结论，不能证明没有进展。首次具备支持证据至最终提交
 的区间可以呈现为“证据出现后的后续成本”，但不能叫“无效成本”。
 
+冗余诊断应给出局部替代路径及其当时前提，例如“已定位 dispatch 后，围绕
+collectionAdd 的未决问题定向读取”，不能只写“少调用工具”。明确区分重复取证、
+同一问题反复打开、无条件依据的探索扩张、验收范围外的额外工作，以及信息未
+进入上下文造成的重新取证。没有能保留目标证据链的替代方案时，不宣称可删除。
+额外验证可能提高证据清晰度；实际价值和是否为任务所必需分别呈现。
+
 ## 9. 页面与导出
 
-新 **Reasoning efficiency** 主视图（语义结果由 Deep evaluation 作业产生）：
+### 9.1 默认结果是关系图，报告作为同源视图
+
+新 Deep Eval 默认回答“用什么思路解决、哪里取得进展、怎么闭环”，由三层
+交互逐步展开；[样例全局图与 G2 详情](./deep-eval-run-40b063-skeleton.md#31-全局关系图)
+作为首个展示验收对象。图形节点来自持久语义对象，不靠另一轮 LLM 排版建图。
 
 1. 顶部：根目标、实际执行状态、验收状态、任务成本、来源/语义/诊断覆盖。
 2. 左侧目标树：目标说明、闭环状态、时间跨度、inclusive usage/累计调用耗时、尝试次数；搜索和按成本排序。
-3. 主区：当前目标的 attempt 与阶段图，默认折叠子目标，可切换实际时间轴。
-4. 详情：目的、具体动作与观察、信息增量、剩余问题、验证依据、自身/共享成本和原始引用。
+3. 主区：默认显示整个 run 的执行 skeleton；展开目标进入 attempt/阶段及逐记录
+   贡献，可切换实际时间轴。首页回答思路与关键转折，工具明细留在展开层。
+4. 详情：子目标闭环、具体动作与观察、信息增量、剩余问题、验证依据、自身/共享成本和原始引用。
 5. 诊断区：点一条发现高亮涉及节点，保留其他正常执行作为上下文。
 
-Deep evaluation 保留模型/预算、运行/恢复、历史、结构识别/协调/诊断进度与覆盖信息，并提供跳转目标图的入口；不再在两个 tab 重复完整图。Trace analysis 保持客观事实与 Call explorer。新 schema 的默认内容以目标结构与诊断为主，旧五维 dashboard 只用于旧结果或专家详情。
+图与报告可切换；报告按第 1.1 节的来源、目标、过程、逐记录贡献、证据可见性、
+闭环、效率与验收组织。节点标题和短结论来自已校验的语义字段，长表/统计/引用
+由程序拼装。两者必须显示同一个 graph revision 与 partial 状态。
 
-时间轴有明确 actor/lane 记录时按其展示并发；旧 trace 按可用调用绑定显示，缺失 lane 不造角色。context/node ID 是可选覆盖层，不决定目标分区。
+### 9.2 第一层：全局 skeleton
+
+一个节点只呈现：**目标/问题、关键变化、结果或未决项**，附行动数量与唯一
+成本入口。不能只有“调查”“执行”这种无业务信息的阶段名。目标初始条件和
+根验收终点使用同一个 Goal 的不同出现位置；闭环通过条件被证据满足表达，
+不要求画一根返回起点的箭头。
+
+| 图元素 | 用户能读到的语义 | 交互 |
+|---|---|---|
+| 阶段卡片 | 如“确定入库方法：已定位 collectionAdd；立即索引仍待证” | 点开所属目标的局部过程 |
+| 成果依赖实线 | 边上标明所传递的结果，如“可用命令”“目标 URI” | 显示来源、依据与推断限制 |
+| 前向反馈边 | 失败/新证据如何推动后一次调查或方案修订 | 定位失败和后续变化两端 |
+| 关联虚线 | 目标归属、诊断涉及范围或事后支持；不等于因果 | 显示具体 relation kind，不混用 |
+| 验收汇合 | 哪些成果/条件被哪个 verifier 评价、宿主如何裁决 | 展开条件、subject 与依据 |
+| 警示/缺口标记 | 反复调查、范围扩大、未知归属或来源缺失 | 高亮受影响片段，保留正常上下文 |
+
+时间先后默认通过布局和时间标签表达；需要时单独开启顺序边，不能把所有
+相邻调用连成“因果链”。图例明确实线/虚线与文字状态；颜色只是辅助，绿色
+只标已有支持/通过的具体对象，不因根 accepted 就把所有阶段染绿。
+
+### 9.3 第二层：子目标闭环与开放问题
+
+点击 G2 的方法调查节点，应看见“目标和问题 → 调查/行动 → 观察增量 →
+判断/总结 → 已支持条件与剩余问题”，以及失败后继续的阶段出现。
+所有环节都来自记录：缺总结显示未观察到，缺证据显示未支持，没有验收则
+保留 unknown。不能为统一画六格而生成并未发生的阶段。
+
+在本例中应能一眼读出：命令注册搜索失败后改用 parseArgs；多次声称理解后
+仍调查 index；E3126 仍有两个问题；DEFAULT_GLOB 先有证据，“立即索引”到
+E3525 才获执行支持并在 E3736 被采用。这个跨目标的结果反馈链接到 G3 的
+同一操作，不复制成本，也不把 G2 错画成进入 G3 前就已全部闭环。
+
+局部详情同时显示声明状态、证据状态、结束处置和对父目标的贡献；它们可以
+不一致。循环在 occurrence 图中展开为后续节点，目标概览可折叠成带次数的
+反馈关系。支持分别查看“当前保留结论”和“它是怎样逐步形成的”。
+
+### 9.4 第三层：行动与证据对照
+
+点击一条贡献、反馈或诊断，打开对应的请求/结果和当时模型可见消息。README
+案例须能并列看到捕获的 1–400 行、next_offset=401 和请求里的 preview/ref。
+显示分析器具体审阅了哪些范围；未展开正文保持标记，不把高亮片段冒充全文。
+点击根验收可分别查看两个 verifier 的 subject，以及 TaskLoop 的最终决策。
+
+普通展开读取已注册原文和已保存分析，不触发评估模型；若用户显式请求继续
+未完成分析，才通过现有作业预算/恢复入口处理。诊断里“需要更多证据”只是
+待办标记，不让前端浏览行为自动消耗模型预算。
+
+### 9.5 渐进展示、时间轴与导出
+
+时间轴按 actor/lane 展示并发，context/node ID 是可选覆盖层，不决定目标分区。
 展开阶段可跳转 round、工具明细和 Call explorer；一次调用出现在多个语义节点时，
 明确标记共享归属。父级花费和自身花费切换，不把两个值相加。
 
@@ -464,58 +863,107 @@ Deep evaluation 保留模型/预算、运行/恢复、历史、结构识别/协�
 刷新 partial 结果保留选中目标、展开状态和 viewport，通过 ID alias 处理合并后的节点。
 无语义结果时显示事实时间轴及“待分析”，不显示空的成功闭环。
 
+每批发布后显示新增/修订的节点和待处理范围；已发布的局部结论可为 provisional，
+重新协调时保留变化依据。全图过大时按根条件/目标加载，不把整个模型状态
+作为前端布局输入；局部节点可在不再分析语义的情况下展开。
+
 导出版本化 JSON（事实引用、语义图、账本、覆盖和诊断）及可分享的静态图/摘要。
 静态导出显示 source digest、分析版本、时区及 partial 状态；不是完整证据包时明确标识。
 UI 对 trace 文本转义，不执行其中的指令或 HTML；证据读取沿用服务权限与注册 artifact 边界。
 
-## 10. 以现有夹具校验解释能力
+## 10. 真实样本的预期解释
 
-当前仓库没有原稿引用的 run-2325-continuous-context-performance-audit.md，也没有可核对的该三 run 审计材料。因此移除“v0.4 审计已支持”的结论及其耗时／调用量定量陈述，不将未经核实的样例当成本项目已验证事实。本轮未运行真实 session 的新语义分析。
+### 10.1 run_40b063：没有显式 plan 时还原实际思路
 
-先以现有代码夹具明确新图应解释什么；这些是模拟/真实形状回归，不能冒称新分析器的真实运行效果：
+2026-10-19 已只读核对 `run_40b06318903e426c80c76142595c5f5d` 的原始服务事件及
+注册 artifact。完整人工样例、20 次 worker 响应和 33 次工具调用的归属表、
+README 可见性和最终验收引用见 [样例记录](./deep-eval-run-40b063-skeleton.md)。
+这是设计校准样例，不是新分析引擎已经实现的输出。
 
-| 现有证据 | 目前已验证的行为 | 新目标闭环图应增加的解释 |
+默认 skeleton 的主线可以压缩为：
+
+```text
+G1 了解功能：README / 源码 → 功能认识 → 最终功能说明
+G2 确定入库方法：CLI / collection 调查 → 可用方案
+   [展开保留：多次追查 index dispatch；未决问题；信息只以预览呈现]
+G3 入库：采用 collection add → pxft 下 118 个文件被索引（范围扩大）
+G4 验证检索：目标 URI + BM25 命中 → 定向搜索 / get 增强证据
+整合提交：功能说明 + 入库 / 检索证据 → finish 候选
+根验收：response review + 三条件 rubric → TaskLoop accepted
+```
+
+这里 G1 的成果支持功能说明，也使能 G2；G2 的成果支持 G3；G3 的目标 URI
+和目标文件特征支持 G4；G1/G3/G4 在候选中汇合。表中顺序不表示 agent 一开始
+提交过这一 plan。G2 内多次“理解 index/collection”大多是同一问题的细化/延续，
+不应每次建立新目标以隐藏调查反复。
+
+三个关键校准点：
+
+- README 实际是 `head -200`、`read_file 1–400`、续读 `401–947`。前两次
+  捕获范围重叠；第三次是正常分页。三个结果在后续请求里均为预览 + result ref，
+  没有 result_read；不能声称完整 README 已呈现或全部重读没有价值。
+- `collection add` 前反复调查是主要候选审查区间，但包含有效参数、运行能力
+  和前置条件信息；不能将整个区间都标为冗余。已有 pxft-arch collection 和
+  本次新增 118 个文档也要保留，根验收通过不自动证明范围最小。
+- 第二次 BM25 与 get 有明确的证据增强目的；不等于新的检索目标。两个 verifier
+  都是对候选及记录的审阅，通过不能表述为独立重放命令或测试了向量检索。
+
+### 10.2 run_2325：已有证据之后的后续成本
+
+参考 [v0.4 三 run 审计](./run-2325-continuous-context-performance-audit.md)。以下是已有
+人工审计支持的设计示例，不是新分析器的运行结果；正式图仍须映射到原始引用。
+
+`run_2325ec26ca6d445cab95104251f34495` 的“目标文档入库”可以展开为：
+
+| 过程 | 已有审计观察 | 新图需要回答的问题 |
 |---|---|---|
-| tests/evaluation/test_reasoning_graph.py 的 rejected completion / real-shape final statements 用例 | complete_node 被拒后改用 finish；记录验收、报告、终点与连续 flow | 业务目标是否已经满足，随后是框架提交修复还是业务再调查；提交成本单独归类 |
-| 同文件的 parallel_tool_branches、goal_revision、truncated_trace 用例 | 并发工具兄弟关系、目标替换边界、截断轨迹开放终点 | 活动可跨 round 但不误跨目标版本；缺失过程不补成成功闭环 |
-| tests/evaluation/test_reasoning_process.py 的 retrospective support / strict adoption lag / imported evidence 用例 | 事后支持不前移采用时间；严格采用需身份；跨目标引用不复制旧读取成本 | 区分取证、形成判断、采用、再次使用，展示成本及依据 |
-| 同文件的 assertion_time、root-cause verification、cross-segment 用例 | 声明时间与证据时间区分；普通 acceptance pass 不冒充根因验证 | 语义 attempt、反馈阶段和验证 subject 的关系 |
-| tests/evaluation/test_behavior_observations.py、test_base_metrics.py | 重复观察及客观统计的既有覆盖 | 将重复/耗时信号映射到目标与尝试，再判断是否存在合理替代解释 |
+| 调查已有状态 | 确认两个路径为同一物理路径；`qmd get` 可取回目标文档 | 哪些条件已有支持，模型当时是否承认 |
+| 继续选择方案 | 公开响应认为已入库，仍围绕“执行添加”调查 refresh/update | 目标状态与计划动作要求是否冲突 |
+| 执行尝试 | 重复添加返回 already exists | 是否提供了新信息，反馈如何影响下一步 |
+| 后续尝试 | 删除 collection 后重新添加 | 是必要修复还是动作要求导致的额外工作；保留替代解释 |
+| 验证与结论 | 验证成功后又进行相似验证并完成节点 | 新验证检查什么；是否存在已有证据后的重复确认 |
 
-可进一步加入“文档本来已入库，agent 仍反复 add/verify”的明确合成夹具：记录初始检索成功、公开承认已有状态、重复操作及最终提交。它是需要新增的测试场景，不沿用未经核实的 run ID 或时间。正式真实样本另保存 source digest、snapshot cursor、run_id、精确引用、人工标注和配置；成本直接从当前账本重算。
+该节点审计跨度约 743 秒，15 次模型调用、累计约 640.909 秒；shell 自报累计仅
+8.184 秒。这些数字描述已有执行节点，不直接等于新识别出的某个语义 loop 成本。
+图拆分以后须重新按调用归属，不能把这 743 秒全标为某次调查或可节省时间。
 
-比较不同执行模式时按业务目标对齐，同时记录任务描述、验收、模型配置、初始 workspace/知识库状态和软件版本。当前仓库尚未实现拟议的持续 Context DAG，不能把它写成现有基线或宣称已经得到因果收益。
+与 checklist、旧 DAG 对比时按“了解工具、入库、检索验证”等业务目标对齐，
+展示不同尝试/阶段及其成本。任务描述、验收、模型配置、知识库初始状态、软件版本
+和测试范围必须并列记录；本例不是严格控制变量实验，不能宣称已验证某框架的因果优势。
 
 ## 11. 实施边界与迁移
 
-建议新增 `src/loom/evaluation/goal_loops/`，职责分为 contracts、facts_adapter、segmentation、
-reconciliation、costs、diagnostics、review、projection；具体拆文件按实施复杂度决定。
-依赖现有 trace_analysis、evaluation 事实/证据与 LLM 边界；评估器不进入 runtime engine、agent 执行或 DAG scheduler。CLI 接口如需开放，沿 evaluation/analyze.py 和现有离线 artifact 路径接入。
+实现位于 `src/loom/evaluation/goal_loops/`，实际模块分工见 §2、§14。
+复用高层事实/证据接口、现有结构化协议及 JSON Schema 校验；不把评估逻辑放入
+kernel、agent 或 DAG scheduler。
+确定性卡片/可见性索引归事实适配层，图 patch 与预算 admission 归 review，
+图和文字报告共用 projection；不新增一个独立的“最终报告 LLM”模块。
 
-SessionTrajectory 继续提供固定事实快照和原文入口，SessionSemantic 管理作业。后者目前只有 analysis_version=v2/v3，实施时增加显式的新版本/engine 标识（例如 goal_loops_v1），分派到新的分析器，不能伪装为旧 v3。新 schema、prompt、adapter、语义设置、模型配置及来源摘要
+service 继续管理作业与持久化，通过显式 engine/schema 分派：旧 `v2`、`v3`、`goal_loops_v1` 与
+新 `goal_graph_v1` 并存。新 schema、prompt、adapter、语义设置、模型配置及来源摘要
 共同参与身份和缓存键；旧 checkpoint 不喂给新引擎。前端根据 schema 选择 renderer。
 
-HTTP 接入沿用 `src/loom/service/api.py` 的 session trajectory/evaluation 路由，更新 evaluation options 的白名单、run 身份校验、options/defaults/bounds、作业进度和结果分派。前端同时更新 `views/evaluation.mjs` 的版本选择、请求 payload、resume 比较和 renderer 分派，以及 `views/trajectory.mjs` 的结果回调。不能只在下拉框新增选项：当前这些位置都存在 v2/v3 特定判断。
+旧结果保留原样，旧 resume 由旧引擎处理。若未来移除旧执行引擎，需明确关闭恢复并
+保留只读结果，不能自动重跑成新评价。新分析创建新历史项，不改写旧验收与分析。
 
-旧结果及 schema reader 保留。旧 resume 仅在原 analyzer/prompt/配置身份兼容且对应引擎仍可用时继续；这沿用当前严格校验。未来若移除旧执行实现或不兼容，明确标记不可恢复，保留只读结果，不能自动重跑成新评价。新分析创建新历史项，不改写旧验收与分析。
-
-Reasoning efficiency 仍不发起评估模型调用：有兼容的新 Deep Eval 时复用其图和账本；
+Efficient Eval 仍不发起评估模型调用：有兼容的新 Deep Eval 时复用其图和账本；
 没有时显示事实过程，明确未做语义识别。新旧图不能混合假装来源于同一分析。
-当前 behavior.evaluation_payload 会调用 evolution/behavior.py 的 proposals_from_behavior；新 bundle 不能直接走这个旧契约函数。新诊断到 Evolve proposals 的映射另行定义和验证，未实现时不生成可应用 proposal。
+旧版 evolution proposals 不从新语义诊断自动生成或应用；后续映射需独立定义和验证。
 
-实现步骤（完成记录见第 13 节及独立实施计划）：
+实施分解（本轮实现和验证进度见 §14）：
 
 | 步骤 | 交付 | 本步验收 |
 |---|---|---|
-| S1 事实与契约 | schema、现有 source/run view 适配、精确证据引用、版本身份 | 原始调用/usage 对账；错误引用和跨 scope ID 不被接受 |
-| S2 目标结构 | Goal/Attempt/Phase 提取、跨批持久状态、合并 | 同目标跨 round/node/context 不丢；缺阶段和未知边界不被补造 |
+| S1 事实与契约 | schema、证据卡、原生适配、可见性索引、账本 | 20+33+2 样例卡可核对，未处理原文不冒充已审阅；无需 LLM 预摘要 |
+| S2 增量建图 | 有界批次/状态、GraphPatch、目标/贡献、按需补证及预算 | 每批发布可用图；跨批目标不丢；输入/输出、修正和重试均受控 |
 | S3 成本 | atom、唯一归属、shared/unassigned、父子汇总 | 所有已知可加字段守恒；重叠时间及未知明确呈现 |
-| S4 作业接入 | SessionSemantic 新 engine/run 范围、checkpoint、partial、取消、resume 与阶段进度 | 已保存批次复用；旧结果可读，兼容身份下恢复；范围不串账 |
-| S5 图展示 | ReasoningView 新 schema 分派、目标树/阶段图、时间轴、详情；EvaluationView 作业联动与导出 | 可从诊断追到原文；共享不重复、折叠不隐藏缺失 |
-| S6 诊断与对照 | 有引用的发现、已登记样本的业务目标对齐 | 人工审阅有效性和覆盖；不把相关成本宣称为节省 |
+| S4 作业接入 | checkpoint、partial、取消、resume、版本分派 | 中断恢复不重算已完成批次；旧结果仍可读/可恢复 |
+| S5 图与报告 | 全局 skeleton、子目标闭环、证据对照、模板报告与导出 | 图/报告同源；展开不调用模型；关键转折/失败不丢、投影无环 |
+| S6 质量与成本校准 | 以 40b063 报告验收、局部诊断、其他任务及三 run 对照 | 同时达到解释质量和预算约束；发布实际消耗及缺口，不宣称未测节省 |
 
-先达到 S1–S5 的可用结构与成本展示，再将 S6 作为解释层；不能只换指标名称而沿用
-旧抽样 segment 当作目标。新默认入口切换以验证结果为条件，不以文件写完为条件。
+按 S1–S5 形成一个可增量浏览的纵向切片，先用样例校准，再扩展任务类型。基础
+贡献/开放问题不能推迟成可选诊断；S6 深化解释并验证其质量与成本。不能只换
+指标名称而沿用旧抽样 segment 当作目标。默认入口切换以验证结果为条件。
 
 ## 12. 验收与待校准项
 
@@ -529,8 +977,48 @@ Reasoning efficiency 仍不发起评估模型调用：有兼容的新 Deep Eval 
 - 缺 usage、缺 artifact、孤立工具结果、超长截断、取消中的模型调用均不填零或补成功。
 - 顺序分块、不同批次大小、恢复重放不改变事实账本；已完成语义 patch 幂等。
 - 不强制六阶段齐全；自动 transport retry 不增加语义 attempt；没有笔记不自动判定停滞。
-- 旧 v2/v3 保存结果可读，匹配身份的旧 resume 可用，无 Deep 时 Reasoning efficiency 继续显示事实过程。
-- run view 只记选定 run 的成本，跨 run 背景仅作为引用；原 L 行号/session seq/source digest 映射不改变。
+- 旧 v3 保存结果、旧 resume、无 Deep 结果的 Efficient Eval 保持兼容。
+- 原始结果、请求中预览和 result_read 可见范围分开；引用可访问不等于正文已呈现。
+- skeleton 展开能找回全部已归属行动；关键变化、失败、未知和验收边界不因压缩丢失。
+- 目标细化不自动增加新 Goal；新目标不自动关闭旧目标；折叠交错目标不制造 DAG 环。
+- 根条件覆盖与子目标完成分开；两种 verifier 的 subject 和审阅方法不被合并改写。
+- 证据卡包含所有业务行动的身份和待处理状态；省略正文有范围记录，不因提取而计作语义已审阅。
+- 每批输入中没有完整 trace、重复 messages 或累计完整图；超限自适应拆批，不以批次作为目标边界。
+- GraphPatch 重放幂等，关联变更原子提交；中断后继续未完成项，不重新分析已提交批次。
+- 补证、修正、重试、恢复重发均占预算；usage 缺失保留 reservation，触顶不再请求模型。
+- 每批均可投影局部图；图/报告/导出同 revision，浏览和模板生成不触发评估调用。
+
+### 以目标报告验收图形结果
+
+第一份可用结果必须能从图中回答以下问题；目标措辞与节点数量可以不同：
+
+| 必须可解释的事实/关系 | 图中验收动作 |
+|---|---|
+| direct 推进，没有提交结构化 plan | 查看根卡和目标引入依据，不能出现虚构的初始 plan |
+| README 正常续页与预览限制 | 从调研节点展开到范围/可见性对照，不能判 401 续页为重读 |
+| G2 多次陈述仍有相同未决问题 | 展开 S2，看到连续目标及反复调查，没有制造多次成功闭环 |
+| 搜索失败促使调整方法 | 从失败结果追到后续响应/定位方法，保留反馈边 |
+| G2 的机制问题由 G3 执行反馈消除 | 从开放问题追到 E3525/E3736，同一 action 不重复计费 |
+| 单文件任务出现 118 文档索引 | 图上保留范围差异，不因 accepted 隐藏，也不夸大成已证明无用 |
+| 第二次搜索/get 是证据增强 | 同一 G4 内显示实际增量；get 不计作第三次搜索 |
+| 两个评审到宿主 accepted 的链 | 查看条件、两个 subject 与最终裁决；不称命令已独立复验 |
+
+报告投影还应提供 20 次 worker 响应、33 次工具行动的逐条追溯；正常执行也
+可以展开，不能只展示异常。样例图不是要求强制一致的人工标签，而是这些
+可检查关系的展示规格。没有足够预算完成时，不能宣称已达到该报告质量。
+
+### 分析成本验收与校准
+
+先用 mock provider 检查输入封包、预算 admission、补证限制和恢复，不调用真实
+模型来验证计数机制。真实质量校准使用固定来源与同一模型配置，记录各阶段
+实际 input/output tokens、请求数、延迟、本地读取量、重复输入量及覆盖缺口。
+不以被评 run 的 tokens 直接推算评估消耗，也不靠缓存假设计算节省。
+
+对比不同卡片/状态预算和分段策略时同时报告：关键关系与诊断的人工核对结果、
+未处理/unknown 范围和实际成本。降低 tokens 但漏掉 README 可见性或 G2 的
+未决项，不算优化成功。可离线计算全量输入的大小作为参照，不为做对照而把
+全 trace 发给模型。最终默认预算在这个样本及更长/交错/不完整样本上校准，
+第 7.7 节的 8 次/64k 只是试验上限，不是发布标准或已验证性能。
 
 ### 语义质量验证
 
@@ -541,6 +1029,11 @@ Reasoning efficiency 仍不发起评估模型调用：有兼容的新 Deep Eval 
 验收重点：关键目标是否遗漏、不同目标是否误合并、同一目标是否无依据碎片化、验证是否
 错归 subject、失败反馈是否正确连接、每条重要语义判断是否被引用内容支持。
 同时测评估调用数、时间、token 和恢复成本，避免分析器自身反复全量阅读。
+
+以 run_40b063 建立首组人工对照：正常续页不判重读；预览不判全文已知；同一
+index 问题多次表述不判多次完成；失败搜索能有排除假设价值；第二次搜索有
+增量但非必需条件；118 文件的范围扩大不被验收通过掩盖。对照标注允许保留
+“是否冗余未知”，并检查不看原始全量日志的读者能否从 skeleton 解释实际思路。
 
 先用合成/脱敏 fixture 和 mock evaluator 验证机制；真实 run 的语义效果另做明确记录的
 离线分析。不能用结构测试通过代替模型质量结论，也不在测试中重放 QMD 删除/添加等业务动作。
@@ -555,403 +1048,323 @@ Reasoning efficiency 仍不发起评估模型调用：有兼容的新 Deep Eval 
 - 使用唯一成本归属和 shared bucket；拒绝无计量依据的阶段 token 均摊。
 - 分开声明完成、实际执行状态和权威验证；接受不闭环、失败闭环和未知状态。
 - 保留公开证据与判断的区分；不推测隐藏推理，不把引用校验当作语义正确性证明。
+- 将意图、相关性、贡献、采用和必要性分开；效率判断以行动当时的证据可见性为前提。
+- skeleton 从可追溯语义图压缩，保留关键转折、低进展区间及根验收，不美化成理想路径。
+- 以 40b063 报告为产品验收目标，默认交付可展开关系图，文字报告由同一语义图投影。
+- 确定性关键提取、有界分段、持久状态和图 patch 逐步建图；补证局部化，不设全量 synthesis。
+- 分析成本独立计量；基础结构覆盖优先，预算触顶交付明确 partial，不靠无限补证追求完整。
 - 新版本并存迁移；不改 checklist baseline、DAG 执行行为或历史分析结果。
 
+## 14. 首版实现与验证记录
 
-## 14. 实现与使用（2026-10-17）
+### 14.1 接入与版本
 
-### 入口与兼容
+本次新增独立引擎 `goal_graph_v1`，analyzer 为 `goal-graph.2`、prompt 为
+`goal-graph-rubric.2`、卡片适配器为 `goal-cards.2`。外层继续使用
+`loom.goal-loop-analysis.v1`，由 `analyzer.version` 和
+`skeleton.projection_version = goal-skeleton-projection.1` 区分新投影。
 
-1. 在 Trace analysis 生成／选择固定快照。
-2. 打开 Deep evaluation → Evaluation settings，将 Analysis version 设为 **Goal loops · Execution & cost**。
-3. 在工具栏选择 **Run scope** 和 Judge model，运行分析。一个作业只分析一个 run。
-4. 点击 **Open goal process** 或切到 Reasoning efficiency，查看目标树、尝试与阶段图、共享成本和诊断。
-5. 预算耗尽或取消时可查看已保存结构；提高调用／token／总时间预算后 Resume，完成批次不重跑。
+Web 默认选择 **Goal process · Incremental graph**，必须指定一个 run。
+API 调用显式传 `analysis_version: "goal_graph_v1"` 和 `run_id`；为兼容旧客户端，
+省略版本的旧 API 行为仍是 v3。新引擎不会转换旧 checkpoint；历史评价由原引擎
+读取和恢复，已移除执行引擎的结果仅保留读取，不自动当作新结果继续。
 
-默认仍为 v3，新引擎以 `analysis_version=goal_loops_v1` 显式选择；v2/v3 的读取和兼容身份下的恢复保留。
-新作业使用 `loom.goal-loop-analysis.v1`，旧 checkpoint 不迁移。HTTP 继续使用现有 trajectory evaluation 路由，
-新版本 start 必须提供 `run_id`；catalog 返回快照里的 `run_ids`。未完成的事实快照不开放新评估启动。
+Deep Eval 与 Reasoning efficiency 共用新结果。切图/报告、展开行动、证据跳转和
+JSON / Markdown / SVG 导出均不调用模型。部分结果也可浏览，状态不会因存在图
+就改为 completed。SVG 导出对应当前筛选/展开范围，JSON 包含整个分析结果。
 
-### 已落地模块
+### 14.2 已实现机制
 
-| 模块 | 实现 |
+| 模块 | 行为 |
 |---|---|
-| `evaluation/goal_loops/facts.py` | selected-run view、原始行号／seq／call 映射、公开响应及工具输入输出分页、实际生效根目标和原始验收记录 |
-| `contracts.py`、`state.py` | JSON Schema、局部坏条目隔离、引用／作用域／时间校验、稳定实体 ID、合并 alias、三轴状态与语义 patch |
-| `context.py`、`review.py` | 全来源结构批次、重叠证据、持久实体索引分页和按需读取、有界协调、成本优先诊断及低成本对照 |
-| `costs.py`、`projection.py` | 唯一 owner、shared/unassigned、排他／包含成本、计量覆盖、区间并集、守恒；包含／顺序／语义边分层 |
-| `service/semantic.py` | 新引擎与单 run 身份、预算／取消／checkpoint／partial／resume、历史结果与阶段进度 |
-| `views/goal-loops.mjs`、`goal-process.mjs` | 可搜索目标树、子目标折叠、阶段 occurrence 图、反馈关系、实际调用时间轴、诊断高亮、证据入口、JSON／静态摘要导出 |
-| `views/evaluation.mjs`、`reasoning.mjs`、`trajectory.mjs` | 新版本／run 选择、Deep 作业与 Reasoning 图联动、新旧 schema 分派 |
+| `cards.py` | model/tool 调用卡，公开 response 最多 600 字符，工具名/参数白名单/命令及结果状态元数据；验收/计划边界卡、全部事件索引、精确范围引用；工具正文及请求 messages 不默认送入评估模型 |
+| `graph_contract.py` | 独立原子组：目标、attempt、稳定 stage、逐卡贡献、依赖、闭环、诊断；有限定向补证协议；可确定的缺省列表正规化后再做严格校验 |
+| `graph_state.py` | 每组全成或全败；宿主生成 ID；校验来源、run/目标版本、时序及依赖双端证据；旧批重试不覆盖后续判断；保留修订历史和缺口 |
+| `incremental.py` | 顺序小批、最多 6 个相关子目标 / 8 个 stage / 16 个旧目标索引 / 4 个 frontier occurrence；逐组持久化；最多两轮补证及一次格式修复；局部失败后继续下一批 |
+| `graph_projection.py` | 每卡及稳定 stage 生成 occurrence；只合并连续同 stage，保留关键变更、失败、依赖及未知边界；无证据不补因果边；同 revision 的图、行动贡献、闭环、成本与模板报告 |
+| `semantic.py` | 新引擎作业分派、部分结果实时读取、取消、预算停止、恢复、artifact；未完成卡或拒绝组保留为 incomplete |
+| `incremental-graph.mjs` | 目标筛选、简图、逐行动贡献及可见性、验收原始记录、诊断、同源报告和导出 |
 
-事实账本不依赖 evaluator 成功：queued／中断作业也可投影已有事实和 unassigned 成本。
-结构阶段逐页处理完整 eligible 字段，不把旧 scan 的抽样段直接改名为目标；模型请求的重复上下文和隐藏推理不作为语义正文投递。
-根目标可使用当前请求中的精确可见引用；来源外的定义只保留原始引用及记录事实，不计入当前 run 成本。
+证据分为 captured / presented / adopted：只有唯一 tool call ID 且执行 trace 匹配
+的 tool message 才记为显式呈现。呈现内容与捕获内容完全相等才标 full，否则为
+preview_or_transformed；不猜测未记录的注入或阅读。后续采用须引用之后的行动。
+补证区分已在本地获取 `fetched_ranges` 与请求封包交付的 `delivered_ranges`，
+后者不证明模型已理解原文。相同范围不能换一个问题无限重读。
 
-`allocation=serves` 才参与归属；`uncertain` 保留 unassigned，`reuse` 仅表示后续复用。
-同一调用被多个阶段共同服务时记到共同父对象的 shared 成本，相关引用不再次累加。
-图中的实线为来源归档顺序，虚线为有引用的语义关系；不会把序号顺序解释为跨进程因果。
+`expected` 必须提供不晚于行动开始的 `expected_refs`，没有时记 unknown；
+事后增量、必要性、冗余和采用分别记录。较早批次 Resume 的输入按原 cutoff 重建，
+不泄露后续闭环。目标及稳定 stage 的定义不在原 ID 上任意改写，结果要求变化应
+新建目标；后续语义判断保留历史。工具成功和语义结束不覆盖宿主 acceptance。
 
-### 首版合同与预算细节
+所有业务调用进入待评卡片队列；后台 bookkeeping 只保留在完整事件索引中。
+显式 unknown 算已处理，但单独计数；未评或 needs_evidence 继续计 pending。
+格式修复耗尽不会由宿主编造 unknown 判断，更不会补虚构 loop 来通过校验：
+保留该批未完成/拒绝原因并继续后续批。Resume 重试未完成批次、复用已提交组。
 
-- bundle 内嵌固定快照事件索引、调用账本和验证记录，而非另行创建四份 `*_ref` artifact；仍可通过 EvidenceStore 原引用读取证据。
-- Phase 的信息变化字段首版采用有界文本，`delta` 尚未细分成数个独立数组。实体的 `basis`、`confidence`、`rationale` 保留判断性质；confidence 未经统计校准。
-- 排他成本位于 `cost_ledger.by_owner[id].exclusive`，包含成本位于 `.inclusive`；阶段显示相关调用时不把共享值计入其自身成本。
-- checkpoint 保存批次、已读 packet、实体、patch revision、alias、待完成读取、协调分组、诊断窗口及 usage；账本由固定 atoms 和实体重算并校验。
-- 结构／协调完成与语义确定性分开。`coverage.status=complete` 表示本次流水线已完成且没有未完成的工作单元；不保证每条记录已解释，也不保证所有目标已诊断。未知、未审阅和未归属分别保留。
-- 诊断窗口有独立覆盖；未审阅原文不能被摘要代替。诊断只输出有引用的建议，不自动生成或应用旧 Evolve proposal。
-- 默认 24 calls、120,000 tokens、600 秒、400,000 evidence characters、48,000 prompt characters、每调用 120 秒；`max_rounds` 在新引擎表示最多诊断目标数，不截断结构扫描。
-- 新引擎 `max_prompt_chars` 最低 20,000，以容纳协议及证据。Resume 仅允许增加 calls/tokens/seconds；变更证据、prompt 或语义设置须创建新作业。
-- 协议 v2 的协调仅处理确定性规则发现的重复候选；无候选不调用模型，保留未解决项，不进行无限固定点迭代。未知 actor/lane 不构造虚假泳道，时间轴仅绘制有可比较时间戳的真实调用。
+### 14.3 请求和预算
 
-### 验证与限制
+新默认：24 次请求、600 秒累计时间、单次 90 秒。当前 Goal process 不再设置
+单次输出或累计 token 硬上限，token 只统计实际消耗；旧 max_tokens 字段仅为历史
+记录兼容保留，不参与停止判断。每批最多 8 张卡，序列化输入（包括原生 response
+schema）最多 24,000 字符。相关目标状态单独限制为 6,000 字符，
+单卡元数据以 2,000 字符为封包目标，未呈现字段明确记录；详见 §15。
+每批最多两轮补证，每个范围最多 1,600 字符、每轮最多三个范围，整个分析额外
+补证最多 24,000 字符。初始窗口过大时减半；已建立窗口仍超限则保留 checkpoint
+并明确报告输入大小、上限和卡数，不丢卡来假装完成。
 
-实现记录：[goal-loop implementation](../exec-plans/completed/deep-eval-goal-loops-implementation.md)。
-新增回归覆盖单 run 隔离、来源精确范围、全字段分页、未知／冲突 usage、重叠时间、共享／不确定／复用成本、
-坏条目隔离、未来证据拒绝、阶段中断恢复、服务取消与持久化、新旧 renderer 切换、图关系、诊断高亮及文本转义。
-同时运行现有 evaluation、semantic service、trajectory 和 Web 回归；使用隔离模拟数据检查实际浏览器渲染。
+调用前记录 messages 和原生 response schema 的 UTF-8 字节数 + 512 协议余量，
+作为输入成本估计，不作为 token 准入门槛，也不假定是 tokenizer 的准确计数。
+实际 usage 和未知 usage 分别保留，不将失败调用的费用清零。输出请求不传
+max_completion_tokens；供应商自身的上下文/输出能力仍适用。Resume 可增加
+calls/seconds，来源、模型配置和语义设置保持不变。
 
-这些测试证明协议、记账和恢复的不变量，不代替真实任务的人工语义标注。
-本次没有对生产 session 调用真实 evaluator，没有调整用户任务、验收状态或运行配置。
-默认切换、不同模型的预算校准、真实任务目标边界／诊断质量评测继续按第 10、12 节开展。
+评估复用现有 `evaluator_provider`：配置中有 enable_thinking 时关闭，配置中有
+reasoning_effort 时设 low；不会向不支持的供应商盲目增加参数。
+新引擎不使用 `max_rounds` 抽样限制：完整卡片队列受总预算控制。
+
+### 14.4 验证及尚未覆盖的设计目标
+
+当前验证包括原子回滚、合法兄弟组保留、失败后继续、Resume 去重、跨批引用、
+依赖双端证据、时间隔离、未知卡折叠边界、来源范围、captured/presented 区分、
+未知 usage 预留、成本守恒、服务取消和重启读取。前端检查覆盖版本/run 选择、
+部分图、展开及证据跳转、选择保持、图/报告切换、Reasoning 复用及安全文本渲染。
+测试使用合成 trace 与测试 provider，不是付费模型效果测量。
+
+验证结果：`tests/evaluation` 及相关 semantic/goal-loop/incremental service 测试
+共 **386 项通过**；`tests/web` **144 项通过**；新增/修改 Python 模块 Ruff 检查通过。
+另用当前保存的 sess_350fe5f8d25f4e2295c5c5df416430a0 快照做只读封包演练：
+123 条事件、36 张卡、5 次测试 provider 调用，最大请求 10,720 字符，成本守恒。
+该演练没有真实模型调用、没有数据库写入，不评判语义质量。
+
+本地 `runs/service/service.sqlite` 中没有样例 session
+`sess_449df2f4e39f421cbf7b61f07433a916`；文档所述 `.loom/service` 数据目录也不在
+当前工作区。因此没有重新核验样例原始 trace、重放旧付费响应或宣称自动复现
+人工报告。§12 的解释质量、目标划分和实际成本验收仍需该来源和真实模型结果。
+
+以下仍是目标设计，不能从当前实现推断已完成：
+
+- 同父目标自动合并/alias、复杂目标 reparent 和全局语义协调；当前只允许稳定 ID
+  复用与有证据的局部修订，拒绝不一致的结构，避免无依据重写历史。
+- 基于实际内容范围的跨工具重叠候选索引、跨 trace 的模糊上下文呈现推断；当前
+  可用元数据、精确呈现关系及定向补证，不把 preview 当全文。
+- 完整的候选—subject—verifier—宿主裁决专用图；当前复用权威原始验收记录和
+  根条件，并与语义闭环分开展示，未生成新的通过判定。
+- 自动诊断的语义质量、人工样例级报告组织、复杂图自动布局、跨 run 生命周期
+  和对照实验。当前仅提供有引用的诊断与改进建议，不自动修改执行器或应用 Evolve。
+
+这些限制不阻止增量分析主链路使用，但不能用机制测试代替产品解释质量验收。
 
 
-## 15. 执行协议 v2（2026-10-17）
+## 15. Token 成本与性能复核（2026-10-19）
 
-真实作业暴露了首版的执行问题：结构识别、协调、诊断共用完整 patch schema；协调模型会再次输出阶段节点和诊断，
-还会把已有 ID 当成新实体 key。输出被截断后，同样大小的任务会整份重写；增加预算不能解决这种重复工作。
-此次修改执行协议，保留 Goal → Attempt → Phase 的设计和原始成本账本。
+### 15.1 生产输入不是原始 trace
 
-### 阶段边界
+执行路径固定为：
 
-| 阶段 | 允许的增量 | 触发条件 | 每次输出 token 上限 | 额外读取轮数上限 |
-| --- | --- | --- | ---: | ---: |
-| Structure | 新实体、明确的 updates、关系、目标声明 | 尚未完成的固定来源批次 | 4,096 | 1 |
-| Reconcile | 已给候选的 merge / distinct / unresolved 决策，候选实体 updates | 同父节点的疑似重复 goal / attempt | 1,536 | 0 |
-| Diagnose | 最多 3 条有引用的诊断 | 结构处理完成后的选定目标和有界证据窗口 | 2,048 | 1 |
-
-这些是上限，仍受模型配置、剩余总预算和 `max_read_rounds` 约束。各阶段使用独立 schema、提示词和输出预算。
-不属于当前阶段的操作被隔离并记录校验诊断，不能修改状态；新实体 key 和已有实体 ID 不再混用。
-`updates` 只提交变化字段，引用新的证据；`call_ids` 合并去重，保留修改前值和修改记录。
-根目标、父子关系、实体类型和成本归属策略不能通过 update 改写。
-
-协调候选由代码产生：同一父节点下，目标文字相同，或文字相近且引用范围重叠；尝试必须有重叠证据。
-不同时间发生、没有共同证据的同方法重试不会仅凭名称触发协调。每个请求只处理给定候选；确定性规则不是语义合并结论。
-merge / distinct 必须引用双方证据；无法确认则记 unresolved。
-
-### 小增量、截断恢复与覆盖
-
-- 请求传递精确 packet ID、内容和必要导航，完整来源指针由框架保管；不重复发送原始请求上下文或完整图。
-- `finish_reason=length/max_tokens` 立即交给调度器，不再执行同尺寸的格式修复。普通格式错误最多修复一次。
-- 调度器把剩余 packet 列表二分；单页过大时按原始字符偏移二分。最多拆分 6 层。
-- 检查点持久化待执行子块、成功增量、实际已读范围和费用。Resume 只运行剩余子块；截断调用的已报告费用仍计入预算。
-- 无法进一步拆分的请求形成 `review_gaps`，其证据不被当成已完整审阅。`pipeline_complete=true` 与 `coverage.status=partial` 可以同时出现。
-- 结构未知、协议校验失败、未审阅工作、未解决的协调决策分别可查。页面展示拆分次数、审阅缺口和协调决策。
-- 诊断使用目标关联证据和分布式来源采样，记录实际交付窗口；局部窗口不能证明全程没有某种行为。
-
-### 检查点兼容与使用
-
-外部引擎名仍是 `goal_loops_v1`，bundle schema 仍是 `loom.goal-loop-analysis.v1`；分析器和提示版本升为
-`goal-loops.2` / `goal-loops-rubric.2`，检查点标注 `execution_protocol=2`。
-
-旧版停止／预算耗尽作业可直接 Resume：来源、run、模型、配置和非资源设置必须保持相同。
-框架归档旧协调状态，保留已完成结构批次、有效实体、引用、修订和累计费用，重新安排候选协调及诊断。
-旧版已完成的历史结果不改写。总预算仍是累计预算，已经耗尽时需提高相应的 calls/tokens/seconds 后 Resume。
-
-使用新协议需要运行更新后的服务。在当前 Deep evaluation 作业上 Resume 即可，不必重新扫描已经保存的结构批次。
-
-### 验证范围
-
-新增测试覆盖阶段权限、按 ID 更新与不可变边界、协调候选、截断二分、精确字符范围、子块恢复、无法继续拆分时的覆盖缺口、
-旧检查点升级、服务恢复和页面展示。另对现有作业检查点的内存副本进行了离线调度回放：23 个结构批次与 24 个阶段均被保留，
-协调阶段跳过，只安排 1 次诊断请求。回放使用空结果模拟 evaluator，未调用真实模型，也未写回生产数据。
-这证明恢复路径减少重复工作，不代表真实模型速度或诊断质量已得到验证。
-
-本轮回归结果：341 项 Python 测试、136 项 Web 测试通过，Ruff 与 diff 空白检查通过。详见[协议 v2 实施记录](../exec-plans/completed/deep-eval-execution-protocol-v2.md)。
-
-## 16. 时间映射与阶段过程展开（2026-10-18）
-
-执行图增加独立的 `execution_view` 事实投影。它只读取固定快照、已有实体及调用账本，不调用 evaluator，
-也不补写语义归属。已保存的旧 Goal-loop 报告在读取时自动补齐该视图，原 artifact 不改写。
-
-### 两层时间口径
-
-- 页面顶部展示当前 run 的全部调用，包括未归属调用。Model / Tool total 是调用累计耗时。
-- 时间条使用开始／结束时间戳计算互斥区间：仅模型、仅工具、模型与工具重叠、调用间空档；四项之和等于 call span。
-- 同类并行调用按区间并集处理；模型嵌套在 `finish` 等工具内部时不重复计算 wall time。
-- 缺失或非法时间戳显式计数，不能当作零耗时。空档不直接判为 idle、排队或框架开销。
-- 阶段节点显示关联调用的模型／工具耗时，以及证据窗口跨度、窗口内其他调用数量。条形长度表示窗口跨度，不能跨阶段相加。
-- 目标原有语义成本明确标为 Attributed model / tool time；不再把少量已归属调用的累计值与整个跨度并列成同一口径。
-
-阶段窗口是该阶段证据边界与关联调用原始记录边界的并集区间。窗口内的其他调用保持原来的 owner；
-时间相邻不等于属于该阶段。所有阶段窗口之外的调用单独展示入口，避免最慢的未归属调用从图中消失。
-
-### 展开的公开执行过程
-
-点击任意阶段，首先展示可折叠的调用组：
-
-`公开判断／拟执行动作 → 工具动作 → 返回观察 → 下一组记录`
-
-每组显示实际耗时、相对 run 起点的时间、TTFT、TPS、输出 tokens、工具目标（文件／查询／命令）、
-执行状态、公开响应和结果摘录，并链接原始证据。默认展开前两组与当前选择中最慢调用所在的组。
-可切换“阶段证据窗口”“仅关联调用”“整个 run”“未归属调用”“阶段窗口之外”。
-
-这里的 Round 是为了展示而建立的调用组，不等同于计划 step 或一个经过语义验证的推理闭环。
-model → tool 仅在同 run / trace 的真实 tool call ID 唯一匹配时连线；tool → observation 使用同一调用的终态记录。
-组间只有来源顺序关系，不推断观察已被采纳、形成根因或因果关系；缺少匹配时展示独立工具活动。
-不展示 provider 的隐藏推理字段。原有 question / known before / delta 等语义解释保留在单独折叠区。
-
-因此，这层图能先展示被旧语义图遗漏的客观过程，但不会宣称已经修复旧报告的错误阶段归属。
-后续语义修复可在同一事实层上重新建立 evidence adoption / decision / verification 关系。
-
-## 17. 默认视图：按实际动作展示执行阶段（2026-10-18）
-
-默认以紧凑的 Execution flow 替代语义关系图。连续同类动作合并为阶段：Plan、Research、Edit / implement、Verify、
-Prepare final answer；再次回到调研或验证时另起阶段，保持执行顺序。原来的目标、推理关系图和阶段窗口保留在 Detailed analysis。
-
-每个阶段显示模型／工具调用数量、Working／Tools 时间及失败数。点击阶段后，每次模型调用和每次工具执行分别占一行，
-显示开始时间、结束时间、调用耗时、状态和模型／目标。模型行以 `Working · Preparing edit_file` 等形式呈现，
-不再把模型准备时间合并进一个工具行。模型用途通过真实 tool call ID 关联的工具确定；没有匹配的模型调用仍然保留。
-点击 Working 展示 TTFT、首个响应之后的持续时间、输入／输出 tokens、TPS，以及公开响应和来源。
-首个响应之后的时间包含推理和响应生成等，不能标为精确的纯推理耗时。工具行只展示该工具自己的调用记录。
-
-分类依据已记录的工具名称、输入参数和模型 role / stage，由代码直接计算，不依赖旧语义图的调用归属，也不额外调用模型。
-同组工具用途不同则标为 Mixed actions，无法确定用途则保留 Other activity。类别表示实际操作类型，不代表已经验证计划合理性或证据有效性。
-
-阶段耗时按 Working 和 Tools 拆分。使用时间戳划分互斥区间；工具内部嵌套的验收模型时间计入验收动作，避免与 finish 重复。
-不同动作并行的区间单独计为 shared，调用间空档单列 Between calls；阶段独占时间、shared 与空档之和等于 Call span。
-缺失时间戳显式提示，Call span 只覆盖有完整时间记录的调用，不等同于整个 session 生命周期。
-空档也在后续动作之前显示为 `Gap · unclassified`，记录具体起止时间；不推断它一定是排队、框架开销或 idle。
-行内 Call time 优先使用已有调用账本的精确 duration，阶段汇总使用时间戳分区，因此可能有秒级舍入差异。
-嵌套／并行调用的行内时长不能直接相加；时间戳计时且同秒结束的工具显示 `<1s (timestamp precision)`，不表示没有执行成本。
-
-`execution_view` 升为 `goal-execution-view.3`，`action_flow` 升为 `action-flow.2`。已有 Goal-loop 报告读取时直接从固定 trace 快照计算，
-不重跑 Deep evaluation、不修改原 artifact。服务使用新代码后刷新页面即可看到。
-
-以 `sess_332a31e7c9124c5caf0a587dd6486cf4` 的已保存报告离线核对，22 个模型调用、20 个工具调用形成 6 个阶段：
-
-| 阶段 | 动作数 | 耗时 |
-| --- | ---: | ---: |
-| 计划／验收准备 | 1 | 3 秒 |
-| 调研 | 30 | 7 分 16 秒 |
-| 修改文件 | 4 | 5 分 58 秒 |
-| 验证 | 4 | 59 秒 |
-| 准备最终答复 | 2 | 1 分 29 秒 |
-| 提交时验收 | 1 | 28 秒 |
-
-加上调用间空档 24 秒，合计 16 分 37 秒；本次记录没有跨动作并行区间。以上秒数按界面取整显示。
-时间分区为 Working 946 秒、工具独占 27 秒、gap 24 秒。修改阶段的两个 Working 调用分别为 335.90 秒、21.83 秒，
-两个 edit_file 工具均在同一秒内开始并结束。现有原始 trace 已提供这些计时，无需补跑任务或新增模型调用。
-
-验证：354 项 Python 测试、140 项 Web 测试通过，Ruff 与 diff 空白检查通过；使用该 session 的离线报告检查了实际页面布局。
-
-## 18. 语义优先的执行骨架（2026-10-18 设计修订，待实施）
-
-本节是下一轮实现依据，不表示已上线。第 14–17 节保留已有实现及演进记录。
-现有事实调用层、成本账本、引用与预算约束继续有效；默认入口调整为本节的目标闭环骨架，
-第 17 节的工具动作分类下沉为展开后的事实时间轴。
-
-### 18.1 重新明确分析问题
-
-主图必须回答：**总目标是什么；当前在解决哪个子问题；采用什么办法；检查暴露了什么缺口；
-为什么继续、换方案或产生新目标；最后依据什么停止。**
-
-`Research → Verify → Research → Final answer` 只是动作类别序列。
-同一种 read/shell 操作可能服务于不同目标；同一目标也可能跨越多段调研、修改和验证。
-继续增加命令分类规则不能恢复这些语义关系。
-
-当前 `contracts.py` 已有 Goal / Attempt / Phase，但没有独立的闭环迭代、检查对象与反馈转换合同。
-`review.py` 逐来源批次生成局部实体；`execution_view.py`、`action_flow.py` 的默认展示以连续动作类别归组。
-新加入的 `action_classification.py` 可以补齐 JSON 调用关联及有引用的用途分类，仍不能代替目标识别。
-因此此次是分析协议及主图的调整，不只是把现有阶段节点改名。
-
-### 18.2 三层展示
-
-| 层级 | 默认展示内容 | 展开后 |
-| --- | --- | --- |
-| Task | 一句话总目标、有效验收条件摘要、当前执行/验收状态 | 条件版本、来源及改变记录 |
-| Objective loop | 要达成的结果、当前状态、闭环轮次、归属耗时 | 每轮办法、行动摘要、检查结果和下一步 |
-| Actions / evidence | 默认隐藏 | Working、工具调用、TTFT/TPS、效用判断、原始证据 |
-
-主图中的 Objective 必须是结果，例如“确认轨道计算符合物理规律”，不是“调用 shell”或“读取 orbital.ts”。
-已有 Goal 对应 Objective，沿用稳定身份，不另建一套竞争的目标树。
-未明确拆分子目标的任务，直接在根目标下显示执行闭环；不强制模型编造多个 Objective。
-显式计划与事后重建的目标结构分开保存：没有制定计划就显示“直接执行”，不能把分析器总结画成原始计划。
-
-### 18.3 主图及检查层级
-
-Task 目标作为图的容器标题。容器内绘制实际发生的骨架：
-
-```mermaid
-flowchart LR
-    C[确定验收条件] --> P[形成行动计划]
-    P --> O1[子目标 A · 已解决]
-    O1 --> O2[子目标 B · 3 轮闭环]
-    O2 --> V[检查整体要求]
-    V -->|仍缺 B 的结果| O2
-    V -->|足以提交| D[形成报告或交付结果]
-    D --> G[最终验收]
-    G -->|通过| E[任务完成]
-    G -->|缺口归属于 B| O2
-    O2 -. 发现独立问题 .-> O3[新子目标 C]
-    O3 -. 解决后继续 B .-> O2
+```text
+不可变 trace / artifact（本地）
+  → 程序提取事实、调用卡和精确证据索引（一次构建，checkpoint 缓存）
+  → 顺序窗口：最多 8 张卡 + 有界相关状态 + 最近 4 个成果端点
+  → 单次语义增量：目标 / 行动贡献 / 关系 / 闭环
+  → 本地提交 metadata graph，下一窗口只检索相关状态
+  → 程序投影图与报告（0 次模型调用）
 ```
 
-这是可出现的结构，不是要求每个 task 必须走完的固定模板：
+LLM 默认得到的是当前窗口的命令/路径/查询、状态/返回码、短公开意图与证据 ID。
+完整原始事件、请求 messages、工具正文、隐藏 reasoning、全部历史模型响应和
+不断增长的完整图不会放进 prompt。模型公开 response 是描述意图的输入，最多
+600 字符；这不是隐藏思维链。计划/验收的嵌套结果只提取 description、status、
+reason 等白名单字段，不再发送不透明 JSON 的开头片段。
 
-- 没有显式行动计划时不补画计划节点；计划可能只有一个方向，没有子目标列表。
-- 中间检查整体要求只在存在相应行为时出现，不能把最后 gate 复制成“中间 Verify + 最终 Acceptance”。
-- 交付与 gate 的实际嵌套按 trace 保留。例如 `finish` 内触发 acceptance，主图折叠在提交环节，展开后看到调用顺序。
-- 最终 gate 未通过可以产生新的执行轮次，也可能暂停、等待输入或结束失败。只绘制实际发生的后继。
-- 暂停显示“暂停／待继续”，运行中快照显示“执行至此”，不能补造成功或失败终点。
-- 已通过 gate 但 run 尚未结束时分别显示“验收通过”和“仍在运行”，不合成为“任务完成”。
+工具结果正文仍保存在本地，确实需要核对结果时才允许模型提交带问题、目的和
+精确范围的 evidence request；其上限见 §14.3。补证不是读取整个 trace 的接口。
+后续 frontier 只携带少量已引用证据片段，每个最多 240 字符。
 
-必须分开三类检查：
+### 15.2 防止元数据再次变成大上下文
 
-| 检查 | 验证对象 | 图上位置 |
-| --- | --- | --- |
-| 验收计划协议校验／修正 | criteria 的格式、范围、verifier 等定义 | 折叠在“确定验收条件”内 |
-| Objective check | 某子目标的完成条件、假设或中间产物 | 该目标的闭环内部 |
-| Task acceptance | 当前有效任务条件与对应产物版本 | 整体验证／最终 gate |
+- 根任务 objective 最多 800 字符；目标条件最多 6 条、每条最多 200 字符。
+  子目标、阶段标题及开放问题各有限长，整个相关状态最多 6,000 字符。
+- 最多 6 个相关子目标、8 个 stage、16 个旧目标索引、4 个成果端点。
+  超出状态预算先裁减低优先级索引和历史状态，并报告 omitted_rows / truncated_fields。
+- 单卡元数据封包目标 2,000 字符，优先保留意图、命令、路径及状态；过长辅助字段
+  留在本地并报告 omitted_metadata_fields。被省略的引用不会被误标为已交付证据。
+- 同一工具结果被后续上下文反复呈现时，发送 presentation_count 和最近三条
+  已发生的呈现元数据，不重复发送整个呈现历史；时间 cutoff 仍严格过滤未来记录。
+- 输入最终 admission 同时计算 messages 和原生 response_format/json_schema，
+  不能把 Schema 放在消息以外就漏计。文字协议也计入同一限制。
+- 预算不足、过长固定窗口及修复耗尽均保留部分结果；不通过加长上下文兜底。
 
-计划被 accepted 不是任务被验收通过。工具退出码为 0 不是子目标已解决。
-子目标检查有效性属于语义判断；权威 gate 结果保留原始事件，不被 evaluator 改写。
+这些截短只改变送审视图，不改写原始证据或已保存图，也不表示遗漏部分已被评审。
+若缺少判断依据，必须补证或保持 unknown。旧版本 checkpoint 不静默换新提示词；
+这次输入协议升级为 goal-graph.2 / goal-cards.2，应新建评价。
 
-### 18.4 一轮闭环如何界定
+### 15.3 消耗如何计算
 
-在 Objective 内新增 `Iteration`：**为消除一个明确缺口采取一组行动，并得到检查或评估反馈的一轮工作。**
-一个迭代可能包含多次模型请求、多次读文件、修改与测试；不以 tool call、round 或 plan node 数量计轮次。
-检查也可以是研究任务中的交叉核对、排除假设或对照要求，不限定为运行测试工具。
-原始工具输出仅是观察；只有对照条件形成结论或改变下一步时，才有 Check 的语义。
-
-```mermaid
-flowchart LR
-    A[本轮要解决的缺口] --> B[行动摘要]
-    B --> C[检查与反馈]
-    C -->|已满足| D[子目标解决]
-    C -->|同一目标仍有缺口| N[下一轮]
-    C -->|需要先解决独立问题| S[新子目标]
+```text
+实际总 token = Σ(provider.prompt_tokens + provider.completion_tokens)
+请求前输入估计 = UTF8(messages + native schema) + 512（统计用途）
 ```
 
-- 同一方案下继续补证、修正和复验是新的 Iteration，不自动生成新的 Attempt。
-- Attempt 仅表示实质方案切换，例如从静态代码分析改为数值实验；它作为迭代分组，不成为默认主图的一列。
-- 多次独立检查共同评估一个候选结果，可以属于一轮。若检查结果已导致新的行动，则开始下一轮。
-- 没有检查或明确评估反馈时保留 open iteration；卡片显示“2 轮已评估 + 1 轮进行中”，不能说完成了 3 轮闭环。
-- 缺少反馈依据时显示“继续执行，原因未确定”；不能凭下一次调用的时间位置断言它是上一次失败导致的返工。
-- 同一问题被其他工作打断后继续，仍关联同一个 Objective，保存独立访问片段，不复制成多个子目标。
+不设 token 停止阈值或固定输出截断上限。Schema、格式修复、补证以及失败请求
+都会占用成本；usage 未知时明确标记，输入估计不能当成完整实际费用。
 
-### 18.5 新目标、返工与方案变化
+固定窗口和有界相关状态使 LLM 输入总量主要随卡片/批次数增长，不再随已读 trace
+前缀重复增长。其本地事实索引仍须扫描源文件，数据库写入和图投影也有独立成本，
+不能把“模型输入有界”说成整个实现已证明严格线性时间。
 
-分析器必须显式选择转换类型，而不是全部画为 next：
+当前配置实查：选择的 evaluator 使用 json_schema；原模型配置 enable_thinking=true，
+经专用 evaluator_provider 后实际请求为 false，当前输出请求省略 token 上限。该覆盖只作用于
+评估请求，不改变 solver 设置。模型服务延迟仍需观察真实调用。
 
-| 转换 | 判断条件 | 表现 |
-| --- | --- | --- |
-| `continue` | 同一目标，继续补齐已有缺口 | 同卡片内下一轮 |
-| `change_approach` | 目标不变，办法实质改变 | 新 Attempt，标注切换点 |
-| `discover_objective` | 发现有独立结果与结束条件的问题 | 新 Objective；注明服务于哪个父目标 |
-| `reopen` | 之前已有解决判断，后来被新检查或新事实推翻 | 原目标重新打开，保留先前判断 |
-| `resolve` | 对照目标条件，已有足够依据结束 | 标注检查及结果 |
-| `abandon` / `blocked` | 明确放弃或受阻 | 展示相应终点或等待状态 |
-| `revise_task` | 用户或已生效合同改变要求 | 新目标/条件 revision，不把旧结果直接沿用 |
+### 15.4 离线封包测量
 
-“还有一个问题”不必然是新子目标。如果它只是原来成功条件未满足，留在原 Objective。
-子目标的证据或产物可以被其他目标复用，用依赖关系表示，不复制目标或重复收费。
-当无法确认拆分理由时，先保留根目标下的未细分工作，不要求 evaluator 填满结构。
+来源为已保存的 sess_350fe5f8d25f4e2295c5c5df416430a0 快照，123 条记录，
+36 张卡。使用测试 provider，只验证封包、预算、状态推进和成本守恒；无真实 API
+调用、无数据库写入。下面的“输入”都是字符数，不能当成实际计费 token。
 
-### 18.6 最小语义合同
+| 模式 | 批次 | 总输入字符 | 最大单次输入字符 | 原生 Schema 字符 / 次 |
+|---|---:|---:|---:|---:|
+| 文字协议 | 5 | 59,922 | 17,312 | 0（文字契约另占 1,595） |
+| 原生 JSON Schema | 5 | 78,192 | 20,966 | 5,261 |
 
-保留事实账本中的调用 ID 与 source refs。下一版增加以下有类型的语义记录，减少阶段里重复的长段描述：
+原生模式输入保守预留合计 81,608，加五次最大输出 13,000，为 94,608 的保守
+预算容量测算；这不是实际 token 消耗或供应商账单。语义产出的目标状态、补证和
+修复会改变后续输入，实际消耗以 provider usage 为准。该样本本地离线流程约一秒，
+不包含网络和模型推理，不能用于承诺真实评估只需一秒。
 
-| 对象 | 必要字段 |
-| --- | --- |
-| Objective | id、parent_id、result_to_achieve、completion_conditions、origin（explicit/inferred）、criterion_refs |
-| Attempt | id、objective_id、approach、改变方案的依据 |
-| Iteration | id、objective_id、attempt_id、gap_before、action_summary、call_ids、check_ids、delta、outcome |
-| Check | id、scope（protocol/objective/task）、subject、condition_refs、method、observed_result、verdict、refs |
-| Transition | from_occurrence、to_occurrence、kind、trigger_check_id（可空）、reason、basis、refs |
-| Objective visit | id、objective_id、iteration_ids、start/end refs；用于恢复实际访问顺序 |
+增长测试使用相同工具输出和稳定目标：
 
-`outcome` 使用 `resolved / continue / blocked / abandoned / unknown`；检查 verdict 单独保留
-`passed / failed / inconclusive / not_checked`。执行状态仍来自 runtime，不混入语义 outcome。
-框架分配稳定 ID；evaluator 引用已投递证据与调用 ID。schema 限长、局部更新、坏条目隔离和有界修复沿用现有协议。
+| 事件 | 卡片 | 批次 | 最大单次输入字符 |
+|---:|---:|---:|---:|
+| 32 | 16 | 2 | 8,838 |
+| 128 | 64 | 8 | 8,859 |
 
-每个行动的主要归属是某个 Iteration、框架 Activity、共享区或未确定区。没有归属的昂贵调用必须保留可见。
-每个“解决”“失败后返工”“新目标”都必须有依据；引用有效只证明可追溯，不自动证明判断正确。
+trace 扩大 4 倍，批次数扩大 4 倍，最大单次输入基本不变。另有测试将工具正文
+扩大到约 1 MB，送入模型的内容仍只有元数据，输入长度差异小于 100 字符。
 
-### 18.7 从 trace 建图的分析顺序
+### 15.5 可观测性和回归
 
-1. **恢复事实锚点（代码）**：实际生效的 task / criteria revisions、计划变更、原生与 JSON action 调用关联、
-   检查与 gate、交付、pause/finish/failure。事实时间和 tokens 不交给模型估算。
-2. **恢复目标和总体路线（语义）**：先读取全 run 的紧凑索引、目标与计划原文、关键检查和终点，
-   建立候选 Objective 与访问顺序。索引仅导航；节点判断必须引用实际投递的原文。
-   大任务仍按有界窗口处理并携带已有目标索引，不能把“全局分析”变成一次无限上下文调用。
-3. **沿目标识别闭环（语义）**：针对访问片段识别 gap → actions → check → next，
-   特别复核检查后的继续、新目标出现、方案切换和提交前后。连续同类读文件只保留行动摘要。
-4. **校验和有界协调（代码 + 必要的语义复核）**：检查包含环、归属冲突、时间/引用范围、孤立访问、
-   无检查的解决声明、缺依据的反馈边，以及未覆盖工作。对冲突只读取相关窗口，不整图重写。
-5. **投影骨架与挂载成本（代码）**：生成默认折叠图；事实时间轴仍可展开。
-6. **诊断与逐 action 效用（独立覆盖）**：复用骨架判断重复取证、无增量迭代、无效复验等。
-   骨架可在 action utility 尚未完成时展示，不再让“每个 action 必须先评价”成为看懂过程的前置条件。
+每次 reservation 和服务 call history 保存 input_profile：卡数、message/schema
+字符数，以及 cards / state / frontier / extra evidence / contract / system 分项。
+结果包含 evaluator_usage.input_cost 汇总；页面 “Evaluator input cost” 表格同时展示
+这些大小与供应商返回的 input/output token，未知 usage 明确显示 Unknown。
 
-分析单元从固定大小的来源块产出散落 Phase，调整为“全局目标索引 + 有界目标访问/闭环窗口”。
-底层分页与断点恢复可以复用，但读取完所有 source packets 不等于语义骨架已完整。
-覆盖分别记录 `skeleton / ownership / checks / utility / diagnosis`，避免用一个 complete 混淆全部质量。
+本轮 394 项 Python 相关测试通过，21 项相关前端回归通过；新增输入成本测试
+覆盖大原文不进入 prompt、元数据上限、呈现历史压缩、Schema 预算、调用前拒绝、
+长 trace 分批增长及引用精确性。未做付费模型质量/耗时基准，不把离线测量当作
+真实语义质量或实际费用证明。
 
-### 18.8 默认图如何保持简洁
 
-- 默认仅显示根目标、验收准备、实际计划、Objective 卡片、交付/验收、执行终点。
-- 卡片最多四项：结果式标题、状态、轮次数、耗时；未知/未审阅用小状态标识，不塞长说明。
-- 目标的多次访问默认汇总在一个卡片，连接实际后继；“实际顺序”展开按 visit occurrence 显示，避免汇总图产生虚假先后。
-- 反馈边仅标“缺少精度验证”“出现新证据”等触发原因，详细引用和解释点开才显示。
-- 展开一级：每轮一个 block，显示本轮缺口、行动一句话、检查反馈、下一步及耗时。
-- 展开二级：Working / tool 调用、效用判断、性能指标及证据。hidden reasoning 不进入分析或页面。
-- 子目标较多时按父目标折叠，标出总数；默认不全展开整棵目标树。
-- 支持/反驳/复用等证据关系默认隐藏；选中节点后按需显示，不与主流程箭头同时铺满画布。
+## 16. 分析结果展示（2026-10-19）
 
-包含关系保持树；实际执行 occurrence 按时间前进；语义反馈指向后续 occurrence。
-主图折叠后可以出现回边，但不把它当成执行器 DAG，也不从时间邻接制造因果关系。
-没有可靠并发信息时不推断 fork/join；已记录的并发需保留分支或共享标识，不强排成串行。
+Deep Eval 底部结果区只保留 **Skeleton / Report** 两个标签，不重复展示上方的
+预算和运行指标卡。Skeleton 按 [样例 §3.1](./deep-eval-run-40b063-skeleton.md#31-全局关系图)
+表达成果依赖 DAG：按拓扑层级自上而下布局，分叉并列、结果汇合，跨层成果边
+走外侧通道。依赖未建立时明确显示缺口，不能按相邻时间补因果边。
 
-### 18.9 时间及状态保持可核对
+- 根任务显示 Root；业务子目标显示 G1、G2…；执行阶段出现显示 S1、S2…。编号
+  属于当前 revision 的展示映射，原始 ID、证据和成本归属不变。报告使用相同编号。
+- 实线表示已保存的成果/反馈依赖；Root 的虚线只表示目标范围，不是执行先后。
+  图里的分叉不表示实际并发，两个 verifier 的先后仍由原始记录决定。
+- DAG 占满内容区，不保留 Entire run/目标侧栏。点击 Root 详情中的子目标，或
+  S 详情中的所属 G，展示该目标及子目标的相关阶段，并保留直接引用的其他目标节点。
+  跨目标引用不会复制调用成本。详情显示目标条件、闭环声明、证据支持、未决
+  问题、尝试和相关 S 节点；对应样例 §3.2 的逐层查看方式。
+- 点击 S 打开旁侧详情面板，显示所属 G、输入/输出依赖、关键变化，以及可折叠
+  的行动、耗时/token、贡献、captured/presented/adopted 范围和原始证据入口。
+  面板靠近当前视口，避免展开内容被放到长图最底部。
+- 黄色表示待审查、未知归属或有诊断依据的行为；红色表示记录的失败；绿色只
+  根据该节点对应的通过记录显示，不将根验收通过扩散到前面的调研/实现节点。
+- Report 使用安全 Markdown 渲染；验收证据、未解决组和输入成本放在报告内的
+  折叠区。结果工具栏只保留 Skeleton / Report，不重复显示状态、Revision、统计
+  卡或导出入口。所有切换/展开都是本地投影，不增加模型请求。
 
-沿用 cost atom 的唯一归属、共享和未确定区。Objective 的 inclusive 成本由其迭代/子目标汇总，
-父子成本不能再次相加；跨目标共享只计一次。事后分类不会改写原始 ledger。
+本次只改投影及展示，不增加评估上下文、语义阶段或新的付费分析步骤。
+已验证 DAG 分叉/汇合、跨目标引用、G/S 编号与报告一致、选择保持及旧视图兼容。
 
-卡片的默认耗时是归属调用的时间区间并集；不同目标并发的区间单列 shared，归属未知保留 unassigned。
-不要用 Objective 第一次到最后一次事件的跨度代替工作耗时，尤其是目标被打断后恢复的情形。
-Working 时间随其服务的行动/目标归属；工具内嵌套的模型时间继续去重。
-全 run 区间分区仍须守恒。跨度、调用 duration 累计、tokens、等待及 gap 在详情区分别展示。
 
-时间记录覆盖但语义归属不全时，显示“已归属耗时 + 未确定”，不能靠强行分配使总账看似完整。
-“反复验证用了很久”是事实；“这些验证无价值”仍需对照当时缺口、结果增量与目标条件单独判断。
+## 17. 取消 token 硬截停，保留元数据分析（2026-10-19）
 
-### 18.10 以行星审计任务检验设计
+sess_0c49… 的 40 张卡分 5 批，10 次响应均在 2,600 output tokens 截断，
+形成 0/40 的结果。旧策略为了节省成本截断了完整 JSON，原批原上限修正又重复
+失败。当前 goal_graph_v1 取消这个输出上限和累计 token 准入门槛，前端隐藏
+Token budget，进度只显示实耗、不显示 token 配额。历史引擎的策略保持原样。
+这项变更取代此前章节中针对该引擎的 token 硬预算/输出预留设计。
 
-对于 `sess_350fe5f8d25f4e2295c5c5df416430a0`，下一轮语义分析应检验如下候选骨架，
-不是直接把人工概括写回成已确认的 evaluator 结果：
+效率通过输入和输出内容控制：
 
-- 根目标：判断默认行星的公转速度是否符合现实。
-- 验收准备：定义数据、计算逻辑、时间缩放及数值审计等要求；格式/定义修正隐藏在此。
-- 候选 Objective A：明确参数、计算、时间推进和渲染之间的实际关系。
-- 候选 Objective B：用数值对照确认速度及比例的物理正确性；不同脚本属于其行动/检查。
-- Saturn 偏差：需判断是 B 的一次补充验证，还是拥有独立完成条件的子目标；不能只因换了脚本便新建目标。
-- 提交：形成审计报告，再按实际 trace 展示最终 gate 和终点。
+- 本地扫描 trace，分批提取意图摘要、工具名、命令/路径、返回状态、验收条件等。
+- 不给模型原始 trace JSON、完整消息历史、大块工具结果或隐藏 reasoning。
+- 每批只附相关目标、阶段及少量成果端点；补证必须指定问题和有界证据范围。
+- 输出使用紧凑 JSON，只提交增量，不重新声明已知根目标或重复条件；判定字段
+  使用简短短语，只引用必要证据，不以丢掉必需判断来缩短结果。
 
-人工核对重点是“为何补查 OrbitLine”“为何再做 vis-viva 对照”“何时已经足够提交”，
-而不是图中有没有 Research / Verify 标签。当前已修复的 233 秒报告生成归属继续保留为成本事实，
-不因重新抽象骨架而被隐藏或归入不明活动。
+提示词升级为 goal-graph-rubric.3，图 Schema/证据协议不变。允许 .2 checkpoint
+Resume 到 .3，记录 protocol_upgrades，复用已有图和卡片判断；来源、模型及
+其他身份字段仍严格匹配。没有直接改写生产历史，也没有自动启动付费重跑。
 
-### 18.11 实施顺序与验收
+## 18. 独立 action 判断与渐进关系图（2026-10-20）
 
-1. 先实现 Objective / Iteration / Check / Transition 合同及事实锚点；使用小型人工标注 trace 验证边界。
-2. 调整 structure 调度、提示词、局部修复与 checkpoint，先产出可读骨架，再做细粒度效用诊断。
-3. 实现确定性骨架投影与折叠 UI，保留现有 action 时间轴作 drill-down。
-4. 回归简单直接任务、同目标多轮返工、发现新子目标、计划修正、并发、验收失败后继续及暂停快照。
-5. 用真实研究/编码/修复任务人工核对目标、迭代边界和反馈依据，记录漏判与误判；测试通过不替代语义质量验证。
+sess_0c49… 继续分析后暴露了第二类问题：目标缺少 parent_id、错误的阶段引用或
+非法 JSON 会连带丢弃同批的有效 action 判断。现在把提交单位从整个 group 改为
+独立 record，协议升级为 goal-graph.3 / goal-graph-rubric.4。
 
-最低可用标准：用户仅看折叠图，就能说出任务目标、主要子目标、返工原因、主要时间去向和最终状态；
-展开某次验证，能知道“验证哪个 Objective 的哪个条件、得到什么反馈、为什么进入下一轮”。
+### 18.1 本地元数据维护执行关系
 
-新骨架需要新的 analyzer/prompt/checkpoint 合同版本。历史报告可以保留原图和已有判断，
-仅凭现有标签重绘不能宣称已完成新的语义分析。迁移须明确区分可复用的事实/证据与需要重新分析的闭环关系，
-不能在读取旧报告时悄悄发起 evaluator 调用。
+Card 是从 trace 提取的最小分析单元，不等于物理调用。该 session 的 40 张卡为
+14 model、13 tool、13 boundary；物理调用共 27 次。每张卡保留稳定 ID、来源行、
+call_ids、执行顺序、previous_card_id；工具卡通过真实调用 ID 关联 caller_card_id。
+
+sequence / invokes 是本地计算的记录关系，不调用 LLM，也不推断成果因果。
+Boundary 表示计划、验收或生命周期边界，不额外计入 model/tool 次数。
+Model 判断意图和决策，tool 判断执行和可观察增量，boundary 判断状态转移。
+
+### 18.2 判断、归属、依赖分别提交
+
+| Record | 内容 | 失败影响 |
+|---|---|---|
+| assessments | 单个 action 的目的、预期、增量、贡献、必要性 | 只影响该条判断 |
+| goals / stages / attempts | 逐步声明 G、S 和尝试 | 依赖该声明的关系等待修正 |
+| attributions | action → S → G，表示服务哪个目标 | 不撤销 action 判断 |
+| comparisons | 重复行为、后续采纳及对应证据 | 不撤销判断和目标归属 |
+| relations | 成果支持、消费、反馈等依赖，必须引用两端证据 | 不根据相邻时间自动补边 |
+| closures | 目标结论、证据支持、未决问题 | 不将 run.completed 当作业务目标达成 |
+
+例如第一批先保存 A1（model）、A2（tool）的判断；第二批建立 G1/S1，并通过
+attributions 把 A1/A2 关联到 S1；后续建立 G2/S2，再引用已知动作的成果建立
+S1 → S2 的依赖。声明按依赖顺序处理，允许同一响应先引用、后声明；稳定 ID
+和批次 alias 使重试幂等。G1/S1 是页面展示编号，实际关联使用稳定 ID。
+
+后续批次携带最多 6 条已判断 action 的精简索引和少量证据切片，可补充归属与
+采纳关系。完整图保存在本地，不全部回传。旧判断的已接受证据由框架保留；新增
+关系的引用必须来自当前请求实际提供的证据，不能借旧引用绕过 delivery 校验。
+不在窗口内的历史内容仍需有界补证，不能据此声称整条 trace 已完成语义分析。
+
+### 18.3 执行协议与成本
+
+独立提交不意味着每张卡或每种类型都单独调用一次模型。仍按时间顺序混合分批，
+每批最多 8 张卡，仅发送意图、工具命令/路径、状态、相关 G/S 和有界摘要；不发送
+原始 trace 全文、大块工具输出或完整 reasoning。token 继续只计量、不硬截停。
+
+- text 模式输出 JSONL，每行一条带 type 的记录；完整行可以独立保留，坏行或
+  截断尾部单独报错。不会为破损的嵌套 JSON 猜测补括号。
+- native/json_object 模式使用扁平数组对象，解析成功后逐条校验并提交。
+- 兼容旧 groups 响应，但 group 不再具有整批回滚语义。
+- 每次响应保留原文及逐条错误；保存有效记录后发布图 revision。修正只要求
+  补未接受记录，已完成判断可先于目标归属显示。
+- Resume 按 trace cutoff 顺序恢复，避免 JSON key 排序导致从末批开始。
+- 超时显示具体批次和秒数；保留已接受判断，不再把空异常文案显示成 completed。
+- 覆盖率分别记录按 model/tool/boundary 的判断进度、目标归属和物理调用成本。
+
+允许旧 goal-graph.2 / rubric.2 或 .3 checkpoint 显式升级并继续，来源、模型和
+其他身份条件仍需一致。未自动启动真实模型重跑，也未改写生产分析结果。
+
+### 18.4 验证边界
+
+对该 session 已保存的一次失败响应进行只读离线回放，新提交逻辑保留了 1 条
+reviewed 和 5 条 needs_evidence 判断，其他错误分别记录；这不表示 6 条均分析
+完成。目标和关系缺少合法证据时继续拒绝，不伪造图边。
+
+回归覆盖独立 model/tool/boundary 判断、坏 JSONL 的局部保留、跨批次归属、
+跨目标依赖、调用成本守恒、幂等重试、未来/未提供证据拒绝、超时和旧 checkpoint
+恢复。实际语义质量和耗时仍需真实模型运行验证，离线测试不代表付费运行成功。

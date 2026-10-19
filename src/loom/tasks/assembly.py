@@ -551,7 +551,8 @@ class TaskAssembly:
             ToolRef(
                 "revise_acceptance_plan",
                 "Add task-specific acceptance checks discovered during execution. "
-                "Keep existing required criteria unchanged; goal is host-owned and must be omitted from the submitted criteria.",
+                "Preserve existing criterion IDs, descriptions and required status. You may repair verifier, check or scope; "
+                "the host revalidates evidence against the original requirements. goal is host-owned and must be omitted.",
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -713,7 +714,7 @@ class TaskAssembly:
                 if completed:
                     from loom.tasks.runner import _report_from_run_result
 
-                    if not await self.prepare_completion(_report_from_run_result(result.value)):
+                    if not await self.prepare_completion(_report_from_run_result(result.value), reuse_current=True):
                         return await self.acceptance_blocked_result(result.value.context, runtime, self.acceptance.data["reason"], result.value)
                     if reason := self.output_error():
                         return await self.acceptance_blocked_result(result.value.context, runtime, reason, result.value)
@@ -873,7 +874,7 @@ class TaskAssembly:
         await self.acceptance.prepare(context, runtime)
         return self.project_acceptance(context)
 
-    async def prepare_completion(self, candidate):
+    async def prepare_completion(self, candidate, *, reuse_current=False):
         from loom.observability.result_format import format_result_text
         from loom.tasks.runner import _report_from_decision_output
 
@@ -885,7 +886,7 @@ class TaskAssembly:
                 self.acceptance.data.update(state=state, reason=reason, candidate=str(candidate or ""))
                 await self.acceptance.emit(self._task_runtime, "acceptance.gate.blocked")
                 return False
-            return await self.acceptance.verify(self.context, self._task_runtime, str(candidate or ""))
+            return await self.acceptance.verify(self.context, self._task_runtime, str(candidate or ""), reuse_current=reuse_current)
         except (ValueError, TypeError, RuntimeError, OSError) as exc:
             self.acceptance.data.update(state="blocked", reason=str(exc))
             if self._task_runtime:
