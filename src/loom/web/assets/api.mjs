@@ -156,6 +156,12 @@ export class SessionApi {
       { body: {}, signal },
     );
   }
+  deleteEvaluation(id, analysisId, jobId, signal) {
+    return this.json(
+      this.path(id, `trajectory/${encodeURIComponent(analysisId)}/evaluation/${encodeURIComponent(jobId)}/delete`),
+      { body: {}, signal },
+    );
+  }
   trajectoryRound(id, analysisId, roundId, signal) {
     return this.json(
       `${this.path(id, `trajectory/${encodeURIComponent(analysisId)}/round`)}?${new URLSearchParams({ round_id: roundId })}`,

@@ -71,6 +71,8 @@ def ledger(view, state):
             chains = [ancestors(owner) for owner in owners]
             owner = next(candidate for candidate in chains[0] if all(candidate in c for c in chains))
             basis = "inferred_unique_activity" if len(owners) == 1 else "inferred_shared_call"
+            if all(entities[o].get("basis") == "framework_rule" for o in owners):
+                basis = "framework_rule"
         assignments.append(
             dict(
                 cost_atom_id=atom["id"],

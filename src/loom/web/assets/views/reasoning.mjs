@@ -120,7 +120,7 @@ export class ReasoningView {
   update(data, job) {
     if (data?.schema_version === GOAL_SCHEMA) {
       this.goalView ||= new GoalLoopView(this.root, {evidence: this.evidence});
-      this.signature = null; this.goalView.update(data); return;
+      this.signature = null; this.goalView.update(data, job?.id); return;
     }
     const signature = JSON.stringify([data, this.baseProcess, job?.state, job?.stage]);
     if (signature === this.signature) return;

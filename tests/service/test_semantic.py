@@ -293,7 +293,7 @@ def test_running_behavior_job_exposes_saved_partial_findings(evaluation):
     assert current['state'] == 'running'
     assert current['analysis_version'] == 'v3'
     assert current['settings']['max_call_seconds'] == 120
-    assert current['settings']['max_seconds'] == 600
+    assert current['settings']['max_seconds'] == 1800
     assert current['scanned_pages'] == current['scan_pages'] == 1
     assert current['evaluation']['semantic']['coverage']['attempted_segments'] == 1
     assert not current['evaluation']['semantic']['coverage']['synthesis_complete']
@@ -311,7 +311,11 @@ def test_catalog_uses_independent_evaluation_model(evaluation, tmp_path):
     semantic.provider_factory = None
     semantic.config_path = config
     assert semantic.options()['default_model'] == 'judge'
-    assert semantic.options()['defaults'] == semantic.options()['defaults_by_version']['v3']
+    catalog = semantic.options()
+    assert catalog['defaults'] == catalog['defaults_by_version'][catalog['default_analysis_version']]
+    for defaults in catalog['defaults_by_version'].values():
+        assert defaults['max_seconds'] == 1800
+        assert defaults['max_evidence_chars'] == 262144
 
 
 def test_saved_graph_upgrade_keeps_snapshot_judgments_and_usage_without_llm_calls(evaluation):

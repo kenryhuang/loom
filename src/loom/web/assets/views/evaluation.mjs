@@ -58,7 +58,8 @@ export class EvaluationView {
     this.form = element("form", "deep-controls");
     this.toolbar = element("div", "dashboard-toolbar deep-toolbar");
     this.settingsPanel = element("details", "evaluation-settings dashboard-panel");
-    this.settingsPanel.append(element("summary", "", "Evaluation settings"));
+    this.settingsSummary = element("summary", "", "Evaluation settings · New evaluation");
+    this.settingsPanel.append(this.settingsSummary);
     this.settingsFields = element("div", "evaluation-controls");
     this.settingsPanel.append(this.settingsFields);
     this.form.append(this.toolbar, this.settingsPanel);
@@ -118,7 +119,8 @@ export class EvaluationView {
         ["max_tokens", "Token budget"],
         ["max_seconds", "Time budget · seconds"],
         ["max_call_seconds", "Call timeout · seconds"],
-        ["max_evidence_chars", "Evidence characters"],
+        ["max_prompt_chars", "Request characters · per call"],
+        ["max_evidence_chars", "Evidence characters · total"],
       ]) {
         if (catalog.defaults[key] == null) continue;
         const input = element("input");
@@ -127,6 +129,8 @@ export class EvaluationView {
         input.max = catalog.bounds[key][1];
         input.value = catalog.defaults[key];
         input.required = true;
+        if (key === "max_prompt_chars") input.title = "Maximum characters in one model request, including instructions, metadata, evidence and response schema.";
+        if (key === "max_evidence_chars") input.title = "Cumulative evidence read allowance across the evaluation. This does not set the per-request input limit.";
         const wrapper = element("label", "", label);
         wrapper.append(input);
         this.settingsFields.append(wrapper);
@@ -156,6 +160,9 @@ export class EvaluationView {
         clearTimeout(this.timer);
         ++this.generation;
         this.job = null;
+        this.cancel.hidden = true;
+        this.deleteButton.hidden = true;
+        this.fresh.disabled = false;
         this.version.value = this.catalog.default_analysis_version || "v2";
         this.model.value = this.catalog.default_model;
         this.applyDefaults();
@@ -166,14 +173,18 @@ export class EvaluationView {
         for (const field of Object.values(this.fields)) field.disabled = false;
         if (this.history) this.history.value = "";
         this.renderedData = null;
+        this.graphView = null;
         this.onResult?.(null);
         this.results.replaceChildren(element("p", "empty-state", "No evaluation selected"));
         this.progress.hidden = true;
         this.settingsPanel.open = false;
         this.status.hidden = true;
       });
+      this.deleteButton = button("Delete evaluation", () => this.deleteSelected());
+      this.deleteButton.classList.add("danger");
+      this.deleteButton.hidden = true;
       const actions = element("div", "deep-actions");
-      actions.append(this.start, this.cancel, this.fresh); this.toolbar.append(actions);
+      actions.append(this.start, this.cancel, this.fresh, this.deleteButton); this.toolbar.append(actions);
       const notes = disclosure(this.settingsPanel, "Budget accounting");
       notes.append(element("p", "muted small", "Evaluator usage is separate from task usage. Incremental graph review records tokens without a token budget or output cap. Time and call limits still apply; unknown usage is marked explicitly. Legacy evaluators check reported usage between requests."));
       this.status.textContent = catalog.models.length ? "" : "Configure a judge model to run evaluation.";
@@ -210,6 +221,7 @@ export class EvaluationView {
     option.title = `${job.model || ""} · ${job.id}`;
   }
   applyDefaults() {
+    this.settingsSummary.textContent = "Evaluation settings · New evaluation";
     const defaults = this.catalog.defaults_by_version?.[this.version.value] || this.catalog.defaults;
     for (const [key, input] of Object.entries(this.fields)) input.value = defaults[key];
     for (const key of ["max_rounds", "max_tokens"]) if(this.fields[key]) this.fields[key].parentElement.hidden = this.version.value === "goal_graph_v1";
@@ -223,7 +235,9 @@ export class EvaluationView {
     this.onError?.(error);
   }
   async run() {
+    if (this.deleting) return;
     this.start.disabled = true;
+    this.deleteButton.disabled = true;
     try {
       const resumable =
         this.job &&
@@ -247,7 +261,7 @@ export class EvaluationView {
         this.version.value === (this.job.analysis_version || "v2") &&
         Object.keys(this.job.settings).every(
           (key) =>
-            ["max_seconds", "max_tokens", "max_calls"].includes(key) ||
+            ["max_seconds", "max_tokens", "max_calls", ...(options.analysis_version === "goal_graph_v1" ? ["max_prompt_chars", "max_evidence_chars"] : [])].includes(key) ||
             options[key] === this.job.settings[key],
         )
       ) {
@@ -261,11 +275,45 @@ export class EvaluationView {
       );
       if (!this.signal.aborted) this.follow(job.id);
     } catch (error) {
+      this.deleteButton.disabled = !this.job || ["queued", "running"].includes(this.job.state);
       this.fail(error);
     }
   }
-  async follow(id, generation = ++this.generation) {
+  async deleteSelected() {
+    const job = this.job;
+    if (!this.catalog.supports_delete || !job || this.deleting || this.history.value !== job.id || ["queued", "running"].includes(job.state)) return;
+    const confirmed = this.root.ownerDocument.defaultView.confirm(
+      `Permanently delete evaluation ${job.id}?\n\nThis removes its metadata, checkpoint, evaluator records and saved results, including earlier revisions. The original task trace and results shared by other evaluations are retained. This cannot be undone.`,
+    );
+    if (!confirmed) return;
+    this.deleting = true;
     clearTimeout(this.timer);
+    ++this.generation;
+    // Freeze selection and settings until the scoped delete finishes.
+    const controls = [...this.form.querySelectorAll("button, input, select")];
+    const disabled = controls.map(node => node.disabled);
+    controls.forEach(node => { node.disabled = true; });
+    let deleted = false;
+    try {
+      await this.api.deleteEvaluation(this.sessionId, this.analysisId, job.id, this.signal);
+      deleted = true;
+    } catch (error) {
+      this.fail(error);
+    } finally {
+      this.deleting = false;
+      if (!this.signal.aborted) controls.forEach((node, i) => { node.disabled = disabled[i]; });
+    }
+    if (this.signal.aborted || !deleted) return;
+    [...this.history.options].find(option => option.value === job.id)?.remove();
+    this.catalog.jobs = this.catalog.jobs.filter(row => row.id !== job.id);
+    this.fresh.click();
+    this.status.textContent = "Evaluation permanently deleted.";
+    this.status.hidden = false;
+  }
+  async follow(id, generation = ++this.generation) {
+    if (this.deleting) return;
+    clearTimeout(this.timer);
+    this.deleteButton.disabled = true;
     try {
       const job = await this.api.evaluation(
         this.sessionId,
@@ -284,7 +332,11 @@ export class EvaluationView {
       const wasActive =
         this.job && ["queued", "running"].includes(this.job.state);
       this.job = job;
+      this.settingsSummary.textContent = "Evaluation settings · Saved evaluation";
       const active = ["queued", "running"].includes(job.state);
+      this.deleteButton.hidden = !this.catalog.supports_delete;
+      this.deleteButton.disabled = active;
+      this.deleteButton.title = active ? "Cancel the evaluation and wait for it to stop before deleting." : "Permanently delete this evaluation and its saved records.";
       if (active && !wasActive && this.settingsPanel)
         this.settingsPanel.open = false;
       this.start.disabled = active;
@@ -315,7 +367,9 @@ export class EvaluationView {
       }
       this.status.textContent = job.error || "";
       if (job.state === "budget_exhausted") {
-        this.status.textContent += " Adjust the exhausted total budget in settings, then Resume evaluation. Saved stages are retained.";
+        this.status.textContent += /input budget reached/i.test(job.error || "")
+          ? " Increase Request characters · per call in Evaluation settings, then Resume evaluation. Saved stages are retained."
+          : " Adjust the exhausted total budget in settings, then Resume evaluation. Saved stages are retained.";
       }
       this.status.hidden = !this.status.textContent;
       this.renderProgress(job);
@@ -323,6 +377,7 @@ export class EvaluationView {
       if (active)
         this.timer = setTimeout(() => this.follow(id, generation), 1200);
     } catch (error) {
+      if (generation !== this.generation) return;
       this.fail(error);
     }
   }
@@ -462,12 +517,12 @@ export class EvaluationView {
     return node;
   }
   render(data) {
-    const signature = JSON.stringify(data);
+    const signature = JSON.stringify([this.job?.id, data]);
     this.onResult?.(data, this.job);
     if (signature === this.renderedData) return;
     if (data.skeleton?.projection_version) {
       if (!this.graphView) this.graphView=new IncrementalGraphView(element("section"),{evidence:ref=>this.evidence(ref)});
-      this.results.replaceChildren(this.graphView.root);this.graphView.update(data);this.renderedData=signature;return;
+      this.results.replaceChildren(this.graphView.root);this.graphView.update(data, this.job?.id);this.renderedData=signature;return;
     }
     const opened = new Set([...this.results.querySelectorAll("details[open][data-detail]")].map(n => n.dataset.detail));
     const filters = [...this.results.querySelectorAll("[data-deep-filter]")].map(n => [n.dataset.deepFilter, n.value]);

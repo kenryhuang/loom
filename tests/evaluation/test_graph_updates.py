@@ -29,6 +29,86 @@ def commit(cp, extraction, records, batch="batch"):
                           cutoff=max(c["end_line"] for c in extraction["cards"]), target_ids={c["id"] for c in extraction["cards"]})
 
 
+def test_goal_decomposition_preserves_cited_basis_and_legacy_missing_basis_is_nonblocking():
+    store, facts, cp, extraction = fixture()
+    card = extraction["cards"][0]
+    root = cp["entities"]["goals"][0]["id"]
+    records = [
+        ("goals", dict(key="parent", parent_id=root, objective="Identify the cause", conditions=[],
+                       root_relation="Establish the defect mechanism needed for the requested repair", refs=card["refs"][:1])),
+        ("goals", dict(key="child", parent_id="parent", objective="Resolve the update ordering", conditions=[],
+                       root_relation="Determine which update path causes the stale value", refs=card["refs"][:1])),
+        ("goals", dict(key="legacy", parent_id="parent", objective="Older judgment", conditions=[], refs=card["refs"][:1])),
+    ]
+    assert not commit(cp, extraction, records)[0]
+    parent, child, legacy = cp["entities"]["goals"][1:]
+    assert child["parent_goal_id"] == parent["id"]
+    assert child["root_relation"] == records[1][1]["root_relation"]
+    assert child["parent_relation_basis"] == "inferred"
+    assert legacy["parent_relation_basis"] == "unreviewed"
+    before = json.dumps(cp, sort_keys=True)
+    result = project(store, facts, "run", cp, extraction)
+    assert json.dumps(cp, sort_keys=True) == before
+    assert "saved nesting is unreviewed" in result["report"]["text"]
+    assert result["display_order"]["sequence_is_dependency"] is False
+    assert next(g for g in result["goals"] if g["id"] == child["id"])["parent_goal_id"] == parent["id"]
+
+
+def test_reused_goal_id_forks_new_definition_and_batch_stages_without_overwriting_history():
+    from copy import deepcopy
+
+    _, _, cp, extraction = fixture()
+    card = extraction["cards"][0]
+    refs = card["refs"][:1]
+    root = cp["entities"]["goals"][0]["id"]
+    assert not commit(cp, extraction, [
+        ("goals", dict(key="g", parent_id=root, objective="Locate the cause", conditions=["Cause established"], refs=refs)),
+        ("stages", dict(key="s", goal_id="g", title="Inspect files", kind="investigation", refs=refs)),
+        ("assessments", assessment(card, stage="s")),
+    ])[0]
+    goal = deepcopy(cp["entities"]["goals"][1])
+    old_stage = next(iter(cp["stages"]))
+    # Reproduce an earlier partially accepted repair: stages already refer to
+    # the occupied ID while its changed declaration was rejected.
+    records = [
+        ("goals", dict(key=goal["id"], parent_id=root, objective="Implement the fix", conditions=["Fix implemented"], refs=refs)),
+        ("stages", dict(key="s", goal_id=goal["id"], title="Inspect files", kind="investigation", refs=refs)),
+        ("attributions", dict(card_id=card["id"], stage_ids=["s"], refs=refs)),
+    ]
+    assert not commit(cp, extraction, records)[0]
+    assert cp["entities"]["goals"][1] == goal
+    new_goal = cp["entities"]["goals"][2]
+    new_stage = cp["assessments"][card["id"]]["stage_ids"][0]
+    assert new_stage != old_stage
+    assert cp["stages"][new_stage]["goal_id"] == new_goal["id"]
+    assert cp["stages"][old_stage]["goal_id"] == goal["id"]
+    assert any(r["stage_ids"] == [old_stage] for r in cp["assessments"][card["id"]]["history"])
+    snapshot = deepcopy(cp)
+    assert not commit(cp, extraction, records)[0]
+    assert cp["graph_revision"] == snapshot["graph_revision"]
+    assert cp["record_aliases"] == snapshot["record_aliases"]
+    # Batch-scoped aliases cannot silently redirect later unrelated work.
+    assert not commit(cp, extraction, [("stages", dict(key="later", goal_id=goal["id"],
+        title="Follow original question", kind="investigation", refs=refs))], "other")[0]
+    later = cp["record_aliases"]["other"]["later"]
+    assert cp["stages"][later]["goal_id"] == goal["id"]
+
+
+def test_goal_title_echo_keeps_definition_but_reparent_and_invalid_refs_still_fail():
+    _, _, cp, extraction = fixture()
+    card = extraction["cards"][0]
+    root = cp["entities"]["goals"][0]["id"]
+    goal = dict(key="g", parent_id=root, objective="Verify fix", conditions=["Tests pass"], refs=card["refs"][:1])
+    assert not commit(cp, extraction, [("goals", goal)])[0]
+    saved = cp["entities"]["goals"][1].copy()
+    echo = {**goal, "key": saved["id"], "objective": "Run tests to verify fix"}
+    assert not commit(cp, extraction, [("goals", echo)], "echo")[0]
+    assert cp["entities"]["goals"][1] == saved
+    assert any(n["rule"] == "goal_title_echo_ignored" for n in cp["protocol_normalizations"])
+    assert commit(cp, extraction, [("goals", {**echo, "refs": ["unseen"]})], "bad")[0]
+    assert commit(cp, extraction, [("goals", {**echo, "parent_id": saved["id"]})], "cycle")[0]
+
+
 def test_bad_goal_and_attribution_do_not_discard_model_or_tool_judgments():
     _, _, cp, extraction = fixture()
     cards = extraction["cards"][:2]
@@ -91,7 +171,7 @@ def test_later_goal_stage_attribution_and_dependency_preserve_earlier_actions():
     assert not errors
     result = project(store, facts, "run", cp, extraction)
     assert len(result["skeleton"]["edges"]) == 1
-    assigned = [n for n in result["skeleton"]["nodes"] if n["goal_id"]]
+    assigned = [n for n in result["skeleton"]["nodes"] if n["goal_id"] and not n.get("attribution")]
     assert {n["goal_display_id"] for n in assigned} == {"G1", "G2"}
     assert {cid for n in assigned for cid in n["call_ids"]} == set(a["call_ids"] + b["call_ids"])
     assert result["cost_ledger"]["conserved"]

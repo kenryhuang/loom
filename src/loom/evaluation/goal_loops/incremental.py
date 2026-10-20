@@ -9,14 +9,19 @@ from jsonschema import Draft202012Validator
 
 from loom.core import ok
 from loom.evaluation.evidence_store import text_value
+from loom.evaluation.goal_loops.attribution import action_attributions
 from loom.evaluation.goal_loops.cards import VERSION as EXTRACTOR
-from loom.evaluation.goal_loops.cards import card_payload, compile_cards, link_cards
+from loom.evaluation.goal_loops.cards import compile_cards, link_cards
+from loom.evaluation.goal_loops.checkpoint_repair import complete_framework_boundaries, reconcile_checkpoint
 from loom.evaluation.goal_loops.facts import identity, run_facts
-from loom.evaluation.goal_loops.graph_contract import ANALYZER, PROMPT, REQUEST, SYSTEM, UPGRADABLE_VERSIONS, compact_contract, protocol
+from loom.evaluation.goal_loops.graph_contract import ANALYZER, PROMPT, REQUEST, RESOURCE_LIMITS, SYSTEM, UPGRADABLE_VERSIONS, compact_contract, protocol
 from loom.evaluation.goal_loops.graph_projection import project
 from loom.evaluation.goal_loops.graph_state import initialize, occurrences
 from loom.evaluation.goal_loops.graph_updates import commit_updates, parse_updates
+from loom.evaluation.goal_loops.judge_metadata import VERSION as INPUT_VERSION
+from loom.evaluation.goal_loops.judge_metadata import card_metadata, feedback_metadata, terminal_metadata_records
 from loom.evaluation.goal_loops.packing import REQUEST_CHARS, bounded_state, request_profile, serialized
+from loom.evaluation.goal_loops.structure import pending_structure_units, structure_pending
 from loom.evaluation.provider import evaluator_provider
 from loom.llm.api import LlmMessage, request_llm_response
 from loom.llm.structured import output_mode, protocol_provider, unsupported_format
@@ -36,7 +41,8 @@ def context(cp, cards, cutoff):
     return bounded_state(
         dict(
             roots=[{k: g[k] for k in ("id", "objective", "conditions")} for g in roots],
-            goals=[{k: g[k] for k in ("id", "parent_goal_id", "objective", "conditions", "goal_disposition")} for g in selected],
+            goals=[{**{k: g[k] for k in ("id", "parent_goal_id", "objective", "conditions", "goal_disposition")},
+                    "root_relation": g.get("root_relation", "")} for g in selected],
             stages=[{k: s[k] for k in ("id", "goal_id", "attempt_id", "title", "kind")} for s in stages],
             closures=[{k: r[k] for k in ("goal_id", "claim", "evidence_state", "open_questions")} for g, r in cp["closures"].items() if g in ids],
             older_goal_index=[dict(id=g["id"], objective=g["objective"][:100]) for g in goals if g["id"] not in ids][-16:],
@@ -84,12 +90,30 @@ def read_requests(source, registry, requests, *, cutoff, inspected, remaining_ch
     return pending
 
 
+def upgrade_budget_identity(checkpoint, saved_settings):
+    """Recognize the old exact settings digest before separating capacity limits.
+
+    The service passes the saved job settings, never the new requested settings.
+    No source, model, protocol or semantic identity component is relaxed.
+    """
+    old = checkpoint.get("identity")
+    legacy = {k: v for k, v in saved_settings.items() if k not in {"max_calls", "max_tokens", "max_seconds"}}
+    if old and old.get("settings") == identity(legacy):
+        old["settings"] = identity({k: v for k, v in saved_settings.items() if k not in RESOURCE_LIMITS})
+        checkpoint.setdefault("resource_limits", {k: saved_settings[k] for k in RESOURCE_LIMITS})
+        checkpoint.setdefault("resource_policy_upgrades", []).append(
+            dict(revision=checkpoint.get("graph_revision", 0), reason="Character capacities are resumable resource limits")
+        )
+
+
 async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint, event_sink, settings, remaining_seconds):
     view = run_facts(source, facts, run_id)
     extraction = checkpoint.get("extraction") or compile_cards(source, facts, view)
     cards, registry = extraction["cards"], dict(extraction["registry"])
     extraction["metadata_links"] = link_cards(cards)
-    semantic_settings = {k: v for k, v in settings.items() if k not in {"max_calls", "max_tokens", "max_seconds"}}
+    judge_cards = {c["id"]: card_metadata(source, c, registry) for c in cards}
+    extraction["registry"] = registry
+    semantic_settings = {k: v for k, v in settings.items() if k not in RESOURCE_LIMITS}
     expected = dict(
         source=source.source_sha256,
         scope=view["scope_digest"],
@@ -100,15 +124,20 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         settings=identity(semantic_settings),
     )
     cp = checkpoint
+    upgrade_budget_identity(cp, settings)
     if cp.get("identity") and cp["identity"] != expected:
         old = cp["identity"]
         if (old.get("analyzer"), old.get("prompt")) not in UPGRADABLE_VERSIONS or {**old, "analyzer": ANALYZER, "prompt": PROMPT} != expected:
             raise ValueError("Incremental graph identity changed; create a new evaluation")
         cp.setdefault("protocol_upgrades", []).append(dict(from_prompt=old["prompt"], to_prompt=PROMPT, revision=cp["graph_revision"]))
+    if any(settings[k] < value for k, value in cp.get("resource_limits", {}).items() if k != "max_tokens"):
+        raise ValueError("Resuming cannot reduce resource limits")
     for key, value in initialize(view).items():
         cp.setdefault(key, value)
     cp["identity"] = expected
+    cp["resource_limits"] = {k: settings[k] for k in RESOURCE_LIMITS}
     cp["extraction"] = extraction
+    cp["input_policy"] = dict(version=INPUT_VERSION, source_reads=False, raw_tool_outputs=False, trace_history=False)
     cp["total_cards"] = len(cards)
     cp.setdefault("mode", output_mode(provider))
     cp.setdefault("read_chars", 0)
@@ -119,6 +148,8 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
     cp.setdefault("delivered_ranges", [])
 
     async def save():
+        cp["action_attributions"] = action_attributions(cp, cards)
+        cp["pending_structure_units"] = pending_structure_units(cp)
         value = save_checkpoint(deepcopy(cp))
         if inspect.isawaitable(value):
             await value
@@ -130,8 +161,12 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         if value is not None and not value.ok:
             raise ValueError(value.error.message)
 
+    reconcile_checkpoint(cp, cards, metadata=judge_cards)
     # A resumable unit retains its cutoff and bounded read state. Failed earlier
     # groups are retried without exposing judgments from later windows.
+    for unit in cp["units"].values():
+        if structure_pending(cp, unit):
+            unit["complete"] = False
     pending = sorted((u for u in cp["units"].values() if not u.get("complete")), key=lambda u: (u["cutoff"], u["id"]))
     for unit in pending:
         unit["repair"] = 0
@@ -172,73 +207,70 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
             known = [r for r in row.get("history", []) + [row] if r["knowledge_cutoff"] <= cutoff]
             if known:
                 local["assessments"][cid] = known[-1]
-        frontier = occurrences(local, cards)[-4:]
-        boundary = {}
-        frontier_rows = []
-        for occurrence in frontier:
-            evidence_ids = []
-            for ref in occurrence["evidence_refs"][:2]:
-                value = text_value(source.resolve(ref))
-                pointer = {**ref, "start": ref.get("start") or 0, "end": (ref.get("start") or 0) + min(len(value), 240)}
-                eid = "e" + identity(pointer)[:12]
-                boundary[eid] = dict(id=eid, ref=pointer, line=pointer["line_number"], text=value[:240])
-                evidence_ids.append(eid)
-            frontier_rows.append(
-                {
-                    **{k: occurrence[k] for k in ("id", "stage_id", "goal_id", "card_ids", "end_line")},
-                    "delta": occurrence["delta"][:240],
-                    "evidence_ids": evidence_ids,
-                }
-            )
-        # Action IDs/order/caller metadata are factual. A compact prior-action index
-        # lets later batches attach an earlier unassigned action or cite its result.
+        # A small previous-action frontier carries metadata, never raw historical
+        # evidence slices or the complete tree. Source pointers remain local.
+        frontier, boundary = [], {}
         prior_actions = []
-        for card in [c for c in cards if c["id"] in local["assessments"] and c["end_line"] < min(s["start_line"] for s in subset)][-6:]:
+        before = min(s["start_line"] for s in subset)
+        for card in [c for c in cards if c["id"] in local["assessments"] and c["end_line"] < before][-2:]:
             assessment = local["assessments"][card["id"]]
-            evidence_ids = []
-            for ref in assessment["evidence_refs"][:2]:
-                value = text_value(source.resolve(ref))
-                pointer = {**ref, "start": ref.get("start") or 0, "end": (ref.get("start") or 0) + min(len(value), 240)}
-                eid = "e" + identity(pointer)[:12]
-                boundary[eid] = dict(id=eid, ref=pointer, line=pointer["line_number"], text=value[:240])
-                evidence_ids.append(eid)
-            prior_actions.append(dict(id=card["id"], kind=card["kind"], start_line=card["start_line"], end_line=card["end_line"],
-                                      stage_ids=assessment["stage_ids"], delta=assessment["delta"][:160], evidence_ids=evidence_ids))
-        registry.update(boundary)
-        allow_reads = unit["read_round"] < min(2, settings["max_read_rounds"]) and not unit.get("conclude")
+            supplied = judge_cards[card["id"]]["fields"][:1]
+            for field in supplied:
+                boundary[field["ref"]] = {**registry[field["ref"]], "text": field["text"]}
+            prior_actions.append(dict(id=card["id"], kind=card["kind"], end_line=card["end_line"],
+                                      stage_ids=assessment["stage_ids"], delta=assessment["delta"][:120],
+                                      evidence_ids=[f["ref"] for f in supplied]))
+        # Preserve exact occurrence IDs for compatibility, without retransmitting
+        # original output/response text from earlier judgments.
+        for occurrence in occurrences(local, cards)[-2:]:
+            matching = next((r for r in prior_actions if r["id"] in occurrence["card_ids"]), None)
+            frontier.append({**{k: occurrence[k] for k in ("id", "stage_id", "goal_id", "end_line")},
+                             "evidence_ids": matching["evidence_ids"] if matching else []})
+        allow_reads = False
+        known_state = context(local, subset, cutoff)
+        known_ids = {r["id"] for key in ("roots", "goals", "stages") for r in known_state[key]}
+        aliases = {k: v for k, v in cp.get("record_aliases", {}).get(unit["id"], {}).items() if v in known_ids}
+        accepted_ids = [c["id"] for c in subset if c["id"] in cp["assessments"] and cp["assessments"][c["id"]]["status"] != "needs_evidence"]
+        structure_only = len(accepted_ids) == len(subset) and structure_pending(cp, unit) and not any(
+            e.get("record_type") not in {"structure", "goals", "stages", "attributions"} for e in unit.get("feedback", [])
+        )
         payload = dict(
             batch_id=unit["id"],
             base_graph_revision=cp["graph_revision"],
             knowledge_cutoff=cutoff,
-            **context(local, subset, cutoff),
-            cards=[card_payload(c, cutoff) for c in subset],
-            extra_evidence=[{k: registry[e][k] for k in ("id", "text", "question")} for e in unit["extra"]],
-            review_control=dict(mode="review" if allow_reads else "conclude", remaining_reads=max(0, min(2, settings["max_read_rounds"]) - unit["read_round"])),
-            feedback=unit.get("feedback", []),
-            frontier=frontier_rows,
+            **known_state,
+            input_version=INPUT_VERSION,
+            cards=[judge_cards[c["id"]] for c in subset],
+            extra_evidence=[],
+            review_control=dict(mode="structure_only" if structure_only else "metadata_only", remaining_reads=0),
+            feedback=feedback_metadata(unit.get("feedback", [])),
+            frontier=frontier,
             prior_actions=prior_actions,
-            accepted_card_ids=[c["id"] for c in subset if c["id"] in cp["assessments"] and cp["assessments"][c["id"]]["status"] != "needs_evidence"],
-            local_aliases=cp.get("record_aliases", {}).get(unit["id"], {}),
+            accepted_card_ids=accepted_ids,
+            local_aliases=dict(list(aliases.items())[-12:]),
             boundary_evidence=[{k: e[k] for k in ("id", "text")} for e in boundary.values()],
         )
         if cp["mode"] != "json_schema":
-            payload["contract"] = compact_contract(cp["mode"])
+            payload["contract"] = compact_contract(cp["mode"], metadata_only=True)
         messages = [
             LlmMessage(
                 role="system", content=SYSTEM + ("\nNo more evidence reads; conclude with supported findings or explicit unknown." if not allow_reads else "")
             ),
             LlmMessage(role="user", content=serialized(payload)),
         ]
-        profile = request_profile(messages, payload, cp["mode"], protocol(allow_reads))
+        profile = request_profile(messages, payload, cp["mode"], protocol(allow_reads, metadata_only=True))
         chars = profile["total_chars"]
-        if chars > min(settings["max_prompt_chars"], REQUEST_CHARS):
-            if unit["id"] not in cp["units"] and len(subset) > 1:
-                half = subset[: max(1, len(subset) // 2)]
-                unit.update(id="batch:" + identity([c["id"] for c in half]), cards=[c["id"] for c in half], cutoff=max(c["end_line"] for c in half))
-                continue
+        if chars > min(settings["max_prompt_chars"], REQUEST_CHARS) and unit["id"] not in cp["units"] and len(subset) > 1:
+            half = subset[: max(1, len(subset) // 2)]
+            unit.update(id="batch:" + identity([c["id"] for c in half]), cards=[c["id"] for c in half], cutoff=max(c["end_line"] for c in half))
+            continue
+        if chars > settings["max_prompt_chars"]:
+            await save()
             raise ValueError(
                 f"Evaluation input budget reached: {chars} chars including response schema, "
-                f"limit {min(settings['max_prompt_chars'], REQUEST_CHARS)}, {len(subset)} cards; checkpoint retained"
+                f"limit {settings['max_prompt_chars']} (Request characters · per call / max_prompt_chars), "
+                f"{len(subset)} cards; checkpoint retained. Increase Request characters · per call, then Resume evaluation; "
+                "Evidence characters controls cumulative evidence reads, not request size"
             )
         if unit["id"] not in cp["units"]:
             cp["units"][unit["id"]] = deepcopy(unit)
@@ -270,14 +302,10 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         cp["usage"]["calls"] += 1
         cp["usage"]["unreported_calls"] += 1
         timeout = min(settings["max_call_seconds"], remaining_seconds())
-        for eid in unit["extra"]:
-            pointer = registry[eid]["ref"]
-            if pointer not in cp["delivered_ranges"]:
-                cp["delivered_ranges"].append(pointer)
         await save()
         meta = dict(
             analysis_stage=unit["id"],
-            evaluation_activity="repair" if unit["repair"] else "read_review" if unit["extra"] else "scan",
+            evaluation_activity="repair" if unit["repair"] else "scan",
             output_token_limit=None,
             timeout_seconds=timeout,
             prompt_chars=chars,
@@ -289,7 +317,9 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         await emit(dict(type="llm.requested", **meta, messages=messages, model=expected["model"]))
         start = time.monotonic()
         try:
-            wrapped = protocol_provider(evaluator_provider(provider, output_tokens=None, timeout_seconds=timeout), protocol(allow_reads), cp["mode"])
+            wrapped = protocol_provider(
+                evaluator_provider(provider, output_tokens=None, timeout_seconds=timeout), protocol(allow_reads, metadata_only=True), cp["mode"]
+            )
             async with asyncio.timeout(timeout):
                 response = await request_llm_response(wrapped, messages, tools=None)
         except TimeoutError as exc:
@@ -329,43 +359,26 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         )
         await emit(dict(type="llm.completed", **meta, response=answer))
         await save()
-        delivered_ids = {e for c in payload["cards"] for e in c["refs"]} | set(unit["extra"]) | set(boundary)
+        delivered_ids = {e for c in payload["cards"] for e in c["refs"]} | set(boundary)
+        cp["responses"][-1]["delivered_ref_ids"] = sorted(delivered_ids)
         delivered = {e: registry[e] for e in delivered_ids}
         records, errors = parse_updates(answer)
-        rejected, requests = commit_updates(cp, records, batch_id=unit["id"], cards=cards, delivered=delivered,
+        rejected, _ = commit_updates(cp, terminal_metadata_records(
+            records, normalizations=cp.setdefault("protocol_normalizations", []), batch_id=unit["id"]), batch_id=unit["id"], cards=cards, delivered=delivered,
                                            cutoff=cutoff, target_ids=set(unit["cards"]))
         errors += rejected
         cp["responses"][-1]["validation_errors"] = deepcopy(errors)
+        complete_framework_boundaries(cp, cards, unit)
         await save()
         # commit_group replaces nested state; reacquire unit before persistence.
         unit = cp["units"][unit["id"]]
         pending[0] = unit
         missing = [c for c in unit["cards"] if c not in cp["assessments"] or cp["assessments"][c]["status"] == "needs_evidence"]
-        if missing and not requests:
+        if missing:
             errors.append(dict(reason="Cards need a terminal assessment (reviewed or explicit unknown)", card_ids=missing))
-        if requests:
-            try:
-                if not allow_reads:
-                    raise ValueError("Reading is closed; conclude unknown for unresolved questions")
-                additions = read_requests(
-                    source,
-                    registry,
-                    requests,
-                    cutoff=cutoff,
-                    inspected=cp["reviewed_ranges"],
-                    remaining_chars=min(settings["max_evidence_chars"], 24000) - cp["read_chars"],
-                )
-                for entry in additions:
-                    registry[entry["id"]] = entry
-                    cp["extra_evidence"][entry["id"]] = entry
-                    cp["reviewed_ranges"].append(entry["ref"])
-                    cp["read_chars"] += len(entry["text"])
-                unit.update(extra=list(dict.fromkeys(unit["extra"] + [e["id"] for e in additions])), read_round=unit["read_round"] + 1, feedback=errors)
-                await save()
-                continue
-            except ValueError as exc:
-                unit["conclude"] = True
-                errors.append(dict(reason=str(exc)))
+        if structure_pending(cp, unit):
+            errors.insert(0, dict(record_type="structure",
+                                  reason="Subgoal analysis pending: link actions to result-oriented child goals, or explain single_goal with current refs"))
         if errors and unit["repair"] < 1:
             unit.update(repair=unit["repair"] + 1, feedback=errors)
             await save()

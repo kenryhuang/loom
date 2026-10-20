@@ -7,6 +7,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from loom.evaluation.goal_loops.facts import identity
 from loom.evaluation.goal_loops.graph_contract import GROUP, UPDATE_FIELDS
 from loom.evaluation.goal_loops.graph_state import commit_group
+from loom.evaluation.goal_loops.structure import commit_structure
 from loom.llm.api import LlmResponse
 from loom.llm.structured import parse_response
 
@@ -85,16 +86,42 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
     sequence/caller metadata alone. Alias mappings are local to one review unit.
     """
     errors, requests, items, attributions = [], [], [], []
+
+    def normalized(kind, raw, rule, **details):
+        row = dict(batch_id=batch_id, record_type=kind, record_id=raw.get("card_id", raw.get("key")), rule=rule, **details)
+        if row not in cp.setdefault("protocol_normalizations", []):
+            cp["protocol_normalizations"].append(row)
+
     for index, (kind, raw) in enumerate(records):
         if not isinstance(raw, dict):
             errors.append(dict(record=index, record_type=kind, reason="Record must be an object"))
             continue
         raw = deepcopy(raw)
+        if kind in {"goals", "stages", "attempts"} and "id" in raw:
+            if "key" in raw and raw["key"] != raw["id"]:
+                errors.append(dict(record=index, record_type=kind, reason="Conflicting declaration id and key"))
+                continue
+            raw["key"] = raw.pop("id")
+            normalized(kind, raw, "declaration_id_to_key")
+        if kind == "goals" and any(g["id"] == raw.get("key") and not g.get("parent_goal_id") for g in cp["entities"]["goals"]):
+            # Root is recorded task metadata, never an evaluator-owned declaration.
+            # Ignore echoes (including paraphrases) without applying any mutation.
+            normalized(kind, raw, "root_echo_ignored")
+            continue
+        if kind == "goals" and "root_relation" not in raw:
+            raw["root_relation"] = ""
+            normalized(kind, raw, "missing_parent_relation_unreviewed")
+        if kind == "goals" and "conditions" not in raw:
+            key = cp.get("record_aliases", {}).get(batch_id, {}).get(raw.get("key"), raw.get("key"))
+            old = next((g for g in cp["entities"]["goals"] if g["id"] == key), None)
+            raw["conditions"] = deepcopy(old["conditions"]) if old else []
+            normalized(kind, raw, "omitted_conditions_preserved_or_empty")
         if kind == "assessments":
             # Backward-compatible input; semantic judgment is independent of its
             # possibly broken goal/stage mapping.
             stage_ids = raw.pop("stage_ids", None)
             raw.setdefault("expected_refs", [])
+            raw.setdefault("expected", "unknown")
             if stage_ids:
                 attributions.append((index, "attributions", dict(card_id=raw.get("card_id"), stage_ids=stage_ids, refs=raw.get("refs", []))))
             prior, uptake = raw.pop("prior_card_ids", []), raw.pop("uptake_card_ids", [])
@@ -123,6 +150,38 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
         for key in ("key", "parent_id", "goal_id", "attempt_id", "source_id", "target_id"):
             if key in row:
                 row[key] = aliases.get(row[key], row[key])
+        forked_from = None
+        if kind == "goals":
+            old = next((g for g in cp["entities"]["goals"] if g["id"] == row["key"]), None)
+            if old and old.get("parent_goal_id") == row["parent_id"] and old.get("knowledge_cutoff", 0) <= cutoff:
+                if old["conditions"] == row["conditions"] and (old["conditions"] or old["objective"] == row["objective"]):
+                    # A repeated definition is not an edit operation. Keep the
+                    # canonical wording; conditions and parent must still match.
+                    if old["objective"] != row["objective"]:
+                        normalized(kind, raw, "goal_title_echo_ignored", retained_objective=old["objective"],
+                                   proposed_objective=row["objective"])
+                        row["objective"] = old["objective"]
+                elif old["objective"] != row["objective"]:
+                    # An explicit new objective + conditions under an occupied
+                    # ID creates a new object. Only this batch's references move.
+                    forked_from = old["id"]
+                    row["key"] = "new-goal:" + identity(batch_id, raw)
+        if kind == "stages" and row["key"] in cp["stages"]:
+            old = cp["stages"][row["key"]]
+            remapped_goal = aliases.get(old["goal_id"], old["goal_id"])
+            if row["goal_id"] != old["goal_id"] and row["goal_id"] == remapped_goal:
+                forked_from = old["id"]
+                row["key"] = "new-stage:" + identity(batch_id, raw, row["goal_id"])
+        if kind == "stages" and row["key"] in cp["stages"]:
+            old = cp["stages"][row["key"]]
+            if old["knowledge_cutoff"] <= cutoff and all(old[k] == row[k] for k in ("goal_id", "title", "kind")) and old["attempt_id"] == (
+                row["attempt_id"] or "attempt:" + identity(row["goal_id"], "unestablished")
+            ):
+                normalized(kind, raw, "unchanged_stage_reused")
+                return
+        if kind == "structure":
+            commit_structure(cp, row, batch_id=batch_id, delivered=delivered, cutoff=cutoff, cards=cards, target_ids=target_ids)
+            return
         field = kind
         validation_evidence = delivered
         if kind == "assessments":
@@ -134,6 +193,9 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
             if not old:
                 raise ValueError("Relationship awaits an accepted action assessment")
             if not row["refs"]:
+                if kind == "attributions":
+                    normalized(kind, raw, "unsupported_attribution_omitted")
+                    return
                 raise ValueError("Relationship requires delivered evidence")
             if any(key not in delivered or delivered[key]["line"] > cutoff for key in row["refs"]):
                 raise ValueError("Relationship cites unknown, undelivered or future evidence")
@@ -155,7 +217,18 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
             row["refs"] = list(dict.fromkeys([*row["refs"], *raw["refs"]]))
         group = {k: [] for k in GROUP["properties"]}
         group[field] = [row]
-        identifier = "record:" + identity(batch_id, kind, raw)
+        # A relationship replay after a declaration fork must be applied to its
+        # new targets, even if the original raw alias text was already accepted.
+        fingerprint = [batch_id, kind, raw]
+        if forked_from:
+            fingerprint.append(row["key"])
+        elif kind == "goals" and any(n.get("rule") == "declaration_forked" and n.get("batch_id") == batch_id
+                                     and n.get("record_id") == raw["key"] and n.get("new_id") == row["key"]
+                                     for n in cp.get("protocol_normalizations", [])):
+            fingerprint.append("new-goal:" + identity(batch_id, raw))
+        elif kind == "attributions":
+            fingerprint.append(row["stage_ids"])
+        identifier = "record:" + identity(*fingerprint)
         commit_group(cp, group, group_id=identifier, base_revision=cp["graph_revision"], cards=cards,
                      delivered=validation_evidence, cutoff=cutoff, target_ids=target_ids)
         if kind in {"goals", "stages", "attempts"}:
@@ -163,6 +236,9 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
             known = cp["stages"] if kind == "stages" else {g["id"] for g in cp["entities"][kind]}
             canonical = row["key"] if row["key"] in known else prefix + ":" + identity(identifier, row["key"])
             cp.setdefault("record_aliases", {}).setdefault(batch_id, {})[raw["key"]] = canonical
+            if forked_from:
+                cp["record_aliases"][batch_id][forked_from] = canonical
+                normalized(kind, raw, "declaration_forked", previous_id=forked_from, new_id=canonical)
 
     # Retry declarations only when a dependency was actually resolved; unrelated
     # malformed declarations cannot prevent other goals or stages from committing.
@@ -179,7 +255,7 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
             errors.extend(e for _, e in rejected)
             break
         declarations = [item for item, _ in rejected]
-    for kind in ("assessments", "attributions", "comparisons", "relations", "closures", "diagnostics", "evidence_requests"):
+    for kind in ("assessments", "attributions", "comparisons", "relations", "closures", "diagnostics", "structure", "evidence_requests"):
         for item in (item for item in items if item[1] == kind):
             try:
                 apply(item)

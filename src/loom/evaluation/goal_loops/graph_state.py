@@ -141,6 +141,8 @@ def commit_group(cp, group, *, group_id, base_revision, cards, delivered, cutoff
         row = dict(
             id=gid,
             parent_goal_id=parent,
+            root_relation=raw.get("root_relation", "").strip(),
+            parent_relation_basis="inferred" if raw.get("root_relation", "").strip() else "unreviewed",
             objective=raw["objective"],
             conditions=raw["conditions"],
             evidence_refs=evidence,

@@ -158,6 +158,10 @@ test("late evaluation responses do not replace newer selection or an aborted ses
   const abort = new AbortController();
   let resolveOld;
   const api = {
+    evaluations: async () => ({
+      models: [{id: "judge", label: "Judge"}], default_model: "judge", defaults: settings,
+      bounds: Object.fromEntries(Object.keys(settings).map(key => [key, [1, 1000000]])), jobs: [],
+    }),
     evaluation: async (s, a, id) =>
       id === "old"
         ? new Promise((r) => {
@@ -180,12 +184,7 @@ test("late evaluation responses do not replace newer selection or an aborted ses
     signal: abort.signal,
     evidence() {},
   });
-  view.status = document.createElement("p");
-  view.start = document.createElement("button");
-  view.cancel = document.createElement("button");
-  view.model = document.createElement("select");
-  view.fields = {};
-  view.results = root;
+  await view.open();
   const old = view.follow("old");
   await view.follow("new");
   resolveOld({ id: "old" });
@@ -398,8 +397,8 @@ test("new v3 evaluation uses version defaults instead of legacy resume settings"
   const dom = new JSDOM('<section id="root"></section>');
   globalThis.document = dom.window.document;
   const abort = new AbortController(), starts = [];
-  const v3 = {...settings, max_calls: 24, max_tokens: 120000, max_seconds: 600, max_call_seconds: 120, max_rounds: 8, max_read_rounds: 1};
-  const legacy = {...v3, max_calls: 80, max_tokens: 1000000, max_rounds: 10000, max_read_rounds: 4};
+  const v3 = {...settings, max_calls: 24, max_tokens: 120000, max_seconds: 1800, max_evidence_chars: 262144, max_call_seconds: 120, max_rounds: 8, max_read_rounds: 1};
+  const legacy = {...v3, max_seconds: 600, max_evidence_chars: 24000, max_calls: 80, max_tokens: 1000000, max_rounds: 10000, max_read_rounds: 4};
   const old = {id: "old", model: "judge", analysis_version: "v2", state: "budget_exhausted", settings: legacy, usage: {calls: 8, total_tokens: 262867}};
   const api = {
     evaluations: async () => ({models: [{id: "judge", label: "Judge"}], default_model: "judge", analysis_versions: ["v3", "v2"], default_analysis_version: "v3", defaults: v3, defaults_by_version: {v3, v2: legacy}, bounds: Object.fromEntries(Object.keys(v3).map(k => [k, [1, 10000000]])), jobs: [old]}),
@@ -410,15 +409,54 @@ test("new v3 evaluation uses version defaults instead of legacy resume settings"
   await view.open();
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(view.version.value, "v2");
+  assert.equal(view.fields.max_seconds.value, "600");
+  assert.match(view.settingsSummary.textContent, /Saved evaluation/);
   view.fresh.click();
   assert.equal(view.version.value, "v3");
+  assert.equal(view.fields.max_seconds.value, "1800");
+  assert.equal(view.fields.max_evidence_chars.value, "262144");
+  assert.match(view.settingsSummary.textContent, /New evaluation/);
   assert.equal(Number(view.fields.max_tokens.value), 120000);
   await view.run();
   assert.equal(starts[0][2].analysis_version, "v3");
   assert.equal(starts[0][2].max_read_rounds, 1);
   assert.equal(starts[0][2].max_call_seconds, 120);
+  assert.equal(starts[0][2].max_seconds, 1800);
+  assert.equal(starts[0][2].max_evidence_chars, 262144);
   assert.equal(starts[0][2].resume_id, undefined);
   abort.abort();
+});
+
+test("request-size exhaustion exposes its own limit and increases resume the same graph job", async () => {
+  const dom = new JSDOM('<section id="root"></section>');
+  globalThis.document = dom.window.document;
+  const abort = new AbortController(), starts = [];
+  const defaults = {...settings, max_seconds: 1800, max_prompt_chars: 262144, max_evidence_chars: 262144};
+  const old = {id: "old", model: "judge", analysis_version: "goal_graph_v1", run_id: "run",
+    state: "budget_exhausted", settings: {...defaults, max_prompt_chars: 24000}, usage: {calls: 2, total_tokens: 500},
+    error: "Evaluation input budget reached: 27597 chars including response schema, limit 24000, 8 cards; checkpoint retained"};
+  const api = {
+    evaluations: async () => ({models: [{id: "judge", label: "Judge"}], default_model: "judge",
+      analysis_versions: ["goal_graph_v1"], default_analysis_version: "goal_graph_v1", defaults,
+      defaults_by_version: {goal_graph_v1: defaults}, bounds: Object.fromEntries(Object.keys(defaults).map(k => [k, [1, 1000000]])),
+      run_ids: ["run"], jobs: [old]}),
+    evaluation: async () => old,
+    startEvaluation: async (...args) => {starts.push(args); return old;},
+  };
+  const view = new EvaluationView(document.querySelector("#root"), {api, sessionId: "s", analysisId: "a", signal: abort.signal});
+  await view.open(); await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(view.fields.max_prompt_chars.value, "24000");
+  assert.equal(view.fields.max_evidence_chars.value, "262144");
+  assert.match(view.fields.max_prompt_chars.parentElement.textContent, /Request characters · per call/);
+  assert.match(view.fields.max_evidence_chars.parentElement.textContent, /Evidence characters · total/);
+  assert.match(view.status.textContent, /Increase Request characters · per call/);
+  assert.doesNotMatch(view.status.textContent, /Adjust the exhausted total budget/);
+  view.fields.max_prompt_chars.value = "262144";
+  await view.run();
+  assert.equal(starts[0][2].resume_id, old.id);
+  assert.equal(starts[0][2].max_prompt_chars, 262144);
+  assert.equal(starts[0][2].max_evidence_chars, 262144);
+  abort.abort(); dom.window.close();
 });
 
 test("v3 progress shows evidence work, phase timing and selected coverage", () => {

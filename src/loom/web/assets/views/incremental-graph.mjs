@@ -1,228 +1,299 @@
 import {element, renderMarkdown} from '../markdown.mjs';
-import {disclosure, panel, table, seconds, number} from './dashboard.mjs';
-import {skeletonPresentation, scopeSkeleton, layoutSkeleton} from './skeleton-layout.mjs';
+import {disclosure, table, seconds, number, badge} from './dashboard.mjs';
+import {goalTree, filterGoalTree, goalEntries, callSummary} from './goal-tree.mjs';
 
 let viewSequence = 0;
 const button = (text, action) => {
   const node = element('button', 'quiet', text); node.type = 'button'; node.addEventListener('click', action); return node;
 };
-const svgNode = (name, attributes = {}, text = '') => {
-  const node = document.createElementNS('http://www.w3.org/2000/svg', name);
-  for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, String(value));
-  if (text) node.textContent = text;
-  return node;
-};
-function wrap(text, width, count) {
-  const measure = value => [...value].reduce((n, c) => n + (c.codePointAt(0) >= 0x1100 ? 2 : 1), 0);
-  const lines = [], words = String(text || '').split(/\s+/); let line = '';
-  for (let word of words) {
-    while (measure(word) > width) {
-      if (line) {lines.push(line); line = '';}
-      let part = ''; for (const char of word) {if (measure(part + char) > width) break; part += char;}
-      lines.push(part); word = word.slice(part.length);
-    }
-    if (line && measure(line) + measure(word) + 1 > width) {lines.push(line); line = '';}
-    line += (line ? ' ' : '') + word;
-  }
-  if (line) lines.push(line);
-  if (lines.length > count) {lines.length = count; lines[count - 1] = lines[count - 1].slice(0, width - 1) + '…';}
-  return lines;
-}
-function svgText(parent, text, x, y, width, count, size = 13, color = '#172b43') {
-  const node = svgNode('text', {x, y, fill: color, 'font-size': size});
-  wrap(text, width, count).forEach((line, i) => node.append(svgNode('tspan', {x, dy: i ? size + 4 : 0}, line)));
-  parent.append(node); return node;
-}
 const conditionText = c => typeof c === 'string' ? c : c.description || c.id || JSON.stringify(c);
+const unique = refs => [...new Map(refs.filter(Boolean).map(r => [JSON.stringify(r), r])).values()];
+export function durationLabel(cost) {
+  if (!cost.calls) return '—';
+  if (!cost.timed) return `Unknown (${cost.calls} ${cost.calls === 1 ? 'call' : 'calls'})`;
+  const measured = cost.duration === 0 ? '0 ms' : seconds(cost.duration);
+  return measured + (cost.unknown ? ` + ${cost.unknown} unknown` : '');
+}
+const basisLabel = {assessed_stage: 'Assessed stage', inferred_context: 'Default rule', default_rule: 'Default rule', recorded: 'Recorded', framework_rule: 'Framework required',
+  operation_grouping: 'Display grouping', unassigned: 'Unassigned'};
 
 export class IncrementalGraphView {
   constructor(root, {evidence = () => {}} = {}) {
-    Object.assign(this, {root, evidence, mode: 'skeleton', limit: 60, selected: null, goal: null, uid: ++viewSequence});
+    Object.assign(this, {root, evidence, mode: 'skeleton', filter: 'all', opened: new Map(), uid: ++viewSequence});
   }
-  update(data) {
-    if (this.data && (this.data.analysis_id !== data.analysis_id || this.data.source.digest !== data.source.digest)) {
-      this.selected = null; this.goal = null; this.limit = 60;
-    }
-    this.data = data; this.graph = skeletonPresentation(data); this.render();
+  update(data, identity = '') {
+    const key = JSON.stringify([identity || data.analysis_id, data.source?.digest, data.source?.run_id]);
+    if (this.identity !== key) {this.opened.clear(); this.filter = 'all'; this.root.replaceChildren();}
+    this.identity = key; this.data = data; this.tree = goalTree(data);
+    if (!['all', 'unassigned'].includes(this.filter) && !this.tree.byGoal.has(this.filter)) this.filter = 'all';
+    this.render();
   }
-  refs(root, refs = []) {
+  refs(root, refs = [], label = '') {
     const actions = element('div', 'action-utility-refs');
-    for (const ref of [...new Map(refs.map(r => [JSON.stringify(r), r])).values()])
-      actions.append(button(`L${ref.line_number}${ref.field_path ? ' · ' + ref.field_path : ''}`, () => this.evidence(ref)));
-    root.append(actions);
+    for (const ref of unique(refs)) {
+      const event = this.data.facts?.events?.find(e => e.line === ref.line_number);
+      const location = event?.seq != null ? `E${event.seq}` : `L${ref.line_number}`;
+      const range = ref.start != null && ref.end != null ? ` · ${ref.start}–${ref.end}` : '';
+      actions.append(button(`${label ? label + ' · ' : ''}${location}${range}${ref.field_path ? ' · ' + ref.field_path : ''}`, () => this.evidence(ref)));
+    }
+    if (actions.childNodes.length) root.append(actions);
   }
-  selectGoal(id) {this.goal = id; this.selected = null; this.limit = 60; this.render(); this.root.querySelector('.skeleton-inspector button')?.focus({preventScroll: true});}
-  selectNode(id) {
-    const node = this.graph.nodes.find(n => n.id === id);
-    if (node?.kind === 'root') return this.selectGoal(node.goal_id);
-    this.selected = id; this.render(); this.root.querySelector('.skeleton-inspector button')?.focus({preventScroll: true});
+  details(root, key, title, render, initial = false, className = '') {
+    const node = element('details', `goal-tree-disclosure ${className}`), summary = element('summary');
+    node.dataset.key = key; summary.append(typeof title === 'string' ? document.createTextNode(title) : title);
+    const body = element('div', 'goal-tree-content'); node.append(summary, body); root.append(node);
+    let rendered = false;
+    const fill = () => {if (!rendered) {rendered = true; render(body);}};
+    node.open = this.opened.has(key) ? this.opened.get(key) : initial;
+    if (node.open) fill();
+    node.addEventListener('toggle', () => {if (!node.isConnected) return; this.opened.set(key, node.open); if (node.open) fill();});
+    return node;
   }
   render() {
-    const scroll = this.root.scrollTop;
-    const opened = new Set([...this.root.querySelectorAll('details[open]')].map(n => n.dataset.key).filter(Boolean));
+    const viewport = this.root.closest('.trajectory-page') || this.root;
+    const scroll = viewport.scrollTop;
+    for (const node of this.root.querySelectorAll('details[data-key]')) this.opened.set(node.dataset.key, node.open);
     this.root.replaceChildren(); this.root.classList.add('incremental-graph');
-    const header = element('div', 'dashboard-toolbar skeleton-toolbar');
-    const tabs = element('div', 'trajectory-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Analysis result');
-    for (const [mode, title] of [['skeleton', 'Skeleton'], ['report', 'Report']]) {
-      const tab = button(title, () => {this.mode = mode; this.render();});
+    const header = element('div', 'dashboard-toolbar skeleton-toolbar'), tabs = element('div', 'trajectory-tabs');
+    tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Analysis result');
+    const modes = ['skeleton', 'acceptance', 'report'];
+    for (const mode of modes) {
+      const tab = button(mode[0].toUpperCase() + mode.slice(1), () => {this.mode = mode; this.render();});
       tab.id = `skeleton-tab-${this.uid}-${mode}`; tab.tabIndex = this.mode === mode ? 0 : -1;
       tab.setAttribute('aria-controls', `skeleton-panel-${this.uid}`);
       tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', String(this.mode === mode));
       tab.addEventListener('keydown', event => {
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-        event.preventDefault(); this.mode = event.key === 'Home' ? 'skeleton' : event.key === 'End' ? 'report' : this.mode === 'skeleton' ? 'report' : 'skeleton';
+        event.preventDefault(); const i = modes.indexOf(this.mode);
+        this.mode = event.key === 'Home' ? modes[0] : event.key === 'End' ? modes.at(-1) : modes[(i + (event.key === 'ArrowLeft' ? 2 : 1)) % 3];
         this.render(); this.root.querySelector('[role=tab][aria-selected=true]')?.focus();
       });
-      tab.classList.toggle('active', this.mode === mode); tabs.append(tab);
+      tabs.append(tab);
     }
-    header.append(tabs);
-    this.root.append(header);
+    header.append(tabs); this.root.append(header);
     const content = element('section', 'skeleton-tab-panel'); content.setAttribute('role', 'tabpanel');
     content.id = `skeleton-panel-${this.uid}`; content.setAttribute('aria-labelledby', `skeleton-tab-${this.uid}-${this.mode}`);
-    content.setAttribute('aria-label', this.mode === 'skeleton' ? 'Skeleton' : 'Report'); this.root.append(content);
+    this.root.append(content);
     if (this.mode === 'report') this.renderReport(content);
+    else if (this.mode === 'acceptance') this.renderAcceptance(content);
     else this.renderSkeleton(content);
-    for (const node of this.root.querySelectorAll('details[data-key]')) if (opened.has(node.dataset.key)) node.open = true;
-    this.root.scrollTop = scroll;
+    // Report disclosures are eager; restore their state as well.
+    for (const node of this.root.querySelectorAll('details[data-key]')) if (this.opened.has(node.dataset.key)) node.open = this.opened.get(node.dataset.key);
+    viewport.scrollTop = scroll;
+  }
+  metrics(cost) {
+    const node = element('span', 'goal-tree-metrics', `${cost.model} model / ${cost.tool} tool · Duration: ${durationLabel(cost)}`);
+    node.title = 'Sum of recorded durations for unique calls in this branch, not wall time. Shared calls cannot be summed across branches.';
+    return node;
+  }
+  heading(label, title, cost, tags = []) {
+    const row = element('span', 'goal-tree-heading');
+    const name = element('span', 'goal-tree-title');
+    if (label) name.append(element('span', 'goal-tree-id', label));
+    name.append(document.createTextNode(title)); row.append(name);
+    const statuses = element('span', 'goal-tree-tags');
+    for (const tag of tags.filter(Boolean)) statuses.append(badge(tag));
+    row.append(statuses, this.metrics(cost)); return row;
   }
   renderSkeleton(root) {
-    const layout = element('div', 'skeleton-workspace'), main = element('div', 'skeleton-main');
-    layout.append(main); root.append(layout);
-    const scope = scopeSkeleton(this.graph, this.goal), shown = scope.nodes.slice(0, this.limit), ids = new Set(shown.map(n => n.id));
-    const edges = scope.edges.filter(e => ids.has(e.source_id) && ids.has(e.target_id));
-    const diagram = element('section', 'skeleton-diagram'); main.append(diagram);
-    const legend = element('div', 'skeleton-legend');
-    legend.append(element('span', '', 'Solid: result / feedback'), element('span', '', 'Dashed: objective scope'));
-    if (this.goal) legend.append(element('span', '', 'Faded: referenced work from another goal'));
-    diagram.append(legend);
-    this.drawDag(diagram, shown, edges, scope.focus);
-    if (!this.data.skeleton.edges.length) diagram.append(element('p', 'muted small', 'Result dependencies have not been established in this revision.'));
-    if (scope.nodes.length > shown.length) diagram.append(button(`Show more · ${scope.nodes.length - shown.length} remaining`, () => {this.limit += 60; this.render();}));
-    const chosen = this.graph.nodes.find(n => n.id === this.selected);
-    if (chosen || this.goal) {
-      const inspector = element('aside', 'skeleton-inspector'); inspector.setAttribute('role', 'dialog');
-      inspector.setAttribute('aria-label', chosen ? `${chosen.display_id} details` : 'Goal details');
-      inspector.addEventListener('keydown', event => {if (event.key === 'Escape') {this.selected = null; this.goal = null; this.render();}});
-      main.append(inspector);
-      if (chosen) this.renderStage(inspector, chosen);
-      else this.renderGoal(inspector, this.graph.goals.find(g => g.id === this.goal));
+    const controls = element('div', 'goal-tree-controls'), label = element('label', '', 'Goal');
+    const select = element('select'); select.setAttribute('aria-label', 'Filter goals');
+    for (const [value, title] of [['all', 'All goals'], ...this.tree.goals.filter(g => g.parent_goal_id).map(g => [g.id, `${g.display_id} · ${g.objective}`]), ['unassigned', 'Unreviewed / unassigned']]) {
+      const option = element('option', '', title); option.value = value; select.append(option);
     }
+    select.value = this.filter; select.addEventListener('change', () => {this.filter = select.value; this.render();});
+    label.append(select); controls.append(label); root.append(controls);
+    const pending = this.data.coverage.pending_structure_units?.length || 0;
+    if (pending) controls.append(badge(`Goal structure pending · ${pending} windows`));
+    const tree = element('div', 'goal-process-tree'); tree.setAttribute('aria-label', 'Goal process tree'); root.append(tree);
+    const roots = filterGoalTree(this.tree, this.filter);
+    for (const goal of roots) this.renderGoal(tree, goal);
+    if (!roots.length) tree.append(element('p', 'muted', 'No actions match this filter.'));
   }
-  nodeTone(node) {
-    const cards = this.data.extraction.cards.filter(c => node.card_ids.includes(c.id));
-    if (cards.some(c => ['failed', 'cancelled'].includes(c.status))) return 'failure';
-    const checks = this.data.facts.verification.filter(v => cards.some(c => c.kind === 'boundary' && c.start_line === v.line));
-    const status = v => v.value?.status || v.value?.result?.status;
-    if (checks.some(v => ['passed', 'accepted'].includes(status(v)) || v.value?.passed === true)) return 'accepted';
-    if (node.kind === 'unassigned' || this.data.diagnostics.some(d => d.card_ids?.some(c => node.card_ids.includes(c))) ||
-        this.data.record_assessments.some(a => node.card_ids.includes(a.card_id) && (a.necessity === 'avoidable' || a.redundancy === 'supported'))) return 'attention';
-    return node.kind === 'root' ? 'root' : 'normal';
-  }
-  drawDag(root, nodes, edges, focus) {
-    const layout = layoutSkeleton(nodes, edges), markerId = `skeleton-arrow-${this.uid}`;
-    const scroller = element('div', 'skeleton-canvas'); scroller.tabIndex = 0;
-    const svg = svgNode('svg', {viewBox: `0 0 ${layout.width} ${layout.height}`, role: 'img', 'aria-label': 'Goal process graph'});
-    svg.style.minWidth = `${Math.min(layout.width, 1150)}px`;
-    const defs = svgNode('defs'), marker = svgNode('marker', {id: markerId, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 6, markerHeight: 6, orient: 'auto-start-reverse'});
-    marker.append(svgNode('path', {d: 'M 0 0 L 10 5 L 0 10 z', fill: '#738ca5'})); defs.append(marker); svg.append(defs);
-    for (const edge of edges) {
-      const a = layout.positions.get(edge.source_id), b = layout.positions.get(edge.target_id); if (!a || !b || b.rank <= a.rank) continue;
-      const x = a.x + a.width / 2, y = a.y + a.height, xx = b.x + b.width / 2, yy = b.y;
-      let d, labelX, labelY;
-      if (b.rank - a.rank > 1) {
-        const lane = layout.longEdges.findIndex(e => e === edge), side = layout.bodyWidth + 30 + (lane % 3) * 25;
-        d = `M ${x} ${y} V ${y+28} H ${side} V ${yy-28} H ${xx} V ${yy}`;
-        labelX = side + 10; labelY = y + 55 + (lane % 3) * 34;
-      } else {
-        const mid = (y + yy) / 2;
-        d = `M ${x} ${y} C ${x} ${mid},${xx} ${mid},${xx} ${yy}`;
-        labelX = (x + xx) / 2 + 10; labelY = mid - 16;
-      }
-      const group = svgNode('g', {'data-edge-id': edge.id || `${edge.source_id}:${edge.target_id}`});
-      const path = svgNode('path', {d, fill: 'none', stroke: '#738ca5', 'stroke-width': 1.5, 'marker-end': `url(#${markerId})`});
-      if (edge.layer === 'scope') path.setAttribute('stroke-dasharray', '4 4');
-      group.append(path, svgNode('title', {}, `${edge.kind}: ${edge.result || ''}`));
-      svgText(group, edge.result || edge.kind, labelX, labelY, 22, 2, 11, '#506b86'); svg.append(group);
-    }
-    const colors = {normal: ['#f5f7fa', '#607e9a'], root: ['#edf3fb', '#50749b'], attention: ['#fff2cc', '#b38a35'], failure: ['#ffe1db', '#b44331'], accepted: ['#ddf3e2', '#378056']};
-    for (const node of nodes) {
-      const p = layout.positions.get(node.id); if (!p) continue;
-      const external = this.goal && !focus.has(node.id) && node.kind !== 'root', tone = this.nodeTone(node), [fill, stroke] = colors[tone];
-      const g = svgNode('g', {role: 'button', tabindex: 0, 'aria-label': `${node.display_id} · ${node.objective}`, 'data-node-id': node.id, 'data-rank': p.rank,
-        'data-goal-id': node.goal_id || '', 'data-tone': tone, opacity: external ? 0.65 : 1});
-      g.append(svgNode('rect', {x: p.x, y: p.y, width: p.width, height: p.height, rx: 9, fill,
-        stroke: this.selected === node.id ? '#215f9b' : stroke, 'stroke-width': this.selected === node.id ? 3 : 1.3}));
-      svgText(g, `${node.display_id}${node.kind === 'root' ? '' : ' · ' + node.goal_display_id}${external ? ' · referenced' : ''}`, p.x+14, p.y+23, 40, 1, 12, '#496581');
-      svgText(g, node.objective, p.x+14, p.y+47, 36, 2, 14);
-      svgText(g, node.key_delta, p.x+14, p.y+91, 42, 2, 11, '#50677d');
-      if (node.kind !== 'root') {
-        const cost = node.cost, counts = cost ? `${cost.model_calls} model · ${cost.tool_calls} tool` : `${node.call_ids.length} calls`;
-        svgText(g, `${counts} · ${seconds(cost?.observed_busy_union_ms)} busy`, p.x+14, p.y+134, 48, 1, 11, '#50677d');
-      }
-      g.append(svgNode('title', {}, `${node.display_id} · ${node.objective}\n${node.key_delta}\n${node.outcome_or_gap}`));
-      g.addEventListener('click', () => this.selectNode(node.id));
-      g.addEventListener('keydown', e => {if (e.key === 'Enter' || e.key === ' ') {e.preventDefault(); this.selectNode(node.id);}}); svg.append(g);
-    }
-    scroller.append(svg); root.append(scroller);
-    if (layout.invalid.length) root.append(element('p', 'notice', `${layout.invalid.length} nodes have conflicting dependencies; inspect the saved report.`));
-  }
-  closure(root, goal) {
-    if (goal.conditions?.length) table(root, ['Completion conditions'], goal.conditions.map(c => [conditionText(c)]));
-    const closure = this.data.closures[goal.id];
-    if (!closure) {root.append(element('p', 'muted', 'Closure not established')); return;}
-    table(root, ['Completion claim', 'Evidence support', 'Disposition'], [[closure.claim, closure.evidence_state, closure.disposition]]);
-    if (closure.reason) root.append(element('p', '', closure.reason));
-    for (const q of closure.open_questions || []) root.append(element('p', '', `Open: ${q}`));
-    this.refs(root, closure.evidence_refs);
+  hostState(goal) {
+    if (goal.execution_state && goal.execution_state !== 'unknown') return goal.execution_state;
+    const events = (this.data.facts?.events || []).filter(e => e.line >= (goal.origin_line ?? 0) && e.line <= (goal.end_line ?? Infinity));
+    const terminal = events.filter(e => ['run.completed', 'run.failed', 'run.stopped'].includes(e.type)).at(-1);
+    return terminal ? terminal.type.slice(4) : 'Unknown';
   }
   renderGoal(root, goal) {
-    if (!goal) return;
-    const detail = panel(root, `${goal.display_id} · ${goal.objective}`, true); detail.classList.add('skeleton-detail');
-    detail.querySelector('header').append(button('Close details', () => this.selectGoal(null))); this.closure(detail, goal);
-    const children = this.graph.goals.filter(g => g.parent_goal_id === goal.id);
-    if (children.length) table(detail, ['Subgoal'], children.map(g => [button(`${g.display_id} · ${g.objective}`, () => this.selectGoal(g.id))]));
-    const stages = this.graph.nodes.filter(n => n.kind !== 'root' && n.goal_id === goal.id);
-    table(detail, ['Stage', 'Key change', 'Source'], stages.map(n => [button(`${n.display_id} · ${n.objective}`, () => this.selectNode(n.id)), n.key_delta, `L${n.start_line}–${n.end_line}`]));
-    const attempts = (this.data.attempts || []).filter(a => a.goal_id === goal.id && a.basis !== 'unknown');
-    if (attempts.length) table(detail, ['Approach', 'Outcome'], attempts.map(a => [a.approach, a.outcome]));
-    this.findings(detail, goal.id); this.refs(detail, goal.evidence_refs);
+    const closure = this.data.closures?.[goal.id];
+    const status = closure?.disposition || goal.goal_disposition || 'unknown';
+    const tags = goal.parent_goal_id ? [status] : [`Process: ${status}`, `Host: ${this.hostState(goal)}`];
+    if (Number.isFinite(goal.first_action_line)) tags.push(`L${goal.first_action_line}–${goal.last_action_line}`);
+    if (this.tree.byGoal.get(goal.parent_goal_id)?.parent_goal_id && goal.parent_relation_basis === 'unreviewed') tags.push('Nesting unreviewed');
+    const node = this.details(root, `goal:${goal.id}`, this.heading(goal.display_id, goal.objective, goal.cost, tags), body => {
+      this.details(body, `goal-info:${goal.id}`, goal.parent_goal_id ? 'Goal details' : 'Task requirements', detail => {
+        if (goal.parent_goal_id) {
+          const parent = this.tree.byGoal.get(goal.parent_goal_id);
+          table(detail, ['Parent goal', 'Decomposition basis', 'Judgment'], [[
+            `${parent?.display_id || ''} · ${parent?.objective || goal.parent_goal_id}`,
+            goal.root_relation || 'Not recorded; saved nesting is unreviewed',
+            goal.parent_relation_basis === 'inferred' ? 'Inferred from cited intent' : 'Unreviewed',
+          ]]);
+        }
+        if (goal.conditions?.length) table(detail, ['Condition', 'Required'], goal.conditions.map(c => [conditionText(c), typeof c === 'object' ? c.required ?? 'Unknown' : 'Unknown']));
+        if (closure) {
+          table(detail, ['Completion claim', 'Closure evidence', 'Disposition'], [[closure.claim, closure.evidence_state, closure.disposition]]);
+          if (closure.reason) detail.append(element('p', '', closure.reason));
+          this.refs(detail, closure.evidence_refs);
+        } else detail.append(element('p', 'muted', 'Closure not established'));
+        for (const q of closure?.open_questions || goal.open_questions || []) detail.append(element('p', '', `Remaining question / feedback: ${q}`));
+        this.refs(detail, goal.evidence_refs);
+        for (const item of goal.requirements) this.renderAction(detail, item, `requirements:${goal.id}`);
+        this.findings(detail, goal.id);
+      });
+      const children = element('div', 'goal-tree-children'); body.append(children);
+      for (const entry of goalEntries(goal)) {
+        if (entry.kind === 'goal') this.renderGoal(children, entry.value);
+        else this.renderStage(children, entry.value);
+      }
+    }, true, 'goal-tree-goal');
+    node.dataset.goalId = goal.id;
   }
-  renderStage(root, node) {
-    const detail = panel(root, `${node.display_id} · ${node.objective}`, true); detail.classList.add('skeleton-detail');
-    const goal = this.graph.goals.find(g => g.id === node.goal_id);
-    const controls = element('div', 'dashboard-toolbar');
-    if (goal) controls.append(button(`${goal.display_id} · ${goal.objective}`, () => this.selectGoal(goal.id)));
-    detail.querySelector('header').append(button('Close details', () => {this.selected = null; this.goal = null; this.render();})); detail.append(controls);
-    detail.append(element('p', '', node.key_delta), element('p', 'muted', node.outcome_or_gap));
-    const related = this.graph.edges.filter(e => e.layer === 'semantic' && (e.source_id === node.id || e.target_id === node.id));
-    table(detail, ['Dependency', 'Result / feedback'], related.map(e => {
-      const incoming = e.target_id === node.id, other = this.graph.nodes.find(n => n.id === (incoming ? e.source_id : e.target_id));
-      return [button(`${incoming ? 'From' : 'To'} ${other.display_id} · ${other.objective}`, () => this.selectNode(other.id)), e.result];
-    }));
-    const actions = disclosure(detail, `Actions · ${node.card_ids.length}`); actions.open = true; actions.dataset.key = `actions:${node.id}`;
-    for (const cid of node.card_ids) this.renderAction(actions, cid);
-    const evidence = disclosure(detail, 'Stage evidence'); evidence.dataset.key = `evidence:${node.id}`; this.refs(evidence, node.evidence_refs);
-    if (goal) this.findings(detail, goal.id, node.card_ids);
+  renderStage(root, stage) {
+    const ids = [...new Set(stage.actions.flatMap(a => a.card.call_ids))], cost = callSummary(ids, this.tree.atoms);
+    const tags = [basisLabel[stage.basis], `L${stage.first_line}–${stage.last_line}`];
+    if (stage.visits?.length > 1) tags.push(`${stage.visits.length} visits`);
+    const node = this.details(root, `stage:${stage.id}`, this.heading(stage.display_id, stage.title, cost,
+      tags), body => {
+      const models = [...new Set(ids.map(id => this.tree.atoms.get(id)).filter(a => a?.kind === 'model').map(a => a.model || 'Unknown'))];
+      const meta = element('div', 'goal-tree-stage-meta', `L${stage.first_line}–${stage.last_line}${models.length ? ' · Models: ' + models.join(', ') : ''}`); body.append(meta);
+      this.details(body, `stage-info:${stage.id}`, 'Stage details & dependencies', detail => {
+        if (stage.visits?.length > 1) table(detail, ['Visit', 'Action range'], stage.visits.map((visit, i) =>
+          [i + 1, `L${visit.first_line}–${visit.last_line}`]));
+        const changes = [...new Set(stage.actions.map(a => a.assessment?.delta).filter(Boolean))];
+        for (const change of changes) detail.append(element('p', '', change));
+        if (!changes.length) detail.append(element('p', 'muted', 'Progress not assessed'));
+        const attempts = (this.data.attempts || []).filter(a => stage.attempt_ids.includes(a.id) && a.basis !== 'unknown');
+        if (attempts.length) table(detail, ['Approach', 'Outcome'], attempts.map(a => [a.approach, a.outcome]));
+        const nodes = this.data.skeleton?.nodes || [], edges = this.data.skeleton?.edges || [];
+        const members = new Set(nodes.filter(n => n.stage_id === stage.source_stage_id && n.goal_id === stage.goal_id).map(n => n.id));
+        const related = edges.filter(e => members.has(e.source_id) || members.has(e.target_id));
+        if (related.length) table(detail, ['Dependency', 'Result / feedback'], related.map(e => {
+          const incoming = members.has(e.target_id), other = nodes.find(n => n.id === (incoming ? e.source_id : e.target_id));
+          const target = this.tree.stages.find(s => s.source_stage_id === other?.stage_id && s.goal_id === other?.goal_id);
+          const value = element('div', '', e.result || e.kind); this.refs(value, e.evidence_refs);
+          return [`${incoming ? 'From' : 'To'} ${target?.display_id || ''} · ${other?.objective || 'Unknown stage'}`, value];
+        }));
+        this.refs(detail, stage.evidence_refs);
+        this.findings(detail, stage.goal_id, stage.card_ids);
+      });
+      const actions = element('div', 'goal-tree-actions'); body.append(actions);
+      for (const item of stage.actions) this.renderAction(actions, item, stage.id);
+    }, false, 'goal-tree-stage');
+    node.dataset.stageId = stage.source_stage_id;
   }
-  renderAction(root, cid) {
-    const data = this.data, card = data.extraction.cards.find(c => c.id === cid); if (!card) return;
-    const assessment = data.record_assessments.find(a => a.card_id === cid);
-    const action = disclosure(root, `${card.kind} · ${card.name} · ${card.status} · L${card.start_line}–${card.end_line}`); action.dataset.key = `card:${cid}`;
-    if (assessment) table(action, ['Assessment', 'Finding'], ['purpose', 'expected', 'delta', 'contribution', 'necessity', 'redundancy'].map(k => [k, assessment[k]]));
-    const calls = data.cost_ledger.atoms.filter(a => card.call_ids.includes(a.id));
-    table(action, ['Call', 'Duration', 'Tokens'], calls.map(a => [a.tool || a.model || a.id, seconds(a.duration_ms), a.total_tokens ?? 'Unknown']));
-    table(action, ['Evidence state', 'Scope'], [['Captured', card.captured.length ? `${card.captured.length} recorded result(s)` : 'Not recorded'],
-      ['Presented', card.presented.length ? `${card.presented.length} delivery record(s)` : 'Unknown'],
-      ['Adopted', assessment?.uptake_card_ids?.length ? assessment.uptake_card_ids.join(', ') : 'Not established']]);
-    const raw = disclosure(action, 'Evidence ranges'); raw.dataset.key = `ranges:${cid}`;
-    raw.append(element('pre', 'goal-report', JSON.stringify({captured: card.captured, presented: card.presented}, null, 2)));
-    this.refs(action, [...new Set([...card.refs, ...card.raw_refs])].map(id => data.extraction.registry[id]?.ref).filter(Boolean));
+  featureRows(root, values) {
+    const walk = (value, name = '') => {
+      if (!value || typeof value !== 'object') return;
+      if ('text' in value) {
+        const row = element('div', 'goal-tree-feature');
+        if (name) row.append(element('strong', '', name));
+        row.append(element('pre', 'goal-report', String(value.text)));
+        if (value.omitted_chars) row.append(element('span', 'muted', `${number(value.omitted_chars)} characters not shown`));
+        this.refs(row, [this.data.extraction.registry[value.ref]?.ref]); root.append(row);
+      } else for (const [key, child] of Object.entries(value)) walk(child, name ? `${name}.${key}` : key);
+    };
+    walk(values);
+  }
+  renderAction(root, item, context) {
+    const {card, assessment, attribution, shared, root_override, framework_rule} = item;
+    const cost = callSummary(card.call_ids, this.tree.atoms);
+    const heading = this.heading(`A${item.ordinal || this.tree.cards.findIndex(c => c.id === card.id) + 1}`, `${card.kind} · ${card.name} · L${card.start_line}–${card.end_line}`, cost,
+      [card.status, shared ? 'Shared reference' : '', framework_rule ? 'Framework required' : attribution ? 'Default rule' : '']);
+    const node = this.details(root, `action:${context}:${card.id}`, heading, body => {
+      body.dataset.actionDetail = card.id;
+      body.append(element('p', 'goal-tree-stage-meta', `L${card.start_line}–${card.end_line} · Review: ${assessment?.status || 'Pending'}`));
+      if (framework_rule) body.append(element('p', 'goal-tree-stage-meta', 'Root Goal association · required by the framework'));
+      if (root_override) body.append(element('p', 'notice', 'Framework ownership takes precedence over the saved subgoal attribution.'));
+      if (assessment) {
+        table(body, ['Action intent', 'Observed progress'], [[assessment.purpose || 'Unknown', assessment.delta || 'Unknown']]);
+        // Older reports may contain these evidence-backed fields. Metadata-only
+        // reviews do not produce them; do not show permanent empty columns.
+        if (assessment.expected?.trim() && assessment.expected.toLowerCase() !== 'unknown' && assessment.expected_evidence_refs?.length) {
+          const expected = element('section'); body.append(expected);
+          table(expected, ['Expected result'], [[assessment.expected]]); this.refs(expected, assessment.expected_evidence_refs);
+        }
+        if (assessment.uptake_card_ids?.length) {
+          table(body, ['Adopted by'], assessment.uptake_card_ids.map(id => {
+            const target = this.tree.cards.find(c => c.id === id);
+            return [target ? `A${this.tree.cards.indexOf(target) + 1} · ${target.kind} · ${target.name} · L${target.start_line}–${target.end_line}` : id];
+          }));
+        }
+      } else body.append(element('p', 'muted', 'Action review pending'));
+      if (assessment) this.details(body, `review:${context}:${card.id}`, 'Review evidence', detail => {
+        table(detail, ['Assessment', 'Finding'], ['purpose', 'contribution', 'necessity', 'redundancy'].map(k => [k, assessment[k]]));
+        this.refs(detail, [...(assessment.evidence_refs || []), ...(assessment.expected_evidence_refs || [])]);
+      });
+      const calls = card.call_ids.map(id => this.tree.atoms.get(id)).filter(Boolean);
+      if (calls.length) table(body, ['Model / tool', 'Duration', 'TTFT', 'TPS', 'Tokens in / out'], calls.map(a => [a.tool || a.model || a.id,
+        a.duration_ms == null ? 'Unknown' : a.duration_ms === 0 ? '0 ms' : seconds(a.duration_ms), seconds(a.ttft_ms), number(a.tps), `${number(a.prompt_tokens)} / ${number(a.completion_tokens)}`]));
+      if (card.kind === 'tool') {
+        for (const [key, label, prefix] of [['arguments', 'Tool arguments', /^(input|arguments)/], ['result', 'Tool result', /^(output|result)/]]) {
+          const section = element('section', 'goal-tree-record'); section.append(element('h4', '', label)); body.append(section);
+          this.featureRows(section, card.features?.[key]);
+          if (key === 'arguments' && card.features?.command) this.featureRows(section, {command: card.features.command});
+          const refs = (card.raw_refs || []).map(id => this.data.extraction.registry[id]?.ref).filter(r => r && prefix.test(r.field_path || ''));
+          this.refs(section, refs, 'Original record');
+        }
+      } else {
+        this.featureRows(body, card.features);
+        if (card.excerpts?.length) {
+          const response = element('section', 'goal-tree-record'); response.append(element('h4', '', 'Recorded response')); body.append(response);
+          for (const excerpt of card.excerpts) this.featureRows(response, excerpt);
+        }
+      }
+      this.details(body, `original:${context}:${card.id}`, 'This action’s original records', detail => {
+        const events = (this.data.facts?.events || []).filter(e => e.call_ids?.some(id => card.call_ids.includes(id)) || e.line === card.start_line || e.line === card.end_line);
+        this.refs(detail, [...calls.flatMap(a => a.evidence_refs || []), ...events.map(e => e.source_ref),
+          ...(card.raw_refs || []).map(id => this.data.extraction.registry[id]?.ref)]);
+      });
+      this.details(body, `visible:${context}:${card.id}`, 'Model-visible input', detail => {
+        if (!card.presented?.length) detail.append(element('p', 'muted', 'No delivery record available'));
+        for (const delivery of card.presented || []) {
+          const ref = this.data.extraction.registry[delivery.ref]?.ref || delivery.ref;
+          detail.append(element('p', '', `${delivery.mode === 'full' ? 'Same captured result presented' : 'Preview or transformed result presented'}${delivery.line ? ' · L' + delivery.line : ''}${delivery.chars != null ? ' · ' + delivery.chars + ' characters' : ''}`));
+          this.refs(detail, typeof ref === 'object' ? [ref] : []);
+        }
+      });
+      if (attribution) this.details(body, `attribution:${context}:${card.id}`, 'Attribution rule · no factual evidence', detail => {
+        detail.append(element('p', 'muted', `Default rule: ${attribution.rule || 'previous_action_same_scope'}. ${attribution.card_id ? 'Previous action: ' + attribution.card_id + '. ' : ''}This is sequential tree placement, not evidence that the action serves this goal. Utility and completion remain separately assessed.`));
+        this.refs(detail, attribution.refs);
+      });
+    }, false, 'goal-tree-action');
+    node.dataset.cardId = card.id;
   }
   findings(root, goalId, cardIds = null) {
-    const rows = this.data.diagnostics.filter(d => d.goal_id === goalId && (!cardIds || d.card_ids?.some(id => cardIds.includes(id))));
+    const rows = (this.data.diagnostics || []).filter(d => d.goal_id === goalId && (!cardIds || d.card_ids?.some(id => cardIds.includes(id))));
     if (!rows.length) return;
-    const detail = disclosure(root, `Findings · ${rows.length}`); detail.dataset.key = `findings:${goalId}:${cardIds?.join(',') || ''}`;
-    for (const row of rows) {detail.append(element('strong', '', row.observation)); for (const key of ['interpretation', 'alternative', 'improvement']) detail.append(element('p', '', `${key}: ${row[key]}`)); this.refs(detail, row.evidence_refs);}
+    this.details(root, `findings:${goalId}:${cardIds?.join(',') || ''}`, `Findings · ${rows.length}`, detail => {
+      for (const row of rows) {detail.append(element('strong', '', row.observation)); for (const key of ['interpretation', 'alternative', 'improvement']) detail.append(element('p', '', `${key}: ${row[key]}`)); this.refs(detail, row.evidence_refs);}
+    });
+  }
+  renderAcceptance(root) {
+    const section = element('div', 'goal-acceptance'); root.append(section);
+    for (const goal of this.tree.roots) {
+      section.append(element('h3', '', goal.objective));
+      table(section, ['Condition', 'Required', 'Recorded status'], (goal.conditions || []).map(c => [conditionText(c), typeof c === 'object' ? c.required ?? 'Unknown' : 'Unknown', typeof c === 'object' ? c.status || 'Unknown' : 'Unknown']));
+      this.refs(section, goal.evidence_refs);
+    }
+    const checks = this.data.facts?.verification || [];
+    if (!checks.length) section.append(element('p', 'muted', 'No verification receipts recorded'));
+    for (const check of checks) this.details(section, `acceptance:${check.line}:${check.type}`, `${check.type} · L${check.line}`, body => {
+      // Retain recorded IDs/subjects without inventing cross-receipt identity matches.
+      const value = check.value || {};
+      table(body, ['Recorded field', 'Value'], Object.entries(value).filter(([, v]) => v == null || typeof v !== 'object'));
+      for (const [key, item] of Object.entries(value).filter(([, v]) => v && typeof v === 'object')) {
+        const nested = disclosure(body, key); nested.append(element('pre', 'goal-report', JSON.stringify(item, null, 2)));
+      }
+      this.refs(body, check.evidence_refs);
+    });
+    const decisions = (this.data.facts?.events || []).filter(e => /^(run\.(completed|failed|stopped)|task\.(decision|outcome|completed))$/.test(e.type));
+    if (decisions.length) {
+      const recorded = element('section'); recorded.append(element('h3', '', 'Host records')); section.append(recorded);
+      for (const event of decisions) {recorded.append(element('p', '', `${event.type} · L${event.line}`)); this.refs(recorded, [event.source_ref]);}
+    }
   }
   renderReport(root) {
     const article = element('article', 'skeleton-report'); article.append(renderMarkdown(this.data.report.text)); root.append(article);
@@ -236,9 +307,10 @@ export class IncrementalGraphView {
         return [r.id, p.card_count, number(p.total_chars), `${c.cards} / ${c.state} / ${c.response_schema+c.contract}`, c.extra_evidence, r.usage ? `${r.usage.prompt_tokens} / ${r.usage.completion_tokens}` : 'Unknown'];
       }));
     }
-    if (this.data.coverage.review_gaps.length) {
-      const gaps = disclosure(article, `Unresolved groups · ${this.data.coverage.review_gaps.length}`); gaps.dataset.key = 'report:gaps';
-      for (const gap of this.data.coverage.review_gaps) gaps.append(element('p', '', `${gap.batch_id}: ${gap.reason}`));
+    const validationIssues = this.data.coverage.review_gaps.filter(gap => gap.record_type !== 'structure');
+    if (validationIssues.length) {
+      const gaps = disclosure(article, `Validation issues · ${validationIssues.length}`); gaps.dataset.key = 'report:gaps';
+      for (const gap of validationIssues) gaps.append(element('p', '', `${gap.batch_id}: ${gap.reason}`));
     }
   }
 }

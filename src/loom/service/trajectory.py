@@ -230,11 +230,9 @@ class SessionTrajectory:
             coverage.update(raw_event_count=sum(event_counts.values()), event_type_counts=event_counts, event_counts_by_run=counts_by_run)
             source = evidence_store(records)
             result = analyze_session_trace(source, coverage)
-            refs = {"source": self.store.artifacts.publish(records, "trajectory_source"),
-                    "result": self.store.artifacts.publish(result, "trajectory_analysis")}
             with self.store.transaction() as db:
-                for ref in refs.values():
-                    db.execute("INSERT OR IGNORE INTO artifacts VALUES(?,?,?)", (body["session_id"], ref["sha256"], canonical(ref)))
+                refs = {"source": self.store.artifact_in_transaction(db, body["session_id"], records, "trajectory_source"),
+                        "result": self.store.artifact_in_transaction(db, body["session_id"], result, "trajectory_analysis")}
             body.update(state="completed", completed_at=now_iso(), **refs)
             self._remember(body["id"], source, result)
             self._save(body)

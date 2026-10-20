@@ -21,9 +21,11 @@ from loom.evaluation.goal_loops.execution import UPGRADABLE_VERSIONS
 from loom.evaluation.goal_loops.graph_contract import ANALYZER as GRAPH_ANALYZER
 from loom.evaluation.goal_loops.graph_contract import ENGINE as GRAPH_ENGINE
 from loom.evaluation.goal_loops.graph_contract import PROMPT as GRAPH_PROMPT
+from loom.evaluation.goal_loops.graph_contract import RESOURCE_LIMITS as GRAPH_RESOURCE_LIMITS
 from loom.evaluation.goal_loops.graph_contract import UPGRADABLE_VERSIONS as GRAPH_UPGRADABLE_VERSIONS
 from loom.evolution.diagnoses import proposals_from_diagnoses
 from loom.service.contracts import ServiceError, canonical, new_id
+from loom.service.evaluation_artifacts import EvaluationArtifacts
 from loom.service.insights import build_insights
 from loom.tasks.config import create_provider_from_task_config, load_task_config
 
@@ -37,7 +39,7 @@ DEFAULTS = {
     "max_calls": 80,
     "max_tokens": 1000000,
     "max_seconds": 1800,
-    "max_evidence_chars": 400000,
+    "max_evidence_chars": 256 * 1024,
     "max_prompt_chars": 100000,
     "batch_rounds": 8,
     "max_read_rounds": 4,
@@ -48,25 +50,33 @@ V3_DEFAULTS = {
     **DEFAULTS,
     "max_calls": 24,
     "max_tokens": 120000,
-    "max_seconds": 600,
     "max_rounds": 8,
     "max_read_rounds": 1,
-    "max_evidence_chars": 120000,
     "max_prompt_chars": 48000,
 }
-GOAL_DEFAULTS = {**V3_DEFAULTS, "max_read_rounds": 2, "max_evidence_chars": 400000}
-GRAPH_DEFAULTS = {**GOAL_DEFAULTS, "max_calls": 24, "max_tokens": 240000, "max_prompt_chars": 24000, "max_call_seconds": 90, "max_evidence_chars": 24000}
+GOAL_DEFAULTS = {**V3_DEFAULTS, "max_read_rounds": 2}
+GRAPH_DEFAULTS = {
+    **GOAL_DEFAULTS,
+    "max_calls": 24,
+    "max_tokens": 240000,
+    "max_prompt_chars": 256 * 1024,
+    "max_call_seconds": 90,
+}
 BOUNDS = {
     "max_calls": (1, 500),
     "max_tokens": (100, 10000000),
     "max_seconds": (1, 7200),
     "max_evidence_chars": (1000, 5000000),
-    "max_prompt_chars": (10000, 200000),
+    "max_prompt_chars": (10000, 1000000),
     "batch_rounds": (1, 16),
     "max_read_rounds": (0, 10),
     "max_rounds": (1, 10000),
     "max_call_seconds": (1, 600),
 }
+
+
+def resource_limits(version):
+    return GRAPH_RESOURCE_LIMITS if version == GRAPH_ENGINE else RESOURCE_LIMITS
 
 
 def _behavior_facts(source, factual, body):
@@ -97,6 +107,7 @@ class SessionSemantic:
                 if body["state"] in {"queued", "running"}:
                     body.update(state="interrupted", error="Service restarted. Resume reuses completed batches.")
                     db.execute("UPDATE semantic_jobs SET body=? WHERE id=?", (canonical(body), row["id"]))
+        self.outputs = EvaluationArtifacts(self.store)
 
     def options(self):
         models, default = [], None
@@ -108,9 +119,10 @@ class SessionSemantic:
                 default = loaded.value.evaluation_model or loaded.value.default_model
                 models = [{"id": key, "label": f"{key} · {value.model}"} for key, value in loaded.value.models.items()]
         return {
+            "supports_delete": True,
             "models": models,
             "default_model": default,
-            "defaults": V3_DEFAULTS,
+            "defaults": GRAPH_DEFAULTS,
             "defaults_by_version": {"v2": DEFAULTS, "v3": V3_DEFAULTS, GOAL_ENGINE: GOAL_DEFAULTS, GRAPH_ENGINE: GRAPH_DEFAULTS},
             "bounds": BOUNDS,
             "analysis_versions": [GRAPH_ENGINE, GOAL_ENGINE, "v3", "v2"],
@@ -250,7 +262,7 @@ class SessionSemantic:
                     **semantic["analyzer"],
                     "model_config_digest": body["config_digest"],
                     "semantic_settings_digest": hashlib.sha256(
-                        canonical({k: v for k, v in body["settings"].items() if k not in RESOURCE_LIMITS}).encode()
+                        canonical({k: v for k, v in body["settings"].items() if k not in resource_limits(body["analysis_version"])}).encode()
                     ).hexdigest(),
                 },
                 "evaluator_usage": {**semantic["evaluator_usage"], "elapsed_seconds": body["elapsed_seconds"]},
@@ -341,7 +353,10 @@ class SessionSemantic:
             if resumed:
                 if previous and previous["id"] != resume_id:
                     raise ServiceError("An evaluation with these settings already exists; select it from history", 409)
-                resumed = json.loads(db.execute("SELECT body FROM semantic_jobs WHERE id=?", (resume_id,)).fetchone()[0])
+                saved = db.execute("SELECT body FROM semantic_jobs WHERE id=?", (resume_id,)).fetchone()
+                if not saved:
+                    raise ServiceError("Evaluation not found", 404)
+                resumed = json.loads(saved[0])
                 if resumed["state"] in {"queued", "running", "completed"}:
                     raise ServiceError("Only stopped evaluations can be resumed", 409)
                 protocol_upgrade = version == GOAL_ENGINE and (resumed["analyzer_version"], resumed["prompt_version"]) in UPGRADABLE_VERSIONS
@@ -354,11 +369,15 @@ class SessionSemantic:
                     or resumed.get("analysis_version", "v2") != version
                     or resumed.get("run_id") != run_id
                     or (not protocol_upgrade and (resumed["analyzer_version"] != analyzer_version or resumed["prompt_version"] != prompt_version))
-                    or any(settings[k] != resumed["settings"].get(k, DEFAULTS[k]) for k in DEFAULTS if k not in RESOURCE_LIMITS)
+                    or any(settings[k] != resumed["settings"].get(k, DEFAULTS[k]) for k in DEFAULTS if k not in resource_limits(version))
                 ):
                     raise ServiceError("Resume must keep the same model, snapshot and analysis settings; only resource limits may change")
-                if any(settings[k] < resumed["settings"][k] for k in RESOURCE_LIMITS if k != "max_tokens" or version != GRAPH_ENGINE):
+                if any(settings[k] < resumed["settings"][k] for k in resource_limits(version) if k != "max_tokens" or version != GRAPH_ENGINE):
                     raise ServiceError("Resuming cannot reduce resource limits")
+                if version == GRAPH_ENGINE:
+                    from loom.evaluation.goal_loops.incremental import upgrade_budget_identity
+
+                    upgrade_budget_identity(resumed["checkpoint"], resumed["settings"])
                 previous = resumed
             if previous and previous["state"] in {"queued", "running", "completed"}:
                 return self._public(previous)
@@ -387,12 +406,39 @@ class SessionSemantic:
             if exhausted:
                 limits = ", ".join(f"{k} > {consumed[k]}" for k in exhausted)
                 raise ServiceError(f"Budget exhausted. Increase total limits ({limits}) to resume saved batches", 409)
+            if body.get("result"):
+                self.outputs.track(db, body, body["result"])
             body.pop("result", None)
             body.update(state="queued", error=None, settings=settings, analyzer_version=analyzer_version, prompt_version=prompt_version)
             db.execute("INSERT OR REPLACE INTO semantic_jobs VALUES(?,?,?,?)", (body["id"], sid, key, canonical(body)))
             self.cancels[body["id"]] = threading.Event()
             self.futures[body["id"]] = self.pool.submit(self._work, body)
             return self._public(body)
+
+    def delete(self, sid, aid, identifier):
+        self.trajectory._load(sid, aid)
+        with self.lock:
+            with self.store.transaction() as db:
+                row = db.execute("SELECT body FROM semantic_jobs WHERE id=? AND session_id=?", (identifier, sid)).fetchone()
+                if row:
+                    body = json.loads(row[0])
+                    if body["analysis_id"] != aid:
+                        raise ServiceError("Evaluation belongs to another snapshot", 404)
+                    future = self.futures.get(identifier)
+                    if body["state"] in {"queued", "running"} or (future and not future.done()):
+                        raise ServiceError("Cancel the evaluation and wait for it to stop before deleting", 409)
+                    self.outputs.prepare(db, body)
+                elif not db.execute(
+                    "SELECT 1 FROM evaluation_deletions WHERE id=? AND session_id=? AND analysis_id=?", (identifier, sid, aid)
+                ).fetchone():
+                    raise ServiceError("Evaluation not found", 404)
+            try:
+                self.outputs.finish(identifier)
+            except OSError as exc:
+                raise ServiceError("Evaluation metadata deleted; file cleanup pending. Retry deletion to finish cleanup.", 503) from exc
+            self.cancels.pop(identifier, None)
+            self.futures.pop(identifier, None)
+        return {"id": identifier, "deleted": True}
 
     def cancel(self, sid, aid, identifier):
         body = self._load(sid, aid, identifier)
@@ -507,7 +553,7 @@ class SessionSemantic:
                             completed_batches=sum(u.get("complete", False) for u in value.get("units", {}).values()),
                             reviewed_packets=len(value.get("assessments", {})),
                             total_packets=value.get("total_cards", 0),
-                            structure_complete=value.get("complete", False),
+                            structure_complete=value.get("complete", False) and not value.get("pending_structure_units"),
                             reconciliation_complete=not value.get("conflicts"),
                             review_gaps=len(value.get("conflicts", [])),
                         )
@@ -661,15 +707,16 @@ class SessionSemantic:
             if stop.is_set() or self.closed.is_set():
                 raise InterruptedError("Evaluation stopped; completed stages retained")
             payload = self._result(body, source, result, semantic)
-            ref = self.store.artifacts.publish(payload, "trajectory_evaluation")
             with self.store.transaction() as db:
-                db.execute("INSERT OR IGNORE INTO artifacts VALUES(?,?,?)", (body["session_id"], ref["sha256"], canonical(ref)))
+                ref = self.store.artifact_in_transaction(db, body["session_id"], payload, "trajectory_evaluation")
+                self.outputs.track(db, body, ref)
             body.update(state="completed", completed_at=now_iso(), result=ref)
             if body.get("analysis_version") == GRAPH_ENGINE and semantic["coverage"]["status"] != "complete":
                 body.update(
                     state="incomplete",
                     error=f"Incremental analysis incomplete: {semantic['coverage']['pending_cards']} cards pending; "
-                    f"{len(semantic['coverage']['review_gaps'])} unresolved groups. Accepted graph revisions retained.",
+                    f"{len(semantic['coverage'].get('pending_structure_units', []))} goal-structure windows pending; "
+                    f"{semantic['coverage']['validation_issue_count']} validation issues. Accepted graph revisions retained.",
                 )
             if body.get("analysis_version") == "v3" and semantic["coverage"]["status"] != "complete":
                 body.update(state="budget_exhausted", error="Evaluation budget reached; focused stages remain unfinished")

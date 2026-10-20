@@ -9,41 +9,41 @@ import {layoutSkeleton, scopeSkeleton} from '../../src/loom/web/assets/views/ske
 const fixture=()=>JSON.parse(readFileSync(new URL('./fixtures/incremental-graph.json',import.meta.url)));
 const click=(root,text)=>[...root.querySelectorAll('button')].find(b=>b.textContent===text).click();
 
-test('incremental projection keeps unknown work, evidence and report in one revision without fetching',()=>{
+test('goal tree replaces DAG, lazily expands actions and retains state across revisions',()=>{
   const dom=new JSDOM('<main></main>');globalThis.document=dom.window.document;
   const root=document.querySelector('main'),data=fixture(),refs=[];
   data.evaluator_usage.reservations[0].input_profile={card_count:4,total_chars:10000,components_chars:{cards:4000,state:500,response_schema:2000,contract:0,extra_evidence:0}};
-  data.skeleton.nodes[0].objective='<script>unsafe()</script>';
-  const view=new IncrementalGraphView(root,{evidence:r=>refs.push(r)});view.update(data);
-  assert.equal(root.querySelectorAll('svg g[role="button"]').length,4); // Root plus three occurrences.
-  assert.deepEqual([...root.querySelectorAll('[role=tab]')].map(n=>n.textContent),['Skeleton','Report']);
-  assert.doesNotMatch(root.textContent,/Evaluator input cost|Task tokens|Calls attributed|Cards reviewed|Evaluator tokens|Revision|Export|Entire run/);
-  assert.equal(root.querySelector('.skeleton-toolbar').textContent,'SkeletonReport');
-  assert.equal(root.querySelector('nav'),null);
+  data.goals[1].objective='<script>unsafe()</script>';
+  const view=new IncrementalGraphView(root,{evidence:r=>refs.push(r)});view.update(data,'job-1');
+  assert.ok(root.querySelector('[aria-label="Goal process tree"]'));
+  assert.equal(root.querySelector('svg'),null);
+  assert.deepEqual([...root.querySelectorAll('[role=tab]')].map(n=>n.textContent),['Skeleton','Acceptance','Report']);
+  assert.doesNotMatch(root.textContent,/Task tokens|Calls attributed|Cards reviewed|Evaluator tokens|Export|Entire run/);
   assert.equal(root.querySelector('script'),null);
-  assert.equal([...root.querySelectorAll('button')].some(b=>b.textContent==='Show sequence edges'),false);
-  assert.equal(root.querySelectorAll('svg path[stroke-dasharray]').length,2);
-  root.querySelector('svg g[data-node-id="'+data.skeleton.nodes[0].id+'"]').dispatchEvent(new dom.window.MouseEvent('click'));
-  assert.match(root.textContent,/Captured/);assert.match(root.textContent,/Presented/);assert.match(root.textContent,/Adopted/);
-  const selected=view.selected;
-  [...root.querySelectorAll('button')].find(b=>b.textContent.startsWith('L2')).click();
-  assert.equal(refs.length,1);
-  view.update({...data,graph_revision:2});assert.equal(view.selected,selected);
+  assert.equal(root.querySelectorAll('[data-action-detail]').length,0);
+  assert.equal(root.querySelectorAll('.goal-tree-stage').length,2); // assessed stage + inferred continuation
+  const stage=root.querySelector('.goal-tree-stage');
+  stage.open=true;stage.dispatchEvent(new dom.window.Event('toggle'));
+  const action=stage.querySelector('.goal-tree-action');
+  action.open=true;action.dispatchEvent(new dom.window.Event('toggle'));
+  assert.match(action.textContent,/Action intentObserved progress/);
+  const original=[...action.querySelectorAll('details')].find(d=>d.querySelector('summary').textContent==='This action’s original records');
+  original.open=true;original.dispatchEvent(new dom.window.Event('toggle'));
+  original.querySelector('button').click();assert.equal(refs.length,1);
+  view.update({...data,graph_revision:2},'job-1');
+  assert.ok(root.querySelector('.goal-tree-stage').open);
+  assert.ok(root.querySelector('.goal-tree-action').open);
+  const goal=root.querySelector('.goal-tree-goal'); goal.open=false;
+  view.update({...data,graph_revision:3},'job-1');assert.equal(root.querySelector('.goal-tree-goal').open,false);
+  click(root,'Acceptance');assert.match(root.textContent,/No verification receipts recorded/);
   click(root,'Report');assert.match(root.querySelector('.skeleton-report').textContent,/Goal process analysis/);
   assert.match(root.textContent,/Evaluator input cost/);
-  assert.match(root.textContent,/Reported input \/ output tokens/);
-  assert.match(root.textContent,/4,000|4000/);
-  click(root,'Skeleton');assert.equal(view.selected,selected);
-  root.querySelector('svg g[data-node-id="root:'+data.goals.find(g=>!g.parent_goal_id).id+'"]').dispatchEvent(new dom.window.MouseEvent('click'));
-  const goal=data.goals.find(g=>g.parent_goal_id);
-  click(root,`G1 · ${goal.objective}`);
-  assert.match(root.querySelector('.skeleton-detail').textContent,/G1/);
-  assert.match(root.querySelector('.skeleton-detail').textContent,/S1/);
-  click(root,'Close details');assert.equal(view.goal,null);
-  assert.equal(root.querySelector('.skeleton-inspector'),null);
+  click(root,'Skeleton');assert.equal(root.querySelector('.goal-tree-goal').open,false);
+  view.update(data,'job-2');assert.equal(root.querySelector('.goal-tree-goal').open,true);
+  assert.equal(root.querySelectorAll('[data-action-detail]').length,0);
   const reasoning=new ReasoningView(root,{baseProcess:null,evidence:()=>{},onEvaluate:()=>{},onRefresh:()=>{}});
   reasoning.update(data,{id:'graph'});
-  assert.equal(root.querySelectorAll('svg[aria-label="Goal process graph"]').length,1);
+  assert.ok(root.querySelector('[aria-label="Goal process tree"]'));
   dom.window.close();
 });
 
@@ -89,8 +89,22 @@ test('new default starts an explicitly scoped graph evaluation and incomplete re
   assert.equal(view.fields.max_tokens.parentElement.hidden,true);
   await view.run();await new Promise(r=>setTimeout(r,0));
   assert.equal(requests[0].analysis_version,'goal_graph_v1');assert.equal(requests[0].run_id,'run');
-  assert.equal(root.querySelectorAll('svg[aria-label="Goal process graph"]').length,1);
+  assert.ok(root.querySelector('[aria-label="Goal process tree"]'));
   const resume=[...root.querySelectorAll('button')].find(b=>b.textContent.includes('Resume'));
   assert.ok(resume);assert.equal(resume.disabled,false);
   assert.deepEqual(errors,[]);controller.abort();dom.window.close();
+});
+
+test('goal structure remains visibly pending when all cards have judgments',()=>{
+  const dom=new JSDOM('<main></main>');globalThis.document=dom.window.document;
+  const root=document.querySelector('main'),data=fixture();
+  data.coverage.pending_cards=0;
+  data.coverage.pending_structure_units=['batch:1','batch:2'];
+  data.coverage.review_gaps=[{batch_id:'batch:1',reason:'Undelivered evidence'}];
+  const view=new IncrementalGraphView(root);view.update(data,'pending-structure');
+  assert.match(root.textContent,/Goal structure pending · 2 windows/);
+  click(root,'Report');
+  assert.match(root.textContent,/Validation issues · 1/);
+  assert.doesNotMatch(root.textContent,/Unresolved groups/);
+  dom.window.close();
 });

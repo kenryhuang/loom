@@ -2135,3 +2135,35 @@ dialog h1 {
 .skeleton-inspector { position:fixed; z-index:60; right:24px; top:76px; width:min(560px,calc(100vw - 48px)); max-height:calc(100vh - 100px); overflow:auto; background:var(--panel); border:1px solid var(--line); border-radius:10px; box-shadow:0 12px 40px #0003; }
 .skeleton-inspector .skeleton-detail { margin:0; border:0; }
 .skeleton-inspector .dashboard-panel-heading { position:sticky; top:0; background:var(--panel); z-index:1; }
+
+/* Goal tree: hierarchy conveys ownership; source positions remain on the rows. */
+.goal-tree-controls { display:flex; align-items:center; margin:16px 0; min-width:0; }
+.goal-tree-controls label { display:flex; align-items:center; gap:12px; min-width:0; max-width:100%; color:var(--muted); }
+.goal-tree-controls select { width:min(480px,65vw); max-width:100%; text-overflow:ellipsis; }
+.goal-process-tree { min-width:0; max-width:100%; }
+.goal-tree-disclosure { min-width:0; margin:8px 0; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
+.goal-tree-disclosure > summary { cursor:pointer; padding:12px; overflow-wrap:anywhere; }
+.goal-tree-disclosure > summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.goal-tree-heading { display:inline-flex; width:calc(100% - 22px); vertical-align:middle; flex-wrap:wrap; align-items:center; gap:8px 14px; min-width:0; }
+.goal-tree-title { flex:1 1 260px; min-width:0; font-weight:600; overflow-wrap:anywhere; }
+.goal-tree-id { display:inline-block; margin-right:10px; color:var(--accent); font-size:12px; }
+.goal-tree-tags { display:flex; flex-wrap:wrap; gap:4px; font-size:11px; }
+.goal-tree-metrics { margin-left:auto; font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; white-space:normal; }
+.goal-tree-content { padding:0 12px 12px; min-width:0; overflow-wrap:anywhere; }
+.goal-tree-content:empty { padding:0; }
+.goal-tree-children { padding-left:16px; border-left:1px solid var(--line); margin-left:5px; min-width:0; }
+.goal-tree-goal > summary { background:color-mix(in srgb,var(--accent) 5%,transparent); border-radius:8px; }
+.goal-tree-stage > summary { font-size:13px; }
+.goal-tree-action > summary { font-size:12px; }
+.goal-tree-stage-meta { color:var(--muted); font-size:12px; margin:8px 0 12px; }
+.goal-tree-record { margin:16px 0; }
+.goal-tree-feature { padding:8px 0; border-bottom:1px solid var(--line); }
+.goal-tree-feature pre { margin:6px 0; max-height:240px; overflow:auto; }
+.goal-process-tree .base-table-scroll,.goal-acceptance .base-table-scroll { max-width:100%; overflow:auto; }
+.goal-acceptance { padding:8px 0; min-width:0; }
+@media (max-width:700px) {
+  .goal-tree-children { padding-left:8px; margin-left:0; }
+  .goal-tree-content { padding:0 8px 8px; }
+  .goal-tree-metrics { width:100%; margin-left:0; }
+  .goal-tree-heading { gap:6px; }
+}

@@ -148,6 +148,29 @@ async def test_budget_reservation_resume_and_projection_without_model():
     assert all(r["state"] == "settled" for r in cp["reservations"])
 
 
+@pytest.mark.asyncio
+async def test_metadata_pass_does_not_fetch_source_text_even_if_judge_requests_it():
+    class ReadMore(GraphJudge):
+        async def chat(self, *args, **kwargs):
+            response = (await super().chat(*args, **kwargs)).unwrap()
+            if len(self.requests) == 1:
+                value = json.loads(response.content)
+                value["evidence_requests"] = [dict(
+                    question="What was the recorded intent?", purpose="Check the source statement",
+                    ref=self.requests[-1]["cards"][0]["refs"][0], start=0, length=5,
+                )]
+                return ok(LlmResponse(content=json.dumps(value), usage=TokenUsage(100, 50, 150)))
+            return ok(response)
+
+    store = source(action(1))
+    cp, judge = {"read_chars": 24000}, ReadMore()
+    await run(store, build_behavior_facts(store), "run", cp, judge)
+    assert cp["read_chars"] == 24000
+    assert len(judge.requests) == 1
+    assert not judge.requests[0]["extra_evidence"]
+    assert cp["input_policy"]["source_reads"] is False
+
+
 def test_atomic_group_rollback_and_explicit_unknown():
     store, facts, rid = example()
     view = run_facts(store, facts, rid)

@@ -275,6 +275,10 @@ class SessionHandler(BaseHTTPRequestHandler):
                         if self._body() != {}:
                             raise ServiceError("Cancel accepts an empty object")
                         self._json(202, evaluation.cancel(sid, parts[4], parts[6]))
+                    elif len(parts) == 8 and parts[7] == "delete" and method == "POST":
+                        if self._body() != {}:
+                            raise ServiceError("Delete accepts an empty object")
+                        self._json(200, evaluation.delete(sid, parts[4], parts[6]))
                     else:
                         raise ServiceError("Route not found", 404)
                 elif method == "GET" and len(parts) == 5:

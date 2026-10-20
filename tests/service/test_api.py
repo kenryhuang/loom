@@ -301,6 +301,7 @@ def test_semantic_api_validates_scope_and_runs_evaluation_without_task_events(ap
         time.sleep(.01)
     route = f"{base}/{aid}/evaluation"
     assert client._json(route)["models"][0]["id"] == "test"
+    assert client._json(route)["supports_delete"] is True
     cursor = client.snapshot(sid)["event_cursor"]
     with pytest.raises(ServiceError):
         client._json(route, {"max_calls": 0})
@@ -317,6 +318,18 @@ def test_semantic_api_validates_scope_and_runs_evaluation_without_task_events(ap
     assert client._json(route, {})["id"] == job["id"]
     with pytest.raises(ServiceError):
         client._json(route + "/missing")
+    delete_route = f"{route}/{job['id']}/delete"
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(urllib.request.Request(client.url + delete_route, data=b"{}", method="POST"))
+    assert error.value.code == 401
+    with pytest.raises(ServiceError):
+        client._json(delete_route, {"unexpected": True})
+    assert client._json(delete_route, {}) == {"id": job["id"], "deleted": True}
+    assert not client._json(route)["jobs"]
+    with pytest.raises(ServiceError):
+        client._json(f"{route}/{job['id']}")
+    assert client.snapshot(sid)["event_cursor"] == cursor
+    assert not (service.store.artifacts.root / f"{result['result']['sha256']}.json").exists()
 
 
 def test_goal_loop_http_polling_and_publication_preserve_stream_metrics(api):

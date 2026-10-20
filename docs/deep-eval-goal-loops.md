@@ -1368,3 +1368,207 @@ reviewed 和 5 条 needs_evidence 判断，其他错误分别记录；这不表�
 回归覆盖独立 model/tool/boundary 判断、坏 JSONL 的局部保留、跨批次归属、
 跨目标依赖、调用成本守恒、幂等重试、未来/未提供证据拒绝、超时和旧 checkpoint
 恢复。实际语义质量和耗时仍需真实模型运行验证，离线测试不代表付费运行成功。
+
+## 19. 字符预算与恢复（2026-10-20）
+
+设置页区分两种容量：
+
+- **Request characters · per call** (`max_prompt_chars`)：单次请求包含指令、
+  元数据、补证和 response schema 的总字符数；默认 graph 引擎为 262,144。
+- **Evidence characters · total** (`max_evidence_chars`)：累计补证读取字符数；
+  默认 262,144，不控制单次请求大小。字符数不是 UTF-8 字节数或 token 数。
+
+新批次仍以 24,000 字符为压缩/拆分目标，每批最多 8 卡。该目标不是隐藏硬上限；
+已经进入补证或修复的固定窗口可以使用用户配置的更大请求容量，不删除待评审卡
+或已接受判断来满足旧上限。不发送原始 trace 全文。
+
+graph 引擎允许 Resume 时增加以上两个字符预算。旧 checkpoint 的设置摘要在精确
+匹配已保存设置后迁移为“语义设置不包含容量参数”，记录迁移，保留来源、模型、
+协议及其他配置的身份校验，禁止减小容量。旧引擎的恢复协议保持原样。
+输入超限提示明确指出 Request characters，不再误导用户增加累计 Evidence characters。
+
+## 20. 删除评估运行（2026-10-20）
+
+在 **Saved evaluations** 选择一次评估，点击 **Delete evaluation**，确认后永久删除。
+运行中或排队中的评估须先 Cancel，等待停止后再删除。
+
+- 删除 `semantic_jobs` 行及其中的 checkpoint、模型响应、调用/用量记录、进度和缓存键。
+- 删除该评估所有已保存版本的结果 artifact 及登记信息，包含 Resume 前的结果。
+  输出归属单独记录，不因 Resume 清空当前 result 引用而丢失。
+- 兼容历史数据：回填现有结果归属，从旧 goal 输出恢复归属，并清理当前 session
+  无引用的遗留 evaluation 输出。其他评估、session 或原始事件仍引用的 artifact 保留。
+- 保留原始任务、执行 trace 和 Trace analysis 快照。删除评估不是删除任务 run。
+- 元数据清理先提交，待清理文件清单持久化；文件清理失败明确返回错误，可重试同一
+  删除请求，服务重启也会重试。全部成功后清单本身删除，不留下历史占位记录。
+
+接口：`POST /v1/sessions/{sid}/trajectory/{analysis_id}/evaluation/{evaluation_id}/delete`，
+请求体 `{}`，沿用服务认证。仅允许匹配 session / snapshot 的已停止评估；活动作业
+返回 409。成功返回 `{ "id": "evaluation_…", "deleted": true }`，后续查询该评估返回 404。
+
+## 21. 动作元数据判定与默认树归属（2026-10-20）
+
+`goal-graph-rubric.5` 将主分析限定为 **metadata-only judge**。本节替代旧协议
+在主分析中自动补读原始证据、生成完整因果关系的要求，避免反复补证/修复阻塞目标树。
+
+### 输入和调用
+
+- 每批最多 8 个 model/tool/boundary action，按执行顺序处理。模型调用只提取公开
+  response 中的行动意图、目标和工具选择；JSON/带代码围栏的行动协议先在本地解析，
+  再选择 description、target、command 等字段，不截取完整 JSON 当作语义摘要。
+- 工具调用只提供命令、路径/查询、退出码/状态等字段；不提供 tool output 正文、
+  patch、报告全文、原始请求 messages、模型 reasoning 或原始 trace。
+- 完整树、调用顺序、caller 关系、引用位置、历史结果在本地保存。请求仅带有界的
+  goal/stage 索引（3,200 字符以内）、最近两个动作的元数据和必要引用。
+- 主协议只要求 goals / stages / assessments / attributions / closures / diagnostics
+  增量记录，不要求每批重建 attempts、因果关系和采纳关系。旧记录仍保留并可导出。
+- 不再提供原文读取入口；旧 checkpoint 的 extra_evidence 也不重新发送。
+  动作可识别时使用 reviewed，贡献/必要性可单独为 unknown；无法识别的动作记 unknown。
+  兼容旧模型的 needs_evidence，保存为 unknown，不以更多原文调用尝试证明任务成果。
+- 错误反馈最多 6 项、每项原因最多 180 字符，alias 只发送当前可见对象的至多 12 项。
+  有效判断逐条保存；token 只计量，不新增硬 token 上限。
+
+### 归属元数据和展示
+
+`action_attributions` 独立于语义 assessments 保存，并随 checkpoint、JSON、report
+和树投影输出。每项包含 card_id、goal_id、stage_id、basis、rule、anchor_card_id
+和 evidence_refs。有证据的归属为 `semantic`；缺少归属时为 `default_rule`。
+
+默认规则取同一有效 Root、同一 loop/角色中、在当前动作开始前已经结束的最近动作，
+继承其 goal/subgoal，并可以沿顺序链继续传递。trace ID 可逐 step 变化，因此有 loop ID
+时不使用 trace ID 分割上下文；没有 loop 时才以 trace 作为边界。跨并行上下文、重叠
+动作或任务修订不继承。不存在唯一前驱归属时放到当前 Root；验收回执仍属于 Root。
+
+`default_rule` 的 evidence_refs 为空。UI 标注 **Default rule**，展开说明“非事实证据”，
+报告也区分默认规则和有证据归属。后续显式判断优先覆盖默认关联。默认归属不增加
+语义评审覆盖率、不证明必要性/价值，不使目标变成 completed 或 accepted。
+
+旧 .4 checkpoint 可以 Resume 到 .5，保留已有判断和图，不自动启动付费重跑。
+对同一份 36 动作 trace 的离线打包测量，新请求含 schema 约 11,051–15,359 字符，
+旧请求约 17,951–27,435 字符；这是输入打包对比，不是实际模型耗时或判断质量保证。
+
+## 22. 子目标结构判定与协议兼容（2026-10-20）
+
+`goal-graph-rubric.6` 修正“Cards 全部已分析，但只有 Root 和阶段”的漏检。
+
+- 判定顺序明确为：当前动作要得到什么结果 → 新建或复用 subgoal → 阶段 → 动作归属。
+  subgoal 是待解决的问题或可独立检查的结果，阶段是实现它的方法；文件、工具、批次
+  和通用 research/verify 标签不自动成为 subgoal。无需 trace 中存在显式 plan，
+  可以根据公开行动意图推断，但必须引用当前提供的元数据，并保持 inferred 语义。
+- 每个含 model/tool 动作的窗口单独检查目标结构。至少有一个动作以有效证据关联
+  到子目标阶段，或评估器提交 `structure: single_goal`（原因与当前证据），才算完成。
+  边界事件单独成批时不要求拆分子目标。其余动作仍可使用明确标注的默认关联。
+- `insufficient_evidence` 保留为未解决的结构问题。不能因为所有动作都有评分，
+  或所有动作已默认挂到 Root，就宣告目标树分析成功；也不强制制造固定数量的子目标。
+- 动作评分已完成时，结构修复请求使用 `structure_only`，只补 goals/stages/attributions
+  或明确的单目标判定。继续使用最多 8 张动作元数据、有限目标索引，不补读 trace
+  或重发工具输出；不要求重评已经保存的动作。每批仍最多一次即时修复。
+- 声明中的 `id` 可规范化为 `key`；两者冲突仍拒绝。重复 Root 作为无效写入意图忽略，
+  不覆盖任务目标；完全相同且在当前时间窗已知的 stage 可直接复用。空 refs 的关联
+  不作为语义证据提交，交给既有默认关联规则，且不清除已有有效关联。
+  以上处理记录到 `protocol_normalizations`。未知引用、未投递引用、未来证据仍拒绝。
+- 新增 `structure_reviews`、`coverage.pending_structure_units`，结构未完成在树上单独提示。
+  “unresolved groups” 改为 validation issues；它原来统计的是逐条校验错误，不是 38 个子目标。
+- .5 checkpoint 可 Resume 到 .6；旧的 Root-only 已完成批次也会重新进入结构判定，
+  保留有效动作评分和阶段。不自动重跑、不修改已有生产评估记录。
+
+离线复放此次保存的 repair 响应，在保留 36 个已接受动作判断的条件下，阶段从 2 个
+恢复到 10 个；仍有 5 条引用错误，且旧响应本身没有声明任何 subgoal。因此协议兼容
+不能单独解决语义漏判，必须重新执行结构判定。该复放未调用模型，不代表新版 prompt
+已在真实模型上验证了子目标识别质量。
+
+## 23. 验收收尾窗口与无引用判断的恢复（2026-10-20）
+
+`.6` 的结构门槛对每批 model/tool 都生效，导致纯验收窗口中的 verification model、
+以及最后的 `finish`，仍被要求关联到 subgoal。`finish` 的报告正文被有意排除后，
+还可能没有可引用字段：模型返回 `reviewed + refs: []` 会连带产生评分、关联和缺失
+动作三条错误。`.7` 修正这些框架阻塞：
+
+- usage_role 明确为 verification 的框架模型调用，以及内置 finish，属于当前 Root，
+  与验收回执一样不单独要求子目标拆分。solver 的测试、验证动作仍需正常分析，
+  不因 stage.kind=verification 或工具名称包含 test 就豁免。
+- `action-metadata.2` 补充可定位的 tool_id、事件类型、usage_role 等简短事实字段；
+  verification JSON 的 results 只提取 criterion_id/status/reason 等有界字段。
+  不发送报告全文、原始输出或 reasoning。特征字段按稳定顺序选取，避免 checkpoint
+  JSON 的 key 排序改变恢复时提供的字段集合。
+- 在 metadata-only 协议中，`reviewed + refs: []` 保守保存为 unknown，清除未被引用
+  支撑的贡献、必要性、目的/结果断言和关联；记录规范化原因。非空但无效的引用仍拒绝。
+  unknown 表示信息未建立，不计作有证据的归属、任务成功或有价值动作。
+- Resume 可本地重放最后响应中的上述无引用动作，保留其他已接受判断；同步撤销已经
+  不适用的框架结构要求。只清除被实际修复的对应错误，独立的格式/引用错误继续保留。
+  `checkpoint_reconciliations` 记录恢复的 unknown 动作和清除的问题，无模型调用。
+- 分析 coverage complete 允许保留 explicit unknown；它只表示分析流程已完成，不等于
+  所有动作价值已经确认，也不代替任务 acceptance。普通 solver 的目标结构缺失仍会阻塞。
+
+对 `evaluation_f6f60c257c9c4e80b84a455779f3450f` 的 checkpoint 副本实测：使用禁止
+模型调用的 provider，恢复后 pending cards / structure windows / validation issues
+均为 0，原有判断与 usage 保留；finish 的效用为 unknown，没有补造语义证据。
+
+## 24. 框架规定动作的显式 Root 归属（2026-10-20）
+
+acceptance、框架 verification、内置 finish 和任务生命周期回执的 Root 关联由框架
+规定，不是缺失语义证据时的顺序默认关联。`sequential-attribution.2` 为它们输出
+`basis: framework_rule`、`rule: required_root_action`，始终指向当时有效的 Root。
+
+- 不继承上一个 subgoal，也不改变 solver 后续动作的顺序归属；不要求模型补做关联。
+- 页面标为 **Framework required**；即使历史 assessment 挂到了子目标，Root 规则仍优先。
+  这些动作不再进入“归属未建立”的列表，效用评分仍可为 unknown。
+- 执行骨架与调用成本归属同时采用 Root 下的框架活动，避免页面在 Root、成本却记入
+  子目标的分歧。成本仍按调用去重；保留历史判断供查看，不修改其评分或引用。
+- JSON/report 单独导出框架归属，coverage 增加 framework_attributed_cards；不混入
+  default_attributed_cards。规定动作属于 Root 不等于 Root 已完成，完成状态仍由验收记录决定。
+- 旧报告读取时即可按新规则投影，不需要重新运行评估或消耗模型 token。
+
+## 25. 动作详情字段与阶段编号（2026-10-20）
+
+metadata-only 协议不要求 Expected / Adoption；它们不能从 purpose 或顺序关系伪造。
+详情默认展示已有的 **Action intent / Observed progress**。历史评估仅在 expected 有
+具体值且有 expected_evidence_refs 时显示 Expected result，有 uptake_card_ids 时显示
+Adopted by（动作编号、名称和位置）。没有结果的动作显示 Action review pending。
+
+S1、S2… 仅表示语义 stage，按首次出现顺序编号；不是树中行号、执行轮次或依赖顺序。
+同一个 stage 的多次 occurrence 共用 S 编号，树与 JSON/report 使用一致的 stage 标签。
+Acceptance & root decision、Submit result 等框架容器使用 Root 标签；默认 continuation
+容器不分配 S 编号。过滤目标不会重新编号，历史报告无需重新调用模型。
+## 26. 展示与分析约束：时间顺序和目标嵌套
+
+适用于后续增量分析，以及 Skeleton、Report 和 JSON 投影：
+
+- **执行先后**由动作的 trace 行号计算，不由模型返回顺序、批次、目标声明位置
+  或 `parent_id` 推导。兄弟目标按最早关联动作排序；目标内部将直接 Stage 和
+  子目标混排，避免先显示所有子目标，再显示父目标较早发生的动作。
+- **父子关系**只表示结果分解。`root_relation` 简述子目标解决了父目标的哪一部分，
+  `refs` 引用当前已交付的意图信息。先定位原因、再修复、再验证，不自动构成
+  三层嵌套；它们通常是 Root 下的并列目标。只有组件结果属于父目标结果时才嵌套。
+  时间上的相邻、使能关系和任务交接均不能单独证明父子关系。
+- **稳定标识**：G/S 是目标和阶段的标识，不是依赖关系或严格连续的执行步骤。
+  同一个 Stage 返回执行时保留 S 编号；树中折叠后的活动范围可能覆盖其他目标的
+  动作。展开查看有序动作，Report 的执行骨架按 occurrence 时间展示。
+  非连续返回同一阶段时，页面标注 visits 数量，详情列出每次访问的动作范围，
+  不将首尾跨度误表示为持续执行。
+- **页面与导出一致**：目标和阶段显示实际活动范围；Report 明示父目标和分解依据，
+  动作评审按原始动作位置排序。JSON 带有 `display_order`、`first_action_line`、
+  `last_action_line`、`hierarchy_depth` 和 `parent_relation_basis`。
+- **兼容旧结果**：缺少 `root_relation` 不使评审失败，记为 `unreviewed`。
+  页面对缺少依据的深层嵌套标记 `Nesting unreviewed`，不擅自改写已保存父子关系。
+  新判断带依据时标为 `inferred`，不将模型给出理由等同于事实验证。
+- **成本**：仍逐批处理动作元数据，只增加短的父子关系说明，不发送原始 trace，
+  不增加整树审阅调用。排序和范围计算均在宿主完成。
+
+## 27. 声明兼容与框架边界漏评恢复
+
+- 对漏掉的 acceptance 等框架 boundary，宿主记录事件类型及 Root 归属，
+  将语义贡献、必要性记为 `unknown`。这只完成事件登记，不代表任务成功，
+  也不用于替代 solver/model/tool 的语义评审。
+- `goals` 是声明协议，不是原地编辑协议。重复使用同一 ID、同一父目标和
+  相同非空 conditions 时保留已存标题，忽略新标题并记录两种措辞供核对；
+  不声称两种表达已被证明语义等价。
+- 同一 ID 被用于不同 objective 和 conditions 时，建立新的不可变 Goal，
+  将本批引用通过别名映射到新对象。已被部分提交的相关 Stage 创建新版本，
+  更新本批 action attribution，历史目标、阶段和 assessment history 保留。
+  别名只在当前批次生效，不自动改写其他批次的语义关系。
+- 省略 conditions 时，新目标使用空列表（未声明细分条件），已有目标保留原值；
+  不凭空生成验收条件。父目标改写、无效引用、未来证据等仍会被拒绝。
+- Resume 可以本地重放上述已保存失败记录，沿用对应窗口、cutoff 和已交付
+  元数据 ref 白名单。新响应保存 `delivered_ref_ids`；旧响应仅在元数据版本
+  相同且字段可确定重建时恢复。恢复保留 audit，不增加模型调用；
+  独立的引用、结构或解析问题仍保留为 incomplete。

@@ -3,13 +3,17 @@
 from copy import deepcopy
 
 from loom.evaluation.goal_loops import SCHEMA
+from loom.evaluation.goal_loops.attribution import VERSION as ATTRIBUTION_VERSION
+from loom.evaluation.goal_loops.attribution import action_attributions
 from loom.evaluation.goal_loops.costs import ledger, summarize
 from loom.evaluation.goal_loops.facts import run_facts
 from loom.evaluation.goal_loops.graph_contract import ANALYZER, PROMPT
+from loom.evaluation.goal_loops.graph_order import hierarchy_order, order_goals
 from loom.evaluation.goal_loops.graph_state import initialize, occurrences
+from loom.evaluation.goal_loops.structure import pending_structure_units
 
 
-def skeleton(cp, cards, phases):
+def skeleton(cp, cards, phases, attributions=()):
     nodes, membership = [], {}
     order = {c["id"]: n for n, c in enumerate(cards)}
     endpoints = {r[k] for r in cp["relations"] for k in ("source_id", "target_id")}
@@ -54,6 +58,7 @@ def skeleton(cp, cards, phases):
             nodes.append(node)
         membership[phase["id"]] = node["id"]
     represented = {c for n in nodes for c in n["card_ids"]}
+    defaults = {r["card_id"]: r for r in attributions if r["basis"] in {"default_rule", "framework_rule"}}
     for card in cards:
         if card["id"] not in represented:
             assessment = cp["assessments"].get(card["id"])
@@ -61,8 +66,9 @@ def skeleton(cp, cards, phases):
                 dict(
                     id="node:" + card["id"],
                     stage_id=None,
-                    goal_id=None,
-                    kind="unassigned",
+                    goal_id=defaults.get(card["id"], {}).get("goal_id"),
+                    attribution=defaults.get(card["id"]),
+                    kind="framework" if defaults.get(card["id"], {}).get("basis") == "framework_rule" else "unassigned",
                     objective=card["name"],
                     member_ids=[],
                     card_ids=[card["id"]],
@@ -73,7 +79,7 @@ def skeleton(cp, cards, phases):
                     end_line=card["end_line"],
                     evidence_refs=assessment.get("evidence_refs", []) if assessment else [],
                     boundary=True,
-                    retain_reason="unexplained_activity",
+                    retain_reason="required_root_action" if defaults.get(card["id"], {}).get("basis") == "framework_rule" else "unexplained_activity",
                 )
             )
     nodes.sort(key=lambda n: (n["start_line"], n["end_line"], n["id"]))
@@ -106,7 +112,8 @@ def report(bundle):
         "",
         "## Goals",
     ]
-    for goal in bundle["goals"]:
+    labels = {g["id"]: g.get("display_id", g["id"]) for g in bundle["goals"]}
+    for goal in hierarchy_order(bundle["goals"]):
         closure = bundle["closures"].get(goal["id"], {})
         lines += [
             f"- {goal.get('display_id', '')} · {goal['objective']} — claim: {closure.get('claim', 'unknown')}; "
@@ -114,10 +121,21 @@ def report(bundle):
             f"disposition: {closure.get('disposition', 'unknown')}"
         ]
         lines += [f"  - Condition: {condition}" for condition in goal["conditions"]]
+        if goal.get("parent_goal_id"):
+            lines += [f"  - Parent: {labels.get(goal['parent_goal_id'], goal['parent_goal_id'])}; "
+                      f"decomposition basis ({goal['parent_relation_basis']}): "
+                      f"{goal.get('root_relation') or 'Not recorded; saved nesting is unreviewed'}"]
+        if goal.get("first_action_line") is not None:
+            lines += [f"  - Activity span: L{goal['first_action_line']}–L{goal['last_action_line']} (may overlap other goals)"]
         if closure:
             lines += [f"  - Closure basis: {closure['reason']}"]
         lines += [f"  - Open: {q}" for q in closure.get("open_questions", [])]
-    lines += ["", "## Execution skeleton"]
+    if c.get("pending_structure_units"):
+        lines += ["", f"Goal decomposition pending in {len(c['pending_structure_units'])} windows; reviewed actions alone do not establish a goal tree."]
+    for row in bundle.get("structure_reviews", {}).values():
+        lines.append(f"- Goal structure: {row['decision']} — {row['reason']}")
+    lines += ["", "## Execution skeleton",
+              "Ordered by action start; G/S labels identify stable objects, not dependencies. Nesting denotes decomposition, not sequence."]
     for node in bundle["skeleton"]["nodes"]:
         lines += [
             f"- {node.get('display_id', '')} · {node['objective']} · {node.get('goal_display_id') or 'Unassigned'} "
@@ -137,6 +155,17 @@ def report(bundle):
             f"  - Purpose: {row['purpose']}; expected: {row['expected']}; necessity: {row['necessity']}; redundancy: {row['redundancy']}.",
             "  - Evidence: " + ", ".join(f"L{r['line_number']}:{r.get('field_path', '')}" for r in row["evidence_refs"]),
         ]
+    labels = {g["id"]: g.get("display_id", g["id"]) for g in bundle["goals"]}
+    framework = [r for r in bundle.get("action_attributions", []) if r["basis"] == "framework_rule"]
+    if framework:
+        lines += ["", "## Framework-required root actions"]
+        lines += [f"- {r['card_id']} → {labels.get(r['goal_id'], r['goal_id'])}: framework_rule / required_root_action" for r in framework]
+    lines += ["", "## Default tree membership", "Sequential defaults are navigation rules, not factual evidence of goal relevance or completion."]
+    labels = {g["id"]: g.get("display_id", g["id"]) for g in bundle["goals"]}
+    for row in bundle.get("action_attributions", []):
+        if row["basis"] == "default_rule":
+            lines.append(f"- {row['card_id']} → {labels.get(row['goal_id'], row['goal_id'])}: default_rule / {row['rule']}"
+                         + (f"; previous action {row['anchor_card_id']}" if row["anchor_card_id"] else ""))
     lines += [
         "",
         "## Evidence visibility",
@@ -164,8 +193,17 @@ def project(source, facts, run_id, checkpoint, extraction=None):
     cp = checkpoint if checkpoint.get("entities") else {**initialize(view), **checkpoint}
     extraction = extraction or cp.get("extraction") or compile_cards(source, facts, view)
     cards = extraction["cards"]
+    attributions = action_attributions(cp, cards)
     entities = deepcopy(cp["entities"])
-    phases = occurrences(cp, cards)
+    framework = {r["card_id"]: r for r in attributions if r["basis"] == "framework_rule"}
+    # Keep saved semantic judgments for inspection, but framework ownership wins
+    # in the execution skeleton and accounting. No LLM judgment is rewritten.
+    phases = [p for p in occurrences(cp, cards) if not any(cid in framework for cid in p["card_ids"])]
+    entities["activities"] += [dict(
+        id="framework:" + c["id"], goal_id=framework[c["id"]]["goal_id"], kind="submission" if c["name"] == "finish" else "verification",
+        description=c["name"], call_ids=c["call_ids"], card_ids=[c["id"]], allocation="serves", basis="framework_rule",
+        rule="required_root_action", evidence_refs=[], start_line=c["start_line"], end_line=c["end_line"],
+    ) for c in cards if c["id"] in framework]
     entities.update(phases=phases, relations=deepcopy(cp["relations"]), diagnostics=deepcopy(cp["diagnostics"]))
     for goal in entities["goals"]:
         recorded = view["statistics"].get("execution_status", "unknown") if not goal.get("parent_goal_id") else "unknown"
@@ -179,9 +217,10 @@ def project(source, facts, run_id, checkpoint, extraction=None):
     reviewed = {c for c, a in cp["assessments"].items() if a["status"] in ("reviewed", "unknown")}
     pending = {c["id"] for c in cards} - reviewed
     conflicts = [c for c in cp["conflicts"] if not c.get("resolved")]
+    structural_pending = pending_structure_units(cp)
     coverage = dict(
-        status="complete" if not pending and not conflicts else "partial",
-        pipeline_complete=not pending and not conflicts,
+        status="complete" if not pending and not conflicts and not structural_pending else "partial",
+        pipeline_complete=not pending and not conflicts and not structural_pending,
         source_events=len(view["records"]),
         source_cards=len(cards),
         reviewed_cards=len(reviewed),
@@ -189,6 +228,8 @@ def project(source, facts, run_id, checkpoint, extraction=None):
                                   reviewed=sum(c["kind"] == kind and c["id"] in reviewed for c in cards))
                        for kind in ("model", "tool", "boundary")},
         attributed_cards=sum(bool(a["stage_ids"]) for a in cp["assessments"].values()),
+        framework_attributed_cards=len(framework),
+        default_attributed_cards=sum(r["basis"] == "default_rule" for r in attributions),
         pending_cards=len(pending),
         unknown_cards=sum(a["status"] == "unknown" for a in cp["assessments"].values()),
         pending_card_ids=sorted(pending),
@@ -198,7 +239,9 @@ def project(source, facts, run_id, checkpoint, extraction=None):
         reviewed_calls=sum(len(c["call_ids"]) for c in cards if c["id"] in reviewed),
         source_packets=len(cards),
         reviewed_packets=len(reviewed),
-        structure_complete=not pending,
+        structure_complete=not pending and not structural_pending,
+        pending_structure_units=structural_pending,
+        validation_issue_count=sum(c.get("record_type") != "structure" for c in conflicts),
         reconciliation_complete=not conflicts,
         diagnosed_goals=list({d["goal_id"] for d in cp["diagnostics"]}),
         diagnostic_scope="Only cited findings; unreported goals are not declared efficient",
@@ -210,8 +253,11 @@ def project(source, facts, run_id, checkpoint, extraction=None):
     bundle = dict(
         schema_version=SCHEMA,
         graph_revision=cp["graph_revision"],
+        structure_reviews=deepcopy(cp.get("structure_reviews", {})),
+        protocol_normalizations=deepcopy(cp.get("protocol_normalizations", [])),
+        checkpoint_reconciliations=deepcopy(cp.get("checkpoint_reconciliations", [])),
         source=dict(digest=source.source_sha256, run_id=run_id, scope_digest=view["scope_digest"], adapter_version=extraction["version"]),
-        analyzer=dict(version=ANALYZER, prompt_version=PROMPT),
+        analyzer=dict(version=ANALYZER, prompt_version=cp.get("identity", {}).get("prompt", PROMPT), input_policy=cp.get("input_policy")),
         **entities,
         facts=dict(events=view["records"], verification=view["verification"], statistics=view["statistics"]),
         extraction=dict(
@@ -223,8 +269,10 @@ def project(source, facts, run_id, checkpoint, extraction=None):
             fetched_ranges=cp["reviewed_ranges"],
             delivered_ranges=cp.get("delivered_ranges", []),
         ),
-        stages=list(cp["stages"].values()),
+        stages=deepcopy(list(cp["stages"].values())),
         record_assessments=list(cp["assessments"].values()),
+        action_attributions=attributions,
+        attribution_version=ATTRIBUTION_VERSION,
         closures=cp["closures"],
         criterion_coverage=[
             dict(
@@ -236,7 +284,7 @@ def project(source, facts, run_id, checkpoint, extraction=None):
             for g in entities["goals"]
             if not g.get("parent_goal_id")
         ],
-        skeleton=skeleton(cp, cards, phases),
+        skeleton=skeleton(cp, cards, phases, attributions),
         graph=dict(nodes=[dict(id=p["id"], kind="phase") for p in phases], relations=cp["relations"]),
         cost_ledger=accounting,
         coverage=coverage,
@@ -252,6 +300,14 @@ def project(source, facts, run_id, checkpoint, extraction=None):
         },
     )
     bundle["execution_view"] = execution_view(source, bundle)
+    order_goals(bundle["goals"], cards, attributions)
+    card_order = {c["id"]: (c["start_line"], c["end_line"], c["id"]) for c in cards}
+    bundle["record_assessments"] = sorted(bundle["record_assessments"],
+                                        key=lambda r: card_order.get(r["card_id"], (float("inf"), 0, r["card_id"])))
+    bundle["display_order"] = dict(
+        siblings="first_action_line", actions="start_line", nesting="goal_decomposition",
+        stage_labels="stable_first_occurrence", sequence_is_dependency=False,
+    )
     goal_number = 0
     for goal in bundle["goals"]:
         if goal.get("parent_goal_id"):
@@ -260,8 +316,15 @@ def project(source, facts, run_id, checkpoint, extraction=None):
         else:
             goal["display_id"] = "Root"
     goal_labels = {g["id"]: g["display_id"] for g in bundle["goals"]}
-    for index, node in enumerate(bundle["skeleton"]["nodes"], 1):
-        node.update(display_id=f"S{index}", goal_display_id=goal_labels.get(node["goal_id"]))
+    stage_labels = {}
+    for node in bundle["skeleton"]["nodes"]:
+        if node["stage_id"]:
+            stage_labels.setdefault(node["stage_id"], f"S{len(stage_labels) + 1}")
+    for stage in bundle["stages"]:
+        stage["display_id"] = stage_labels.get(stage["id"], "")
+    for node in bundle["skeleton"]["nodes"]:
+        label = stage_labels.get(node["stage_id"], "Root" if (node.get("attribution") or {}).get("basis") == "framework_rule" else "")
+        node.update(display_id=label, goal_display_id=goal_labels.get(node["goal_id"]))
         node["cost"] = summarize([a for a in view["atoms"] if a["id"] in node["call_ids"]])
     bundle["report"] = dict(graph_revision=cp["graph_revision"], status=coverage["status"], format="markdown", text=report(bundle))
     return bundle

@@ -4,7 +4,8 @@ import json
 
 from loom.llm.structured import native_schema
 
-STATE_CHARS = 6000
+STATE_CHARS = 3200
+# Preferred initial batch size; the configured request limit is enforced separately.
 REQUEST_CHARS = 24000
 
 

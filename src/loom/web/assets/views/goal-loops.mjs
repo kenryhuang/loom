@@ -39,7 +39,8 @@ export function renderGoalSummary(root, data, explore) {
 
 export class GoalLoopView {
   constructor(root, {evidence}) { this.root = root; this.evidence = evidence; this.limit = 100; this.phaseLimit = 12; this.expanded = new Set(); this.expandedActions = new Set(); }
-  update(data) {
+  update(data, identity = '') {
+    this.identity = identity;
     if(this.data && (this.data.analysis_id !== data.analysis_id || this.data.source?.run_id !== data.source?.run_id)) {
       this.expandedActions.clear(); this.selectedActionStage=null;
     }
@@ -54,7 +55,7 @@ export class GoalLoopView {
   }
   render() {
     if(this.data.skeleton?.projection_version) {
-      this.incrementalView ||= new IncrementalGraphView(this.root,{evidence:this.evidence});this.incrementalView.update(this.data);return;
+      this.incrementalView ||= new IncrementalGraphView(this.root,{evidence:this.evidence});this.incrementalView.update(this.data, this.identity);return;
     }
     const data = this.data, c = data.coverage;
     const viewport = this.root.closest(".trajectory-page") || this.root.parentElement;

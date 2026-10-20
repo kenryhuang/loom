@@ -1,9 +1,12 @@
+import json
+
 import pytest
 
 from loom.evaluation.behavior_facts import build_behavior_facts
 from loom.evaluation.goal_loops.cards import CARD_CHARS, card_payload, compile_cards
 from loom.evaluation.goal_loops.facts import run_facts
 from loom.evaluation.goal_loops.graph_contract import SYSTEM, compact_contract, protocol
+from loom.evaluation.goal_loops.judge_metadata import card_metadata
 from loom.evaluation.goal_loops.packing import STATE_CHARS, bounded_state, request_profile, serialized
 from loom.llm.api import LlmMessage
 from tests.evaluation.test_behavior_sequence import action, source
@@ -109,7 +112,7 @@ async def test_schema_cost_is_measured_without_a_token_budget_gate():
     result = await run(store, facts, "run", cp, judge, max_tokens=100)
     assert result["coverage"]["pipeline_complete"]
     assert judge.requests and cp["usage"]["total_tokens"] > 100
-    assert cp["reservations"][0]["input_profile"]["schema_chars"] > 4000
+    assert 0 < cp["reservations"][0]["input_profile"]["schema_chars"] < 4000
     assert cp["reservations"][0]["output_token_limit"] is None
 
 
@@ -142,3 +145,79 @@ async def test_longer_trace_adds_batches_without_accumulating_prompt_history():
         measurements.append((len(profiles), max(p["total_chars"] for p in profiles)))
     assert measurements[1][0] == 4 * measurements[0][0]
     assert measurements[1][1] < 1.2 * measurements[0][1]
+
+
+@pytest.mark.asyncio
+async def test_pending_request_bounds_old_feedback_without_replaying_saved_cards():
+    store = source([event for n in range(1, 9) for event in action(n)])
+    facts = build_behavior_facts(store)
+    cp, judge = {"mode": "json_schema"}, GraphJudge()
+    with pytest.raises(ValueError, match="budget reached"):
+        await run(store, facts, "run", cp, judge, max_calls=1, max_prompt_chars=24000)
+    saved = {cid: dict(row) for cid, row in cp["assessments"].items()}
+    pending = next(u for u in cp["units"].values() if not u["complete"])
+    # A retained repair/read window is fixed; it must not lose cards just to fit
+    # an earlier limit. Simulate the metadata growth that caused the real failure.
+    pending["feedback"] = [dict(reason="Saved validation feedback. " * 800)]
+    saved_ref = next(iter(cp["extraction"]["registry"].values()))
+    cp["extra_evidence"]["old-read"] = {**saved_ref, "id": "old-read", "text": "OLD_RAW_TOOL_BODY" * 10000, "question": "Legacy read"}
+    pending["extra"] = ["old-read"]
+    result = await run(store, facts, "run", cp, judge, max_calls=20, max_prompt_chars=262144)
+    assert result["coverage"]["pipeline_complete"]
+    assert len(judge.requests) == 2
+    assert cp["reservations"][-1]["input_profile"]["total_chars"] < 24000
+    assert len(serialized(judge.requests[-1]["feedback"])) < 500
+    assert "OLD_RAW_TOOL_BODY" not in serialized(judge.requests[-1])
+    assert not judge.requests[-1]["extra_evidence"]
+    assert {c["id"] for c in judge.requests[-1]["cards"]}.isdisjoint(saved)
+    assert all(cp["assessments"][cid] == row for cid, row in saved.items())
+    with pytest.raises(ValueError, match="cannot reduce resource"):
+        await run(store, facts, "run", cp, judge, max_calls=20, max_prompt_chars=24000)
+
+
+def test_model_action_json_is_extracted_locally_without_reasoning_patch_or_report():
+    events = action(1)
+    events[1]["response"]["content"] = "```json\n" + json.dumps({
+        "reasoning": "RAW_REASONING" * 10000,
+        "action": {"kind": "tool", "description": "Inspect orbital calculation", "target": "shell_execute",
+                   "input": {"command": "rg angular_velocity src", "patch": "RAW_PATCH" * 10000}},
+        "report": "RAW_REPORT" * 10000,
+    }) + "\n```"
+    store = source(events)
+    facts = build_behavior_facts(store)
+    extraction = compile_cards(store, facts, run_facts(store, facts, "run"))
+    card = next(c for c in extraction["cards"] if c["kind"] == "model")
+    metadata = card_metadata(store, card, extraction["registry"])
+    payload = serialized(metadata)
+    assert "Inspect orbital calculation" in payload and "rg angular_velocity src" in payload
+    assert not any(marker in payload for marker in ("RAW_REASONING", "RAW_PATCH", "RAW_REPORT", "raw_refs"))
+    assert len(payload) < 1300
+    for field in metadata["fields"]:
+        assert store.resolve(extraction["registry"][field["ref"]]["ref"]) == field["text"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_output_value_is_terminal_without_read_or_repair_calls():
+    from loom.core import ok
+    from loom.llm import LlmResponse, TokenUsage
+
+    class Uncertain(GraphJudge):
+        async def chat(self, messages, tools=None, cancellation=None, **kwargs):
+            payload = json.loads(messages[1].content)
+            self.requests.append(payload)
+            return ok(LlmResponse(content=json.dumps({"assessments": [dict(
+                card_id=c["id"], status="needs_evidence", purpose="Inspect source", delta="Output value is not established",
+                contribution="unknown", necessity="unknown", refs=c["refs"][:1],
+            ) for c in payload["cards"]], "structure": [dict(decision="single_goal", reason="One source inspection; no independent intermediate result",
+                refs=payload["cards"][0]["refs"][:1])]}), usage=TokenUsage(50, 30, 80)))
+
+    store = source(action(1, output={"status": "success", "content": "RAW_TOOL_OUTPUT" * 10000}))
+    cp, judge = {}, Uncertain()
+    result = await run(store, build_behavior_facts(store), "run", cp, judge)
+    assert len(judge.requests) == 1
+    assert result["coverage"]["pipeline_complete"]
+    assert result["coverage"]["unknown_cards"] == 2
+    assert all(a["basis"] == "default_rule" for a in result["action_attributions"])
+    assert "RAW_TOOL_OUTPUT" not in serialized(judge.requests)
+    assert not cp["read_chars"]
+    assert "evidence_requests" not in judge.requests[0]["contract"]["records"]

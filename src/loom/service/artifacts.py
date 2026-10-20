@@ -44,3 +44,9 @@ class ServiceArtifacts:
         if hashlib.sha256(raw).hexdigest() != digest:
             raise ServiceError("Artifact integrity failure", 500)
         return raw
+
+    def delete(self, digest: str):
+        """Unlink an unreferenced artifact; caller must serialize with publishers."""
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ServiceError("Invalid artifact digest")
+        (self.root / f"{digest}.json").unlink(missing_ok=True)
