@@ -313,6 +313,7 @@
               Cancel
             </button>
           </div>
+          <section class="setup-block setup-task-block">
           <label for="create-objective"
             >Initial task <span class="muted">(optional)</span></label
           ><textarea
@@ -320,6 +321,9 @@
             rows="3"
             placeholder="What should Loom work on?"
           ></textarea>
+          </section>
+          <section class="setup-block">
+          <h3>Workspace &amp; model</h3>
           <div id="workspace-field">
             <label for="create-workspace">Workspace path</label
             ><input
@@ -335,49 +339,56 @@
           <label for="create-model">Model</label
           ><select id="create-model"></select>
           <div class="setup-assistance">
-            <button id="setup-recommend" type="button" class="quiet">
+            <button id="setup-recommend" type="button" class="primary">
               Recommend with LLM
             </button>
             <p id="setup-status" class="muted small" role="status"></p>
           </div>
+          </section>
+          <section class="setup-block">
           <label for="create-template">Task type</label
           ><select id="create-template"></select>
           <p id="template-description" class="muted small"></p>
-          <fieldset id="collections-field">
-            <legend>Tool collections · adjust as needed</legend>
-            <div id="create-collections"></div>
+          </section>
+          <details id="collections-field" class="setup-block" data-open-default open>
+            <summary><span>Tool collections</span><span id="setup-collections-summary" class="setup-selection-summary"></span></summary>
+            <div class="setup-block-body">
+            <div id="create-collections" role="group" aria-label="Tool collections"></div>
             <p id="setup-visual-status" class="muted small" hidden></p>
-          </fieldset>
-          <fieldset id="setup-plugins" hidden>
-            <legend>Plugins · adjust as needed</legend>
+            </div>
+          </details>
+          <details id="setup-plugins" class="setup-block" hidden>
+            <summary><span>Context &amp; workflow</span><span id="setup-plugins-summary" class="setup-selection-summary"></span></summary>
+            <div class="setup-block-body setup-settings-grid">
+            <div>
             <label for="setup-context">Context plugin</label>
             <select id="setup-context"></select>
             <p id="setup-context-reason" class="muted small"></p>
+            </div><div>
             <label for="setup-workflow">Workflow plugin</label>
             <select id="setup-workflow"></select>
             <p id="setup-workflow-reason" class="muted small"></p>
-          </fieldset>
-          <fieldset id="setup-acceptance">
-            <legend>Task acceptance · Automatically enabled</legend>
-            <p>Every task must pass acceptance before it can complete.</p>
-            <ol>
-              <li>Before execution: inspect the bound workspace and establish task-specific acceptance criteria.</li>
-              <li>Before completion: run the relevant checks and an independent semantic review.</li>
-              <li>On failure: return check results for bounded repair; pause when evidence or budget is unavailable.</li>
-            </ol>
-            <p id="setup-acceptance-status" class="muted small" role="status">The acceptance plan is prepared after creation. No workspace has been inspected or checks run yet.</p>
-            <p id="setup-acceptance-budget" class="muted small"></p>
-          </fieldset>
-          <details class="setup-external">
-            <summary>External tools</summary>
+            </div></div>
+          </details>
+          <details id="setup-external" class="setup-block">
+            <summary><span>External tools</span><span id="setup-external-summary" class="setup-selection-summary">None selected</span></summary>
+            <div class="setup-block-body">
             <div id="create-external-tools" class="external-choices"></div>
             <p class="muted small">Selected tools are available to the task model when useful. Register connections in External tools.</p>
+            </div>
           </details>
-          <label for="create-title"
-            >Session title <span class="muted">(optional)</span></label
-          ><input id="create-title" placeholder="A name for this work" />
+          <details id="setup-knowledge" class="setup-block">
+            <summary><span>Knowledge bases</span><span id="setup-knowledge-summary" class="setup-selection-summary">None selected</span></summary>
+            <div class="setup-block-body">
+              <div id="create-knowledge" class="knowledge-choices" role="group" aria-label="Knowledge bases" aria-describedby="create-knowledge-hint"></div>
+              <p id="create-knowledge-hint" class="muted small">The model can search selected knowledge bases when needed.</p>
+            </div>
+          </details>
+          <details id="restart-settings-block" class="setup-block" hidden>
+            <summary><span>Execution limits</span></summary>
+            <div class="setup-block-body">
           <fieldset id="restart-settings" hidden disabled>
-            <legend>Execution limits</legend>
+            <legend class="visually-hidden">Execution limits</legend>
             <label for="restart-plan-mode">Planning mode (legacy workflow)</label>
             <select id="restart-plan-mode"><option value="auto">Auto</option><option value="force">Required</option><option value="off">Off</option></select>
             <label for="restart-max_steps">Maximum steps</label><input id="restart-max_steps" type="number" min="1" step="1" required />
@@ -387,23 +398,19 @@
             <label for="restart-max_window_chars">Context window (characters)</label><input id="restart-max_window_chars" type="number" min="1" step="1" required />
             <p id="restart-context-note" class="muted small"></p>
           </fieldset>
-          <label for="create-knowledge">Knowledge bases (optional)</label>
-          <select
-            id="create-knowledge"
-            multiple
-            size="3"
-            aria-describedby="create-knowledge-hint"
-          ></select>
-          <p id="setup-knowledge-reasons" class="muted small"></p>
-          <p id="create-knowledge-hint" class="muted small">
-            The model can search selected knowledge bases when needed.
-          </p>
-          <div id="spec-field" hidden>
+            </div>
+          </details>
+          <details id="spec-field" class="setup-block" hidden>
+            <summary><span>Custom specification</span></summary>
+            <div class="setup-block-body">
             <label for="create-spec">Task specification (JSON)</label
             ><textarea id="create-spec" rows="8" spellcheck="false"></textarea>
           </div>
+          </details>
           <p id="create-error" class="error" role="alert"></p>
+          <div class="setup-form-actions">
           <button class="primary" id="create-submit">Create session</button>
+          </div>
         </form>
       </main>
       <aside class="session-details" aria-label="Session information">

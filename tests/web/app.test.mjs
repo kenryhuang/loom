@@ -150,12 +150,12 @@ test("browser app connects to real service, answers input, creates sessions, con
       /WORKFLOW_ROUTE_FAILED.*Model did not select/,
     );
     $("new-session").click();
-    $("create-title").value = "UI session";
+    assert.equal($("create-title"), null);
     $("create-objective").value = "Created in browser";
     submit("create-form");
     await until(
       () =>
-        $("session-title").textContent === "UI session" &&
+        $("session-title").textContent === "Created in browser" &&
         $("event-feed").querySelector(".result"),
     );
     assert.equal($("run-failure").hidden, true);
@@ -184,20 +184,28 @@ test("browser app connects to real service, answers input, creates sessions, con
     );
     const edit = [...document.querySelectorAll('[data-panel="info"] button')].find(b => b.textContent === "Edit task");
     assert.equal(edit.disabled, false);
+    assert.equal(edit.classList.contains('primary'), true);
     edit.click();
     await until(() => !$("create-page").hidden && $("create-submit").textContent === "Save & restart");
-    assert.equal($("create-title").value, "Browser demo");
+    assert.equal($("create-title"), null);
     assert.equal($("restart-max_tokens").value, "500000");
     assert.equal($("create-template").value, "current-task");
+    assert.equal($("create-workspace").readOnly, true);
+    assert.equal($("restart-settings-block").open, false);
+    $("restart-max_tokens").value = "0";
+    assert.equal($("restart-max_tokens").checkValidity(), false);
+    assert.equal($("restart-settings-block").open, true);
     $("create-objective").value = "Analyze the updated task";
-    $("create-title").value = "Edited task";
     $("restart-max_tokens").value = "600000";
     $("setup-workflow").value = "legacy_planning";
     $("restart-plan-mode").value = "off";
     submit("create-form");
-    await until(() => $("create-page").hidden && $("session-title").textContent === "Edited task" && $("task-status").textContent === "idle");
+    await until(() => $("create-page").hidden && $("session-title").textContent === "Browser demo" && $("task-status").textContent === "idle");
     assert.equal($("event-feed").querySelectorAll(".result").length, 2);
     assert.match(document.querySelector('[data-panel="budget"]').textContent, /600,000/);
+    $("new-session").click();
+    assert.equal($("create-workspace").readOnly, false);
+    $("cancel-create").click();
     $("disconnect").click();
     assert.equal($("auth-dialog").open, true);
     assert.equal($("connection").textContent, "Disconnected");

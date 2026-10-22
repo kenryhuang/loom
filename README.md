@@ -135,8 +135,9 @@ runs the current goal again with a new run, fresh plan and acceptance checks, an
 reset run budgets. Earlier conversation and results are retained as bounded background;
 old checkpoints and acceptance results are not reused. Workspace files remain as they are.
 Use **Session info → Details → Edit task → Save & restart** to change the objective,
-model, workspace, execution limits, context/workflow plugins, tool collections, knowledge
-bases, and external tools. Changes are validated and saved atomically with restart;
+model, execution limits, context/workflow plugins, tool collections, knowledge
+bases, and external tools. The workspace is read-only for an existing session;
+create a new session to use another directory. Changes are validated and saved atomically with restart;
 external bindings are refreshed from the registry. An explicitly edited objective becomes
 the new request; otherwise pending guidance is included once.
 You can restart directly from idle, paused, failed, or completed state after the

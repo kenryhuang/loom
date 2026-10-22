@@ -121,8 +121,9 @@ Research 可以不绑定 workspace；如果希望分析文档落盘，请绑定�
 任务控制中，**Complete task** 关闭任务，**Reopen task** 恢复消息输入，但不会自动执行。
 需要从头运行时点击 **Restart task**：沿用当前目标，重新绑定当前注册的外部工具，创建新 run，
 重建计划和验收，重置本轮预算用量；旧对话和结果作为有长度限制的背景提供给模型，旧 checkpoint 和验收结果不沿用，工作区文件不回滚。
-在 **Session info → Details → Edit task → Save & restart** 中可修改目标、模型、workspace、执行预算、
-context/workflow plugins、工具集合、知识库和外部工具。配置验证与保存、重启一次完成，验证失败不会改变原任务。
+在 **Session info → Details → Edit task → Save & restart** 中可修改目标、模型、执行预算、
+context/workflow plugins、工具集合、知识库和外部工具。已有 Session 的 workspace 只读展示，
+更换目录需要新建 Session。配置验证与保存、重启一次完成，验证失败不会改变原任务。
 编辑后的目标作为新请求；直接 Restart 时，暂停期间尚未执行的追加要求会合并到新一轮目标。
 旧 worker 退出后，可从 idle、paused、failed、completed 直接重跑。
 TUI 也提供这些按钮，CLI 使用 `loom session restart SESSION_ID`。

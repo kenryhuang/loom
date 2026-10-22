@@ -512,12 +512,13 @@ function selectedTemplate() {
     ? currentTaskTemplate() : catalog?.templates.find(t => t.id === $("create-template").value);
 }
 function editorMode(editing) {
-  sessionSetup.editing = editing;
+  sessionSetup.setEditing(editing);
   $("create-page").querySelector("h2").textContent = editing ? "Edit task" : "New session";
   $("create-page").setAttribute("aria-label", editing ? "Edit task" : "New session");
   $("create-submit").textContent = editing ? "Save & restart" : "Create session";
   $("create-objective").required = editing;
   $("restart-settings").hidden = !editing;
+  $("restart-settings-block").hidden = !editing;
   $("restart-settings").disabled = !editing;
   $("cancel-create").setAttribute("aria-label", editing ? "Cancel task editing" : "Cancel new session");
 }
@@ -533,7 +534,6 @@ async function editTask() {
   populateCreate(); editorMode(true);
   sessionSetup.loadTask(editingTask.task, bases.knowledge_bases);
   $("create-error").textContent = "";
-  $("setup-knowledge-reasons").textContent = "";
   activateComponent("sessions"); setWorkspaceMode("create"); $("create-objective").focus();
 }
 function templateChanged() {
@@ -544,6 +544,7 @@ function templateChanged() {
     "Provide a task specification for the installed plugins.";
   sessionSetup.template(template);
   $("spec-field").hidden = id !== "custom";
+  if (id === "custom") $("spec-field").open = true;
   if (id === "custom" && !$("create-spec").value)
     $("create-spec").value = JSON.stringify(
       catalog.templates[0].task_spec,
@@ -622,11 +623,10 @@ $("new-session").addEventListener("click", async () => {
     if (controller === setupController) catalog = next;} catch (error) {showError(error); return;}}
   if (controller !== setupController) return;
   populateCreate();
-  $("setup-knowledge-reasons").textContent = "";
   activateComponent("sessions");
   setWorkspaceMode("create");
   $("create-objective").focus();
-  $("create-knowledge").replaceChildren();
+  sessionSetup.renderKnowledge([]);
   const active = controller;
   try {
     const data = await active.api.json("/v1/knowledge-bases");
@@ -636,11 +636,7 @@ $("new-session").addEventListener("click", async () => {
       sessionSetup.recommendation?.result.knowledge_bases
     )
       return;
-    for (const base of data.knowledge_bases) {
-      const option = element("option", "", base.name);
-      option.value = base.id;
-      $("create-knowledge").append(option);
-    }
+    sessionSetup.renderKnowledge(data.knowledge_bases);
   } catch (error) {
     $("create-error").textContent = error.message;
   }
@@ -655,11 +651,7 @@ $("create-form").addEventListener("submit", async (event) => {
       payload = {};
     if ($("create-objective").value.trim())
       payload.objective = $("create-objective").value.trim();
-    if ($("create-title").value.trim())
-      payload.title = $("create-title").value.trim();
-    payload.knowledge_base_ids = [...$("create-knowledge").selectedOptions].map(
-      (option) => option.value,
-    );
+    payload.knowledge_base_ids = sessionSetup.knowledgeIds();
     if ($("create-model").value) payload.model = $("create-model").value;
     if ($("create-template").value === "custom")
       payload.task_spec = JSON.parse($("create-spec").value);
@@ -683,7 +675,6 @@ $("create-form").addEventListener("submit", async (event) => {
       result = await active.api.create(payload);
     if (controller !== active) return;
     $("create-objective").value = "";
-    $("create-title").value = "";
     await active.refresh();
     if (controller === active) await select(result.session_id);
   } catch (error) {

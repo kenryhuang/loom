@@ -57,8 +57,11 @@ test('new session recommendations select external tools and remain manually edit
   let view; view = new SessionSetupView(root, {api: () => api, templateChanged: () => view.template(template)});
   view.configure(catalog); view.template(template); await view.recommend();
   assert.deepEqual(selectedTools(root.querySelector('#create-external-tools')), [tool.id]);
+  assert.equal(root.querySelector('#setup-external').open, false);
+  assert.equal(root.querySelector('#setup-external-summary').textContent, '1 selected');
   let payload = {knowledge_base_ids: []}; view.apply(payload, template); assert.deepEqual(payload.external_tool_ids, [tool.id]);
   const check = root.querySelector('#create-external-tools input'); check.checked = false; check.dispatchEvent(new dom.window.Event('change', {bubbles: true}));
+  assert.equal(root.querySelector('#setup-external-summary').textContent, 'None selected');
   payload = {knowledge_base_ids: []}; view.apply(payload, template); assert.deepEqual(payload.external_tool_ids, []);
   await view.recommend();
   root.querySelector('#create-collections input[value="external_tools"]').click();

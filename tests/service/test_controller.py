@@ -1,5 +1,6 @@
 import time
 import uuid
+from copy import deepcopy
 
 import pytest
 
@@ -445,7 +446,7 @@ def test_invalid_restart_configuration_is_atomic(tmp_path, changes):
         service.close()
 
 
-def test_restart_rebinds_workspace_claims_and_projects_updated_configuration(tmp_path):
+def test_restart_keeps_workspace_claims_and_projects_updated_configuration(tmp_path):
     from loom.client.projection import SessionProjection
     from loom.service.contracts import ServiceError
 
@@ -456,14 +457,21 @@ def test_restart_rebinds_workspace_claims_and_projects_updated_configuration(tmp
         workspace.mkdir()
         before = service.snapshot(sid)
         projection = SessionProjection(before)
-        with pytest.raises(ServiceError, match='Workspace must match'):
-            command(service, sid, 'restart_task', task={'objective': 'New task', 'workspace': str(workspace), 'task_spec': before['task']['task_spec']})
-        assert service.snapshot(sid) == before
-        command(service, sid, 'restart_task', task={'objective': 'New task', 'workspace': str(workspace), 'title': 'New title'})
+        altered = deepcopy(before['task']['task_spec'])
+        resource_id = altered['execution_runtime']['workspace_resource']
+        for resource in altered['session_environment']['resources']:
+            if resource['id'] == resource_id:
+                resource['uri'] = str(workspace)
+        for change in ({'workspace': str(workspace)}, {'workspace': None}, {'task_spec': altered},
+                       {'workspace': str(workspace), 'task_spec': altered}):
+            with pytest.raises(ServiceError, match='Workspace is fixed'):
+                command(service, sid, 'restart_task', task={'objective': 'New task', **change})
+            assert service.snapshot(sid) == before
+        command(service, sid, 'restart_task', task={'objective': 'New task', 'workspace': before['task']['workspace'], 'title': 'New title'})
         after = service.snapshot(sid)
-        assert after['task']['workspace'] == str(workspace)
-        assert after['task']['task_spec']['session_environment']['resources'][0]['uri'] == str(workspace)
-        assert after['task']['resource_claims'] != before['task']['resource_claims']
+        assert after['task']['workspace'] == before['task']['workspace']
+        assert after['task']['task_spec']['session_environment']['resources'] == before['task']['task_spec']['session_environment']['resources']
+        assert after['task']['resource_claims'] == before['task']['resource_claims']
         for event in service.events(sid, before['event_cursor']):
             projection.apply(event)
         assert projection.snapshot['task'] == after['task']
@@ -472,6 +480,27 @@ def test_restart_rebinds_workspace_claims_and_projects_updated_configuration(tmp
         with pytest.raises(ServiceError, match='revision conflict'):
             service.submit(sid, {'command_id': 'stale', 'type': 'restart_task', 'payload': {}, 'expected_task_revision': before['task']['revision']})
         assert service.store.snapshot(sid) == current
+    finally:
+        service.close()
+
+
+def test_restart_cannot_add_workspace_to_session_without_one(tmp_path):
+    from loom.service.contracts import ServiceError
+
+    service = LoomService(tmp_path / 'data')
+    try:
+        sid = service.create('no-workspace', {'task_spec': {'tools': {'collections': ['task_control']}}})['session_id']
+        before = service.store.snapshot(sid)
+        assert before['task']['workspace'] is None
+        altered = deepcopy(before['task']['task_spec'])
+        altered['session_environment']['resources'] = [{'id': 'new', 'kind': 'directory', 'uri': str(tmp_path)}]
+        altered['execution_runtime']['workspace_resource'] = 'new'
+        for change in ({'workspace': str(tmp_path)}, {'task_spec': altered}):
+            with pytest.raises(ServiceError, match='Workspace is fixed'):
+                command(service, sid, 'restart_task', task={'objective': 'Continue', **change})
+            assert service.store.snapshot(sid) == before
+        command(service, sid, 'restart_task', task={'objective': 'Continue', 'workspace': None})
+        assert service.snapshot(sid)['task']['workspace'] is None
     finally:
         service.close()
 

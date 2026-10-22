@@ -1,6 +1,7 @@
 import { element } from "../markdown.mjs";
 import { parseBudget, canUpdateTaskTools, canRestartTask } from "../state.mjs";
 import { acceptanceBudgetText } from '../activity/acceptance.mjs';
+import { acceptanceChecklist } from './acceptance-checklist.mjs';
 
 function panel(title) {
   const root = element("section", "panel");
@@ -38,8 +39,9 @@ export function builtinPanels() {
       const root = panel("Details"),
         body = element("div");
       root.append(body);
-      const edit = element("button", "quiet", "Edit task");
-      edit.type = "button"; edit.onclick = () => actions.editTask?.(); root.append(edit);
+      const edit = element("button", "primary edit-task-button", "Edit task");
+      edit.type = "button"; edit.onclick = () => actions.editTask?.();
+      root.querySelector("h2").after(edit);
       let signature;
       return {
         element: root,
@@ -96,39 +98,36 @@ export function builtinPanels() {
     .register("acceptance", (actions) => {
       const root = panel("Task acceptance"), body = element("div");
       root.append(body);
-      let signature;
+      let signature, checklistScope;
       return {element: root, update(state) {
         const current = state.acceptance_run_id === state.run?.id ? state.acceptance : null;
-        const next = JSON.stringify([current, state.acceptance_current_check]);
+        const next = JSON.stringify([current, state.acceptance_current_check, state.workspace_profile]);
         if (signature === next) return;
         signature = next;
+        const scope = JSON.stringify([state.run?.id, current?.goal_digest, current?.revision]);
+        const expanded = new Set(scope === checklistScope
+          ? [...body.querySelectorAll('.acceptance-item[open]')].map(row => row.dataset.criterionId) : []);
+        checklistScope = scope;
         body.replaceChildren();
         if (!current) {body.append(element("p", "muted", "Acceptance will be prepared from the task and workspace.")); return;}
-        body.append(element("strong", "", (current.state === "not_ready" && !current.plan ? "Preparing plan" : ({not_ready: "Ready to work", verifying: "Verifying", passed: "Passed", needs_repair: "Needs repair", blocked: "Blocked"})[current.state]) || current.state),
-          element("p", "muted", current.reason));
+        const headline = element("div", "acceptance-state");
+        headline.dataset.status = current.state === 'passed' ? 'passed' : current.state === 'blocked' ? 'blocked' : current.state === 'needs_repair' ? 'failed' : 'pending';
+        const symbols = {passed: '✓', blocked: '⊘', needs_repair: '×', verifying: '↻'};
+        const icon = element('span', 'acceptance-status-icon', symbols[current.state] || '○'); icon.setAttribute('aria-hidden', 'true');
+        headline.append(icon, element("strong", "", (current.state === "not_ready" && !current.plan ? "Preparing plan" : ({not_ready: "Ready to work", verifying: "Verifying", passed: "Passed", needs_repair: "Needs repair", blocked: "Blocked"})[current.state]) || current.state));
+        body.append(headline, element("p", "muted acceptance-reason", current.reason));
+        if (state.acceptance_current_check) body.append(element("p", "acceptance-current-check", state.acceptance_current_check));
+        body.append(acceptanceChecklist(current, state.acceptance_current_check, actions, expanded));
         if (current.budget) {
-          body.append(element('small', 'muted', 'Acceptance budget'), element('p', 'muted small', acceptanceBudgetText(current)));
-          if (current.state === 'blocked') body.append(element('p', 'muted small', current.budget.renewal));
+          const budget = element('details', 'acceptance-budget-details');
+          budget.append(element('summary', '', 'Acceptance budget'), element('p', 'muted small', acceptanceBudgetText(current)));
+          if (current.state === 'blocked') budget.append(element('p', 'muted small', current.budget.renewal));
           if (current.budget.previous?.sha256) {
             const previous = element('button', 'output-link', 'View previous allocation');
             previous.onclick = () => actions.artifact(current.budget.previous.sha256);
-            body.append(previous);
+            budget.append(previous);
           }
-        }
-        if (state.acceptance_current_check) body.append(element("p", "", state.acceptance_current_check));
-        const results = new Map((current.results || []).map(r => [r.criterion_id, r]));
-        for (const c of current.plan?.criteria || []) {
-          const row = element("details"), result = results.get(c.id);
-          row.open = ["failed", "blocked"].includes(result?.status);
-          row.append(element("summary", "", `${result?.deferred ? 'pending review' : result?.status || "pending"} · ${c.description}`));
-          if (result) row.append(element("p", "", result.reason));
-          row.append(element("small", "muted", `${c.verifier} · ${result?.assurance || "recorded check"}`));
-          if (result?.artifact?.sha256) {
-            const link = element("button", "output-link", "View verification evidence");
-            link.addEventListener("click", () => actions.artifact(result.artifact.sha256));
-            row.append(link);
-          }
-          body.append(row);
+          body.append(budget);
         }
         for (const missing of current.plan?.unresolved_requirements || []) body.append(element("p", "notice", missing));
         const profile = state.workspace_profile;

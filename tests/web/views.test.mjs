@@ -979,7 +979,7 @@ test("acceptance panel renders current checks, evidence links and clears previou
   assert.match(panel.textContent, /Needs repair/);
   assert.match(panel.textContent, /Checking regression/);
   assert.match(panel.textContent, /Exit code 1/);
-  assert.equal(panel.querySelector("details").open, true);
+  assert.equal(panel.querySelector("details").open, false);
   panel.querySelector("button").click();
   assert.deepEqual(opened, ["proof"]);
   panels.update({...current, run: {id: "next"}});
@@ -999,7 +999,8 @@ test('acceptance shows its actual allocation separately from context input and r
   panels.update({...state(), acceptance_run_id: 'run', acceptance});
   const panel = document.querySelector('[data-panel="acceptance"]');
   assert.match(panel.textContent, /Model calls 6 \/ 20.*Time 109 \/ 600s.*Failed candidates 1 \/ 3.*Allocation 2/);
-  assert.match(panel.querySelector('details summary').textContent, /pending review/);
+  assert.match(panel.querySelector('details summary').getAttribute('aria-label'), /Pending review/);
+  assert.doesNotMatch(panel.querySelector('details summary').textContent, /Pending review/);
   panel.querySelector('button').click();
   assert.deepEqual(opened, ['old-allocation']);
   const feed = new FeedView(document.getElementById('feed'), {});
@@ -1011,6 +1012,44 @@ test('acceptance shows its actual allocation separately from context input and r
   row.open = true; row.dispatchEvent(new dom.window.Event('toggle'));
   assert.match(row.textContent, /Acceptance budget/);
   assert.match(row.textContent, /600,000 tokens/);
+  dom.window.close();
+});
+
+test('acceptance checklist distinguishes outcomes, deferred review and active checks without relying on color', () => {
+  const dom = setup(), opened = [];
+  const panels = new PanelsView(document.getElementById('panels'), builtinPanels(), {artifact: id => opened.push(id)});
+  const criteria = ['passed', 'pending', 'blocked', 'failed', 'deferred', 'checking', 'stale'].map(id =>
+    ({id, description: `Criterion ${id}`, verifier: 'semantic'}));
+  const results = [
+    {criterion_id: 'passed', status: 'passed'},
+    {criterion_id: 'blocked', status: 'blocked', reason: 'Screenshot unavailable'},
+    {criterion_id: 'failed', status: 'failed', reason: 'Expected assertion failed', artifact: {sha256: 'failure-proof'}},
+    {criterion_id: 'deferred', status: 'blocked', deferred: true, reason: 'Waiting for outcome review'},
+    {criterion_id: 'stale', status: 'stale'},
+  ];
+  const snapshot = {...state(), acceptance_run_id: 'run', acceptance_current_check: 'Criterion checking',
+    acceptance: {state: 'verifying', reason: 'Verifying current work', plan: {criteria}, results}};
+  panels.update(snapshot);
+  const panel = document.querySelector('[data-panel="acceptance"]');
+  assert.match(panel.textContent, /1 of 7 checks passed/);
+  const bar = panel.querySelector('progress');
+  assert.equal(bar.max, 7); assert.equal(bar.value, 1);
+  const items = [...panel.querySelectorAll('.acceptance-item')];
+  assert.deepEqual(items.map(item => item.dataset.status), ['passed', 'pending', 'blocked', 'failed', 'pending', 'pending', 'pending']);
+  assert.deepEqual(items.map(item => item.open), [false, false, false, false, false, false, false]);
+  assert.deepEqual(items.slice(0, 4).map(item => item.querySelector('.acceptance-status-icon').textContent), ['✓', '○', '⊘', '×']);
+  assert.equal(panel.querySelector('.acceptance-item-status'), null);
+  assert.match(items[4].querySelector('summary').getAttribute('aria-label'), /^Pending review:/);
+  assert.equal(items[5].getAttribute('aria-current'), 'step');
+  assert.match(items[5].querySelector('summary').getAttribute('aria-label'), /^Checking:/);
+  assert.match(panel.querySelector('.acceptance-legend').textContent, /4 pending/);
+  items[3].querySelector('button').click(); assert.deepEqual(opened, ['failure-proof']);
+  items[3].open = true;
+  panels.update({...snapshot, acceptance_current_check: 'Checking another criterion'});
+  assert.equal(panel.querySelector('[data-criterion-id="failed"]').open, true);
+  assert.equal(panel.querySelectorAll('.acceptance-item[open]').length, 1);
+  panels.update({...snapshot, acceptance: {...snapshot.acceptance, revision: 2}});
+  assert.equal(panel.querySelectorAll('.acceptance-item[open]').length, 0);
   dom.window.close();
 });
 

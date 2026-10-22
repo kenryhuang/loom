@@ -11,7 +11,6 @@ export class SessionSetupView {
     for (const id of ["create-objective", "create-model"])
       this.get(id).addEventListener("input", () => {
         this.abort?.abort();
-        this.renderAcceptance(this.catalog?.acceptance);
         this.get("setup-recommend").disabled = !(
           this.catalog?.setup_recommendation && this.catalog.models.length
         );
@@ -25,8 +24,12 @@ export class SessionSetupView {
         '[value="knowledge"]',
       );
       if (check)
-        check.checked = this.get("create-knowledge").selectedOptions.length > 0;
+        check.checked = this.knowledgeIds().length > 0;
+      this.updateSummaries();
     });
+    root.addEventListener("invalid", event => {
+      for (let block = event.target.closest("details"); block; block = block.parentElement?.closest("details")) block.open = true;
+    }, true);
   }
   configure(catalog) {
     this.abort?.abort(); this.abort = null;
@@ -41,18 +44,31 @@ export class SessionSetupView {
       ? "Click Recommend with LLM to fill in the configuration below, then review it and create your session."
       : "Configure manually. LLM recommendations require a configured model and service support.";
     this.recommendation = null;
+    for (const block of this.root.querySelectorAll('details.setup-block')) block.open = block.hasAttribute('data-open-default');
     const external = this.get('create-external-tools');
     if (external) {
       toolChoices(external, catalog.external_tools || []);
       external.onchange = () => {const check = this.get('create-collections').querySelector('[value="external_tools"]');
-        if (check) check.checked = selectedTools(external).length > 0;};
+        if (check) check.checked = selectedTools(external).length > 0;
+        this.updateSummaries();};
     }
-    this.renderAcceptance(catalog.acceptance);
+    this.updateSummaries();
+  }
+  setEditing(editing) {
+    this.editing = editing;
+    if (!editing) this.fixedWorkspace = undefined;
+    const input = this.get("create-workspace");
+    input.readOnly = editing;
+    input.placeholder = editing && !this.fixedWorkspace ? "No workspace bound" : "/absolute/path/to/project";
+    this.get("workspace-hint").textContent = editing
+      ? "Workspace is fixed for this session. Create a new session to use another directory."
+      : "Existing directory on the Loom service machine. Required for file and command tools; optional otherwise. Enter the full path.";
   }
   loadTask(task, bases) {
-    this.editing = true;
+    this.fixedWorkspace = task.workspace || null;
+    this.setEditing(true);
     this.get("create-spec").value = JSON.stringify(task.task_spec, null, 2);
-    for (const key of ["objective", "title", "workspace", "model"]) {
+    for (const key of ["objective", "workspace", "model"]) {
       const input = this.get(`create-${key}`);
       const value = key === "model" ? (this.catalog?.model_aliases?.[task.model] || task.model) : task[key];
       if (key === "model" && value && ![...input.options].some(o => o.value === value)) {
@@ -60,11 +76,7 @@ export class SessionSetupView {
       }
       input.value = value || "";
     }
-    const knowledge = this.get("create-knowledge"); knowledge.replaceChildren();
-    const ids = task.knowledge_base_ids || [];
-    for (const base of [...bases, ...ids.filter(id => !bases.some(b => b.id === id)).map(id => ({id, name: `${id} (unavailable)`}))]) {
-      const option = element("option", "", base.name); option.value = base.id; option.selected = ids.includes(base.id); knowledge.append(option);
-    }
+    this.renderKnowledge(bases, task.knowledge_base_ids || []);
     const selected = task.external_tool_ids || [];
     const tools = this.catalog.external_tools || [];
     const unavailable = selected.filter(id => !tools.some(t => t.id === id)).map(id => ({id, connector_name: "Unavailable", name: id, description: "Detach this tool or enable it before restarting.", kind: "mcp"}));
@@ -75,11 +87,17 @@ export class SessionSetupView {
     const effective = Math.min(task.limits.max_window_chars, cap ?? task.limits.max_window_chars);
     this.get("restart-context-note").textContent = `Currently effective: ${effective.toLocaleString()} characters${cap < task.limits.max_window_chars ? " (limited by the context plugin)" : ""}. Save & restart applies the value above to both task and built-in context plugin limits.`;
     this.get("setup-status").textContent = "Review the current task configuration. Save & restart builds a fresh plan and acceptance checks; previous messages and results remain background.";
-    this.get("setup-acceptance-status").textContent = "A new acceptance plan will be prepared after restart using the updated task and workspace.";
+    this.updateSummaries();
   }
   restartChanges(payload) {
     payload.model = this.get("create-model").value || null;
-    payload.workspace = this.get("create-workspace").value.trim() || null;
+    payload.workspace = this.fixedWorkspace;
+    const spec = payload.task_spec;
+    const resourceId = spec?.execution_runtime?.workspace_resource;
+    const binding = spec?.session_environment?.resources?.find(resource => resource.id === resourceId);
+    if ((this.fixedWorkspace && (binding?.kind !== "directory" || binding.uri !== this.fixedWorkspace)) ||
+        (!this.fixedWorkspace && resourceId))
+      throw new Error("Workspace is fixed for this session. Create a new session to use another directory.");
     payload.plan_mode = this.get("restart-plan-mode").value;
     payload.limits = {};
     for (const input of this.get("restart-settings").querySelectorAll("input")) {
@@ -91,15 +109,33 @@ export class SessionSetupView {
     if (["bounded_context", "research_context"].includes(payload.task_spec?.context?.plugin))
       payload.task_spec.context.max_window_chars = payload.limits.max_window_chars;
   }
-  renderAcceptance(acceptance, recommended = false) {
-    this.get("setup-acceptance-status").textContent = (recommended
-      ? "This recommended setup includes automatic task acceptance. " : "") +
-      (this.editing ? "The acceptance plan is prepared after restart from the updated task and workspace."
-        : "The acceptance plan is prepared after creation from the task and bound workspace. No workspace has been inspected or checks run yet.");
-    const limits = acceptance?.defaults;
-    this.get("setup-acceptance-budget").textContent = limits
-      ? `Default limits: ${limits.max_repairs} repair rounds · ${limits.max_model_calls} planning/review calls · ${limits.max_seconds}s acceptance time · Input budget: ${limits.context_window_percent ?? 60}% of the verification model context (estimated tokens). Visual plans scale the default allowance for capture and repair; explicit limits are retained. Calls share the task budget.`
-      : "Acceptance applies to every workflow and does not require an optional tool collection.";
+  updateSummaries() {
+    const count = value => value ? `${value} selected` : 'None selected';
+    this.get('setup-collections-summary').textContent = count(this.collections().length);
+    this.get('setup-external-summary').textContent = count(selectedTools(this.get('create-external-tools')).length);
+    this.get('setup-knowledge-summary').textContent = count(this.knowledgeIds().length);
+    this.get('setup-plugins-summary').textContent = ['context', 'workflow'].map(kind => this.get(`setup-${kind}`).value).filter(Boolean).join(' · ');
+  }
+  knowledgeIds() {
+    return [...this.get('create-knowledge').querySelectorAll('input[type="checkbox"]:checked')].map(input => input.value);
+  }
+  renderKnowledge(bases, selected = [], reasons = {}) {
+    const root = this.get('create-knowledge');
+    root.replaceChildren();
+    const unavailable = selected.filter(id => !bases.some(base => base.id === id)).map(id => ({
+      id, name: `${id} (unavailable)`, description: 'Detach this knowledge base or restore it before restarting.',
+    }));
+    const choices = [...bases, ...unavailable];
+    if (!choices.length) root.append(element('p', 'muted small', 'No knowledge bases available. Create one in Knowledge bases.'));
+    for (const base of choices) {
+      const label = element('label', 'setup-collection'), check = element('input');
+      check.type = 'checkbox'; check.value = base.id; check.checked = selected.includes(base.id);
+      const info = element('span');
+      info.append(element('strong', '', base.name), element('small', 'muted', base.description || 'No description provided.'));
+      if (reasons[base.id]) info.append(element('small', 'setup-reason', reasons[base.id]));
+      label.append(check, info); root.append(label);
+    }
+    this.updateSummaries();
   }
   fingerprint() {
     return JSON.stringify([
@@ -141,9 +177,10 @@ export class SessionSetupView {
         const option = element("option", "", `${defaultId} (unavailable)`); option.value = defaultId; select.append(option); select.value = defaultId;
       }
       this.get(`setup-${kind}-reason`).textContent = "";
-      if (kind === 'workflow') select.onchange = () => {
-        this.get('setup-workflow-reason').textContent = select.value === 'adaptive_dag'
+      select.onchange = () => {
+        if (kind === 'workflow') this.get('setup-workflow-reason').textContent = select.value === 'adaptive_dag'
           ? 'Reuses the working context. Only clearly independent work with stable inputs and registered read-only tools can use parallel agents. Writes and integration stay on the main lane.' : '';
+        this.updateSummaries();
       };
     }
   }
@@ -199,6 +236,7 @@ export class SessionSetupView {
       this.requiresWorkspace = false;
     this.get("workspace-field").hidden = false;
     this.get("create-workspace").required = false; // Validate only after the recommendation has been reviewed.
+    this.updateSummaries();
   }
   async recommend() {
     if (!this.catalog?.setup_recommendation || !this.catalog.models.length)
@@ -246,31 +284,16 @@ export class SessionSetupView {
           result.plugin_reasons?.[kind] || "";
       }
       if (result.knowledge_bases) {
-        const select = this.get("create-knowledge");
-        select.replaceChildren();
-        for (const base of result.knowledge_bases) {
-          const option = element("option", "", base.name);
-          option.value = base.id;
-          option.selected =
-            result.knowledge_base_ids?.includes(base.id) || false;
-          select.append(option);
-        }
-        this.get("setup-knowledge-reasons").textContent = result.knowledge_bases
-          .filter((base) => result.knowledge_base_ids?.includes(base.id))
-          .map(
-            (base) =>
-              `${base.name}: ${result.knowledge_reasons?.[base.id] || "Recommended"}`,
-          )
-          .join("\n");
+        this.renderKnowledge(result.knowledge_bases, result.knowledge_base_ids || [], result.knowledge_reasons || {});
       }
       if (this.get('create-external-tools')) toolChoices(this.get('create-external-tools'), this.catalog.external_tools || [], result.external_tools || [], result.external_tool_reasons || {});
       this.recommendation = { fingerprint, result };
-      this.renderAcceptance(result.acceptance || this.catalog.acceptance, true);
+      this.updateSummaries();
       this.get("setup-status").textContent =
         `${result.rationale}\nReview the configuration below before ${this.editing ? "saving and restarting" : "creating"}. Setup model: ${result.model} · ${result.usage.total_tokens || 0} reported tokens.`;
       if (
         result.tool_collections.includes("knowledge") &&
-        !this.get("create-knowledge").selectedOptions.length
+        !this.knowledgeIds().length
       )
         this.get("setup-status").textContent +=
           "\nSelect at least one knowledge base, or uncheck Knowledge bases.";
@@ -290,13 +313,14 @@ export class SessionSetupView {
     }
   }
   apply(payload, template) {
+    payload.knowledge_base_ids = this.knowledgeIds();
     payload.external_tool_ids = this.get('create-external-tools') ? selectedTools(this.get('create-external-tools')) : [];
     if (this.collections().includes('external_tools') && !payload.external_tool_ids.length)
       throw new Error('Select external tools, or uncheck External tools.');
     const editableCollections =
       this.get("create-template").value !== "custom" &&
       Boolean(this.catalog?.tool_collections);
-    const workspace = this.get("create-workspace").value.trim();
+    const workspace = this.editing ? this.fixedWorkspace || "" : this.get("create-workspace").value.trim();
     if (!editableCollections && !workspace && !this.requiresWorkspace) return;
     if (!editableCollections && !payload.task_spec && !template?.task_spec) {
       if (!workspace && this.requiresWorkspace)

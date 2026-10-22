@@ -92,6 +92,48 @@ test('adaptive DAG is selectable without replacing the default workflow', () => 
   dom.window.close();
 });
 
+test('setup uses cards with collapsed optional settings and live selection summaries', () => {
+  const {dom, view, $, root} = setup({});
+  assert.ok(root.querySelectorAll('.setup-block').length >= 7);
+  for (const id of ['setup-external', 'setup-knowledge', 'setup-plugins']) assert.equal($(id).open, false);
+  assert.equal($('setup-knowledge-summary').textContent, 'None selected');
+  view.renderKnowledge([{id: 'kb', name: 'Project notes', description: 'Architecture and design notes'}]);
+  $('create-knowledge').querySelector('input').click();
+  assert.equal($('setup-knowledge-summary').textContent, '1 selected');
+  assert.equal($('setup-collections-summary').textContent, '2 selected');
+  $('setup-knowledge').querySelector('summary').click();
+  assert.equal($('setup-knowledge').open, true);
+  view.configure(catalog);
+  assert.equal($('setup-knowledge').open, false);
+  dom.window.close();
+});
+
+test('knowledge checkbox cards show escaped names and descriptions and submit the current multi-selection', () => {
+  const {dom, view, $} = setup({});
+  view.renderKnowledge([
+    {id: 'architecture', name: 'Architecture <script>name</script>', description: 'System design <img src=x onerror=alert(1)>'},
+    {id: 'operations', name: 'Operations', description: 'Runbooks and incident notes'},
+  ], ['architecture']);
+  const root = $('create-knowledge'), checks = [...root.querySelectorAll('input[type="checkbox"]')];
+  assert.equal(root.querySelectorAll('label').length, 2);
+  assert.equal(root.querySelector('script, img, select'), null);
+  assert.match(root.textContent, /System design <img/);
+  checks[1].click();
+  assert.deepEqual(view.knowledgeIds(), ['architecture', 'operations']);
+  assert.equal($('setup-knowledge-summary').textContent, '2 selected');
+  checks[0].click();
+  const payload = {knowledge_base_ids: ['stale-selection']};
+  view.apply(payload, catalog.templates[0]);
+  assert.deepEqual(payload.knowledge_base_ids, ['operations']);
+  assert.ok(payload.task_spec.tools.collections.includes('knowledge'));
+  checks[1].click();
+  assert.equal($('create-collections').querySelector('[value="knowledge"]').checked, false);
+  assert.equal($('setup-knowledge-summary').textContent, 'None selected');
+  view.renderKnowledge([]);
+  assert.match(root.textContent, /No knowledge bases available/);
+  dom.window.close();
+});
+
 test("recommendation is reviewable, tools can be changed, and workspace is explicitly bound", async () => {
   const requests = [];
   const { dom, view, $ } = setup({
@@ -108,10 +150,11 @@ test("recommendation is reviewable, tools can be changed, and workspace is expli
   assert.equal($("create-template").value, "coding");
   assert.deepEqual(view.collections(), ["filesystem", "task_control"]);
   assert.match($("setup-status").textContent, /Inspect source only/);
-  assert.equal($("setup-acceptance").hidden, false);
-  assert.match($("setup-acceptance-status").textContent, /recommended setup includes automatic task acceptance/);
-  assert.match($("setup-acceptance-status").textContent, /No workspace has been inspected/);
-  assert.match($("setup-acceptance-budget").textContent, /2 repair rounds.*6 planning\/review calls.*180s/);
+  assert.equal($("setup-acceptance"), null);
+  assert.equal($("create-title"), null);
+  assert.equal($("setup-recommend").classList.contains('primary'), true);
+  assert.equal($("setup-external").open, false);
+  assert.equal($("setup-knowledge").open, false);
   const payload = { knowledge_base_ids: [] };
   assert.throws(
     () => view.apply(payload, catalog.templates[1]),
@@ -187,7 +230,7 @@ test("recommended knowledge and plugins remain editable and reach the final spec
       tool_collections: ["task_control", "knowledge"],
       plugins: { context: "research_context", workflow: "dynamic" },
       plugin_reasons: { context: "Read sources" },
-      knowledge_bases: [{ id: "kb", name: "AI Infra" }],
+      knowledge_bases: [{ id: "kb", name: "AI Infra", description: "Infrastructure design and operations" }],
       knowledge_base_ids: ["kb"],
       knowledge_reasons: { kb: "Relevant material" },
     }),
@@ -201,14 +244,13 @@ test("recommended knowledge and plugins remain editable and reach the final spec
   };
   $("create-objective").value = "Explain AI infrastructure";
   await view.recommend();
-  assert.equal($("create-knowledge").selectedOptions[0].value, "kb");
+  assert.deepEqual(view.knowledgeIds(), ['kb']);
   assert.equal($("setup-context").value, "research_context");
-  assert.match($("setup-knowledge-reasons").textContent, /Relevant material/);
+  assert.match($("create-knowledge").textContent, /Infrastructure design and operations/);
+  assert.match($("create-knowledge").textContent, /Relevant material/);
   $("setup-context").value = "bounded_context";
   const payload = {
-    knowledge_base_ids: [...$("create-knowledge").selectedOptions].map(
-      (o) => o.value,
-    ),
+    knowledge_base_ids: view.knowledgeIds(),
   };
   view.apply(payload, catalog.templates[0]);
   assert.equal(payload.task_spec.context.plugin, "bounded_context");
@@ -229,19 +271,56 @@ test("task editing preserves existing plugin options, unavailable bindings and v
       max_steps: 10, max_llm_calls: 20, max_tokens: 30000, max_duration_seconds: 60, max_window_chars: 9000}};
   view.configure({...catalog, plugins: {context: [{id: "bounded_context"}], workflow: [{id: "legacy_planning"}]}});
   view.template({task_spec: spec}); view.loadTask(task, []);
+  assert.equal($("create-workspace").readOnly, true);
+  assert.match($("workspace-hint").textContent, /fixed for this session/);
   assert.equal($("create-model").value, "removed-model");
-  assert.equal($("create-knowledge").selectedOptions[0].value, "missing-kb");
+  assert.deepEqual(view.knowledgeIds(), ['missing-kb']);
   assert.equal(root.querySelector('#create-external-tools input:checked').value, "missing-tool");
   $("create-workspace").value = "/new";
   const payload = {objective: task.objective, task_spec: structuredClone(spec), knowledge_base_ids: ["missing-kb"]};
   view.apply(payload, {task_spec: spec}); view.restartChanges(payload);
   assert.match($("restart-context-note").textContent, /7,000 characters \(limited by the context plugin\)/);
   assert.equal(payload.task_spec.context.max_window_chars, 9000);
-  assert.deepEqual(payload.task_spec.session_environment.resources, [{id: "source", kind: "directory", uri: "/new", access: "read-only"}]);
+  assert.equal(payload.workspace, '/old');
+  assert.deepEqual(payload.task_spec.session_environment.resources, [{id: "source", kind: "directory", uri: "/old", access: "read-only"}]);
   assert.deepEqual(payload.limits, task.limits);
   assert.equal(payload.model, "removed-model");
   $("restart-max_tokens").value = "0";
   assert.throws(() => view.restartChanges(payload), /positive integers/);
+  dom.window.close();
+});
+
+test('task editing keeps the workspace across template changes and custom specifications, and creation unlocks it', () => {
+  const {dom, view, $} = setup({});
+  const original = {session_environment: {plugin: 'session', resources: [{id: 'source', kind: 'directory', uri: '/fixed'}]},
+    execution_runtime: {plugin: 'native_os', workspace_resource: 'source'}, tools: {collections: ['task_control']}};
+  const task = {objective: 'Continue', workspace: '/fixed', plan_mode: 'off', task_spec: original, limits: {
+    max_steps: 10, max_llm_calls: 20, max_tokens: 30000, max_duration_seconds: 60, max_window_chars: 9000}};
+  view.loadTask(task, []);
+  const replacement = {task_spec: {session_environment: {plugin: 'session'}, tools: {collections: ['task_control']}}};
+  view.template(replacement);
+  $('create-workspace').value = '/attempted-change';
+  const payload = {objective: task.objective, knowledge_base_ids: []};
+  view.apply(payload, replacement); view.restartChanges(payload);
+  assert.equal(payload.workspace, '/fixed');
+  assert.equal(payload.task_spec.session_environment.resources[0].uri, '/fixed');
+  payload.task_spec.session_environment.resources[0].uri = '/custom-change';
+  assert.throws(() => view.restartChanges(payload), /Workspace is fixed/);
+  view.setEditing(false);
+  assert.equal($('create-workspace').readOnly, false);
+  assert.doesNotMatch($('workspace-hint').textContent, /fixed for this session/);
+  dom.window.close();
+});
+
+test('task editing cannot add a workspace to a session created without one', () => {
+  const {dom, view, $} = setup({});
+  view.loadTask({objective: 'Continue', workspace: null, task_spec: catalog.templates[0].task_spec, limits: {
+    max_steps: 10, max_llm_calls: 20, max_tokens: 30000, max_duration_seconds: 60, max_window_chars: 9000}}, []);
+  assert.equal($('create-workspace').readOnly, true);
+  assert.equal($('create-workspace').placeholder, 'No workspace bound');
+  const payload = {objective: 'Continue', task_spec: {execution_runtime: {workspace_resource: 'new'},
+    session_environment: {resources: [{id: 'new', kind: 'directory', uri: '/other'}]}}};
+  assert.throws(() => view.restartChanges(payload), /Workspace is fixed/);
   dom.window.close();
 });
 

@@ -159,23 +159,13 @@ class SessionStore:
         return message
 
     def _restart_configuration(self, task, changes):
+        if "workspace" in changes:
+            requested = str(Path(changes["workspace"]).expanduser().resolve()) if changes["workspace"] is not None else None
+            if requested != task["workspace"]:
+                raise ServiceError("Workspace is fixed for this session. Create a new session to use another directory.")
         value = {key: task.get(key) for key in EDITABLE_TASK_FIELDS}
         value.update(changes)
         value["limits"] = {**task["limits"], **object_value(changes.get("limits", {}), "limits")}
-        if "workspace" in changes and "task_spec" not in changes:
-            spec = json.loads(canonical(task["task_spec"]))
-            resource_id = spec["execution_runtime"].get("workspace_resource", "workspace")
-            resources = spec["session_environment"].get("resources", [])
-            existing = next((r for r in resources if r["id"] == resource_id), {})
-            resources = [r for r in resources if r["id"] != resource_id]
-            if changes["workspace"]:
-                resources.append({"id": resource_id, "kind": "directory", "access": existing.get("access", "read-write"),
-                                  "uri": changes["workspace"]})
-                spec["execution_runtime"]["workspace_resource"] = resource_id
-            else:
-                spec["execution_runtime"].pop("workspace_resource", None)
-            spec["session_environment"]["resources"] = resources
-            value["task_spec"] = spec
         workflow = value["task_spec"].get("workflow") if isinstance(value["task_spec"], dict) else None
         context = value["task_spec"].get("context") if isinstance(value["task_spec"], dict) else None
         if "max_window_chars" in changes.get("limits", {}) and isinstance(context, dict) and context.get("plugin") in {"bounded_context", "research_context"}:
@@ -188,10 +178,8 @@ class SessionStore:
         self.knowledge.validate_ids(value.get("knowledge_base_ids") or [])
         updated = validate_create(value, plugin_registry=self.plugin_registry_factory() if self.plugin_registry_factory else None,
                                   external_bindings=self.external_tools.resolve(value.get("external_tool_ids") or []))
-        if "workspace" in changes:
-            requested = str(Path(changes["workspace"]).expanduser().resolve()) if changes["workspace"] is not None else None
-            if updated["workspace"] != requested:
-                raise ServiceError("Workspace must match the directory bound by task_spec.execution_runtime.workspace_resource")
+        if updated["workspace"] != task["workspace"]:
+            raise ServiceError("Workspace is fixed for this session. Create a new session to use another directory.")
         return updated
 
     def submit(self, sid, command, *, after=None):
