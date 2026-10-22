@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "loom"
 version = "0.1.0"
 description = "Python implementation of Loom: everything is a loop."
+license = "Apache-2.0"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["jsonschema>=4.23,<5"]
