@@ -987,6 +987,33 @@ test("acceptance panel renders current checks, evidence links and clears previou
   dom.window.close();
 });
 
+test('acceptance shows its actual allocation separately from context input and retains renewal history', () => {
+  const dom = setup(), opened = [];
+  const panels = new PanelsView(document.getElementById('panels'), builtinPanels(), {artifact: id => opened.push(id)});
+  const acceptance = {state: 'blocked', reason: 'Model call allowance exhausted', attempts: 2,
+    budget: {generation: 1, model_calls: 6, max_model_calls: 20, elapsed_seconds: 109, max_seconds: 600,
+      failed_attempts: 1, max_failed_attempts: 3, previous: {sha256: 'old-allocation'}, renewal: 'Resume renews the bounded allocation.'},
+    input_budget: {estimated_input_tokens: 5218, max_input_tokens: 600000, context_window_percent: 60, context_source: 'configured'},
+    plan: {criteria: [{id: 'build', description: 'Build passes', verifier: 'command'}]},
+    results: [{criterion_id: 'build', status: 'blocked', deferred: true, reason: 'Outcome review is deferred'}]};
+  panels.update({...state(), acceptance_run_id: 'run', acceptance});
+  const panel = document.querySelector('[data-panel="acceptance"]');
+  assert.match(panel.textContent, /Model calls 6 \/ 20.*Time 109 \/ 600s.*Failed candidates 1 \/ 3.*Allocation 2/);
+  assert.match(panel.querySelector('details summary').textContent, /pending review/);
+  panel.querySelector('button').click();
+  assert.deepEqual(opened, ['old-allocation']);
+  const feed = new FeedView(document.getElementById('feed'), {});
+  feed.append(event(1, 'acceptance.gate.blocked', {acceptance}));
+  const renewed = {...acceptance, attempts: 2, budget: {...acceptance.budget, generation: 2}};
+  feed.append(event(2, 'acceptance.budget.renewed', {acceptance: renewed}));
+  assert.equal(document.querySelectorAll('#feed .event-row').length, 2);
+  const row = document.querySelector('#feed .event-row');
+  row.open = true; row.dispatchEvent(new dom.window.Event('toggle'));
+  assert.match(row.textContent, /Acceptance budget/);
+  assert.match(row.textContent, /600,000 tokens/);
+  dom.window.close();
+});
+
 function verificationEvents({attempts = 1, failed = false, goal = "goal"} = {}) {
   const criteria = ["data", "mechanics", "comparison", "goal"].map(id => ({id, description: `Check ${id}`, verifier: "semantic"}));
   const results = criteria.map(c => ({criterion_id: c.id, status: failed && c.id === "goal" ? "failed" : "passed",

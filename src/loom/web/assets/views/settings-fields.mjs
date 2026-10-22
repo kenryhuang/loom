@@ -17,6 +17,7 @@ export const modelFields = {
   temperature: numberField('Temperature', 0, {step: 'any', placeholder: 'Provider default'}),
   max_completion_tokens: numberField('Maximum output tokens'),
   context_window_tokens: numberField('Context window · tokens', 1024),
+  input_modalities: {label: 'Input modalities', type: 'list', options: ['text', 'image']},
 };
 export const requestFields = {
   enable_thinking: flag('Enable thinking'), tool_stream: flag('Stream tool calls'), parallel_tool_calls: flag('Parallel tool calls'),

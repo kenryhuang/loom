@@ -98,7 +98,7 @@ export class SessionSetupView {
         : "The acceptance plan is prepared after creation from the task and bound workspace. No workspace has been inspected or checks run yet.");
     const limits = acceptance?.defaults;
     this.get("setup-acceptance-budget").textContent = limits
-      ? `Default limits: ${limits.max_repairs} repair rounds · ${limits.max_model_calls} planning/review calls · ${limits.max_seconds}s acceptance time · Input budget: ${limits.context_window_percent ?? 60}% of the verification model context (estimated tokens). Calls share the task budget.`
+      ? `Default limits: ${limits.max_repairs} repair rounds · ${limits.max_model_calls} planning/review calls · ${limits.max_seconds}s acceptance time · Input budget: ${limits.context_window_percent ?? 60}% of the verification model context (estimated tokens). Visual plans scale the default allowance for capture and repair; explicit limits are retained. Calls share the task budget.`
       : "Acceptance applies to every workflow and does not require an optional tool collection.";
   }
   fingerprint() {
@@ -181,6 +181,14 @@ export class SessionSetupView {
   }
   updateWorkspace() {
     const ids = this.collections();
+    const visual = this.get('setup-visual-status');
+    if (visual) {
+      visual.hidden = !ids.includes('browser');
+      const model = this.catalog?.visual_observation?.verification_model;
+      visual.textContent = model
+        ? `Browser screenshots and visual acceptance use ${model}. Local previews also need a workspace and Commands.`
+        : 'Browser captures are available after setup. Select an image-capable Visual acceptance model in Settings for independent visual review.';
+    }
     this.requiresWorkspace = Boolean(
       this.currentTemplate?.requires_workspace ||
       this.catalog?.tool_collections?.some(

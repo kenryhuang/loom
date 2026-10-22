@@ -502,7 +502,7 @@ class CompactEventFeedWidget(EventFeedWidget):
         run = event.run_id or self.current_run
         if kind in ROUND_EVENTS and data.get("acceptance"):
             value = data["acceptance"]
-            key = (run, value.get("goal_digest"), value.get("revision"), value.get("attempts"))
+            key = (run, value.get("goal_digest"), value.get("revision"), value.get('budget', {}).get('generation', 0), value.get("attempts"))
             summary, failed = round_summary(value)
             aggregate = replace(event, data={**data, "view": "acceptance", "summary": summary, "failed": failed})
             group = self._process_group(event)

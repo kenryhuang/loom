@@ -5,7 +5,7 @@ import sys
 
 from loom.service.controller import LoomService
 from tests.service.fakes import FakeProvider
-from tests.service.test_controller import wait_state
+from tests.service.test_controller import command, wait_state
 from tests.tasks.test_acceptance import Judge
 
 
@@ -93,5 +93,62 @@ def test_durable_failed_check_suspends_and_never_commits_success(tmp_path):
         assert state["acceptance"]["attempts"] == 3
         assert any(row["status"] == "failed" for row in state["acceptance"]["results"])
         assert not any(e["type"] == "run.completed" for e in service.events(sid, limit=1000))
+    finally:
+        service.close()
+
+
+def test_explicit_resume_recovers_exhausted_acceptance_budget_across_service_restart(tmp_path):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    (workspace / 'check.txt').write_text('pass')
+    directory = tmp_path / 'data'
+    service = LoomService(directory, provider_factory=provider_factory).start()
+    try:
+        sid = service.create('bounded', {'objective': 'Maintain', 'workspace': str(workspace), 'plan_mode': 'off',
+            'task_spec': {'acceptance': {'max_model_calls': 1}, 'workflow': {'plugin': 'dynamic'},
+                'session_environment': {'plugin': 'session', 'resources': [{'id': 'workspace', 'kind': 'directory', 'uri': str(workspace)}]},
+                'tools': {'collections': ['filesystem', 'shell', 'task_control']}}})['session_id']
+        first = wait_state(service, sid, 'paused')
+        assert first['acceptance']['state'] == 'blocked'
+        assert 'model calls 1/1' in first['acceptance']['reason']
+        original_plan = first['acceptance']['plan']
+        original_usage = first['token_budget']['used']
+    finally:
+        service.close()
+    service = LoomService(directory, provider_factory=provider_factory).start()
+    try:
+        command(service, sid, 'resume')
+        state = wait_state(service, sid, 'idle')
+        assert state['acceptance']['state'] == 'passed'
+        assert state['acceptance']['plan'] == original_plan
+        assert state['acceptance']['budget']['max_model_calls'] == 1
+        assert state['acceptance']['budget']['generation'] == 1
+        assert state['acceptance']['budget']['total_model_calls'] == 2
+        assert state['token_budget']['used'] > original_usage
+        events = service.events(sid, limit=1000)
+        renewed = [e for e in events if e['type'] == 'acceptance.budget.renewed']
+        assert len(renewed) == 1
+        archive = json.loads(service.store.read_artifact(sid, renewed[0]['payload']['previous_budget']['sha256']))
+        assert archive['budget']['model_calls'] == 1
+        assert not any(r['status'] == 'passed' for r in archive['results'])
+    finally:
+        service.close()
+
+
+def test_resume_allocation_request_survives_replacing_a_failed_run(tmp_path):
+    service = LoomService(tmp_path / 'data')
+    try:
+        sid = service.create('new', {'objective': 'Maintain', 'plan_mode': 'off'})['session_id']
+        first = service.prepare_attempt(sid)
+
+        def failed(state, emit, db):
+            state['task']['state'] = 'failed'
+            state['run']['state'] = 'failed'
+
+        service.store.update(sid, failed)
+        receipt = command(service, sid, 'resume')
+        second = service.prepare_attempt(sid)
+        assert first['run']['id'] != second['run']['id']
+        assert second['run']['acceptance_budget_request'] == receipt['command_id']
     finally:
         service.close()

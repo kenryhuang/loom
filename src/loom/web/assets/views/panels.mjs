@@ -1,5 +1,6 @@
 import { element } from "../markdown.mjs";
 import { parseBudget, canUpdateTaskTools, canRestartTask } from "../state.mjs";
+import { acceptanceBudgetText } from '../activity/acceptance.mjs';
 
 function panel(title) {
   const root = element("section", "panel");
@@ -105,12 +106,21 @@ export function builtinPanels() {
         if (!current) {body.append(element("p", "muted", "Acceptance will be prepared from the task and workspace.")); return;}
         body.append(element("strong", "", (current.state === "not_ready" && !current.plan ? "Preparing plan" : ({not_ready: "Ready to work", verifying: "Verifying", passed: "Passed", needs_repair: "Needs repair", blocked: "Blocked"})[current.state]) || current.state),
           element("p", "muted", current.reason));
+        if (current.budget) {
+          body.append(element('small', 'muted', 'Acceptance budget'), element('p', 'muted small', acceptanceBudgetText(current)));
+          if (current.state === 'blocked') body.append(element('p', 'muted small', current.budget.renewal));
+          if (current.budget.previous?.sha256) {
+            const previous = element('button', 'output-link', 'View previous allocation');
+            previous.onclick = () => actions.artifact(current.budget.previous.sha256);
+            body.append(previous);
+          }
+        }
         if (state.acceptance_current_check) body.append(element("p", "", state.acceptance_current_check));
         const results = new Map((current.results || []).map(r => [r.criterion_id, r]));
         for (const c of current.plan?.criteria || []) {
           const row = element("details"), result = results.get(c.id);
           row.open = ["failed", "blocked"].includes(result?.status);
-          row.append(element("summary", "", `${result?.status || "pending"} · ${c.description}`));
+          row.append(element("summary", "", `${result?.deferred ? 'pending review' : result?.status || "pending"} · ${c.description}`));
           if (result) row.append(element("p", "", result.reason));
           row.append(element("small", "muted", `${c.verifier} · ${result?.assurance || "recorded check"}`));
           if (result?.artifact?.sha256) {

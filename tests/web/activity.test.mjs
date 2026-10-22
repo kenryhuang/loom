@@ -52,6 +52,39 @@ const evidenceArtifact = () => ({
   ],
 });
 
+test('visual evidence loads original screenshots on demand with normalized finding overlays', async () => {
+  const {dom, root} = setup();
+  const requests = [];
+  const value = {frames: [{id: 'overview', width: 640, height: 480, artifact: {sha256: 'image-proof'}}],
+    result: {reason: 'Duplicate body detected', findings: [{evidence_id: 'overview', region: [.1,.2,.3,.4], observation: 'Extra body'}]}};
+  root.append(renderVerificationArtifact(value, async digest => {
+    requests.push(digest); return {media_type: 'image/png', data_url: 'data:image/png;base64,iVBORw0KGgo='};
+  }));
+  assert.equal(root.querySelector('img'), null);
+  root.querySelector('button').click(); await tick();
+  assert.deepEqual(requests, ['image-proof']);
+  assert.match(root.querySelector('img').src, /^data:image\/png;base64,/);
+  assert.equal(root.querySelector('.visual-region').style.left, '10%');
+  assert.match(root.textContent, /Duplicate body detected/);
+  assert.equal(root.querySelector('details').open, false);
+  assert.equal(renderVerificationArtifact({media_type:'image/png', data_url:'javascript:alert(1)'}), null);
+  dom.window.close();
+});
+
+test('browser evidence events hydrate through the normal authenticated artifact loader', async () => {
+  const loaded = [];
+  const {dom, root, feed} = setup({loadArtifact: async digest => {
+    loaded.push(digest); return {frames:[{id:'first',width:320,height:240,artifact:{sha256:'image'}}],url:'http://localhost:1234'};
+  }});
+  feed.append(event(1, 'artifact.created', {artifact:{kind:'visual_evidence',sha256:'bundle'}}));
+  assert.equal(loaded.length, 0);
+  feed.toggleAll(); await tick();
+  assert.deepEqual(loaded, ['bundle']);
+  assert.match(root.querySelector('.activity-title').textContent, /Browser screenshots saved/);
+  assert.equal(root.querySelectorAll('.visual-frame').length, 1);
+  dom.window.close();
+});
+
 test("verification artifacts lazily load readable goals, criteria, answers and actual tool output", async () => {
   const loaded = [];
   const {dom, root, feed} = setup({loadArtifact: async digest => {loaded.push(digest); return evidenceArtifact();}});

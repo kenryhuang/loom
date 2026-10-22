@@ -50,12 +50,12 @@ export class SettingsView {
       };
       if (key === 'general') {
         panel.append(element('p', 'muted', 'Choose which configured model handles each role.'));
-        const known = ['default_model', 'evaluation_model', 'verification_model'];
+        const known = ['default_model', 'evaluation_model', 'verification_model', 'visual_verification_model'];
         const scalarKeys = [...new Set([...known, ...Object.keys(draft).filter(k =>
           (draft[k] === null || typeof draft[k] !== 'object') && !groups.some(([id]) => id === k))])];
         fields(panel, () => Object.fromEntries(scalarKeys.filter(k => Object.hasOwn(draft, k)).map(k => [k, draft[k]])), next => {
           for (const k of scalarKeys) {if (Object.hasOwn(next, k)) draft[k] = next[k]; else delete draft[k];}
-        }, {default_model: modelChoice('Default task model'), evaluation_model: modelChoice('Deep evaluation model'), verification_model: modelChoice('Acceptance verifier model')}, context);
+        }, {default_model: modelChoice('Default task model'), evaluation_model: modelChoice('Deep evaluation model'), verification_model: modelChoice('Acceptance verifier model'), visual_verification_model: modelChoice('Visual acceptance model')}, context);
       } else if (key === 'providers') this.providers(panel, context, announce);
       else if (key === 'embedding_profiles') this.embeddings(panel, context);
       else {
@@ -77,7 +77,7 @@ export class SettingsView {
         invalid.reportValidity(); invalid.focus(); announce('Check the highlighted field before saving.'); return;
       }
       const models = context.models();
-      for (const key of ['default_model', 'evaluation_model', 'verification_model']) {
+      for (const key of ['default_model', 'evaluation_model', 'verification_model', 'visual_verification_model']) {
         if (draft[key] && !Object.hasOwn(models, draft[key])) {announce(`${labelFor(key)} must refer to a configured model.`); choose('general'); return;}
       }
       if (draft.meta_harness && Object.keys(draft.meta_harness).length) {
@@ -135,7 +135,7 @@ export class SettingsView {
       const advanced = element('details', 'settings-field-group'); advanced.append(element('summary', '', 'Provider request options'));
       fields(advanced, () => models[name].request_options, value => {models[name].request_options = value;}, requestFields, {...context, compact: true}, `${prefix}.${name}.request_options`, true);
       card.append(advanced, action('Remove model', () => {
-        const used = ['default_model', 'evaluation_model', 'verification_model'].some(key => this.draft[key] === `${providerName}/${name}`)
+        const used = ['default_model', 'evaluation_model', 'verification_model', 'visual_verification_model'].some(key => this.draft[key] === `${providerName}/${name}`)
           || ['proposer_model', 'solver_model', 'judge_model'].some(key => this.draft.meta_harness?.[key] === `${providerName}/${name}`);
         if (used) {announce(`“${name}” is selected for a model role. Change its model selections before removing it.`); return;}
         delete models[name];

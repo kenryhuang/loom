@@ -40,6 +40,7 @@ class WebFrontend:
         from loom.service.session_setup import capability_catalog
 
         models, default_model, model_aliases = [], None, {}
+        visual_model = None
         if service.config_path:
             from loom.tasks.config import load_task_config
 
@@ -47,6 +48,7 @@ class WebFrontend:
             if loaded.ok:
                 default_model = loaded.value.default_model
                 model_aliases = dict(loaded.value.model_aliases)
+                visual_model = loaded.value.visual_verification_model
                 models = [{"id": name, "label": name if "/" in name else f"{name} · {value.model}"} for name, value in loaded.value.models.items()]
         return {
             "schema_version": 1,
@@ -57,6 +59,8 @@ class WebFrontend:
             "models": models,
             "default_model": default_model,
             "model_aliases": model_aliases,
+            "visual_observation": {"collection": "browser", "verification_model": visual_model,
+                                   "status": "configured" if visual_model else "model_not_configured"},
         }
 
 

@@ -88,7 +88,7 @@ export function builtinRenderers() {
       event.payload.artifact?.kind === "acceptance_tool_evidence", () => ({hidden: true}))
     .register("acceptance-round", isAcceptanceRound, acceptanceDescriptor)
     .register("verification-artifact", event => event.type === "artifact.created" &&
-      ["verification_evidence", "verification"].includes(event.payload.artifact?.kind), event => ({
+      ["verification_evidence", "verification", "visual_evidence"].includes(event.payload.artifact?.kind), event => ({
         key: `event:${event.seq}`, kind: "artifact", summary: "Verification evidence saved",
         artifact: event.payload.artifact, details: event.payload,
       }))

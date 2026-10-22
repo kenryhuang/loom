@@ -17,12 +17,16 @@ function renderSection(item, loadArtifact) {
   const node = element("section", "activity-section");
   if (item.label) node.append(element("small", "activity-label", item.label));
   const value = item.value;
-  if (item.kind === "acceptance-criterion") {
+  if (item.kind === "visual-evidence") {
+    const view = renderVerificationArtifact(value, loadArtifact);
+    if (view) node.append(view);
+  } else if (item.kind === "acceptance-criterion") {
     node.append(element("p", "", value.description || "No criterion description recorded"));
     if (Array.isArray(value.scope) && value.scope.length)
       node.append(element("p", "muted", `Scope: ${value.scope.join(", ")}`));
     const methods = {semantic: "Review the result and supporting evidence", command: "Run a verification command",
-      artifact: "Check the deliverable", source: "Check source evidence", external: "External confirmation"};
+      artifact: "Check the deliverable", source: "Check source evidence", visual: "Inspect actual browser screenshots and assertions",
+      external: "External confirmation"};
     if (value.verifier) node.append(element("p", "muted", `Verification: ${methods[value.verifier] || value.verifier}`));
     const input = value.check?.input;
     if (input?.command || Array.isArray(input?.argv))
@@ -32,7 +36,7 @@ function renderSection(item, loadArtifact) {
     const row = element("details", "acceptance-check");
     row.dataset.key = `criterion:${value.id}`;
     row.open = ["failed", "blocked"].includes(value.status);
-    row.append(element("summary", "", `${value.status || "pending"} · ${value.description || value.id}`));
+    row.append(element("summary", "", `${value.deferred ? 'pending review' : value.status || "pending"} · ${value.description || value.id}`));
     if (value.reason) row.append(element("p", "", value.reason));
     if (value.evidence_ids?.length)
       row.append(element("p", "muted", `Evidence: ${value.evidence_ids.join(", ")}`));
@@ -44,7 +48,7 @@ function renderSection(item, loadArtifact) {
         button.disabled = true;
         try {
           const content = await loadArtifact(value.artifact.sha256);
-          evidence.replaceChildren(renderVerificationArtifact(content) || element("pre", "activity-raw-content", JSON.stringify(content, null, 2)));
+          evidence.replaceChildren(renderVerificationArtifact(content, loadArtifact) || element("pre", "activity-raw-content", JSON.stringify(content, null, 2)));
         } catch (error) {
           evidence.textContent = `Could not load evidence: ${error.message}`;
           button.disabled = false;
@@ -139,11 +143,53 @@ function renderSection(item, loadArtifact) {
 }
 
 /** Stable summary, controls, and section nodes; closed rows do no detail work. */
-export function renderVerificationArtifact(value) {
+export function renderVerificationArtifact(value, loadArtifact) {
+  if (value?.media_type === 'image/png' && /^data:image\/png;base64,/.test(value.data_url || '')) {
+    const image = element('img', 'visual-original'); image.src = value.data_url; image.alt = 'Original browser screenshot'; return image;
+  }
+  const frames = value?.frames || value?.detail?.frames;
+  if (Array.isArray(frames) && frames.length && loadArtifact) {
+    const root = element('div', 'visual-evidence');
+    root.append(element('p', 'muted small', 'Actual browser captures · image collection is separate from acceptance judgment.'));
+    const findings = value.judgment?.findings || value.detail?.judgment?.findings || value.result?.findings || [];
+    for (const frame of frames) {
+      const figure = element('figure', 'visual-frame'), caption = element('figcaption', '', `${frame.id} · ${frame.width} × ${frame.height}`);
+      const button = element('button', 'quiet', 'View screenshot'); button.type = 'button';
+      figure.append(caption, button); root.append(figure);
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+          const content = await loadArtifact(frame.artifact.sha256);
+          const image = renderVerificationArtifact(content);
+          if (!image) throw new Error('Image artifact unavailable');
+          const display = element('div', 'visual-image'); display.append(image);
+          for (const finding of findings.filter(f => f.evidence_id === frame.id && f.region?.length === 4)) {
+            if (!finding.region.every(v => Number.isFinite(v) && v >= 0 && v <= 1)) continue;
+            const box = element('span', 'visual-region'); box.title = finding.observation;
+            const [x,y,w,h] = finding.region; Object.assign(box.style, {left:`${x*100}%`,top:`${y*100}%`,width:`${w*100}%`,height:`${h*100}%`}); display.append(box);
+          }
+          if (display.querySelector('.visual-region')) {
+            const toggle = element('button', 'quiet', 'Hide findings'); toggle.type = 'button';
+            toggle.addEventListener('click', () => {
+              const hide = toggle.textContent === 'Hide findings';
+              display.querySelectorAll('.visual-region').forEach(box => box.hidden = hide);
+              toggle.textContent = hide ? 'Show findings' : 'Hide findings';
+            });
+            figure.append(toggle);
+          }
+          figure.append(display); button.remove();
+        } catch (error) {button.disabled = false; button.textContent = `Could not load screenshot: ${error.message}`;}
+      });
+    }
+    if (value.url) root.append(element('p', 'muted small', `Target: ${value.url}`));
+    if (value.result?.reason || value.judgment?.reason) root.append(element('p', '', value.result?.reason || value.judgment.reason));
+    const raw = element('details'); raw.append(element('summary', '', 'Capture metadata and raw evidence'), element('pre', 'activity-raw-content', JSON.stringify(value, null, 2))); root.append(raw);
+    return root;
+  }
   const sections = verificationArtifactSections(value);
   if (!sections) return null;
   const root = element("div", "verification-evidence");
-  root.append(...sections.map(item => renderSection(item)));
+  root.append(...sections.map(item => renderSection(item, loadArtifact)));
   const raw = element("details");
   raw.append(element("summary", "", "Raw verification evidence"));
   raw.addEventListener("toggle", () => {

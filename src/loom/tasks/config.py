@@ -24,6 +24,7 @@ _MODEL_CONFIG_FIELDS = frozenset(
         "temperature",
         "max_completion_tokens",
         "context_window_tokens",
+        "input_modalities",
         "request_options",
     }
 )
@@ -40,8 +41,13 @@ class ModelConfig:
     max_completion_tokens: int | None = None
     request_options: Mapping[str, Any] = field(default_factory=dict)
     context_window_tokens: int | None = None
+    input_modalities: tuple[str, ...] = ("text",)
 
     def __post_init__(self) -> None:
+        if (not isinstance(self.input_modalities, (tuple, list)) or not self.input_modalities
+                or any(m not in {"text", "image"} for m in self.input_modalities)):
+            raise ValueError("input_modalities must contain text and/or image")
+        object.__setattr__(self, "input_modalities", tuple(self.input_modalities))
         if self.context_window_tokens is not None and (type(self.context_window_tokens) is not int or self.context_window_tokens < 1024):
             raise ValueError("context_window_tokens must be an integer of at least 1024")
         object.__setattr__(self, "request_options", normalize_request_options(self.request_options))
@@ -77,6 +83,7 @@ class TaskRunnerConfig:
     models: Mapping[str, ModelConfig] = field(default_factory=dict)
     evaluation_model: str | None = None
     verification_model: str | None = None
+    visual_verification_model: str | None = None
     model_aliases: Mapping[str, str] = field(default_factory=dict)
 
     def resolve_model_name(self, name: str | None) -> str | None:
@@ -171,6 +178,7 @@ def create_provider_from_task_config(
             temperature=model.temperature,
             max_completion_tokens=model.max_completion_tokens,
             context_window_tokens=model.context_window_tokens,
+            input_modalities=model.input_modalities,
             request_options=model.request_options,
             http_client=http_client,
         )
@@ -242,7 +250,7 @@ def _canonical_provider_document(document: dict[str, Any]) -> dict[str, Any]:
                             raise ValueError(f"Ambiguous legacy model alias {alias}; use provider/model")
                         aliases[alias] = target
         group["models"] = children
-    for key in ("default_model", "evaluation_model", "verification_model"):
+    for key in ("default_model", "evaluation_model", "verification_model", "visual_verification_model"):
         if isinstance(result.get(key), str):
             result[key] = aliases.get(result[key], result[key])
     if isinstance(result.get("meta_harness"), dict):
@@ -338,7 +346,11 @@ def _parse_task_config(payload: Mapping[str, Any], path: Path) -> Result:
     verification_model = payload.get("verification_model")
     if verification_model is not None and (not isinstance(verification_model, str) or verification_model not in models):
         return err(make_loom_error("VALIDATION_FAILED", "verification_model must name a configured model", retryable=False))
+    visual_model = payload.get("visual_verification_model")
+    if visual_model is not None and (not isinstance(visual_model, str) or visual_model not in models or "image" not in models[visual_model].input_modalities):
+        return err(make_loom_error("VALIDATION_FAILED", "visual_verification_model must name a configured image-capable model", retryable=False))
     return ok(TaskRunnerConfig(default_model=default_model, task=task.value, run=run.value, models=models,
+                               visual_verification_model=visual_model,
                                evaluation_model=evaluation_model, verification_model=verification_model, model_aliases=aliases))
 
 
@@ -451,6 +463,7 @@ def _parse_model_config(payload: Mapping[str, Any], path: Path, name: str) -> Re
                 temperature=_optional_float(payload.get("temperature")),
                 max_completion_tokens=_optional_int(payload.get("max_completion_tokens")),
                 context_window_tokens=payload.get("context_window_tokens"),
+                input_modalities=payload.get("input_modalities", ("text",)),
                 request_options=request_options,
             )
         )

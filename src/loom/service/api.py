@@ -161,7 +161,7 @@ class SessionHandler(BaseHTTPRequestHandler):
                     self.send_header(
                         "Content-Security-Policy",
                         "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
-                        "img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+                        "img-src 'self' data: blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
                     )
                     self.end_headers()
                     self.wfile.write(body)
@@ -329,8 +329,11 @@ class SessionHandler(BaseHTTPRequestHandler):
                 self._sse(sid, cursor)
             elif method == "GET" and route == "artifacts" and len(parts) == 5:
                 data = service.store.read_artifact(sid, parts[4])
+                ref = service.store.artifact_ref(sid, parts[4])
                 self.send_response(200)
-                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Type", ref.get("media_type", "application/json"))
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)

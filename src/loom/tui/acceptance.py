@@ -7,7 +7,8 @@ LABELS = {"not_ready": "Ready to work", "verifying": "Verifying", "passed": "Pas
           "needs_repair": "Needs repair", "blocked": "Blocked"}
 
 
-ROUND_EVENTS = {"acceptance.verifying", "verification.started", "verification.completed", "acceptance.gate.passed", "acceptance.gate.blocked"}
+ROUND_EVENTS = {"acceptance.verifying", "verification.started", "verification.completed", "acceptance.gate.passed", "acceptance.gate.blocked",
+                "visual.capture.started", "visual.capture.completed", "visual.capture.failed", "acceptance.budget.renewed"}
 
 
 def round_summary(value):
@@ -26,6 +27,10 @@ def round_summary(value):
 def round_details(value):
     results = {r["criterion_id"]: r for r in value.get("results", [])}
     lines = [value.get("reason", "")]
+    if budget := value.get('budget'):
+        lines.append(f"Acceptance budget: {budget['model_calls']}/{budget['max_model_calls']} model calls · "
+                     f"{budget['elapsed_seconds']:.1f}/{budget['max_seconds']}s · "
+                     f"{budget['failed_attempts']}/{budget['max_failed_attempts']} failed candidates")
     for criterion in (value.get("plan") or {}).get("criteria", []):
         result = results.get(criterion["id"], {})
         lines.append(f"[{result.get('status', 'pending')}] {criterion['description']}")
@@ -35,6 +40,8 @@ def round_details(value):
             lines.append("  Evidence: " + ", ".join(result["evidence_ids"]))
         if result.get("artifact", {}).get("sha256"):
             lines.append("  Evidence artifact: " + result["artifact"]["sha256"])
+        if result.get("visual_evidence", {}).get("sha256"):
+            lines.append("  Browser screenshots: " + result["visual_evidence"]["sha256"] + " (open the evidence in Web)")
     for requirement in (value.get("plan") or {}).get("unresolved_requirements", []):
         lines.append("[unresolved] " + requirement)
     return "\n".join(lines)

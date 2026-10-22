@@ -60,6 +60,10 @@ def plan_protocol(assembly):
                              "scope": STRINGS, "required": {"type": "boolean", "enum": [True]}, "check": check}))
 
     criterion("semantic", obj({}))
+    if "browser_capture" in assembly.bindings:
+        from loom.browser.scenarios import SCENARIO_SCHEMA
+
+        criterion("visual", obj({"scenario": SCENARIO_SCHEMA}))
     criterion("artifact", obj({"path": STRING, "nonempty": {"type": "boolean", "enum": [True]}, "contains": STRINGS}))
     criterion("source", obj({"urls": STRINGS}))
     if assembly.bindings:
@@ -75,6 +79,11 @@ def plan_protocol(assembly):
         if not isinstance(value, dict) or not isinstance(value.get("criteria"), list):
             return value, changes
         for i, row in enumerate(value["criteria"]):
+            if isinstance(row, dict) and row.get("verifier") == "visual" and isinstance(row.get("check"), dict) and "scenario" in row["check"]:
+                from loom.browser.scenarios import normalize_scenario
+
+                row["check"]["scenario"], edits = normalize_scenario(row["check"]["scenario"], path=f"/criteria/{i}/check/scenario")
+                changes.extend(edits)
             if not isinstance(row, dict) or row.get("verifier") != "command" or not isinstance(row.get("check"), dict):
                 continue
             check = row["check"]

@@ -106,6 +106,8 @@ def parse_response(response, max_chars=1_000_000):
 def output_mode(provider):
     if not isinstance(provider, OpenAIProvider):
         return "text"
+    if provider.model == "qwen3.8-omni-flash":
+        return "json_object"  # This model supports JSON Mode, not native JSON Schema.
     options = materialize_request_options(provider.request_options).get("response_format", {})
     configured = options.get("type") if isinstance(options, dict) else None
     if configured in {"json_schema", "json_object"}:

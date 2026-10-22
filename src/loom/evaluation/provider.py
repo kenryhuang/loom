@@ -12,13 +12,13 @@ from loom.llm.api import OpenAIProvider
 from loom.llm.request_options import materialize_request_options
 
 
-def evaluator_provider(provider, *, output_tokens, timeout_seconds, install_http=True):
+def evaluator_provider(provider, *, output_tokens, timeout_seconds, install_http=True, preserve_options=False):
     if not is_dataclass(provider) or not hasattr(provider, "max_completion_tokens"):
         return provider
     options = materialize_request_options(getattr(provider, "request_options", {}))
-    if "enable_thinking" in options:
+    if not preserve_options and "enable_thinking" in options:
         options["enable_thinking"] = False
-    if "reasoning_effort" in options:
+    if not preserve_options and "reasoning_effort" in options:
         options["reasoning_effort"] = "low"
     # None explicitly removes the solver's output cap for metadata-based evaluation.
     cap = None if output_tokens is None else min(output_tokens, getattr(provider, "max_completion_tokens", None) or output_tokens)

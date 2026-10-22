@@ -25,10 +25,12 @@ from loom.llm.api import (
     to_llm_tool,
     to_llm_tools,
 )
+from loom.llm.images import ImagePart
 from loom.llm.structured import ProtocolError, ProtocolExhausted, StructuredProtocol, StructuredResult, request_structured
 
 __all__ = [
     "EnvOpenAIConfig",
+    "ImagePart",
     "LlmMessage",
     "LlmResponse",
     "LlmStepPolicy",

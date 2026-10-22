@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import json
 import sqlite3
@@ -191,6 +192,8 @@ class LoomService:
                     )
                 )
                 state['run']['restart_from_scratch'] = restarting
+                if old and not restarting and old.get('acceptance_budget_request'):
+                    state['run']['acceptance_budget_request'] = old['acceptance_budget_request']
             if not state["run"].get("task_episode_id"):
                 state["run"]["task_episode_id"] = (old.get("task_episode_id") if old and old["state"] != "completed"
                                                    and not state["run"].get("reset_planning") else None) or new_id("episode")
@@ -419,6 +422,23 @@ class LoomService:
                 self._save_operation(db, sid, oid, op)
                 run["current_operation"] = None
                 emit("operation.completed", {"operation_id": oid})
+            elif kind == "artifact_upload_start":
+                response = self.store.artifacts.begin_upload(record["attempt_id"], value["sha256"], value["byte_size"], value["media_type"], value["kind"])
+            elif kind in {"artifact_upload_chunk", "artifact_upload_finish"}:
+                response = self.store.artifacts.upload(record["attempt_id"], value["upload_id"], offset=value.get("offset"), data=value.get("data"),
+                                                       finish=kind == "artifact_upload_finish")
+                if kind == "artifact_upload_finish":
+                    db.execute("INSERT OR IGNORE INTO artifacts VALUES(?,?,?)", (sid, response["sha256"], canonical(response)))
+                    emit("artifact.created", {"artifact": response})
+            elif kind == "read_artifact_chunk":
+                row = db.execute("SELECT ref FROM artifacts WHERE session_id=? AND digest=?", (sid, value["digest"])).fetchone()
+                if not row or json.loads(row[0]).get("media_type") != "image/png":
+                    raise ServiceError("Image does not belong to this session", 404)
+                raw = self.store.artifacts.read(value["digest"])
+                offset = value["offset"]
+                if type(offset) is not int or not 0 <= offset <= len(raw) or len(raw) > 4_000_000:
+                    raise ServiceError("Invalid image read size or offset")
+                response = {"byte_size": len(raw), "data": base64.b64encode(raw[offset:offset + 49152]).decode()}
             elif kind == "publish_artifact":
                 response = self.store.artifact_in_transaction(db, sid, value["value"], value["kind"])
                 emit("artifact.created", {"artifact": response})

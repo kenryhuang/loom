@@ -208,6 +208,7 @@ async def run_generic_task(
     cancellation: Any | None = None,
     plugin_registry: Any = None,
     verification_provider: Any = None,
+    visual_provider: Any = None,
     loops: Mapping[str, Any] | None = None,
 ) -> Result:
     run_options = options or TaskRunOptions()
@@ -232,7 +233,9 @@ async def run_generic_task(
     try:
         if verification_provider is None and config is not None and config.verification_model:
             verification_provider = _create_provider(config, model_name=config.verification_model).unwrap()
-        assembly.configure_acceptance(provider, verification_provider=verification_provider)
+        if visual_provider is None and config is not None and config.visual_verification_model:
+            visual_provider = _create_provider(config, model_name=config.visual_verification_model).unwrap()
+        assembly.configure_acceptance(provider, verification_provider=verification_provider, visual_provider=visual_provider)
         return await _run_assembled_task(request, provider, run_options, task_harness, assembly, trace_sink, cancellation)
     finally:
         await assembly.close()

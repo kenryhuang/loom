@@ -297,6 +297,8 @@ class SessionStore:
                 state["control"] = control
                 task["state"] = "pausing" if state["run"] and state["run"]["state"] == "running" else "paused"
             elif kind == "resume":
+                if state['run']:
+                    state['run']['acceptance_budget_request'] = cid
                 self.queue_resume(db, state, cid)
             elif kind == "complete_task":
                 task["state"] = "completed"
@@ -511,3 +513,12 @@ class SessionStore:
             if not db.execute("SELECT 1 FROM artifacts WHERE session_id=? AND digest=?", (sid, digest)).fetchone():
                 raise ServiceError("Artifact not referenced by session", 404)
         return self.artifacts.read(digest)
+
+
+    def artifact_ref(self, sid, digest):
+        with self.transaction() as db:
+            self._load(db, sid)
+            row = db.execute("SELECT ref FROM artifacts WHERE session_id=? AND digest=?", (sid, digest)).fetchone()
+            if not row:
+                raise ServiceError("Artifact not referenced by session", 404)
+            return json.loads(row[0])

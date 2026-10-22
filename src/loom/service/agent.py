@@ -51,13 +51,16 @@ async def execute(state, bridge, config_path, provider_factory, plugin_registry_
 
 
 async def _execute_assembled(state, bridge, provider, request, assembly):
-    verification_provider = None
+    verification_provider = visual_provider = None
     path = request.metadata.get("knowledge_config_path")
     if path:
         config = load_task_config(path).unwrap()
         if config.verification_model:
             verification_provider = _create_provider(config, model_name=config.verification_model).unwrap()
-    assembly.configure_acceptance(provider, limits=state["task"]["limits"], verification_provider=verification_provider)
+        if config.visual_verification_model:
+            visual_provider = _create_provider(config, model_name=config.visual_verification_model).unwrap()
+    assembly.configure_acceptance(provider, limits=state["task"]["limits"], verification_provider=verification_provider, visual_provider=visual_provider)
+    assembly.acceptance_resume_request = state['run'].get('acceptance_budget_request')
     planning = assembly.workflow
     initial = make_task_context(request, planning=planning, assembly=assembly).unwrap()
     previous = decode(state["context"]) if state.get("context") else None

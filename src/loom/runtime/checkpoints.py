@@ -9,6 +9,7 @@ from typing import Any
 
 from loom.core import models
 from loom.llm.api import LlmMessage, LlmResponse, LlmToolCall, TokenUsage
+from loom.llm.images import ImagePart
 from loom.runtime.control import StepControl
 
 _NAMES = (
@@ -38,7 +39,7 @@ _NAMES = (
     "RunResult",
 )
 _TYPES = {name: getattr(models, name) for name in _NAMES}
-_TYPES.update({cls.__name__: cls for cls in (LlmMessage, LlmResponse, LlmToolCall, TokenUsage, StepControl)})
+_TYPES.update({cls.__name__: cls for cls in (LlmMessage, LlmResponse, LlmToolCall, TokenUsage, StepControl, ImagePart)})
 
 
 def encode(value: Any) -> Any:

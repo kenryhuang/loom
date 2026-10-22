@@ -45,6 +45,7 @@ class LlmMessage:
     name: str | None = None
     tool_call_id: str | None = None
     tool_calls: tuple[LlmToolCall, ...] = ()
+    images: tuple = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -987,6 +988,8 @@ class OpenAIProvider:
     base_url: str = "https://api.openai.com/v1"
     http_client: Any = None
     context_window_tokens: int | None = None
+    input_modalities: tuple[str, ...] = ("text",)
+    image_reader: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "request_options", normalize_request_options(self.request_options))
@@ -994,7 +997,7 @@ class OpenAIProvider:
     def _request_body(self, messages, tools, tool_choice, *, stream: bool) -> dict[str, Any]:
         body = {
             "model": self.model,
-            "messages": [_to_openai_message(message) for message in messages],
+            "messages": [_to_openai_message(message, image_reader=self.image_reader, input_modalities=self.input_modalities) for message in messages],
         }
         if self.temperature is not None:
             body["temperature"] = self.temperature
@@ -1896,9 +1899,16 @@ def _max_tool_calls_exceeded(max_tool_calls: int) -> Result:
     )
 
 
-def _to_openai_message(message: Any) -> dict[str, Any]:
+def _to_openai_message(message: Any, *, image_reader=None, input_modalities=("text",)) -> dict[str, Any]:
     role = _field(message, "role")
     content = _field(message, "content")
+    images = _field(message, "images", ())
+    if images:
+        from loom.llm.images import image_content
+
+        if role != "user" or "image" not in input_modalities or image_reader is None:
+            raise ValueError("Image messages require an image-capable provider and authorized artifact reader")
+        content = [{"type": "text", "text": content}, *[image_content(part, image_reader) for part in images]]
     tool_calls = _field(message, "tool_calls", ())
     result = {"role": role, "content": None if role == "assistant" and tool_calls and content == "" else content}
     name = _field(message, "name", None)

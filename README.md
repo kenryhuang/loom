@@ -419,3 +419,7 @@ LOOM_RUN_LIVE_LLM=1 uv run pytest tests/integration/test_live_llm_smoke.py -q
 
 The project uses a `src/loom/` package layout; the Web frontend is packaged
 inside the Python distribution.
+
+### Browser and WebGL visual acceptance
+
+The optional browser collection provides real page interaction, screenshots and multi-frame Canvas/WebGL evidence for independent visual acceptance. Configure `visual_verification_model` (initial provider: `dashscope/qwen3.8-omni-flash`) and model `input_modalities: [text, image]`, then select Browser & visual evidence when creating/editing a task. Local previews also require a workspace and Commands. See [setup, evidence and recovery](docs/visual-observation-and-acceptance.zh-CN.md).

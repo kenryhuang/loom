@@ -184,10 +184,16 @@ export class SessionApi {
     if (view != null) query.set("view", view);
     return this.json(`${this.path(id, "history")}?${query}`, { signal });
   }
-  artifact(id, digest, signal) {
-    return this.json(this.path(id, `artifacts/${encodeURIComponent(digest)}`), {
-      signal,
-    });
+  async artifact(id, digest, signal) {
+    const response = await this.open(this.path(id, `artifacts/${encodeURIComponent(digest)}`), {signal});
+    if (response.headers?.get('Content-Type')?.split(';')[0] === 'image/png') {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.length > 4_000_000) throw new ApiError('Screenshot exceeds the display limit');
+      let binary = '';
+      for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+      return {media_type: 'image/png', data_url: 'data:image/png;base64,' + btoa(binary)};
+    }
+    return response.json();
   }
   create(payload, { commandId = crypto.randomUUID(), signal } = {}) {
     return this.json("/v1/sessions", {

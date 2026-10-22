@@ -75,6 +75,11 @@ export function eventPresentation(kind, data) {
   }
   if (kind === "artifact.created") {
     const artifact = data.artifact || {};
+    if (artifact.kind === "visual_evidence") {
+      const value = data.artifact_content;
+      return {title: "Browser screenshots saved", subject: value ? `${value.frames?.length || 0} frames · ${value.url || ''}` : "Expand to view actual captures",
+        sections: value ? [{label: '', kind: 'visual-evidence', value}] : [{label: '', value: 'Browser evidence loads when expanded.'}]};
+    }
     if (["verification_evidence", "verification"].includes(artifact.kind)) {
       const value = data.artifact_content;
       return {title: artifact.kind === "verification_evidence" ? "Verification evidence saved" : "Verification check saved",

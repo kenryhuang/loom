@@ -13,6 +13,8 @@ from loom.tasks.assembly import default_plugin_registry
 from loom.tasks.config import create_provider_from_task_config, load_task_config
 
 COLLECTIONS = {
+    "browser": ("Browser & visual evidence",
+                "Open Web applications, interact and capture screenshots, including Canvas/WebGL. Local previews require workspace and shell.", False),
     "filesystem": ("Files", "Read, create and edit workspace files. Does not run commands.", True),
     "shell": ("Commands", "Execute shell commands and processes in the workspace.", True),
     "web_research": ("Web sources", "Fetch and read HTTP(S) source URLs. Not a general web search engine.", False),
@@ -92,6 +94,7 @@ class SessionSetup:
                 "Choose exactly one task_type from the supplied types and the minimum sufficient tool_collections from the supplied catalog. "
                 "A code explanation may need filesystem but not shell. Describe actual collection capabilities accurately; filesystem also permits editing. "
                 "A reasoning/writing task needs no file or command access. "
+                "Select browser for Web UI, Canvas/WebGL defects or visual acceptance when available; local previews also need filesystem and shell. "
                 "web_research reads supplied URLs; it is not a web search engine. Include task_control when available. "
                 "Select relevant knowledge_base_ids from the supplied knowledge_bases using names, descriptions and document names. "
                 "Include knowledge in tool_collections if any bases are selected; otherwise omit it. Do not bind unrelated bases. "

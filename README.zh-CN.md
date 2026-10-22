@@ -391,3 +391,7 @@ LOOM_RUN_LIVE_LLM=1 uv run pytest tests/integration/test_live_llm_smoke.py -q
 ```
 
 代码采用 `src/loom/` 包布局，Web 前端资源包含在 Python 发布包中。
+
+### Web / WebGL 视觉验收
+
+可选浏览器集合支持实际页面操作、截图与多帧 WebGL 证据，并接入独立多模态验收。配置 `visual_verification_model`（首选 `dashscope/qwen3.8-omni-flash`）和模型的 `input_modalities: [text, image]`，在新建/编辑任务时选择 Browser & visual evidence；本地预览同时需要 workspace 和 Commands。安装、场景协议、证据查看与恢复流程见 [视觉观察与验收](docs/visual-observation-and-acceptance.zh-CN.md)。

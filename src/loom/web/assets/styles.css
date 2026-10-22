@@ -2163,3 +2163,12 @@ dialog h1 {
   .goal-tree-metrics { width:100%; margin-left:0; }
   .goal-tree-heading { gap:6px; }
 }
+
+/* Browser evidence remains inspectable at its recorded aspect ratio. */
+.visual-evidence { display:grid; gap:12px; min-width:0; }
+.visual-frame { margin:0; padding:10px; border:1px solid var(--line); border-radius:8px; }
+.visual-frame figcaption { margin-bottom:8px; font-size:12px; color:var(--muted); }
+.visual-image { position:relative; display:block; width:100%; }
+.visual-original { display:block; max-width:100%; height:auto; }
+.visual-image > .visual-original { width:100%; }
+.visual-region { position:absolute; border:2px solid var(--danger); pointer-events:auto; }

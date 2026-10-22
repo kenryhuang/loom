@@ -58,7 +58,7 @@ def _freeze_json(value: Any, path: str) -> FrozenJsonValue:
         if not math.isfinite(value):
             raise ValueError(f"{path} must be a finite JSON number")
         return value
-    if isinstance(value, list):
+    if isinstance(value, list | tuple):
         return tuple(_freeze_json(item, f"{path}[{index}]") for index, item in enumerate(value))
     if isinstance(value, Mapping):
         frozen: dict[str, FrozenJsonValue] = {}
