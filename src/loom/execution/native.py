@@ -9,6 +9,7 @@ import uuid
 from dataclasses import asdict
 
 from loom.core import err, make_loom_error, ok
+from loom.host_environment import DEFAULT_SHELL_ARGV, inspect_execution_environment
 from loom.runtime.checkpoints import decode, encode
 from loom.runtime.execution_contracts import ExecutionResult
 from loom.runtime.plugin_contracts import PluginManifest, config_digest, json_value
@@ -20,16 +21,21 @@ class NativeToolExecutionRuntime:
     def __init__(self, config, *, entrypoints, execution=None, cancellable=()):
         if set(config) - {"workspace_resource", "shell"}:
             raise ValueError("Unknown native runtime configuration")
-        shell = config.get("shell", ["/bin/bash", "-o", "pipefail", "-c"])
+        shell = config.get("shell", list(DEFAULT_SHELL_ARGV))
         if not isinstance(shell, list) or not shell or not all(isinstance(part, str) and part for part in shell):
             raise ValueError("Native runtime shell must be a non-empty argv prefix ending in the shell command option")
         self.config = json_value(config)
+        self._environment = inspect_execution_environment(shell)
         self.entrypoints = dict(entrypoints)
         self.execution = execution
         self.cancellable = set(cancellable)
         self.runtime_id = uuid.uuid4().hex
         self.operations = {}
         self.tasks = {}
+
+    def describe_environment(self):
+        # Recreated on the current worker; never restored from an old checkpoint.
+        return {**self._environment, "shell_argv": list(self._environment["shell_argv"])}
 
     def prepare(self, resources):
         workspace = self.config.get("workspace_resource")
@@ -61,7 +67,7 @@ class NativeToolExecutionRuntime:
 
         async def invoke():
             opts = dict(options or {})
-            opts["shell_argv"] = self.config.get("shell", ["/bin/bash", "-o", "pipefail", "-c"])
+            opts["shell_argv"] = self.config.get("shell", list(DEFAULT_SHELL_ARGV))
             if self.execution is not None:
                 opts.update(
                     process_started=lambda pid: self.execution.rpc("process_started", {"pid": pid}),

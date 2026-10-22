@@ -265,8 +265,10 @@ class AcceptanceController:
                 "token_count_basis": "estimate_ascii_3_non_ascii_utf8"}
 
     async def model(self, runtime, stage, prompt, payload, *, protocol=None, mode="text", raw_response=False, provider=None, images=()):
+        from loom.host_environment import format_execution_environment
         from loom.llm.structured import ProtocolError, native_schema, parse_response
 
+        prompt += "\n\n" + format_execution_environment(self.assembly.execution_environment())
         remaining = self.require_model_budget()
         text = json.dumps(payload, ensure_ascii=False)
         schema_text = json.dumps(native_schema(protocol.schema), ensure_ascii=False) if protocol and mode == "json_schema" else ""

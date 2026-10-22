@@ -12,6 +12,7 @@ import uuid
 from contextlib import suppress
 
 from loom.browser.frameworks import framework_facts
+from loom.browser.readiness import wait_for_render
 from loom.browser.scenarios import origin
 
 
@@ -73,28 +74,49 @@ class BrowserWorker:
           const get = HTMLCanvasElement.prototype.getContext, contexts = new WeakMap();
           HTMLCanvasElement.prototype.getContext = function(kind, ...args) {
             const value = get.call(this, kind, ...args);
-            if (value && /^(webgl2?|experimental-webgl)$/.test(kind)) contexts.set(this, {gl:value,kind});
+            if (value && !contexts.has(this)) {
+              const webgl = /^(webgl2?|experimental-webgl)$/.test(kind);
+              const entry = {gl:webgl ? value : null,kind,render_calls:0,draw_calls:0};
+              contexts.set(this, entry);
+              if (webgl) for (const name of ['clear','drawArrays','drawElements','drawArraysInstanced','drawElementsInstanced']) {
+                const original = value[name];
+                if (typeof original !== 'function') continue;
+                value[name] = function(...args) {
+                  const result = Reflect.apply(original, this, args);
+                  entry.render_calls++; if (name !== 'clear') entry.draw_calls++;
+                  return result;
+                };
+              }
+            }
             return value;
           };
           Object.defineProperty(window, '__loomCanvasState', {value: () => [...document.querySelectorAll('canvas')].map(c => {
             const entry = contexts.get(c), gl = entry?.gl;
             const extension = gl && gl.getExtension('WEBGL_debug_renderer_info');
-            return {width:c.width,height:c.height,webgl:!!gl,kind:entry?.kind || 'unobserved_or_2d',
+            const bounds = c.getBoundingClientRect(), style = getComputedStyle(c);
+            return {width:c.width,height:c.height,webgl:!!gl,kind:entry?.kind || 'uninitialized',
+              visible:bounds.width > 0 && bounds.height > 0 && style.visibility !== 'hidden' && style.display !== 'none',
+              render_calls:entry?.render_calls || 0,draw_calls:entry?.draw_calls || 0,
               context_lost:gl ? gl.isContextLost() : null,
               renderer:gl ? gl.getParameter(extension ? extension.UNMASKED_RENDERER_WEBGL : gl.RENDERER) : null};
           })});
         })()""")
         page = await context.new_page()
         page.set_default_timeout(10000)
-        errors = []
+        errors, request_failures, http_errors = [], [], []
         page.on("pageerror", lambda error: errors.append(str(error)[:1000]) if len(errors) < 20 else None)
+        page.on("requestfailed", lambda request: request_failures.append(
+            {"url": request.url[:2000], "resource_type": request.resource_type, "error": request.failure}) if len(request_failures) < 20 else None)
+        page.on("response", lambda response: http_errors.append(
+            {"url": response.url[:2000], "status": response.status}) if response.status >= 400 and len(http_errors) < 20 else None)
         response = await page.goto(url, wait_until="domcontentloaded", timeout=20000)
         if response and response.status >= 400:
             await context.close()
             raise ValueError(f"application_http_error: HTTP {response.status}")
         await page.evaluate("document.fonts.ready")
         identifier = uuid.uuid4().hex
-        self.pages[identifier] = dict(page=page, context=context, errors=errors, adapter=value.get("adapter_script"))
+        self.pages[identifier] = dict(page=page, context=context, errors=errors, request_failures=request_failures,
+                                      http_errors=http_errors, adapter=value.get("adapter_script"))
         return {"page_id": identifier, "url": page.url, "browser_version": self.browser.version}
 
     def session(self, identifier):
@@ -141,6 +163,7 @@ class BrowserWorker:
         page = session["page"]
         if value.get("ready_selector"):
             await page.locator(value["ready_selector"]).wait_for(state="visible")
+        readiness = await wait_for_render(page, canvas_required=bool(value.get("canvas")))
         canvas = await page.evaluate("window.__loomCanvasState()")
         if value.get("canvas") and (not canvas or any(not c["width"] or not c["height"] or c["context_lost"] for c in canvas)):
             raise ValueError("canvas_not_ready: missing canvas, empty buffer or WebGL context lost")
@@ -182,11 +205,12 @@ class BrowserWorker:
             frames.append({"canvas": await page.evaluate("window.__loomCanvasState()"), "id": capture.get("id", f"frame-{index}"),
                            "png": base64.b64encode(raw).decode(),
                            "captured_at": time.time(), "selector": capture.get("selector"), "framework_facts": await framework_facts(page)})
-        return {"url": page.url, "viewport": page.viewport_size, "browser_version": self.browser.version,
-                "canvas": await page.evaluate("window.__loomCanvasState()"), "instrumentation": "native_getContext_observer_v1",
+        return {"url": page.url, "viewport": page.viewport_size, "browser_version": self.browser.version, "readiness": readiness,
+                "canvas": await page.evaluate("window.__loomCanvasState()"), "instrumentation": "native_canvas_render_observer_v2",
                 "assertions": assertions, "adapter_facts": facts, "adapter_assurance": "application_reported",
                 "framework_facts": frames[-1]['framework_facts'],
-                "page_errors": list(session["errors"]), "dom_text": (await page.locator("body").inner_text())[:6000], "frames": frames}
+                "page_errors": list(session["errors"]), "request_failures": list(session["request_failures"]),
+                "http_errors": list(session["http_errors"]), "dom_text": (await page.locator("body").inner_text())[:6000], "frames": frames}
 
     async def call(self, value):
         method = value["method"]

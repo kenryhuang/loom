@@ -33,6 +33,7 @@ from loom.core import (
     ok,
     thaw_json,
 )
+from loom.host_environment import inspect_execution_environment
 from loom.llm import create_env_openai_provider, create_llm_step_function
 from loom.llm.request_options import materialize_request_options
 from loom.observability import EventRecordingPolicy, JsonlTraceStore
@@ -134,6 +135,7 @@ def make_task_context(
                 affordances=empty_affordances(tools=tools, resources=resources),
                 metadata={
                     "task_kind": "generic_task",
+                    "execution_environment": assembly.execution_environment() if assembly is not None else inspect_execution_environment(),
                     "profile": profile.id,
                     "workspace": "" if workspace is None else str(workspace),
                     "blueprint": profile.blueprint,

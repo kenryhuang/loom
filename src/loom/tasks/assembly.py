@@ -807,6 +807,13 @@ class TaskAssembly:
             self.visual_provider = next((p for p in (self.acceptance_provider, provider) if "image" in getattr(p, "input_modalities", ())), None)
         self.acceptance_limits = limits or {}
 
+    def execution_environment(self):
+        describe = getattr(self.runtime, "describe_environment", None)
+        if describe:
+            return describe()
+        return {"runtime": self.runtime.manifest.plugin_id, "os": "unknown", "shell_argv": None,
+                "container": "unknown", "note": "Runtime does not report its execution host; inspect before choosing platform-specific commands."}
+
     def project_acceptance(self, context):
         plan = self.acceptance.data.get("plan")
         constraint = Constraint(
@@ -818,6 +825,7 @@ class TaskAssembly:
         scratch = {**(context.state.scratch or {}), "acceptance": self.acceptance.public()}
         return replace(
             context,
+            metadata={**(context.metadata or {}), "execution_environment": self.execution_environment()},
             identity=replace(context.identity, constraints=(*[c for c in context.identity.constraints if c.id != "acceptance"], constraint)),
             state=replace(context.state, scratch=scratch),
         )

@@ -35,6 +35,7 @@ from loom.core.models import (
     ok,
     thaw_json,
 )
+from loom.host_environment import format_execution_environment, inspect_execution_environment
 from loom.llm.request_options import materialize_request_options, normalize_request_options
 
 
@@ -234,6 +235,8 @@ def build_system_prompt(context: Context) -> str:
         "",
         "Constraints:",
         *[f"- {_field(constraint, 'severity', 'must').upper()}: {_field(constraint, 'description')}" for constraint in context.identity.constraints],
+        "",
+        format_execution_environment((context.metadata or {}).get("execution_environment") or inspect_execution_environment()),
         "",
         "Goal:",
         f"- Objective: {context.goal.objective}",

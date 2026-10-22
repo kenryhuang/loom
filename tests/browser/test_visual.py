@@ -257,6 +257,59 @@ async def test_loaded_framework_probe_reports_actual_duplicates_and_hidden_objec
         await assembly.close()
 
 
+@pytest.mark.asyncio
+async def test_auto_capture_waits_for_async_canvas_and_suspended_scene(tmp_path):
+    pytest.importorskip('playwright')
+    (tmp_path / '@react-three_fiber.js').write_text('export const _roots = new Map();')
+    (tmp_path / 'index.html').write_text('''<div id="ready">UI is ready before the scene</div><script type="module">
+      import {_roots} from './@react-three_fiber.js';
+      const canvas = document.createElement('canvas'); canvas.width=320; canvas.height=240;
+      document.body.append(canvas);
+      const scene={children:[]}; _roots.set(canvas,{store:{getState:()=>({scene})}});
+      setTimeout(()=>{
+        const gl=canvas.getContext('webgl'); gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+        setTimeout(()=>{
+          scene.children.push({isMesh:true,geometry:{type:'SphereGeometry'},children:[]});
+          function draw(){gl.clearColor(0,.8,.2,1);gl.clear(gl.COLOR_BUFFER_BIT);requestAnimationFrame(draw)} draw();
+        },700);
+      },900);
+    </script>''')
+    assembly = TaskAssembly(TaskRequest('Inspect async WebGL', workspace=tmp_path, task_spec=spec(tmp_path)), plan_mode='off')
+    try:
+        scenario = scene()
+        scenario.pop('captures')  # No explicit canvas hint: reproduce the original race.
+        bundle, images, _ = await assembly.browser.capture(scenario)
+        assert bundle['readiness']['status'] == 'ready'
+        assert [f['id'] for f in bundle['frames']] == ['viewport', 'viewport-later']
+        assert len(images) == 2
+        for frame in bundle['frames']:
+            assert frame['canvas'][0]['webgl']
+            assert frame['canvas'][0]['render_calls'] > 0
+            assert frame['framework_facts']['mesh_count'] == 1
+    finally:
+        await assembly.close()
+
+
+@pytest.mark.asyncio
+async def test_readiness_timeout_is_bounded_and_reported(tmp_path):
+    from loom.browser.readiness import wait_for_render
+    from loom.browser.worker import BrowserWorker
+
+    pytest.importorskip('playwright')
+    worker = BrowserWorker()
+    try:
+        await worker.start()
+        page = await worker.browser.new_page()
+        await page.set_content('<canvas></canvas>')
+        await page.evaluate("window.__loomCanvasState=()=>[{visible:true,width:300,height:150,kind:'uninitialized'}]")
+        status = await wait_for_render(page, canvas_required=True, timeout_seconds=0.7)
+        assert status['status'] == 'timed_out'
+        assert status['phase'] == 'canvas_initialization'
+        assert status['waited_seconds'] < 2
+    finally:
+        await worker.close()
+
+
 @pytest.mark.parametrize("expected,status,calls", [(8, "passed", 1), (9, "blocked", 0)])
 def test_visual_gate_uses_real_browser_images_and_cannot_override_hard_failures(tmp_path, expected, status, calls):
     pytest.importorskip("playwright")

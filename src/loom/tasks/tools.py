@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from loom.core import Observation, Result, err, make_loom_error, new_trace_id, now_iso, ok, thaw_json
+from loom.host_environment import DEFAULT_SHELL_ARGV
 from loom.tasks.edit_file import apply_file_edits, parse_text_edits
 from loom.tasks.request import TaskRequest
 
@@ -139,7 +140,7 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
             encoded = None
         if isinstance(encoded, list):
             return _invalid_process_input('Do not JSON-encode argv into command. Use process_execute: {"argv":["git","status"]}.')
-        shell = tuple((_options or {}).get("shell_argv", ("/bin/bash", "-o", "pipefail", "-c")))
+        shell = tuple((_options or {}).get("shell_argv", DEFAULT_SHELL_ARGV))
         return await execute_process("shell_execute", data, (*shell, script), _options)
 
     async def process_execute(input_value: Any, _options: Mapping[str, Any] | None = None) -> Result:
