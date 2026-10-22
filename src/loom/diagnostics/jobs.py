@@ -166,11 +166,14 @@ class SessionDiagnosis:
         with self.lock:
             jobs = [self._public(self._sync(j)) for j in self._jobs(sid)]
         runs = list(dict.fromkeys(p["run_id"] for p in self.service.store.processes(sid)))
+        model = state["task"].get("model") or config.get("default_model")
+        if self.service.config_path:
+            model = load_task_config(self.service.config_path).unwrap().resolve_model_name(model)
         return {
             "jobs": jobs,
             "runs": runs,
             "models": list(config["models"]),
-            "default_model": state["task"].get("model") or config.get("default_model"),
+            "default_model": model,
             "budgets": DEFAULTS,
             "budget_limits": MAXIMUM,
             "source_root": str(self.root) if self.root else None,
@@ -207,6 +210,8 @@ class SessionDiagnosis:
             raise ServiceError(self.source_error, 422)
         config, secret_values = self._configuration(state)
         model = payload.get("model") or state["task"].get("model") or config.get("default_model")
+        if isinstance(model, str) and self.service.config_path:
+            model = load_task_config(self.service.config_path).unwrap().resolve_model_name(model)
         if model is not None and (not isinstance(model, str) or model not in config["models"]):
             raise ServiceError("Select a configured model")
         run = payload.get("run_id", "latest")

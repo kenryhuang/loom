@@ -146,7 +146,7 @@ LightRAG 的 **Sync activity** 展示当前页面或文档、执行阶段、已�
 uv run loom
 
 # 使用服务 config.yaml 中定义的模型别名
-uv run loom --workspace /absolute/path/to/project --model main
+uv run loom --workspace /absolute/path/to/project --model dashscope/your-model-id
 
 # 重新连接，并恢复符合条件的暂停/失败任务
 uv run loom --resume SESSION_ID
@@ -203,26 +203,26 @@ uv run loom session budget SESSION_ID 20M
 需要多个模型或供应商参数时，创建配置文件：
 
 ```yaml
-default_model: main
+default_model: dashscope/your-model-id
 # 可选：为评估选择独立配置的模型别名。
-# evaluation_model: judge
+# evaluation_model: dashscope/your-fast-model-id
 # 可选：运行时验收模型，默认使用任务模型。
-# verification_model: judge
+# verification_model: dashscope/your-fast-model-id
 
-models:
-  main:
-    provider: openai
-    model: your-model-id
+providers:
+  dashscope:
     base_url: https://your-provider.example/v1
     api_key_env: LOOM_LLM_API_KEY
-    temperature: 0
-    max_completion_tokens: 8192
-
-  fast:
-    provider: openai
-    model: your-fast-model-id
-    base_url: https://your-provider.example/v1
-    api_key_env: LOOM_LLM_API_KEY
+    models:
+      your-model-id:
+        temperature: 0
+        max_completion_tokens: 8192
+        context_window_tokens: 128000
+        request_options:
+          enable_thinking: true
+      your-fast-model-id:
+        request_options:
+          enable_thinking: false
 ```
 
 启动后端时显式指定该文件：
@@ -231,14 +231,16 @@ models:
 uv run loom serve --data-dir .loom/service --config config.yaml
 ```
 
-`main`、`fast` 是 Loom 内部别名；`model` 是供应商的实际模型 ID。
-Web/TUI 中选择的是服务端配置的别名。
+`models` 下的节点名就是实际 API 模型 ID，无需再配置 `model` 字段。
+所有模型选择和角色引用均使用 `provider/model`，例如 `dashscope/your-model-id`。
 `api_key_env` 从后端环境变量或 `.env` 中读取 key。
 
-`provider: openai` 表示使用 OpenAI 兼容 Chat API 适配器。
+同一个 provider 仅共用 `base_url` 和 `api_key_env`，其他参数放在各自模型下。不同 provider 可以使用相同模型 ID。同一 API 模型需要不同参数配置时，使用独立的 provider 配置组（例如 `dashscope` 和 `dashscope_judge`）。Settings → Models 可填写供应商连接及其模型参数。旧版配置仍可读取，通过 Settings 保存时转换为新结构；顶层 `models` 和 `providers` 不能混用。迁移保留的 `model_aliases` 仅用于兼容旧 session、知识库及评估记录的引用，不会出现在选择列表中。
+
+每个模型默认使用 OpenAI 兼容 Chat API 适配器（`provider: openai`）。
 `max_completion_tokens` 限制模型输出，包含 reasoning 内容。
 
-验收输入预算默认使用**验证模型上下文的 60%**，按多语言 token 估算并预留输出空间，不再默认使用固定字符上限。已知模型容量自动识别；自定义模型或部署可在 `config.yaml` 的 `models.<别名>` 下设置 `context_window_tokens`（例如 `context_window_tokens: 128000`）。未知模型使用明确标注的 32,768 token 回退值。该字段仅供 Loom 使用，不发送给模型 API。任务显式设置的 `acceptance.max_prompt_chars` 仍作为额外上限；省略或设为 `null` 即使用自动预算。输入超限时会显示估算用量和容量，不会静默截断证据。输入估算与服务商报告的实际 token 用量分开记录。
+验收输入预算默认使用**验证模型上下文的 60%**，按多语言 token 估算并预留输出空间，不再默认使用固定字符上限。已知模型容量自动识别；自定义模型或部署可在 `config.yaml` 的 `providers.<供应商>.models.<模型ID>` 下设置 `context_window_tokens`（例如 `context_window_tokens: 128000`）。未知模型使用明确标注的 32,768 token 回退值。该字段仅供 Loom 使用，不发送给模型 API。任务显式设置的 `acceptance.max_prompt_chars` 仍作为额外上限；省略或设为 `null` 即使用自动预算。输入超限时会显示估算用量和容量，不会静默截断证据。输入估算与服务商报告的实际 token 用量分开记录。
 `request_options` 将供应商参数传入流式和非流式请求，例如模型支持的 thinking 参数。
 参数必须适用于该供应商和模型，不能覆盖 Loom 管理的 `messages`、
 `tools`、`stream` 等字段。
@@ -327,7 +329,7 @@ LightRAG 网站索引包含 LLM 实体/关系抽取和 embedding；
 
 ```bash
 uv run loom task '分析项目并提出改进建议' \
-  --workspace /absolute/path/to/project --config config.yaml --model main --tui
+  --workspace /absolute/path/to/project --config config.yaml --model dashscope/your-model-id --tui
 
 uv run loom task '读取 https://www.python.org/about/ 并总结，注明来源' \
   --task-spec examples/task-specs/research.yaml --config config.yaml

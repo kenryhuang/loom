@@ -76,6 +76,22 @@ function setup(api) {
   return { dom, view, $, root };
 }
 
+test('adaptive DAG is selectable without replacing the default workflow', () => {
+  const {dom, view, $} = setup({});
+  const configured = {...catalog, plugins: {context: [{id: 'bounded_context'}],
+    workflow: [{id: 'adaptive_dag'}, {id: 'dynamic'}, {id: 'legacy_planning'}]}};
+  view.configure(configured);
+  view.template(catalog.templates[0]);
+  assert.equal($('setup-workflow').value, 'legacy_planning');
+  $('setup-workflow').value = 'adaptive_dag';
+  $('setup-workflow').dispatchEvent(new dom.window.Event('change'));
+  assert.match($('setup-workflow-reason').textContent, /stable inputs.*read-only/);
+  const payload = {knowledge_base_ids: []};
+  view.apply(payload, catalog.templates[0]);
+  assert.equal(payload.task_spec.workflow.plugin, 'adaptive_dag');
+  dom.window.close();
+});
+
 test("recommendation is reviewable, tools can be changed, and workspace is explicitly bound", async () => {
   const requests = [];
   const { dom, view, $ } = setup({
@@ -226,5 +242,16 @@ test("task editing preserves existing plugin options, unavailable bindings and v
   assert.equal(payload.model, "removed-model");
   $("restart-max_tokens").value = "0";
   assert.throws(() => view.restartChanges(payload), /positive integers/);
+  dom.window.close();
+});
+
+test('editing an old session resolves its model alias to the provider/model option', () => {
+  const {dom, view, $} = setup({});
+  view.configure({...catalog, model_aliases: {main: 'cloud/glm-5.2'}});
+  const option = document.createElement('option'); option.value = 'cloud/glm-5.2'; option.textContent = option.value;
+  $('create-model').append(option);
+  view.loadTask({model: 'main', objective: 'Continue', limits: {max_window_chars: 9000}, task_spec: catalog.templates[0].task_spec}, []);
+  assert.equal($('create-model').value, 'cloud/glm-5.2');
+  assert.doesNotMatch($('create-model').textContent, /unavailable/);
   dom.window.close();
 });

@@ -4,6 +4,13 @@ import {JSDOM} from 'jsdom';
 import {SettingsView} from '../../src/loom/web/assets/views/settings.mjs';
 
 function setup(config) {
+  // Model fixtures use one provider; the API always returns the normalized hierarchy.
+  if (config.models) {
+    const {models: fixtures, ...rest} = config;
+    const models = Object.fromEntries(Object.entries(fixtures).map(([id, {model, ...options}]) => [id, options]));
+    for (const key of ['default_model', 'evaluation_model', 'verification_model']) if (rest[key]) rest[key] = `example/${rest[key]}`;
+    config = {...rest, providers: {example: {base_url: 'https://example.com/v1', api_key_env: 'TEST_KEY', models}}};
+  }
   const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
   const calls = [];
   const data = {path: '/service/config.yaml', revision: 'one', config};
@@ -28,19 +35,19 @@ test('typed settings save numbers, booleans, lists and model selection while pre
     assert.equal(document.querySelector('.settings-editor'), null);
     assert.doesNotMatch(document.body.textContent, /configuration JSON|Advanced JSON/);
     ctx.click('Models');
-    ctx.input('models.main.model', 'updated'); ctx.input('models.main.temperature', '.3');
-    ctx.input('models.main.request_options.enable_thinking', 'true');
+    ctx.input('providers.example.models.main.temperature', '.3');
+    ctx.input('providers.example.models.main.request_options.enable_thinking', 'true');
     ctx.input('run.max_steps', '12'); ctx.input('run.stream', 'false');
-    ctx.input('task.expected_outputs.0', 'Analysis report'); ctx.input('evaluation_model', 'main');
+    ctx.input('task.expected_outputs.0', 'Analysis report'); ctx.input('evaluation_model', 'example/main');
     await ctx.save();
     const saved = ctx.calls.find(([, options]) => options?.body)[1].body;
-    assert.equal(saved.revision, 'one'); assert.equal(saved.config.models.main.model, 'updated');
-    assert.equal(saved.config.models.main.temperature, .3);
-    assert.equal(saved.config.models.main.api_key, '••••••••');
-    assert.deepEqual(saved.config.models.main.request_options, {custom: {threshold: .25}, enable_thinking: true});
+    assert.equal(saved.revision, 'one'); assert.equal(saved.config.providers.example.models.main.model, undefined);
+    assert.equal(saved.config.providers.example.models.main.temperature, .3);
+    assert.equal(saved.config.providers.example.models.main.api_key, '••••••••');
+    assert.deepEqual(saved.config.providers.example.models.main.request_options, {custom: {threshold: .25}, enable_thinking: true});
     assert.deepEqual(saved.config.run, {timeout_ms: null, max_steps: 12, stream: false});
     assert.deepEqual(saved.config.task.expected_outputs, ['Analysis report']);
-    assert.equal(saved.config.evaluation_model, 'main'); assert.deepEqual(saved.config.extension, config.extension);
+    assert.equal(saved.config.evaluation_model, 'example/main'); assert.deepEqual(saved.config.extension, config.extension);
     assert.equal(Object.hasOwn(saved.config, 'meta_harness'), false);
     assert.match(document.body.textContent, /Configuration saved/);
   } finally {ctx.close();}
@@ -50,15 +57,15 @@ test('models and embedding services can be added with forms and selections refre
   const ctx = setup({models: {main: {model: 'main'}}, default_model: 'main'});
   try {
     await ctx.view.open(); ctx.click('Models');
-    document.querySelector('[aria-label="New model alias"]').value = 'reviewer'; ctx.click('Add model');
-    ctx.input('models.reviewer.model', 'review-model'); ctx.input('models.reviewer.base_url', 'https://example.com/v1');
-    ctx.input('evaluation_model', 'reviewer');
+    document.querySelector('[aria-label="New model ID"]').value = 'reviewer'; ctx.click('Add model');
+    ctx.input('providers.example.base_url', 'https://example.com/v1');
+    ctx.input('evaluation_model', 'example/reviewer');
     ctx.click('Embedding services'); ctx.click('Add embedding service');
     ctx.input('embedding_profiles.0.name', 'Local embeddings');
     ctx.input('embedding_profiles.0.endpoint', 'http://localhost:1234/v1/embeddings');
     await ctx.save();
     const config = ctx.calls.find(([, options]) => options?.body)[1].body.config;
-    assert.equal(config.evaluation_model, 'reviewer'); assert.equal(config.models.reviewer.model, 'review-model');
+    assert.equal(config.evaluation_model, 'example/reviewer'); assert.deepEqual(config.providers.example.models.reviewer, {});
     assert.equal(config.embedding_profiles[0].name, 'Local embeddings'); assert.match(config.embedding_profiles[0].id, /^emb_/);
   } finally {ctx.close();}
 });
@@ -66,13 +73,13 @@ test('models and embedding services can be added with forms and selections refre
 test('invalid values focus the right tab and prevent save without losing draft', async () => {
   const ctx = setup({models: {main: {model: 'test'}}, default_model: 'main'});
   try {
-    await ctx.view.open(); ctx.input('models.main.context_window_tokens', '50');
+    await ctx.view.open(); ctx.input('providers.example.models.main.context_window_tokens', '50');
     ctx.input('task.objective', 'Keep this draft');
     await ctx.save();
     assert.equal(ctx.calls.filter(([, options]) => options?.body).length, 0);
-    assert.equal(document.getElementById('settings-tab-models').getAttribute('aria-selected'), 'true');
+    assert.equal(document.getElementById('settings-tab-providers').getAttribute('aria-selected'), 'true');
     assert.equal(document.querySelector('[name="task.objective"]').value, 'Keep this draft');
-    ctx.input('models.main.context_window_tokens', '128000'); await ctx.save();
+    ctx.input('providers.example.models.main.context_window_tokens', '128000'); await ctx.save();
     assert.equal(ctx.calls.filter(([, options]) => options?.body).length, 1);
   } finally {ctx.close();}
 });
@@ -81,13 +88,13 @@ test('provider options can add typed nested parameters without a JSON editor', a
   const ctx = setup({models: {main: {model: 'test'}}});
   try {
     await ctx.view.open(); ctx.click('Models');
-    const name = document.querySelector('[aria-label="models.main.request_options parameter name"]');
+    const name = document.querySelector('[aria-label="providers.example.models.main.request_options parameter name"]');
     name.value = 'custom_limit';
-    const type = document.querySelector('[aria-label="models.main.request_options parameter type"]'); type.value = 'number';
+    const type = document.querySelector('[aria-label="providers.example.models.main.request_options parameter type"]'); type.value = 'number';
     [...name.parentElement.querySelectorAll('button')].find(node => node.textContent === 'Add parameter').click();
-    ctx.input('models.main.request_options.custom_limit', '9'); await ctx.save();
+    ctx.input('providers.example.models.main.request_options.custom_limit', '9'); await ctx.save();
     const config = ctx.calls.find(([, options]) => options?.body)[1].body.config;
-    assert.equal(config.models.main.request_options.custom_limit, 9);
+    assert.equal(config.providers.example.models.main.request_options.custom_limit, 9);
   } finally {ctx.close();}
 });
 
@@ -97,8 +104,42 @@ test('model removal preserves selected roles and untouched nested list values su
   try {
     await ctx.view.open(); ctx.click('Models'); ctx.click('Remove model');
     assert.match(document.body.textContent, /selected for a model role/);
-    assert.ok(document.querySelector('[name="models.main.model"]'));
+    assert.ok(document.querySelector('[name="providers.example.models.main.temperature"]'));
+    assert.equal(document.querySelector('[name="providers.example.models.main.model"]'), null);
     await ctx.save();
     assert.deepEqual(ctx.calls.find(([, options]) => options?.body)[1].body.config.extensions, extensions);
+  } finally {ctx.close();}
+});
+
+test('providers share connection fields, namespace model IDs and preserve model options', async () => {
+  const ctx = setup({providers: {
+    cloud: {base_url: 'https://cloud.example/v1', api_key_env: 'CLOUD_KEY', models: {main: {temperature: 0}}},
+  }, default_model: 'cloud/main'});
+  try {
+    await ctx.view.open(); ctx.click('Models');
+    assert.equal(document.querySelector('[name="providers.cloud.models.main.base_url"]'), null);
+    ctx.input('providers.cloud.base_url', 'https://new.example/v1');
+    ctx.input('providers.cloud.api_key_env', 'NEW_KEY');
+    document.querySelector('[aria-label="New provider name"]').value = 'local'; ctx.click('Add provider');
+    ctx.input('providers.local.base_url', 'http://localhost:8080/v1');
+    const local = document.querySelector('[name="providers.local.base_url"]').closest('section.settings-card');
+    const alias = local.querySelector('[aria-label="New model ID"]');
+    const add = [...local.querySelectorAll('button')].find(node => node.textContent === 'Add model');
+    alias.value = 'main'; add.click();
+    const newAlias = [...document.querySelectorAll('[aria-label="New model ID"]')].at(-1);
+    newAlias.value = 'main';
+    [...newAlias.parentElement.querySelectorAll('button')].find(node => node.textContent === 'Add model').click();
+    assert.match(newAlias.validationMessage, /already exists/);
+    newAlias.value = ''; newAlias.dispatchEvent(new ctx.dom.window.Event('input'));
+    ctx.input('providers.local.models.main.temperature', '.7');
+    ctx.input('evaluation_model', 'local/main');
+    await ctx.save();
+    const config = ctx.calls.find(([, options]) => options?.body)[1].body.config;
+    assert.equal(config.models, undefined);
+    assert.equal(config.providers.cloud.base_url, 'https://new.example/v1');
+    assert.equal(config.providers.cloud.api_key_env, 'NEW_KEY');
+    assert.equal(config.providers.cloud.models.main.temperature, 0);
+    assert.equal(config.providers.local.models.main.temperature, .7);
+    assert.equal(config.evaluation_model, 'local/main');
   } finally {ctx.close();}
 });

@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 
 from loom.service.contracts import ServiceError
-from loom.tasks.config import _parse_task_config, parse_yaml_document
+from loom.tasks.config import _parse_task_config, parse_yaml_document, provider_config_document
 
 LOCK = threading.RLock()
 MASK = '••••••••'
@@ -43,7 +43,8 @@ def yaml_text(value, indent=0):
     lines = []
     rows = value.items() if isinstance(value, dict) else enumerate(value)
     for key, child in rows:
-        prefix = ' ' * indent + (str(key) + ':' if isinstance(value, dict) else '-')
+        yaml_key = json.dumps(str(key), ensure_ascii=False) if any(c in str(key) for c in ':#\n"') else str(key)
+        prefix = ' ' * indent + (yaml_key + ':' if isinstance(value, dict) else '-')
         if isinstance(child, (dict, list)) and child:
             lines.extend([prefix, yaml_text(child, indent + 2)])
         else:
@@ -61,7 +62,10 @@ class Settings:
         parsed = parse_yaml_document(raw, self.path)
         if not parsed.ok:
             raise ServiceError('Cannot parse configuration: ' + parsed.error.message)
-        return raw, parsed.value or {}
+        try:
+            return raw, provider_config_document(parsed.value or {})
+        except ValueError as exc:
+            raise ServiceError(str(exc)) from exc
 
     def get(self):
         with LOCK:
@@ -76,11 +80,14 @@ class Settings:
             raw, old = self.read()
             if payload['revision'] != hashlib.sha256(raw.encode()).hexdigest():
                 raise ServiceError('Configuration changed; reload settings before saving', 409)
-            data = restore(payload['config'], old)
+            try:
+                data = restore(provider_config_document(payload['config']), old)
+            except ValueError as exc:
+                raise ServiceError(str(exc)) from exc
             parsed = _parse_task_config(data, self.path)
             if not parsed.ok:
                 raise ServiceError(parsed.error.message)
-            if data.get('default_model') and data['default_model'] not in data.get('models', {}):
+            if data.get('default_model') and data['default_model'] not in parsed.value.models:
                 raise ServiceError('default_model must name a configured model')
             if data.get('meta_harness'):
                 from loom.optimize.config import _parse_meta

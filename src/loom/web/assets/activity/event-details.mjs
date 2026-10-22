@@ -62,6 +62,10 @@ export function eventPresentation(kind, data) {
       sections: meaningfulFields({workspace: profile.workspace, limitations: profile.limitations,
         configuration: profile.configuration, files: profile.files})};
   }
+  if (kind?.startsWith('workflow.lane.')) {
+    return {title: kind.replaceAll('.', ' '), subject: data.objective || data.node_id || '',
+      sections: meaningfulFields({node: data.node_id, lane: data.lane_id, context: data.context_session_id, reason: data.reason, result: data.result})};
+  }
   if (kind?.startsWith("workflow.node.")) {
     const workflow = data.workflow || {};
     const nodes = workflow.workflow?.nodes || [];

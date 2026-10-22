@@ -1,5 +1,5 @@
 import {element} from '../markdown.mjs';
-import {action, fields, textField, modelChoice, modelFields, requestFields, taskFields, runFields, metaFields, labelFor} from './settings-fields.mjs';
+import {action, fields, textField, modelChoice, providerFields, modelFields, requestFields, taskFields, runFields, metaFields, labelFor} from './settings-fields.mjs';
 
 export class SettingsView {
   constructor(root, {api, changed}) {Object.assign(this, {root, api, changed});}
@@ -24,9 +24,9 @@ export class SettingsView {
     const controls = element('fieldset', 'settings-controls'); this.root.append(controls);
     const tabs = element('div', 'evaluation-tabs settings-tabs'), body = element('div', 'settings-body');
     tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Configuration categories'); controls.append(tabs, body);
-    const groups = [['general', 'Model selection'], ['models', 'Models'], ['embedding_profiles', 'Embedding services'],
+    const groups = [['general', 'Model selection'], ['providers', 'Models'], ['embedding_profiles', 'Embedding services'],
       ['task', 'Task defaults'], ['run', 'Run defaults'], ['meta_harness', 'Evaluation / Evolve']];
-    const extras = Object.keys(draft).filter(key => draft[key] !== null && typeof draft[key] === 'object' && !groups.some(([id]) => key === id));
+    const extras = Object.keys(draft).filter(key => key !== 'model_aliases' && draft[key] !== null && typeof draft[key] === 'object' && !groups.some(([id]) => key === id));
     groups.push(...extras.map(key => [key, labelFor(key)]));
     const panels = new Map();
     const choose = key => {
@@ -35,7 +35,7 @@ export class SettingsView {
         panel.hidden = id !== key; tab.setAttribute('aria-selected', String(id === key)); tab.tabIndex = id === key ? 0 : -1;
       }
     };
-    const context = {models: () => draft.models || {}};
+    const context = {models: () => Object.fromEntries(Object.entries(draft.providers || {}).flatMap(([name, provider]) => Object.entries(provider.models || {}).map(([id, model]) => [`${name}/${id}`, model])))};
     for (const [key, title] of groups) {
       const tab = action(title, () => choose(key)), panel = element('section', 'settings-category');
       tab.id = `settings-tab-${key}`; panel.id = `settings-content-${key}`;
@@ -56,7 +56,7 @@ export class SettingsView {
         fields(panel, () => Object.fromEntries(scalarKeys.filter(k => Object.hasOwn(draft, k)).map(k => [k, draft[k]])), next => {
           for (const k of scalarKeys) {if (Object.hasOwn(next, k)) draft[k] = next[k]; else delete draft[k];}
         }, {default_model: modelChoice('Default task model'), evaluation_model: modelChoice('Deep evaluation model'), verification_model: modelChoice('Acceptance verifier model')}, context);
-      } else if (key === 'models') this.models(panel, context, announce);
+      } else if (key === 'providers') this.providers(panel, context, announce);
       else if (key === 'embedding_profiles') this.embeddings(panel, context);
       else {
         if (key === 'run') panel.append(element('p', 'muted', 'Defaults for new task runs. Empty fields retain Loom defaults.'));
@@ -76,7 +76,7 @@ export class SettingsView {
         for (let node = invalid.parentElement; node && node !== controls; node = node.parentElement) if (node.tagName === 'DETAILS') node.open = true;
         invalid.reportValidity(); invalid.focus(); announce('Check the highlighted field before saving.'); return;
       }
-      const models = draft.models || {};
+      const models = context.models();
       for (const key of ['default_model', 'evaluation_model', 'verification_model']) {
         if (draft[key] && !Object.hasOwn(models, draft[key])) {announce(`${labelFor(key)} must refer to a configured model.`); choose('general'); return;}
       }
@@ -98,34 +98,60 @@ export class SettingsView {
     controls.append(footer);
   }
   redraw() {this.render({...this.data, config: this.draft});}
-  models(root, context, announce) {
-    const models = this.draft.models || {};
-    if (!Object.keys(models).length) root.append(element('p', 'muted', 'No models configured. Add a model to get started.'));
-    for (const [name, model] of Object.entries(models)) {
-      const card = element('details', 'settings-card'); card.open = name === (this.openModel || this.draft.default_model || Object.keys(models)[0]);
-      const summary = element('summary'); summary.append(element('strong', '', name), element('span', 'muted', model.model || 'New model'));
-      card.append(summary); root.append(card);
-      fields(card, () => Object.fromEntries(Object.entries(models[name]).filter(([key]) => key !== 'request_options')),
-        value => {models[name] = {...value, ...(models[name].request_options !== undefined ? {request_options: models[name].request_options} : {})};},
-        modelFields, context, `models.${name}`);
-      const advanced = element('details', 'settings-field-group'); advanced.append(element('summary', '', 'Provider request options'));
-      fields(advanced, () => models[name].request_options, value => {models[name].request_options = value;}, requestFields, {...context, compact: true}, `models.${name}.request_options`, true);
-      card.append(advanced, action('Remove model', () => {
-        const used = ['default_model', 'evaluation_model', 'verification_model'].some(key => this.draft[key] === name)
-          || ['proposer_model', 'solver_model', 'judge_model'].some(key => this.draft.meta_harness?.[key] === name);
-        if (used) {announce(`“${name}” is selected for a model role. Change its model selections before removing it.`); return;}
-        delete models[name]; this.redraw();
+  providers(root, context, announce) {
+    const providers = this.draft.providers ||= {};
+    for (const [name, provider] of Object.entries(providers)) {
+      const card = element('section', 'settings-card');
+      card.append(element('h3', '', name)); root.append(card);
+      fields(card, () => Object.fromEntries(Object.entries(providers[name]).filter(([key]) => key !== 'models')),
+        value => {providers[name] = {...value, models: providers[name].models};}, providerFields, context, `providers.${name}`);
+      this.models(card, context, announce, name, provider.models ||= {});
+      card.append(action('Remove provider', () => {
+        if (Object.keys(providers[name].models).length) {announce('Remove the provider’s models first.'); return;}
+        delete providers[name]; this.redraw();
       }));
     }
     const add = element('div', 'settings-add-model'), name = element('input');
-    name.placeholder = 'Model alias, e.g. main or evaluator'; name.setAttribute('aria-label', 'New model alias');
+    name.placeholder = 'Provider name, e.g. dashscope'; name.setAttribute('aria-label', 'New provider name');
+    name.oninput = () => name.setCustomValidity('');
+    add.append(name, action('Add provider', () => {
+      const key = name.value.trim();
+      name.setCustomValidity(!/^[a-zA-Z0-9_-]+$/.test(key) ? 'Use letters, numbers, underscores or hyphens.' : Object.hasOwn(providers, key) ? 'This provider already exists.' : '');
+      if (!name.reportValidity()) return;
+      Object.defineProperty(providers, key, {value: {base_url: '', api_key_env: 'LOOM_LLM_API_KEY', models: {}}, enumerable: true, writable: true, configurable: true});
+      this.redraw();
+    })); root.append(add);
+  }
+  models(root, context, announce, providerName, models) {
+    const prefix = `providers.${providerName}.models`;
+    if (!Object.keys(models).length) root.append(element('p', 'muted', 'No models configured. Add a model to get started.'));
+    for (const name of Object.keys(models)) {
+      const card = element('details', 'settings-card'); card.open = `${providerName}/${name}` === (this.openModel || this.draft.default_model || `${providerName}/${Object.keys(models)[0]}`);
+      const summary = element('summary'); summary.append(element('strong', '', `${providerName}/${name}`));
+      card.append(summary); root.append(card);
+      fields(card, () => Object.fromEntries(Object.entries(models[name]).filter(([key]) => key !== 'request_options')),
+        value => {models[name] = {...value, ...(models[name].request_options !== undefined ? {request_options: models[name].request_options} : {})};},
+        modelFields, context, `${prefix}.${name}`);
+      const advanced = element('details', 'settings-field-group'); advanced.append(element('summary', '', 'Provider request options'));
+      fields(advanced, () => models[name].request_options, value => {models[name].request_options = value;}, requestFields, {...context, compact: true}, `${prefix}.${name}.request_options`, true);
+      card.append(advanced, action('Remove model', () => {
+        const used = ['default_model', 'evaluation_model', 'verification_model'].some(key => this.draft[key] === `${providerName}/${name}`)
+          || ['proposer_model', 'solver_model', 'judge_model'].some(key => this.draft.meta_harness?.[key] === `${providerName}/${name}`);
+        if (used) {announce(`“${name}” is selected for a model role. Change its model selections before removing it.`); return;}
+        delete models[name];
+        if (this.draft.model_aliases) this.draft.model_aliases = Object.fromEntries(Object.entries(this.draft.model_aliases).filter(([, target]) => target !== `${providerName}/${name}`));
+        this.redraw();
+      }));
+    }
+    const add = element('div', 'settings-add-model'), name = element('input');
+    name.placeholder = 'Model ID, e.g. glm-5.2'; name.setAttribute('aria-label', 'New model ID');
     name.oninput = () => name.setCustomValidity('');
     add.append(name, action('Add model', () => {
       const key = name.value.trim();
-      name.setCustomValidity(!/^[a-zA-Z0-9_-]+$/.test(key) ? 'Use letters, numbers, underscores or hyphens.' : Object.hasOwn(models, key) ? 'This model alias already exists.' : '');
+      name.setCustomValidity(!key || /\s/.test(key) ? 'Enter a model ID without whitespace.' : Object.hasOwn(models, key) ? 'This model already exists in this provider.' : '');
       if (!name.reportValidity()) return;
-      Object.defineProperty(models, key, {value: {provider: 'openai', model: '', base_url: '', api_key_env: 'LOOM_LLM_API_KEY'}, enumerable: true, writable: true, configurable: true});
-      this.draft.models = models; this.openModel = key; this.redraw();
+      Object.defineProperty(models, key, {value: {}, enumerable: true, writable: true, configurable: true});
+      this.openModel = `${providerName}/${key}`; this.redraw();
     })); root.append(add);
   }
   embeddings(root, context) {

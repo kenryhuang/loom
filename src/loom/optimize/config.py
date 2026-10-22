@@ -21,13 +21,15 @@ from loom.optimize.contracts import (
     SplitRatios,
     TaskSetConfig,
 )
-from loom.tasks.config import load_task_config, parse_yaml_document
+from loom.tasks.config import load_task_config, parse_yaml_document, provider_config_document
 
 _REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
 _CANDIDATE_KINDS = frozenset({"declarative_patch", "executable_component"})
 _APPROVAL_KINDS = frozenset({"medium", "high", "executable"})
 _OBJECTIVE_METRICS = frozenset({"task_success_rate", "total_tokens", "wall_time_ms"})
-_META_FIELDS = frozenset({"proposer_model", "solver_model", "judge_model", "search", "tasks", "objectives", "budgets", "execution", "governance", "seed_analysis_version"})
+_META_FIELDS = frozenset({
+    "proposer_model", "solver_model", "judge_model", "search", "tasks", "objectives", "budgets", "execution", "governance", "seed_analysis_version",
+})
 
 
 class _OptimizeConfigError(ValueError):
@@ -51,6 +53,8 @@ def load_optimize_config(path: str | Path) -> Result:
         else:
             payload = tomllib.loads(text)
         root = _mapping(payload, "config")
+        if "providers" in root:
+            root = provider_config_document(root)
         meta_value = root.get("meta_harness")
         meta = _parse_meta(_mapping(meta_value, "meta_harness"), task_config.value.models)
         _validate_model_options(task_config.value.models)

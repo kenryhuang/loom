@@ -14,7 +14,7 @@ def dispatch(handler, method, parts):
         from loom.tasks.config import load_task_config
 
         loaded = load_task_config(store.config_path) if store.config_path else None
-        models = [{"id": k, "label": f"{k} · {v.model}"} for k, v in loaded.value.models.items()] if loaded and loaded.ok else []
+        models = [{"id": k, "label": k if "/" in k else f"{k} · {value.model}"} for k, value in loaded.value.models.items()] if loaded and loaded.ok else []
         return 200, {"knowledge_bases": store.list(), "embedding_profiles": store.profiles(), "engines": list(ENGINES), "models": models}
     if not tail and method == "POST":
         return 201, store.create(handler._body())

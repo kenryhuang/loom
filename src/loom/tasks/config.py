@@ -77,9 +77,14 @@ class TaskRunnerConfig:
     models: Mapping[str, ModelConfig] = field(default_factory=dict)
     evaluation_model: str | None = None
     verification_model: str | None = None
+    model_aliases: Mapping[str, str] = field(default_factory=dict)
+
+    def resolve_model_name(self, name: str | None) -> str | None:
+        return self.model_aliases.get(name, name)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "models", dict(self.models))
+        object.__setattr__(self, "model_aliases", dict(self.model_aliases))
 
 
 def load_task_config(path: str | os.PathLike[str]) -> Result:
@@ -126,7 +131,7 @@ def create_provider_from_task_config(
     env: Mapping[str, str] | None = None,
     http_client: Any = None,
 ) -> Result:
-    selected_name = model_name or config.default_model
+    selected_name = config.resolve_model_name(model_name or config.default_model)
     if not selected_name:
         return err(make_loom_error("VALIDATION_FAILED", "No model selected and config has no default_model", retryable=False))
 
@@ -172,7 +177,122 @@ def create_provider_from_task_config(
     )
 
 
+def provider_config_document(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize model IDs and preserve legacy references without listing aliases."""
+    result = dict(payload)
+    if "providers" in result:
+        if "models" in result:
+            raise ValueError("Use providers or legacy models, not both")
+        return _canonical_provider_document(result)
+    legacy = result.pop("models", {})
+    if not isinstance(legacy, Mapping):
+        raise ValueError("Task config models must be a table")
+    providers: dict[str, Any] = {}
+    for name, model in legacy.items():
+        if not isinstance(model, Mapping):
+            raise ValueError(f"Model {name} must be a table")
+        shared = {key: model[key] for key in ("base_url", "api_key_env") if key in model}
+        group = next((p for p in providers.values() if {k: v for k, v in p.items() if k != "models"} == shared), None)
+        if group is None:
+            group = {**shared, "models": {}}
+            providers[f"provider_{len(providers) + 1}"] = group
+        group["models"][name] = {k: v for k, v in model.items() if k not in shared}
+    result["providers"] = providers
+    return _canonical_provider_document(result)
+
+
+def _canonical_provider_document(document: dict[str, Any]) -> dict[str, Any]:
+    from copy import deepcopy
+
+    result = deepcopy(document)
+    providers = result["providers"]
+    if not isinstance(providers, Mapping):
+        raise ValueError("providers must be a table")
+    aliases = result.get("model_aliases", {})
+    if not isinstance(aliases, dict):
+        raise ValueError("model_aliases must be a table")
+    for provider_name, group in list(providers.items()):
+        if not isinstance(group, dict) or not isinstance(group.get("models"), Mapping):
+            raise ValueError(f"providers.{provider_name}.models must be a table")
+        children = {}
+        for old_name, value in group["models"].items():
+            if not isinstance(value, Mapping):
+                raise ValueError(f"providers.{provider_name}.models.{old_name} must be a table")
+            model = dict(value)
+            identifier = model.pop("model", old_name)
+            if not isinstance(identifier, str) or not identifier.strip() or identifier != identifier.strip():
+                raise ValueError(f"providers.{provider_name}: model ID must be a nonempty string without surrounding whitespace")
+            target_provider = provider_name
+            if identifier in children:
+                # Old aliases can configure the same API model differently. Preserve both.
+                base = f"{provider_name}_{old_name}"
+                target_provider = base
+                index = 2
+                while target_provider in providers:
+                    target_provider = f"{base}_{index}"
+                    index += 1
+                providers[target_provider] = {**{k: v for k, v in group.items() if k != "models"}, "models": {identifier: model}}
+            else:
+                children[identifier] = model
+            if "model" in value:
+                target = f"{target_provider}/{identifier}"
+                for alias in (old_name, f"{provider_name}/{old_name}"):
+                    if alias != target:
+                        if alias in aliases and aliases[alias] != target:
+                            raise ValueError(f"Ambiguous legacy model alias {alias}; use provider/model")
+                        aliases[alias] = target
+        group["models"] = children
+    for key in ("default_model", "evaluation_model", "verification_model"):
+        if isinstance(result.get(key), str):
+            result[key] = aliases.get(result[key], result[key])
+    if isinstance(result.get("meta_harness"), dict):
+        for key in ("proposer_model", "solver_model", "judge_model"):
+            value = result["meta_harness"].get(key)
+            if isinstance(value, str):
+                result["meta_harness"][key] = aliases.get(value, value)
+    if aliases:
+        result["model_aliases"] = aliases
+    return result
+
+
+def _resolved_models(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if "providers" not in payload:
+        legacy = payload.get("models", {})
+        if not isinstance(legacy, Mapping):
+            raise ValueError("Task config models must be a table")
+        return dict(legacy)
+    providers = payload["providers"]
+    if not isinstance(providers, Mapping):
+        raise ValueError("providers must be a table")
+    models = {}
+    for name, group in providers.items():
+        location = f"providers.{name}"
+        if not isinstance(name, str) or not name.strip() or "/" in name or not isinstance(group, Mapping):
+            raise ValueError(f"{location} must be a named provider table")
+        unknown = set(group) - {"base_url", "api_key_env", "models"}
+        if unknown:
+            raise ValueError(f"{location}: model-specific fields must be under models: {', '.join(sorted(unknown))}")
+        for key in ("base_url", "api_key_env"):
+            if key in group and not isinstance(group[key], str):
+                raise ValueError(f"{location}.{key} must be a string")
+        children = group.get("models")
+        if not isinstance(children, Mapping):
+            raise ValueError(f"{location}.models must be a table")
+        for alias, model in children.items():
+            if not isinstance(alias, str) or not alias.strip() or not isinstance(model, Mapping):
+                raise ValueError(f"{location}.models.{alias} must be a named model table")
+            if {"base_url", "api_key_env"} & set(model):
+                raise ValueError(f"{location}.models.{alias}: base_url/api_key_env belong on the provider")
+            models[f"{name}/{alias}"] = {**{k: v for k, v in group.items() if k != "models"}, **model, "model": alias}
+    return models
+
+
 def _parse_task_config(payload: Mapping[str, Any], path: Path) -> Result:
+    if "providers" in payload:
+        try:
+            payload = provider_config_document(payload)
+        except ValueError as exc:
+            return err(make_loom_error("VALIDATION_FAILED", str(exc), retryable=False, metadata={"path": str(path)}))
     task = _parse_task_defaults(payload.get("task", {}), path)
     if not task.ok:
         return task
@@ -180,9 +300,10 @@ def _parse_task_config(payload: Mapping[str, Any], path: Path) -> Result:
     if not run.ok:
         return run
 
-    models_payload = payload.get("models", {})
-    if not isinstance(models_payload, Mapping):
-        return err(make_loom_error("VALIDATION_FAILED", "Task config models must be a table", retryable=False, metadata={"path": str(path)}))
+    try:
+        models_payload = _resolved_models(payload)
+    except ValueError as exc:
+        return err(make_loom_error("VALIDATION_FAILED", str(exc), retryable=False, metadata={"path": str(path)}))
 
     models: dict[str, ModelConfig] = {}
     for name, value in models_payload.items():
@@ -200,6 +321,13 @@ def _parse_task_config(payload: Mapping[str, Any], path: Path) -> Result:
             return parsed
         models[str(name)] = parsed.value
 
+    aliases = payload.get("model_aliases", {})
+    if not isinstance(aliases, Mapping) or any(
+        not isinstance(k, str) or not isinstance(v, str) or v not in models or k in models
+        for k, v in aliases.items()
+    ):
+        return err(make_loom_error("VALIDATION_FAILED", "model_aliases must map legacy names to configured provider/model IDs", retryable=False))
+
     default_model = payload.get("default_model")
     if default_model is not None and not isinstance(default_model, str):
         return err(make_loom_error("VALIDATION_FAILED", "default_model must be a string", retryable=False, metadata={"path": str(path)}))
@@ -211,7 +339,7 @@ def _parse_task_config(payload: Mapping[str, Any], path: Path) -> Result:
     if verification_model is not None and (not isinstance(verification_model, str) or verification_model not in models):
         return err(make_loom_error("VALIDATION_FAILED", "verification_model must name a configured model", retryable=False))
     return ok(TaskRunnerConfig(default_model=default_model, task=task.value, run=run.value, models=models,
-                               evaluation_model=evaluation_model, verification_model=verification_model))
+                               evaluation_model=evaluation_model, verification_model=verification_model, model_aliases=aliases))
 
 
 def _parse_task_defaults(payload: Any, path: Path) -> Result:
@@ -513,6 +641,16 @@ def _looks_like_yaml_mapping_entry(value: str) -> bool:
 
 
 def _split_yaml_mapping_line(line: str, line_number: int) -> tuple[str, str | None]:
+    if line.startswith('"'):
+        try:
+            key, end = json.JSONDecoder().raw_decode(line)
+        except ValueError as exc:
+            raise _YamlParseError(line_number, "invalid quoted mapping key") from exc
+        remaining = line[end:].lstrip()
+        if not isinstance(key, str) or not key or not remaining.startswith(":"):
+            raise _YamlParseError(line_number, "expected quoted key: value")
+        value = remaining[1:].strip()
+        return key, value or None
     if ":" not in line:
         raise _YamlParseError(line_number, "expected key: value")
     key, value = line.split(":", 1)

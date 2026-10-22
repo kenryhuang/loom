@@ -320,6 +320,20 @@
             rows="3"
             placeholder="What should Loom work on?"
           ></textarea>
+          <div id="workspace-field">
+            <label for="create-workspace">Workspace path</label
+            ><input
+              id="create-workspace"
+              placeholder="/absolute/path/to/project"
+              aria-describedby="workspace-hint"
+            />
+            <p id="workspace-hint" class="muted small">
+              Existing directory on the Loom service machine. Required for file
+              and command tools; optional otherwise. Enter the full path.
+            </p>
+          </div>
+          <label for="create-model">Model</label
+          ><select id="create-model"></select>
           <div class="setup-assistance">
             <button id="setup-recommend" type="button" class="quiet">
               Recommend with LLM
@@ -361,20 +375,6 @@
           <label for="create-title"
             >Session title <span class="muted">(optional)</span></label
           ><input id="create-title" placeholder="A name for this work" />
-          <div id="workspace-field">
-            <label for="create-workspace">Workspace path</label
-            ><input
-              id="create-workspace"
-              placeholder="/absolute/path/to/project"
-              aria-describedby="workspace-hint"
-            />
-            <p id="workspace-hint" class="muted small">
-              Existing directory on the Loom service machine. Required for file
-              and command tools; optional otherwise. Enter the full path.
-            </p>
-          </div>
-          <label for="create-model">Model</label
-          ><select id="create-model"></select>
           <fieldset id="restart-settings" hidden disabled>
             <legend>Execution limits</legend>
             <label for="restart-plan-mode">Planning mode (legacy workflow)</label>

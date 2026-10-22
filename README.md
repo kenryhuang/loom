@@ -169,7 +169,7 @@ Python package; it needs no Node runtime or separate frontend server.
 uv run loom
 
 # New session using a named model from the service configuration
-uv run loom --workspace /absolute/path/to/project --model main
+uv run loom --workspace /absolute/path/to/project --model dashscope/your-model-id
 
 # Reconnect to an existing session and resume eligible paused/failed work
 uv run loom --resume SESSION_ID
@@ -228,26 +228,26 @@ preserving the current run's token, step, and model-call usage.
 For multiple models or provider-specific options, create a configuration file:
 
 ```yaml
-default_model: main
+default_model: dashscope/your-model-id
 # Optional: select a separately configured judge model for evaluation.
-# evaluation_model: judge
+# evaluation_model: dashscope/your-fast-model-id
 # Optional independent runtime acceptance model (otherwise uses the task model).
-# verification_model: judge
+# verification_model: dashscope/your-fast-model-id
 
-models:
-  main:
-    provider: openai
-    model: your-model-id
+providers:
+  dashscope:
     base_url: https://your-provider.example/v1
     api_key_env: LOOM_LLM_API_KEY
-    temperature: 0
-    max_completion_tokens: 8192
-
-  fast:
-    provider: openai
-    model: your-fast-model-id
-    base_url: https://your-provider.example/v1
-    api_key_env: LOOM_LLM_API_KEY
+    models:
+      your-model-id:
+        temperature: 0
+        max_completion_tokens: 8192
+        context_window_tokens: 128000
+        request_options:
+          enable_thinking: true
+      your-fast-model-id:
+        request_options:
+          enable_thinking: false
 ```
 
 Start the backend with this file explicitly:
@@ -256,14 +256,16 @@ Start the backend with this file explicitly:
 uv run loom serve --data-dir .loom/service --config config.yaml
 ```
 
-`main` and `fast` are Loom aliases; `model` is the provider's actual model ID.
-Web/TUI model selections refer to the aliases configured on the service.
+The key under `models` is the actual API model ID; no separate `model` field is needed.
+All model selections and role references use `provider/model`, such as `dashscope/your-model-id`.
 `api_key_env` resolves the key from the backend's environment or `.env`.
 
-`provider: openai` means the OpenAI-compatible Chat API adapter.
+Provider groups share only `base_url` and `api_key_env`; all other parameters belong to each model. The same model ID may appear under different providers. To keep different parameter profiles for the same API model, use separate provider groups (for example, `dashscope` and `dashscope_judge`). Settings → Models edits provider connections and their nested model profiles. Legacy configurations remain readable and are migrated when saved in Settings; do not mix top-level `models` with `providers`. Migration retains `model_aliases` only for old session/knowledge/evaluation references; aliases do not appear in selections.
+
+Each model defaults to the OpenAI-compatible Chat API adapter (`provider: openai`).
 `max_completion_tokens` caps output including reasoning content.
 
-Acceptance automatically budgets input at 60% of the verification model's context window, using a multilingual token estimate and reserving space for output. It no longer applies a fixed character cap by default. Known model capacities are resolved locally; for custom models or deployments, set `context_window_tokens` under `models.<alias>` in `config.yaml` (for example, `context_window_tokens: 128000`). Unknown models use a visibly labeled 32,768-token fallback. This metadata is not sent as an API parameter. An explicitly configured task-level `acceptance.max_prompt_chars` still acts as an additional cap; omit it or set it to `null` for automatic budgeting. Oversized evidence blocks with estimated usage and capacity details; it is not silently truncated. These estimates are separate from provider-reported usage.
+Acceptance automatically budgets input at 60% of the verification model's context window, using a multilingual token estimate and reserving space for output. It no longer applies a fixed character cap by default. Known model capacities are resolved locally; for custom models or deployments, set `context_window_tokens` under `providers.<provider>.models.<model-id>` in `config.yaml` (for example, `context_window_tokens: 128000`). Unknown models use a visibly labeled 32,768-token fallback. This metadata is not sent as an API parameter. An explicitly configured task-level `acceptance.max_prompt_chars` still acts as an additional cap; omit it or set it to `null` for automatic budgeting. Oversized evidence blocks with estimated usage and capacity details; it is not silently truncated. These estimates are separate from provider-reported usage.
 `request_options` passes provider-specific fields, such as supported thinking
 options, to both streaming and non-streaming requests. Options must match the
 chosen provider/model and cannot override Loom-owned fields such as
@@ -354,7 +356,7 @@ Run a task directly without the persistent service:
 
 ```bash
 uv run loom task 'Audit this project and suggest improvements' \
-  --workspace /absolute/path/to/project --config config.yaml --model main --tui
+  --workspace /absolute/path/to/project --config config.yaml --model dashscope/your-model-id --tui
 
 uv run loom task 'Read https://www.python.org/about/ and summarize with sources' \
   --task-spec examples/task-specs/research.yaml --config config.yaml

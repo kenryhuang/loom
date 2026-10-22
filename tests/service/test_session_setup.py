@@ -7,6 +7,7 @@ from loom.core import ok
 from loom.llm.api import LlmResponse, TokenUsage
 from loom.service.contracts import ServiceError
 from loom.service.session_setup import SessionSetup
+from loom.tasks.config import load_task_config
 from tests.service.test_api import api  # noqa: F401
 
 
@@ -130,3 +131,89 @@ def test_uninstalled_bindings_are_rejected(api, change):  # noqa: F811
     server.session_setup.provider_factory = lambda _: Recommender(proposal(**change))
     with pytest.raises(ServiceError, match="unsupported configuration"):
         client._json("/v1/session-setup/recommend", {"objective": "Do work"})
+
+
+@pytest.mark.parametrize("empty", [None, [], {}])
+def test_empty_binding_reasons_are_normalized_without_changing_selections(api, empty):  # noqa: F811
+    service, server, client, _ = api
+    provider = Recommender(proposal(knowledge_reasons=empty, external_tool_reasons=empty, plugin_reasons=empty))
+    server.session_setup.provider_factory = lambda _: provider
+    before = service.store.list_sessions()
+
+    result = client._json("/v1/session-setup/recommend", {"objective": "Explain the code"})
+
+    assert result["knowledge_base_ids"] == result["external_tools"] == []
+    assert result["knowledge_reasons"] == result["external_tool_reasons"] == result["plugin_reasons"] == {}
+    assert result["plugins"] == {}
+    assert result["tool_collections"] == ["filesystem", "task_control"]
+    assert len(provider.calls) == 1
+    assert service.store.list_sessions() == before
+
+
+def test_binding_reason_keys_are_normalized_to_selected_bindings(api):  # noqa: F811
+    _, server, client, _ = api
+    provider = Recommender(proposal(
+        knowledge_reasons={"base_id": "No relevant knowledge bases"},
+        external_tool_reasons={"tool_id": "No external tools needed"},
+        plugins={"context": "bounded_context", "workflow": "dynamic"},
+        plugin_reasons={"bounded_context": "Read code", "dynamic": "Direct explanation", "legacy_planning": "Not needed"},
+    ))
+    server.session_setup.provider_factory = lambda _: provider
+
+    result = client._json("/v1/session-setup/recommend", {"objective": "Explain the code"})
+
+    assert result["knowledge_reasons"] == result["external_tool_reasons"] == {}
+    assert result["plugin_reasons"] == {"context": "Read code", "workflow": "Direct explanation"}
+    assert result["plugins"] == {"context": "bounded_context", "workflow": "dynamic"}
+    assert result["knowledge_base_ids"] == result["external_tools"] == []
+    assert len(provider.calls) == 1
+    assert "when no items are selected, return {}" in provider.calls[0][0].content
+
+
+def test_plugin_kind_reason_takes_precedence_over_plugin_id_reason(api):  # noqa: F811
+    _, server, client, _ = api
+    server.session_setup.provider_factory = lambda _: Recommender(proposal(
+        plugins={"workflow": "dynamic"},
+        plugin_reasons={"workflow": "Canonical reason", "dynamic": "Alternate reason"},
+    ))
+    result = client._json("/v1/session-setup/recommend", {"objective": "Explain the code"})
+    assert result["plugin_reasons"] == {"workflow": "Canonical reason"}
+
+
+@pytest.mark.parametrize("reasons", ["not an object", ["not empty"], {"workflow": {"reason": "nested"}}, {"workflow": "x" * 1001}])
+def test_malformed_binding_reasons_identify_the_field(api, reasons):  # noqa: F811
+    _, server, client, _ = api
+    server.session_setup.provider_factory = lambda _: Recommender(proposal(plugins={"workflow": "dynamic"}, plugin_reasons=reasons))
+    with pytest.raises(ServiceError, match="Invalid plugin_reasons"):
+        client._json("/v1/session-setup/recommend", {"objective": "Explain the code"})
+
+
+@pytest.mark.parametrize("thinking,effort", [(True, "xhigh"), (False, "high")])
+def test_recommendation_preserves_configured_model_options(api, monkeypatch, thinking, effort):  # noqa: F811
+    service, _, client, directory = api
+    config_path = directory / "models.yaml"
+    config_path.write_text(
+        'default_model: cloud/setup-model\nproviders:\n  cloud:\n    base_url: https://example.test/v1\n'
+        '    models:\n      setup-model:\n        max_completion_tokens: 16384\n        request_options:\n'
+        f'          enable_thinking: {str(thinking).lower()}\n          reasoning_effort: {effort}\n',
+    )
+    service.config_path = str(config_path)
+    before = config_path.read_bytes()
+    configured = load_task_config(config_path).value.models["cloud/setup-model"]
+    provider = Recommender()
+    selected = []
+
+    def create_provider(config, *, model_name):
+        assert model_name == "cloud/setup-model"
+        selected.append(config.models[model_name])
+        return ok(provider)
+
+    monkeypatch.setattr("loom.service.session_setup.create_provider_from_task_config", create_provider)
+    result = client._json("/v1/session-setup/recommend", {"objective": "Explain the code", "model": "cloud/setup-model"})
+
+    assert result["model"] == "cloud/setup-model"
+    assert len(selected) == len(provider.calls) == 1
+    assert selected[0].request_options == configured.request_options
+    assert selected[0].max_completion_tokens == 4096
+    assert configured.max_completion_tokens == 16384
+    assert config_path.read_bytes() == before

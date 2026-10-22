@@ -32,9 +32,9 @@ def binding(config_path, model):
     if not config_path:
         raise ServiceError("LightRAG requires a configured LLM model", 422)
     loaded = load_task_config(config_path)
-    if not loaded.ok or model not in loaded.value.models:
+    if not loaded.ok or loaded.value.resolve_model_name(model) not in loaded.value.models:
         raise ServiceError("Select an available indexing model", 422)
-    value = loaded.value.models[model]
+    value = loaded.value.models[loaded.value.resolve_model_name(model)]
     identity = {"provider": value.provider, "model": value.model, "base_url": value.base_url,
                 "temperature": value.temperature, "request_options": materialize_request_options(value.request_options)}
     return hashlib.sha256(canonical(identity).encode()).hexdigest()

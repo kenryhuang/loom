@@ -27,6 +27,7 @@ from loom.tasks.evidence import PAGE_CHARS, artifact_page, source_preview
 from loom.tools.collections import builtin_collection, document_collection, research_collection
 from loom.tools.contracts import AffordanceBudget, ToolCatalog
 from loom.tools.resolver import ToolResolver
+from loom.workflows.adaptive_dag import AdaptiveDagWorkflow
 from loom.workflows.dynamic import DynamicWorkflowPolicy
 from loom.workflows.legacy import LegacyPlanningWorkflow
 
@@ -118,6 +119,7 @@ def default_plugin_registry():
     registry.register("execution_runtime", "native_os", lambda config, **services: NativeToolExecutionRuntime(config, **services))
     registry.register("workflow", "legacy_planning", lambda config, **_: LegacyPlanningWorkflow(config))
     registry.register("workflow", "dynamic", lambda config, **services: DynamicWorkflowPolicy(config, **services))
+    registry.register("workflow", "adaptive_dag", lambda config, **services: AdaptiveDagWorkflow(config, **services))
     for name in ("filesystem", "shell", "task_control"):
         registry.register("tools", name, lambda config, request, name=name: _builtin(name, config, request))
     registry.register("tools", "web_research", lambda config, request: _custom_collection(research_collection, config, request))
@@ -256,6 +258,11 @@ class TaskAssembly:
             execution=execution,
         )
         self.workflow.snapshot_plugins = self.snapshot
+        if isinstance(self.workflow, AdaptiveDagWorkflow):
+            from loom.contexts.conversation import ConversationContext
+
+            self.workflow.assembly = self
+            self.context_manager = ConversationContext(self.context_manager, self.workflow)
         self.workflow.completion_check = self.completion_error
         self.workflow.completion_prepare = self.prepare_completion
         self.workflow.prepare_acceptance = self.prepare_acceptance
@@ -454,7 +461,7 @@ class TaskAssembly:
                     deadline=deadline,
                     goal_revision=getattr(self.execution, "goal_revision", 0),
                     workflow_revision=self.workflow.snapshot().get("workflow", self.workflow.snapshot().get("plan", {})).get("revision", 0),
-                    node_id=getattr(self.workflow, "_active", None),
+                    node_id=metadata.get("node_id", getattr(self.workflow, "_active", None)),
                 )
                 if persisted:
                     result = ok(persisted["value"]) if persisted["ok"] else err(persisted["error"])
@@ -689,10 +696,12 @@ class TaskAssembly:
             result = await wrapped.step(context, runtime)
             if not result.ok and result.error.code == "OUTPUT_CONTRACT_FAILED" and self.acceptance.data["state"] != "passed":
                 return await self.acceptance_blocked_result(context, runtime, self.acceptance.data["reason"])
-            if result.ok and not self.execution:
+            if result.ok and not self.execution and not (result.value.trace.metadata or {}).get("usageAlreadyAccounted"):
                 from loom.llm import TokenUsage
 
                 usage = (result.value.trace.metadata or {}).get("tokenUsage", {})
+                if isinstance(self.workflow, AdaptiveDagWorkflow):
+                    self._local_calls += (result.value.trace.metadata or {}).get("llmCalls", 0)
                 self._local_usage = TokenUsage(
                     *(
                         getattr(self._local_usage, k) + usage.get(k, usage.get(camel, 0))
@@ -755,6 +764,8 @@ class TaskAssembly:
         return replace(wrapped, step=task_step, done=task_done)
 
     def configure_acceptance(self, provider, *, limits=None, verification_provider=None):
+        if isinstance(self.workflow, AdaptiveDagWorkflow):
+            self.workflow.provider = provider
         self.acceptance_provider = verification_provider or getattr(provider, "verification_provider", None) or provider
         self.acceptance_limits = limits or {}
 
@@ -797,7 +808,8 @@ class TaskAssembly:
         usage = cp["usage"] if cp else self._local_usage
         calls = cp["llm_calls"] if cp else self._local_calls
         token_limit = self.acceptance_limits.get("max_tokens") or (self.context.goal.budget.max_tokens if self.context else None)
-        if (token_limit is not None and usage.total_tokens >= token_limit) or calls >= self.acceptance_limits.get("max_llm_calls", 10000):
+        reserved = getattr(self.workflow, "reserved_tokens", 0)
+        if (token_limit is not None and usage.total_tokens + reserved >= token_limit) or calls >= self.acceptance_limits.get("max_llm_calls", 10000):
             raise AcceptanceBlocked("Task model budget exhausted before acceptance verification")
         if self.execution and (poll := getattr(self.execution, "poll_control", None)) and (directive := poll()):
             raise AcceptanceBlocked(directive.get("reason", "Task interrupted"))

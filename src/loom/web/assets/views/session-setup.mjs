@@ -54,10 +54,11 @@ export class SessionSetupView {
     this.get("create-spec").value = JSON.stringify(task.task_spec, null, 2);
     for (const key of ["objective", "title", "workspace", "model"]) {
       const input = this.get(`create-${key}`);
-      if (key === "model" && task.model && ![...input.options].some(o => o.value === task.model)) {
-        const option = element("option", "", `${task.model} (unavailable)`); option.value = task.model; input.append(option);
+      const value = key === "model" ? (this.catalog?.model_aliases?.[task.model] || task.model) : task[key];
+      if (key === "model" && value && ![...input.options].some(o => o.value === value)) {
+        const option = element("option", "", `${value} (unavailable)`); option.value = value; input.append(option);
       }
-      input.value = task[key] || "";
+      input.value = value || "";
     }
     const knowledge = this.get("create-knowledge"); knowledge.replaceChildren();
     const ids = task.knowledge_base_ids || [];
@@ -127,7 +128,7 @@ export class SessionSetupView {
       const select = this.get(`setup-${kind}`);
       select.replaceChildren();
       for (const plugin of this.catalog?.plugins?.[kind] || []) {
-        const option = element("option", "", plugin.id);
+        const option = element("option", "", plugin.id === 'adaptive_dag' ? 'adaptive_dag · reuse context, independent read branches' : plugin.id);
         option.value = plugin.id;
         select.append(option);
       }
@@ -140,6 +141,10 @@ export class SessionSetupView {
         const option = element("option", "", `${defaultId} (unavailable)`); option.value = defaultId; select.append(option); select.value = defaultId;
       }
       this.get(`setup-${kind}-reason`).textContent = "";
+      if (kind === 'workflow') select.onchange = () => {
+        this.get('setup-workflow-reason').textContent = select.value === 'adaptive_dag'
+          ? 'Reuses the working context. Only clearly independent work with stable inputs and registered read-only tools can use parallel agents. Writes and integration stay on the main lane.' : '';
+      };
     }
   }
   renderCollections(selected, reasons = {}) {

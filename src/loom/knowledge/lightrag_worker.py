@@ -101,7 +101,7 @@ async def execute(value):
 
     embedder = partial(embed, timeout=60)
     config = load_task_config(value["config_path"]).unwrap()
-    name = value["model"]
+    name = config.resolve_model_name(value["model"])
     selected = config.models[name]
     options = materialize_request_options(selected.request_options)
     if "enable_thinking" in options:

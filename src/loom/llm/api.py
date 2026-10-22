@@ -705,6 +705,7 @@ def create_llm_step_function(
         # Build trace metadata including tool selection info
         trace_metadata: dict[str, Any] = {
             "model": provider.model,
+            "llmCalls": llm_call_count,
             "finishReason": final_response.finish_reason,
             "tokenUsage": _token_usage_metadata(tracker.total),
             "streaming": bool(stream and hasattr(provider, "stream_chat")),

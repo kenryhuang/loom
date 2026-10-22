@@ -161,7 +161,7 @@ def _model_configuration_lines(options: TaskCliOptions) -> list[str]:
         model = loaded.value
         return [f"  model: {options.model_name or '<environment default>'} (openai/{model.model})", f"  base_url: {model.base_url}"]
 
-    alias = options.model_name or options.config.default_model
+    alias = options.config.resolve_model_name(options.model_name or options.config.default_model)
     model = options.config.models.get(alias) if alias is not None else None
     if model is None:
         return [f"  model: {alias or '<not selected>'} (unresolved)"]

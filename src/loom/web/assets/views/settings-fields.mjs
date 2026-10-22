@@ -7,11 +7,12 @@ export const choice = (label, options, extra = {}) => ({label, type: 'select', o
 export const flag = label => ({label, type: 'boolean'});
 export const modelChoice = label => ({label, type: 'model'});
 
-export const modelFields = {
-  provider: choice('Provider', [['openai', 'OpenAI compatible']], {placeholder: 'OpenAI compatible'}),
-  model: textField('Model name', {required: true, placeholder: 'Provider model identifier'}),
+export const providerFields = {
   base_url: textField('API base URL', {type: 'url', placeholder: 'https://api.example.com/v1'}),
   api_key_env: textField('API key environment variable', {placeholder: 'LOOM_LLM_API_KEY'}),
+};
+export const modelFields = {
+  provider: choice('API protocol', [['openai', 'OpenAI compatible']], {placeholder: 'OpenAI compatible'}),
   api_key: textField('API key', {type: 'password', help: 'Leave the masked value unchanged to retain the saved key. A direct key takes precedence over the environment variable.'}),
   temperature: numberField('Temperature', 0, {step: 'any', placeholder: 'Provider default'}),
   max_completion_tokens: numberField('Maximum output tokens'),
@@ -19,7 +20,7 @@ export const modelFields = {
 };
 export const requestFields = {
   enable_thinking: flag('Enable thinking'), tool_stream: flag('Stream tool calls'), parallel_tool_calls: flag('Parallel tool calls'),
-  reasoning_effort: choice('Reasoning effort', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']),
+  reasoning_effort: choice('Reasoning effort', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
   stream_options: {label: 'Stream options', fields: {include_usage: flag('Include usage')}},
 };
 export const taskFields = {
@@ -137,7 +138,7 @@ function control(root, get, set, spec, context, name) {
   input.name = name; input.setAttribute('aria-label', spec.label);
   if (select) {
     const blank = element('option', '', spec.placeholder || 'Use default'); blank.value = ''; input.append(blank);
-    const options = spec.type === 'model' ? Object.keys(context.models()) : spec.type === 'boolean' ? [['true', 'Enabled'], ['false', 'Disabled']] : spec.options || [];
+    const options = spec.type === 'model' ? Object.keys(context.models()).map(id => [id, id]) : spec.type === 'boolean' ? [['true', 'Enabled'], ['false', 'Disabled']] : spec.options || [];
     for (const item of options) {
       const [value, label] = Array.isArray(item) ? item : [item, labelFor(item)];
       const option = element('option', '', label); option.value = value; input.append(option);

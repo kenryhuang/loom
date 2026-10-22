@@ -39,14 +39,15 @@ class WebFrontend:
     def catalog(self, service):
         from loom.service.session_setup import capability_catalog
 
-        models, default_model = [], None
+        models, default_model, model_aliases = [], None, {}
         if service.config_path:
             from loom.tasks.config import load_task_config
 
             loaded = load_task_config(service.config_path)
             if loaded.ok:
                 default_model = loaded.value.default_model
-                models = [{"id": name, "label": f"{name} · {value.model}"} for name, value in loaded.value.models.items()]
+                model_aliases = dict(loaded.value.model_aliases)
+                models = [{"id": name, "label": name if "/" in name else f"{name} · {value.model}"} for name, value in loaded.value.models.items()]
         return {
             "schema_version": 1,
             "session_delete": True,
@@ -55,6 +56,7 @@ class WebFrontend:
             "templates": deepcopy(self.templates),
             "models": models,
             "default_model": default_model,
+            "model_aliases": model_aliases,
         }
 
 

@@ -77,6 +77,7 @@ WORKFLOW_PRESENTATION_EVENTS = {
     "verification.started", "verification.completed", "acceptance.gate.passed", "acceptance.gate.blocked",
     "workflow.routing.requested",
     "workflow.route.selected",
+    "workflow.lane.started", "workflow.lane.completed",
 }
 
 PLAN_TOOL_IDS = frozenset({"enter_plan", "continue_react", "submit_plan", "update_plan"})

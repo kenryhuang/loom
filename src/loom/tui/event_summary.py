@@ -89,6 +89,9 @@ def summarize_event(event: TuiEvent) -> EventSummary | None:
 
 def _workflow_summary(event_type: str, data: Mapping[str, Any]) -> EventSummary | None:
     reason = _truncate(_text(data.get("reason")))
+    if event_type.startswith("workflow.lane."):
+        return EventSummary("Branch " + event_type.rsplit(".", 1)[-1],
+                            _truncate(f"{data.get('node_id', '')} · {data.get('objective', '')}"), "blue")
     if event_type == "workflow.routing.requested":
         title = "Workflow evaluating" if data.get("trigger") == "initial" else "Workflow reviewing"
         return EventSummary(title, reason, "orange")

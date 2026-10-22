@@ -16,19 +16,21 @@ def test_settings_atomic_roundtrip_secrets_and_revision(tmp_path):
         settings = Settings(service)
         value = settings.get()
         assert 'private-value' not in json.dumps(value)
-        value['config']['models']['main']['temperature'] = .3
+        value['config']['providers']['provider_1']['models']['test']['temperature'] = .3
         value['config']['task'] = {'objective': 'Explain "quoted" text\nwith another line'}
         value['config']['embedding_profiles'] = [{'id': 'emb_test', 'name': 'Test', 'model': 'embed',
                                                  'endpoint': 'http://localhost:1234/embeddings', 'api_key_env': 'EMBED_KEY'}]
         saved = settings.save({k: value[k] for k in ('revision', 'config')})
         assert saved['revision'] != value['revision']
+        assert 'models' not in saved['config']
+        assert 'models' not in parse_yaml_document(path.read_text(), path).unwrap()
         config = load_task_config(path).unwrap()
-        assert config.models['main'].api_key == 'private-value'
+        assert config.models['provider_1/test'].api_key == 'private-value'
         assert config.task.objective == value['config']['task']['objective']
         assert service.store.knowledge.profiles()[0]['id'] == 'emb_test'
         with pytest.raises(ServiceError, match='changed'):
             settings.save({k: value[k] for k in ('revision', 'config')})
-        saved['config']['models']['main']['unknown_parameter'] = True
+        saved['config']['providers']['provider_1']['models']['test']['unknown_parameter'] = True
         before = path.read_bytes()
         with pytest.raises(ServiceError):
             settings.save({k: saved[k] for k in ('revision', 'config')})
@@ -77,3 +79,30 @@ def test_masked_secrets_in_extension_lists_restore_the_correct_entry():
 
     value = {'connections': [{'name': 'one', 'api_key': 'first-secret'}, {'name': 'two', 'api_key': 'second-secret'}]}
     assert restore(mask(value), value) == value
+
+
+def test_provider_settings_save_applies_shared_fields_to_all_models(tmp_path):
+    from loom.service.settings import yaml_text
+
+    path = tmp_path / 'config.yaml'
+    path.write_text(yaml_text({'default_model': 'main', 'providers': {
+        'cloud': {'base_url': 'https://old.example/v1', 'api_key_env': 'OLD_KEY', 'models': {
+            'main': {'model': 'large', 'api_key': 'private-value', 'temperature': 0},
+            'fast': {'model': 'small', 'temperature': .8},
+        }},
+    }}))
+    service = LoomService(tmp_path / 'data', config_path=path)
+    try:
+        settings = Settings(service)
+        value = settings.get()
+        group = value['config']['providers']['cloud']
+        assert group['models']['large']['api_key'] == '••••••••'
+        group.update(base_url='https://new.example/v1', api_key_env='NEW_KEY')
+        settings.save({k: value[k] for k in ('revision', 'config')})
+        config = load_task_config(path).unwrap()
+        assert config.models['cloud/large'].api_key == 'private-value'
+        assert config.models['cloud/large'].temperature == 0
+        assert config.models['cloud/small'].temperature == .8
+        assert all(m.base_url == 'https://new.example/v1' and m.api_key_env == 'NEW_KEY' for m in config.models.values())
+    finally:
+        service.close()

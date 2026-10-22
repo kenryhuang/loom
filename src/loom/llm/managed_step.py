@@ -501,6 +501,9 @@ class ManagedStep:
             if suspended is not None:
                 return suspended
             if cp["phase"] == "before_llm":
+                reserved = getattr(self.planning, "reserved_tokens", 0)
+                if reserved and cp["usage"].total_tokens + reserved >= self.limits["max_tokens"]:
+                    return self._result(cp, runtime, "paused", "Unreported branch usage reserves the remaining token budget")
                 reason = stop_reason(cp, self.limits)
                 if reason:
                     return await self._wrap_up(cp, runtime, reason)

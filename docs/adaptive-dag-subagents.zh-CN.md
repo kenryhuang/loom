@@ -1,6 +1,6 @@
 # Adaptive plan：DAG 执行图与 Context 复用
 
-日期：2026-10-17。状态：修订设计，尚未实现。文件名保留以兼容已有链接。
+日期：2026-10-17；2026-10-21 更新实现说明。状态：已新增 opt-in `adaptive_dag` 执行插件；当前交付范围和使用方式见 §15。文件名保留以兼容已有链接。
 
 本版替代 2026-10-16 的“一节点一 subagent / 新 Context”方案。根据用户实验，该方式使节点反复重建证据与项目理解，明显拖慢执行。本版以持续复用工作 Context 为默认，仅为真正独立、值得并行的工作建立分支 Context。
 
@@ -31,7 +31,7 @@
 | `service/scheduler.py` | session 级共享读／独占写准入 | 保留外层准入，增加 session 内资源与 Context 写入锁 |
 | `tasks/acceptance.py` | task 级验收与修复 | 保持最终完成边界，接收分支可信证据 |
 
-当前 plugin ID 为 legacy_planning、dynamic，没有名为 adaptive 的 plugin。本文 adaptive 指随证据修订的计划策略。当前 TERMINAL 含 skipped/superseded，不能直接视为数据依赖满足：生产者结束但无产物，下游仍不可执行。
+原有 plugin ID 为 legacy_planning、dynamic；新增 `adaptive_dag`，两种原有插件和默认选择保持不变。本文 adaptive 指随证据修订的计划策略。原有 TERMINAL 含 skipped/superseded；新插件的数据依赖不将它们视为成功：生产者结束但无产物，下游仍不可执行。
 
 ## 3. 分离 PlanNode、ContextSession 与工作线
 
@@ -284,3 +284,80 @@ P1–P4 是首版范围。旧版“一节点一 NodeRunner/Context”实施计�
 以相同模型、任务、初始 workspace、预算多次对照：旧串行模式、每节点新 Context（负面对照）、DAG+持续 Context、DAG+少量独立分支。比较耗时、重复取证、总 token/calls、交接成本和验收通过率，不只比较主窗口大小。
 
 收益阈值在基线测量后确定，不预设“更多 subagent 更快”。首要要求：节点化本身不引入 Context 重建及强制交接成本；并行只有在完成质量与总体成本上产生实际收益时才扩大使用。
+
+## 15. 当前插件与使用方式（2026-10-21）
+
+### 15.1 选择插件
+
+Web 的 **New session → Workflow plugin** 选择 `adaptive_dag`。
+默认选项没有改变；LLM recommend 也仅在用户明确要求 DAG／并行时推荐新插件。
+已有 dynamic/legacy session 不自动迁移，变更执行插件需开启新任务或显式 Restart。
+
+任务 specification 的配置片段：
+
+```yaml
+workflow:
+  plugin: adaptive_dag
+  parallel:
+    max_lanes: 2
+    max_calls_per_node: 8
+    max_output_tokens: 2048
+    max_seed_chars: 16000
+    max_result_chars: 8000
+```
+
+可以在完整 task spec 中保留原来的 `session_environment`、工具 collections 和 context 配置。
+命令行／TUI 使用 `loom task '任务描述' --task-spec task-dag.yaml --tui`。
+未提供 nodes 时，从主线上下文开始，由模型通过 `revise_workflow` 提交后续 DAG。
+`revise_workflow.nodes` 是未来节点的 upsert；宿主保留省略的历史节点，不要求模型反复回传完整历史。
+
+### 15.2 可独立并行节点的合同
+
+```yaml
+id: independent-source-review
+objective: 核对已提供的独立资料，输出来源及结论
+execution_hint: parallel_candidate
+context_independent: true
+independence_reason: 输入资料与其他分支独立，不需要主线的实现判断；可一次交付结果
+stable_inputs:
+  source: 已确认且完整的资料文本或可独立读取的明确来源
+executor_config:
+  allowed_tools: [read_file]
+outputs:
+  - name: findings
+    kind: text
+work_group_hint: source-review
+```
+
+这只是候选声明。宿主仍检查当前绑定的工具是 `read_only` execution tool。
+省略工具白名单、稳定输入、独立性说明、具名输出，或请求 shell／写入／未知副作用工具，
+均退回主线上下文。单个新候选不创建新 agent；必须存在至少两个独立候选才启动并发。
+`max_lanes: 1` 可禁用新分支并发。已经建立的 work group 可继续在原分支对话上执行后续节点。
+
+数据依赖使用 `inputs: [{from_node: ..., output_name: ..., required: true}]`，同时声明 dependencies。
+只有上游 succeeded 且对应命名输出存在，消费者才 ready。返回文本是待核对结果，不是全局验收收据。
+
+### 15.3 实际实现范围
+
+- 主线 conversation 跨节点持续保存，active-node 控制块更新，旧 terminal/tool continuation 不复用；
+  原 context manager 仍负责 compact 和归档。DAG 节点不自动生成新对话。
+- 分支独立保存 messages、Context ID、工具游标、节点 attempt、调用次数、输出和读取版本；
+  同 work group 的后续节点复用对话。分支结果通过稳定 ID 向主线投递一次。
+- 第一版使用 **最多两条只读分支组成的并发批次**。批次期间父级不执行写入或模型工作；
+  批次结束后，由原主线上下文集成和验收。这是 §8 更一般的非 barrier 调度的保守子集。
+- 一个父级 checkpoint writer 持久化所有 lane 状态，不并发使用多个 ManagedStep/WorkerBridge；
+  复用现有串行 RPC transport、attempt fencing 和 operation journal。暂停保留独立对话及工具游标，
+  已登记的读取不重复执行。新输入或 rebind 在边界使未完成分支转回主线审查。
+- 分支模型调用共享任务计数和 token 余额，调用前预留输入估算与输出容量，并为集成和验收留额度。
+  未报告 usage 的请求保留 reservation，不当作零成本。`read_file` 已读范围的哈希在恢复／复用时核对；
+  变化则回到主线上下文处理。不能将模型结果声明直接当作 acceptance passed。
+- 执行事件带 lane/context/node scope；计划项展示依赖及工作线，Web/TUI 分支事件展开显示目标与结果。
+  原 Deep Eval 可根据不同 loop/lane scope 避免把并行分支当成一条串行推理链。
+
+后续尚未交付：主线与分支同时工作的非 barrier 调度、一般资源租约和跨工作区写分支、
+完整的文件版本依赖传播与自动修订消费者、专用 DAG+lane 图形面板，以及并行收益统计／真实模型对照实验。
+目前没有 worktree 写分支；不能把 `parallel_candidate` 当作任意任务可并发的开关。
+
+关键实现：`runtime/dag_scheduler.py`、`workflows/adaptive_dag.py`、`tasks/dag_lanes.py`、
+`contexts/conversation.py`。回归测试覆盖实际并发、主线和分支 Context 复用、
+具名输出依赖、预算不足回退、暂停恢复、读取不重放、默认选择不变与旧插件兼容。

@@ -117,7 +117,7 @@ class SessionSemantic:
             loaded = load_task_config(self.config_path)
             if loaded.ok:
                 default = loaded.value.evaluation_model or loaded.value.default_model
-                models = [{"id": key, "label": f"{key} · {value.model}"} for key, value in loaded.value.models.items()]
+                models = [{"id": key, "label": key if "/" in key else f"{key} · {value.model}"} for key, value in loaded.value.models.items()]
         return {
             "supports_delete": True,
             "models": models,
@@ -317,6 +317,10 @@ class SessionSemantic:
             raise ServiceError("Goal-loop max_prompt_chars must be at least 20000 to fit the structured protocol and evidence")
         available = self.options()
         model = options.get("model") or (resumed["model"] if resumed else available["default_model"])
+        if isinstance(model, str) and self.config_path:
+            configured = load_task_config(self.config_path)
+            if configured.ok:
+                model = configured.value.resolve_model_name(model)
         if not isinstance(model, str) or model not in {row["id"] for row in available["models"]}:
             raise ServiceError("Select a configured judge model")
         parent = self.trajectory._load(sid, aid)

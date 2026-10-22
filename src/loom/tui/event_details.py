@@ -79,6 +79,9 @@ def event_content(kind, data):
     if kind == "workspace.probed":
         profile = data.get("profile") or {}
         return "Workspace inspected", meaningful_fields({k: profile.get(k) for k in ("workspace", "limitations", "configuration", "files")})
+    if kind.startswith("workflow.lane."):
+        return kind.replace(".", " "), meaningful_fields({"node": data.get("node_id"), "lane": data.get("lane_id"),
+            "context": data.get("context_session_id"), "objective": data.get("objective"), "reason": data.get("reason"), "result": data.get("result")})
     if kind.startswith("workflow.node."):
         workflow = data.get("workflow") or {}
         active = next((n for n in workflow.get("workflow", {}).get("nodes", []) if n.get("id") == workflow.get("active")), None)

@@ -121,7 +121,7 @@ class LoomService:
                     configured = load_task_config(self.config_path)
                     if not configured.ok:
                         raise ServiceError("Could not load model configuration for restart", 422)
-                    model = state["task"]["model"] or configured.value.default_model
+                    model = configured.value.resolve_model_name(state["task"]["model"] or configured.value.default_model)
                     if model not in configured.value.models:
                         raise ServiceError(f"Model {model!r} is not configured; select an available model", 422)
                 if answer:

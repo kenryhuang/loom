@@ -938,14 +938,10 @@ dialog h1 {
   gap: 9px;
   font-size: 12px;
   padding: 4px 0;
+  list-style: none;
 }
-.event-row > summary::before {
-  content: "›";
-  width: 8px;
-  flex-shrink: 0;
-}
-.event-row[open] > summary::before {
-  content: "⌄";
+.event-row > summary::-webkit-details-marker {
+  display: none;
 }
 .activity-status {
   width: 12px;

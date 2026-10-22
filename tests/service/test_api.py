@@ -497,3 +497,23 @@ def test_worktree_diagnosis_review_and_discard_routes(api):
     result = client._json(prefix + '/discard', {})
     assert result['workspace']['state'] == 'deleted'
     assert client._json(prefix + '/changes') == {**changes, 'workspace': result['workspace']}
+
+
+def test_provider_model_catalog_uses_qualified_ids_and_hides_legacy_aliases(api):
+    from loom.service.settings import yaml_text
+
+    service, server, client, path = api
+    config = path / 'models.yaml'
+    config.write_text(yaml_text({'default_model': 'cloud/glm-5.2', 'model_aliases': {'main': 'cloud/glm-5.2'},
+                                'providers': {
+                                    'cloud': {'api_key_env': 'PRIVATE_KEY', 'models': {'glm-5.2': {}}},
+                                    'local': {'models': {'glm-5.2': {}}},
+                                }}))
+    service.config_path = str(config)
+    service.store.knowledge.config_path = str(config)
+    catalog = client._json('/v1/web/catalog')
+    expected = [{'id': key, 'label': key} for key in ('cloud/glm-5.2', 'local/glm-5.2')]
+    assert catalog['models'] == expected
+    assert catalog['model_aliases'] == {'main': 'cloud/glm-5.2'}
+    assert client._json('/v1/knowledge-bases')['models'] == expected
+    assert 'PRIVATE_KEY' not in json.dumps(catalog)

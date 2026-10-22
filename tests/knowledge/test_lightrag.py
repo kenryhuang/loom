@@ -520,3 +520,15 @@ def test_local_graph_import_keeps_path_reference_and_reads_original(graph_store,
     store.remove_document(kb, doc['id'])
     assert original.read_text() == 'Updated graph evidence'
     assert not store.get(kb)['documents']
+
+
+def test_indexing_binding_survives_model_id_migration(tmp_path):
+    from loom.service.settings import yaml_text
+    from loom.tasks.config import parse_yaml_document, provider_config_document
+
+    path = tmp_path / 'config.yaml'
+    path.write_text('models:\n  main:\n    model: glm-5.2\n    base_url: https://example.test/v1\n')
+    before = lightrag_local.binding(path, 'main')
+    path.write_text(yaml_text(provider_config_document(parse_yaml_document(path.read_text(), path).unwrap())))
+    assert lightrag_local.binding(path, 'main') == before
+    assert lightrag_local.binding(path, 'provider_1/glm-5.2') == before

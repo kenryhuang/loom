@@ -1,6 +1,63 @@
 from loom.tasks.config import ModelConfig, TaskRunnerConfig, create_provider_from_task_config, load_task_config
 
 
+def test_provider_models_share_connection_but_keep_model_options(tmp_path):
+    from loom.service.settings import yaml_text
+
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml_text({
+        "default_model": "dashscope/large", "evaluation_model": "dashscope/small", "verification_model": "dashscope/large",
+        "providers": {
+            "dashscope": {"base_url": "https://example.test/v1", "api_key_env": "SHARED_KEY", "models": {
+                "large": { "temperature": 0, "context_window_tokens": 128000,
+                         "max_completion_tokens": 8192, "request_options": {"enable_thinking": True}},
+                "small": { "temperature": .5, "request_options": {"enable_thinking": False}},
+            }},
+            "local": {"base_url": "http://localhost:8080/v1", "api_key_env": "LOCAL_KEY", "models": {
+                "large": {},
+            }},
+        },
+    }))
+    config = load_task_config(path).unwrap()
+    main = create_provider_from_task_config(config, env={"SHARED_KEY": "test-key"}).unwrap()
+    fast = create_provider_from_task_config(config, model_name="dashscope/small", env={"SHARED_KEY": "test-key"}).unwrap()
+    assert main.base_url == fast.base_url == "https://example.test/v1"
+    assert main.api_key == fast.api_key == "test-key"
+    assert main.temperature == 0 and fast.temperature == .5
+    assert main.request_options["enable_thinking"] is True
+    assert fast.request_options["enable_thinking"] is False
+    assert main.context_window_tokens == 128000
+    assert main.max_completion_tokens == 8192
+    assert config.models["local/large"].api_key_env == "LOCAL_KEY"
+
+
+def test_provider_structure_errors_are_actionable(tmp_path):
+    from loom.service.settings import yaml_text
+
+    cases = [
+        ({"providers": {}, "models": {}}, "not both"),
+        ({"providers": []}, "providers must be a table"),
+        ({"providers": {"one": {"models": []}}}, "providers.one.models"),
+        ({"providers": {"one": {"base_url": 42, "models": {}}}}, "providers.one.base_url"),
+        ({"providers": {"one": {"temperature": 0, "models": {}}}}, "model-specific fields"),
+        ({"providers": {"one": {"models": {"main": {"base_url": "other"}}}}}, "belong on the provider"),
+        ({"providers": {"one": {"models": {"main": {"model": 3}}}}}, "model ID must be a nonempty string"),
+    ]
+    path = tmp_path / "bad.yaml"
+    for document, message in cases:
+        path.write_text(yaml_text(document))
+        result = load_task_config(path)
+        assert not result.ok
+        assert message in result.error.message
+
+
+def test_provider_hierarchy_supports_toml(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('default_model = "main"\n[providers.local]\nbase_url = "http://localhost/v1"\n'
+                    'api_key_env = "LOCAL_KEY"\n[providers.local.models.main]\nmodel = "test"\n')
+    assert load_task_config(path).unwrap().models["local/test"].base_url == "http://localhost/v1"
+
+
 def test_load_task_config_reads_multiple_named_models(tmp_path):
     path = tmp_path / "loom-task.toml"
     path.write_text(
@@ -393,3 +450,39 @@ def test_evaluation_model_is_independent_and_must_exist(tmp_path):
     assert config.evaluation_model == 'judge'
     path.write_text('evaluation_model: missing\n')
     assert not load_task_config(path).ok
+
+
+def test_model_id_keys_allow_namespaces_and_colons(tmp_path):
+    from loom.service.settings import yaml_text
+    path = tmp_path / 'config.yaml'
+    path.write_text(yaml_text({'default_model': 'local/vendor/model:v1', 'providers': {
+        'local': {'models': {'vendor/model:v1': {'temperature': .2}}},
+    }}))
+    config = load_task_config(path).unwrap()
+    assert list(config.models) == ['local/vendor/model:v1']
+    assert config.models['local/vendor/model:v1'].model == 'vendor/model:v1'
+
+
+def test_legacy_profiles_migrate_without_losing_options_or_old_references(tmp_path):
+    from loom.service.settings import yaml_text
+    from loom.tasks.config import provider_config_document
+    old = {'default_model': 'solver', 'evaluation_model': 'judge', 'meta_harness': {'solver_model': 'solver'},
+           'providers': {'cloud': {'base_url': 'https://example.test/v1', 'api_key_env': 'KEY', 'models': {
+               'solver': {'model': 'shared-v2', 'max_completion_tokens': 8192, 'request_options': {'enable_thinking': True}},
+               'judge': {'model': 'shared-v2', 'max_completion_tokens': 2048, 'request_options': {'enable_thinking': False}},
+           }}}}
+    document = provider_config_document(old)
+    assert provider_config_document(document) == document
+    assert document['default_model'] == 'cloud/shared-v2'
+    assert document['evaluation_model'] == 'cloud_judge/shared-v2'
+    assert document['meta_harness']['solver_model'] == 'cloud/shared-v2'
+    assert all('model' not in m for p in document['providers'].values() for m in p['models'].values())
+    path = tmp_path / 'config.yaml'
+    path.write_text(yaml_text(document))
+    config = load_task_config(path).unwrap()
+    assert set(config.models) == {'cloud/shared-v2', 'cloud_judge/shared-v2'}
+    provider = create_provider_from_task_config(config, model_name='judge', env={'KEY': 'test'}).unwrap()
+    assert provider.model == 'shared-v2'
+    assert provider.max_completion_tokens == 2048
+    assert provider.request_options['enable_thinking'] is False
+    assert config.resolve_model_name('solver') == 'cloud/shared-v2'
