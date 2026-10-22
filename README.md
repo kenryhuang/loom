@@ -2,43 +2,50 @@
 
 [中文文档](README.zh-CN.md)
 
-Loom is a local AI agent runtime for coding, research, and general tasks. Give it
-an objective, a model, and the tools it may use; it runs a model–tool loop,
-maintains a plan or workflow, and records the work and its results.
-
-Use Loom to inspect a codebase and fix problems, read sources and write an
-analysis report, or build a local knowledge base for repeated questions. Its
-persistent service lets you follow the same task from a browser or terminal,
-disconnect while work continues, and return to its saved state.
+Loom is a local AI agent runtime for coding, research, and general tasks, with
+persistent execution, independent acceptance checks, and inspectable evidence.
+Give it an objective, a model, and tools; follow the work from Web or TUI and
+resume from saved checkpoints.
 
 ## Key features
 
-- **Persistent sessions:** conversations, execution checkpoints, tool results,
-  artifacts, and event history survive frontend disconnects and service restarts.
-  A new message after a completed round starts another round in the same session.
-- **Web and TUI:** both connect to the same backend and sessions, with streaming
-  model output, tool details, task controls, history, and token usage.
-- **Configurable tools and workflows:** choose file/shell tools, URL reading,
-  report output, and knowledge retrieval. Task specifications configure the
-  workspace, context management, execution runtime, and workflow separately.
-- **Plans and bounded context:** support dynamic workflows and Plan & Execute,
-  with context compaction that retains full original content in artifacts.
-- **Runtime acceptance:** task- and workspace-aware acceptance criteria gate completion, with actual checks, independent semantic review, bounded repair and visible evidence. See the [implementation and configuration](docs/superpowers/specs/2026-10-10-runtime-acceptance-gate-design.md).
-- **Reports with saved documents:** research reports retain their sources and
-  artifact. When a writable workspace is bound, `create_report` also writes the
-  report there, and the UI shows its saved path.
-- **Local knowledge bases:** keyword, hybrid vector, YakDB, and LightRAG engines.
-  LightRAG supports website sync, graph exploration, visible indexing progress,
-  and resuming from completed document checkpoints.
-- **External tools:** register MCP servers or CLI commands, select individual
-  tools manually or through LLM session recommendations, and invoke them through
-  the same task loop with recorded results and execution controls.
-- **Observable execution:** inspect model/tool activity and stored evidence;
-  analyze traces or session trajectories. Advanced evaluation and Meta-Harness
-  commands support experiments and governed optimization. Opt-in [behavior evaluation v3](docs/behavior-evaluation-v3.md) separates goal verification from intent, planning, progress, reasoning efficiency, and recovery.
+- **Independent acceptance before completion:** actual command checks and a
+  separate semantic review assess task- and workspace-specific requirements.
+  Failed candidates enter bounded repair; missing evidence retains a concrete
+  blocker. Check results and evidence remain available for review.
+- **Real browser and WebGL evidence:** optional browser tools replay pages,
+  wait for rendering, and capture multiple Canvas/WebGL frames. An independent
+  image model reviews the screenshots alongside browser assertions and runtime
+  facts; collection alone does not establish acceptance.
+- **Durable sessions across Web and TUI:** conversations, checkpoints, tool
+  results, artifacts, and events survive frontend disconnects and support
+  recovery after service restarts. Both interfaces share streaming output,
+  controls, history, and budgets. Completed sessions accept follow-up rounds.
+- **Inspectable execution and context:** review model requests, tool inputs and
+  results, traces, and session trajectories. Context compaction retains original
+  content in artifacts so omitted evidence can be retrieved.
+- **Configurable models, tools, and workflows:** use OpenAI-compatible model
+  profiles, file/shell tools, URL readers, MCP servers, and CLI connections.
+  Choose tools manually or through LLM recommendations; configure dynamic
+  workflows or Plan & Execute separately from resources and context management.
+- **Commands informed by the execution host:** execution and acceptance prompts
+  include the worker's OS, architecture, actual shell, and container information.
+  Platform-specific guidance covers command syntax and utility flags; resuming
+  a session refreshes these facts.
+- **Local knowledge and cited reports:** keyword, hybrid vector, YakDB, and
+  LightRAG retrieval support repeated research. LightRAG adds resumable website
+  sync and graph exploration. Reports retain sources and artifacts, and can also
+  be saved to a writable workspace with visible file paths.
+- **Failure diagnosis and evaluation:** investigate saved runs in a read-only
+  loop or an isolated worktree, retain patches and test receipts, and review
+  changes before merging. Trace analysis, Meta-Harness, and opt-in
+  [behavior evaluation v3](docs/behavior-evaluation-v3.md) support experiments
+  and distinguish goal acceptance from execution quality.
 
 The current general task runtime executes tools on the host OS. Loom targets
 macOS/Linux and a single local user; Docker/VM task backends are not implemented.
+Environment detection can identify container markers and the Docker CLI; it
+does not create containers or automatically isolate tasks in Docker.
 
 ## Quick start
 
@@ -57,6 +64,17 @@ For LightRAG, also install the optional graph dependencies:
 ```bash
 uv sync --extra knowledge-graph
 ```
+
+For Web / Canvas / WebGL visual features, install the optional browser
+dependencies and Chromium:
+
+```bash
+uv sync --extra browser --inexact
+PLAYWRIGHT_SKIP_BROWSER_GC=1 .venv/bin/python -m playwright install chromium
+```
+
+`--inexact` preserves other optional dependencies already installed. Browser
+downloads happen during setup, not automatically while tasks run.
 
 ### 2. Configure a model
 
@@ -78,7 +96,7 @@ Named models and provider options are covered under [Configuration](#configurati
 uv run loom serve --data-dir .loom/service
 ```
 
-Keep this process running. By default it listens on `127.0.0.1:8765), hosts the
+Keep this process running. By default it listens on `127.0.0.1:8765`, hosts the
 Web frontend, and writes its connection credential to `.loom/service/credential`.
 Keep the data directory between restarts to retain sessions and knowledge bases.
 
@@ -102,7 +120,9 @@ press Enter to begin.
 2. Open the new-session panel and enter your objective.
 3. Select **General**, **Research**, or **Coding**, then review the tools, model,
    workspace, and knowledge base selections. **Recommend with LLM** can suggest
-   a configuration; review it before clicking **Create session**.
+   a configuration; review it before clicking **Create session**. For page
+   interaction or visual acceptance, select **Browser & visual evidence**;
+   local application previews also need a workspace, Files, and Commands.
 4. Follow the conversation and expand **Process** to inspect model requests,
    tool arguments, results, and errors. Workflow, budget, and output panels show
    the current task state.
@@ -139,8 +159,9 @@ is reused. [Design and implementation notes](docs/session-self-diagnosis.zh-CN.m
 Coding and file/command tools require an existing workspace directory on the
 service host. Research can run without a workspace; bind a writable directory
 when you want analysis documents saved as files as well as artifacts. The
-built-in research tools read supplied HTTP(S) URLs; they do not provide a search
-engine or execute a JavaScript browser.
+built-in research tools read supplied HTTP(S) URLs and do not provide a search
+engine. Use the optional browser collection to execute page JavaScript or inspect
+Canvas/WebGL output.
 
 The **Knowledge bases** view manages imports, embedding profiles, website
 sources, and graph exploration. Attach selected bases to a session so its agent
@@ -161,6 +182,52 @@ and [session setup guide](docs/session-setup.md) for details.
 Closing the tab leaves backend tasks running. The browser keeps its credential
 in tab memory, so reloading requires reconnecting. The frontend ships with the
 Python package; it needs no Node runtime or separate frontend server.
+
+### Web / Canvas / WebGL visual acceptance
+
+The browser collection provides `browser_open`, `browser_act`, `browser_observe`,
+`browser_capture`, and `browser_close`. The execution agent can inspect pages;
+formal acceptance replays the scenario in an independent browser and sends actual
+screenshots to a separate image model. See the `visual_verification_model`
+example below, or set Input modalities in **Settings → Models** and choose
+Visual acceptance model under **General**.
+
+Local previews use a bounded copy of the candidate source and a dedicated port,
+starting the actual application through the `{port}` placeholder in
+`preview.argv`. External pages require an explicitly bound URL resource. Formal
+acceptance does not reuse an existing dev server whose source version is unknown.
+Loom's bundled frontend needs no Node runtime; the application being verified
+still needs its own runtime dependencies.
+
+Before capture, Loom waits up to **12 seconds** for document and resource loading,
+visible Canvas initialization, and actual rendering calls. For recognized React
+Three Fiber pages, it also waits for content to mount into an empty scene root,
+reducing captures of UI-only screens or black frames during texture loading.
+When capture times are omitted and Canvas is requested or WebGL is detected,
+the default is a first frame 1.5 seconds after readiness, followed by another
+frame 1 second later. Readiness is not acceptance; timeouts retain actual images
+and diagnostics.
+
+Open **Processing / acceptance records → View screenshot** to inspect original
+images and finding regions. Evidence also records readiness duration, timeout
+phase, page exceptions, failed resource requests, HTTP errors, and available
+scene facts. A model cannot override failed browser assertions. Exact object
+counts require assertions or independent runtime evidence rather than image
+guesswork. Insufficient views can trigger one recapture; unresolved gaps retain
+a concrete blocked result.
+
+**Input budget** is the per-request context allowance; **Acceptance budget**
+tracks verification calls, time, and failed candidates. Visual criteria adjust
+default verification limits, while explicit task limits remain authoritative.
+After acceptance blocks or exhausts its allowance, an explicit **Resume** retains
+the history and starts a fresh bounded acceptance allocation for new evidence.
+Task-wide usage and original requirements remain. Restarting the service alone
+does not replenish this allocation; pauses and environment blockers do not count
+as failed candidate repairs.
+
+The initial scope covers Web pages, Canvas, and WebGL. See the
+[visual observation and acceptance guide (Chinese)](docs/visual-observation-and-acceptance.zh-CN.md)
+for setup, scenarios, evidence boundaries, and recovery.
 
 ## Using the TUI and session CLI
 
@@ -233,6 +300,8 @@ default_model: dashscope/your-model-id
 # evaluation_model: dashscope/your-fast-model-id
 # Optional independent runtime acceptance model (otherwise uses the task model).
 # verification_model: dashscope/your-fast-model-id
+# Optional independent visual verifier; the model must support image input.
+# visual_verification_model: dashscope/qwen3.8-omni-flash
 
 providers:
   dashscope:
@@ -248,6 +317,15 @@ providers:
       your-fast-model-id:
         request_options:
           enable_thinking: false
+      qwen3.8-omni-flash:
+        input_modalities: [text, image]
+        context_window_tokens: 1000000
+        max_completion_tokens: 4096
+        request_options:
+          modalities: [text]
+          reasoning_effort: none
+          response_format:
+            type: json_object
 ```
 
 Start the backend with this file explicitly:
@@ -259,6 +337,12 @@ uv run loom serve --data-dir .loom/service --config config.yaml
 The key under `models` is the actual API model ID; no separate `model` field is needed.
 All model selections and role references use `provider/model`, such as `dashscope/your-model-id`.
 `api_key_env` resolves the key from the backend's environment or `.env`.
+
+To enable visual acceptance, uncomment `visual_verification_model` and use a
+provider endpoint that serves the selected model. The Qwen3.8-Omni-Flash example
+uses JSON Mode with local response validation. `verification_model` handles
+general acceptance and `visual_verification_model` handles image judgments;
+they can be selected separately.
 
 Provider groups share only `base_url` and `api_key_env`; all other parameters belong to each model. The same model ID may appear under different providers. To keep different parameter profiles for the same API model, use separate provider groups (for example, `dashscope` and `dashscope_judge`). Settings → Models edits provider connections and their nested model profiles. Legacy configurations remain readable and are migrated when saved in Settings; do not mix top-level `models` with `providers`. Migration retains `model_aliases` only for old session/knowledge/evaluation references; aliases do not appear in selections.
 
@@ -330,6 +414,32 @@ For the legacy planning workflow, `--plan-mode auto` lets the model enter
 planning as needed; `force` requires a plan first; `off` uses the ReAct path
 without planning tools. General/Research templates use the dynamic workflow.
 
+### Execution host and shell
+
+Execution and acceptance system prompts include the current worker's OS,
+version, CPU architecture, execution shell and arguments, login shell, container
+detection, and Docker CLI availability. These describe where tools actually run:
+inside a container, the reported OS is the container's OS. The browser client's
+machine does not determine command syntax. Resuming an existing session refreshes
+the environment facts.
+
+`shell_execute` defaults to `/bin/bash -o pipefail -c`; it does not automatically
+switch to the login shell. A macOS login shell may be zsh while tools execute
+through Bash. To configure the execution shell, set it in the **task specification**:
+
+```yaml
+execution_runtime:
+  plugin: native_os
+  shell: ["/bin/bash", "-o", "pipefail", "-c"]
+```
+
+Prompts include platform-specific guidance, such as differences between macOS
+BSD utilities and GNU flags. `process_execute` receives literal argv without
+shell expansion. Container detection uses Docker/Podman markers and cgroups;
+absent markers do not prove execution on a bare host. Docker CLI presence is
+recorded separately from container detection. Daemon connectivity is labeled
+unprobed and must be checked before relying on Docker.
+
 ### Knowledge bases and embeddings
 
 | Engine           | Setup and use                                                                                  |
@@ -393,6 +503,8 @@ traces under `runs/` by default and are tied to their launching process.
 - [Task plugins, workflows, and report output](docs/general-task-runtime.md)
 - [Knowledge bases and LightRAG sync](docs/knowledge-bases.md)
 - [External tools: MCP and CLI](docs/external-tools.md)
+- [Runtime acceptance: implementation and configuration](docs/superpowers/specs/2026-10-10-runtime-acceptance-gate-design.md)
+- [Web / Canvas / WebGL visual observation and acceptance (Chinese)](docs/visual-observation-and-acceptance.zh-CN.md)
 - [Session trajectory analysis](docs/session-trajectory-analysis.md)
 - [Trace effectiveness analysis](docs/trace-effectiveness-analysis.md)
 - [Meta-Harness: optimization, experiments, and governance](docs/meta-harness.md)
@@ -419,7 +531,3 @@ LOOM_RUN_LIVE_LLM=1 uv run pytest tests/integration/test_live_llm_smoke.py -q
 
 The project uses a `src/loom/` package layout; the Web frontend is packaged
 inside the Python distribution.
-
-### Browser and WebGL visual acceptance
-
-The optional browser collection provides real page interaction, screenshots and multi-frame Canvas/WebGL evidence for independent visual acceptance. Configure `visual_verification_model` (initial provider: `dashscope/qwen3.8-omni-flash`) and model `input_modalities: [text, image]`, then select Browser & visual evidence when creating/editing a task. Local previews also require a workspace and Commands. See [setup, evidence and recovery](docs/visual-observation-and-acceptance.zh-CN.md).

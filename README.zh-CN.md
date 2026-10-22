@@ -19,6 +19,10 @@ Loom 是一个运行在本地的 AI Agent 任务执行框架，用于编程、�
 - **Web 与 TUI 共用后端**：提供模型流式输出、工具详情、任务控制、历史记录和 token 用量。
 - **工具与工作流可配置**：按需选择文件、命令、URL 阅读、报告输出和知识检索工具。
   任务配置分别定义 workspace、上下文管理、执行后端与 workflow。
+- **执行主机环境感知**：执行与验收模型的系统提示词包含 OS、架构、实际 shell 和容器信息，
+  提示模型使用对应平台的命令、路径与工具参数；恢复 Session 时刷新环境信息。
+- **Web / Canvas / WebGL 视觉验收**：通过可选浏览器工具操作页面、等待渲染并采集多帧截图，
+  由独立多模态模型结合浏览器断言与运行时事实判断结果，保留原图和验收证据。
 - **计划与上下文管理**：支持动态工作流及 Plan & Execute；
   压缩上下文时，完整原文仍保存在 artifact 中。
 - **报告同时保存为文档和 artifact**：保留来源引用；绑定可写 workspace 后，
@@ -31,7 +35,8 @@ Loom 是一个运行在本地的 AI Agent 任务执行框架，用于编程、�
   高级评估及 Meta-Harness 命令支持实验和受治理约束的优化。可选的 [行为评估 v3](docs/behavior-evaluation-v3.zh-CN.md) 将目标验收与意图、计划、推进、推理效率及恢复能力分开评估。
 
 当前通用任务执行后端使用本机 OS。项目面向 macOS/Linux 和单个本地用户；
-Docker/VM 任务执行后端尚未实现。
+Docker/VM 任务执行后端尚未实现。环境探测可识别当前进程的容器标记及 Docker CLI，
+不代表 Loom 会自动创建容器或将任务隔离到 Docker 中。
 
 ## 快速开始
 
@@ -50,6 +55,15 @@ uv sync
 ```bash
 uv sync --extra knowledge-graph
 ```
+
+使用 Web / Canvas / WebGL 视觉功能时，安装可选浏览器依赖和 Chromium：
+
+```bash
+uv sync --extra browser --inexact
+PLAYWRIGHT_SKIP_BROWSER_GC=1 .venv/bin/python -m playwright install chromium
+```
+
+`--inexact` 保留环境中已安装的其他可选依赖。浏览器在安装阶段下载，任务运行时不自动安装。
 
 ### 2. 配置模型
 
@@ -93,7 +107,8 @@ uv run loom --workspace /absolute/path/to/project
 2. 打开新建 Session 页面，填写任务目标。
 3. 选择 **General**、**Research** 或 **Coding**，检查工具、模型、workspace
    和知识库绑定。也可以点击 **Recommend with LLM** 获取建议，确认后点击
-   **Create session**。
+   **Create session**。需要实际页面操作或视觉验收时，选择 **Browser & visual evidence**；
+   本地应用预览同时需要 workspace、Files 和 Commands。
 4. 在对话区查看进展，展开 **Process** 检查模型请求、工具参数、结果和错误。
    Workflow、预算和输出面板展示当前任务状态。
 5. 发送补充要求或回答待处理问题，通过 **Pause**、**Resume**、**Stop** 控制执行。
@@ -101,7 +116,7 @@ uv run loom --workspace /absolute/path/to/project
 Coding 和文件/命令工具需要服务所在机器上的现有目录。
 Research 可以不绑定 workspace；如果希望分析文档落盘，请绑定可写目录，
 结果会同时保留为 artifact。内置调研工具读取给定的 HTTP(S) URL，
-当前没有内置搜索引擎，也不执行 JavaScript 浏览器。
+当前没有内置搜索引擎；需要执行页面 JavaScript 或检查 Canvas/WebGL 时，使用可选浏览器集合。
 
 任务控制中，**Complete task** 关闭任务，**Reopen task** 恢复消息输入，但不会自动执行。
 需要从头运行时点击 **Restart task**：沿用当前目标，重新绑定当前注册的外部工具，创建新 run，
@@ -138,6 +153,35 @@ LightRAG 的 **Sync activity** 展示当前页面或文档、执行阶段、已�
 
 关闭浏览器标签页不会停止后端任务。凭证只保存在当前标签页内存，
 刷新后需要重新连接。Web 页面随 Python 包发布，不需要 Node 或单独的前端服务。
+
+### Web / Canvas / WebGL 视觉验收
+
+浏览器集合提供 `browser_open`、`browser_act`、`browser_observe`、`browser_capture` 和
+`browser_close`。执行 Agent 可以观察页面；正式验收在独立浏览器中重放场景，
+将实际截图交给独立的图像模型。配置方法见下方 `visual_verification_model` 示例，
+也可在 **Settings → Models** 设置 Input modalities，并在 **General** 选择 Visual acceptance model。
+
+本地预览使用当前候选源码的有界副本和独立端口，场景通过 `preview.argv` 的 `{port}` 占位符
+启动实际应用。外部页面需要显式绑定 URL resource；正式验收不直接复用版本不明的已有 dev server。
+Loom 自身的 Web 界面不需要 Node，但被验收的应用仍需具备自己的运行依赖。
+
+截图前最多等待 **12 秒**，检查文档与资源加载、可见 Canvas 初始化和实际渲染调用；
+可识别的 React Three Fiber 场景还会等待空 root 挂载内容，减少只截到 UI 或纹理加载黑屏的情况。
+未指定采样时刻且要求 Canvas 或检测到 WebGL 时，就绪等待后默认延时 1.5 秒采第一张，
+再间隔 1 秒采第二张。就绪不等于验收通过，超时仍保留实际画面和诊断。
+
+在 **Processing / 验收记录 → View screenshot** 查看原图和判断区域。
+证据还包含就绪耗时、超时阶段、页面异常、失败资源请求、HTTP 错误及可用的场景事实。
+确定性浏览器断言失败不能被模型覆盖；精确对象数量需要断言或独立运行时证据，不能只靠截图猜测。
+视角或画面不足时最多补采一次，仍不足则保留具体阻塞原因。
+
+**Input budget** 表示单次模型上下文容量，**Acceptance budget** 表示验收调用、耗时和失败候选额度。
+视觉任务会按条件数调整默认验收额度，任务显式配置的上限仍有效。验收阻塞或额度耗尽后，
+明确点击 **Resume** 会保留历史记录并开启新的有界验收额度，重新采证；任务总用量和原始要求保留。
+单纯重启服务不会补充额度，暂停或环境阻塞也不算作候选修复失败。
+
+首期覆盖 Web 页面、Canvas 和 WebGL。安装配置、场景协议、证据边界和恢复流程详见
+[视觉观察与验收指南](docs/visual-observation-and-acceptance.zh-CN.md)。
 
 ## TUI 与 Session CLI 使用方法
 
@@ -208,6 +252,8 @@ default_model: dashscope/your-model-id
 # evaluation_model: dashscope/your-fast-model-id
 # 可选：运行时验收模型，默认使用任务模型。
 # verification_model: dashscope/your-fast-model-id
+# 可选：独立的视觉验收模型，必须声明支持 image 输入。
+# visual_verification_model: dashscope/qwen3.8-omni-flash
 
 providers:
   dashscope:
@@ -223,6 +269,15 @@ providers:
       your-fast-model-id:
         request_options:
           enable_thinking: false
+      qwen3.8-omni-flash:
+        input_modalities: [text, image]
+        context_window_tokens: 1000000
+        max_completion_tokens: 4096
+        request_options:
+          modalities: [text]
+          reasoning_effort: none
+          response_format:
+            type: json_object
 ```
 
 启动后端时显式指定该文件：
@@ -234,6 +289,10 @@ uv run loom serve --data-dir .loom/service --config config.yaml
 `models` 下的节点名就是实际 API 模型 ID，无需再配置 `model` 字段。
 所有模型选择和角色引用均使用 `provider/model`，例如 `dashscope/your-model-id`。
 `api_key_env` 从后端环境变量或 `.env` 中读取 key。
+
+使用视觉验收时，取消 `visual_verification_model` 行的注释，并使用该模型实际可用的供应商 endpoint。
+示例中的 Qwen3.8-Omni-Flash 采用 JSON Mode，结果由 Loom 本地校验。
+`verification_model` 负责普通验收，`visual_verification_model` 负责图像判断，两者可分别选择。
 
 同一个 provider 仅共用 `base_url` 和 `api_key_env`，其他参数放在各自模型下。不同 provider 可以使用相同模型 ID。同一 API 模型需要不同参数配置时，使用独立的 provider 配置组（例如 `dashscope` 和 `dashscope_judge`）。Settings → Models 可填写供应商连接及其模型参数。旧版配置仍可读取，通过 Settings 保存时转换为新结构；顶层 `models` 和 `providers` 不能混用。迁移保留的 `model_aliases` 仅用于兼容旧 session、知识库及评估记录的引用，不会出现在选择列表中。
 
@@ -304,6 +363,27 @@ uv run loom session create '读取 https://www.python.org/about/ 并写出带来
 `force` 要求先提交计划，`off` 使用不含计划工具的 ReAct 路径。
 General/Research 模板使用 dynamic workflow。
 
+### 执行主机环境与 shell
+
+执行模型与验收模型的系统提示词会加入当前 worker 的 OS、版本、CPU 架构、
+实际执行 shell 及参数、登录 shell、容器检测结果和 Docker CLI 可用性。
+这些信息描述工具实际运行的位置；容器内报告的是容器的 OS，浏览器客户端所在机器不决定命令格式。
+恢复旧 Session 时会刷新环境信息。
+
+`shell_execute` 默认通过 `/bin/bash -o pipefail -c` 执行，不跟随登录 shell 自动切换；
+例如 macOS 登录 shell 为 zsh，工具仍可能使用 Bash。需要调整时，在**任务配置**中指定：
+
+```yaml
+execution_runtime:
+  plugin: native_os
+  shell: ["/bin/bash", "-o", "pipefail", "-c"]
+```
+
+模型会收到适用的命令提示，例如 macOS 默认 BSD 工具与 GNU 参数的差异。
+`process_execute` 直接接收字面量 argv，不执行 shell 展开。容器探测结合 Docker/Podman 标记和
+cgroup；未检测到标记不保证位于裸机。Docker CLI 存在与当前是否位于容器内分别记录，
+daemon 连通性标为未探测，使用 Docker 前仍需实际检查。
+
 ### 知识库与 embedding 配置
 
 | 引擎             | 配置与用途                                                           |
@@ -366,6 +446,7 @@ run:
 - [任务插件、工作流和报告输出](docs/general-task-runtime.md)
 - [知识库与 LightRAG 同步](docs/knowledge-bases.md)
 - [外部工具：MCP 与 CLI](docs/external-tools.zh-CN.md)
+- [Web / Canvas / WebGL 视觉观察与验收](docs/visual-observation-and-acceptance.zh-CN.md)
 - [Session 轨迹分析](docs/session-trajectory-analysis.md)
 - [Trace 效果分析](docs/trace-effectiveness-analysis.md)
 - [Meta-Harness：优化、实验与治理](docs/meta-harness.md)
@@ -391,7 +472,3 @@ LOOM_RUN_LIVE_LLM=1 uv run pytest tests/integration/test_live_llm_smoke.py -q
 ```
 
 代码采用 `src/loom/` 包布局，Web 前端资源包含在 Python 发布包中。
-
-### Web / WebGL 视觉验收
-
-可选浏览器集合支持实际页面操作、截图与多帧 WebGL 证据，并接入独立多模态验收。配置 `visual_verification_model`（首选 `dashscope/qwen3.8-omni-flash`）和模型的 `input_modalities: [text, image]`，在新建/编辑任务时选择 Browser & visual evidence；本地预览同时需要 workspace 和 Commands。安装、场景协议、证据查看与恢复流程见 [视觉观察与验收](docs/visual-observation-and-acceptance.zh-CN.md)。
