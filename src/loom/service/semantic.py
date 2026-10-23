@@ -36,31 +36,31 @@ EVALUATION_WORKERS = 2
 MAX_ACTIVE_EVALUATIONS = 4
 RESOURCE_LIMITS = {"max_calls", "max_tokens", "max_seconds"}
 DEFAULTS = {
-    "max_calls": 80,
-    "max_tokens": 1000000,
-    "max_seconds": 1800,
-    "max_evidence_chars": 256 * 1024,
-    "max_prompt_chars": 100000,
+    "max_calls": 160,
+    "max_tokens": 2000000,
+    "max_seconds": 3600,
+    "max_evidence_chars": 512 * 1024,
+    "max_prompt_chars": 200000,
     "batch_rounds": 8,
-    "max_read_rounds": 4,
-    "max_rounds": 10000,
-    "max_call_seconds": 120,
+    "max_read_rounds": 8,
+    "max_rounds": 20000,
+    "max_call_seconds": 240,
 }
 V3_DEFAULTS = {
     **DEFAULTS,
-    "max_calls": 24,
-    "max_tokens": 120000,
-    "max_rounds": 8,
-    "max_read_rounds": 1,
-    "max_prompt_chars": 48000,
+    "max_calls": 48,
+    "max_tokens": 240000,
+    "max_rounds": 16,
+    "max_read_rounds": 2,
+    "max_prompt_chars": 96000,
 }
-GOAL_DEFAULTS = {**V3_DEFAULTS, "max_read_rounds": 2}
+GOAL_DEFAULTS = {**V3_DEFAULTS, "max_read_rounds": 4}
 GRAPH_DEFAULTS = {
     **GOAL_DEFAULTS,
-    "max_calls": 24,
-    "max_tokens": 240000,
-    "max_prompt_chars": 256 * 1024,
-    "max_call_seconds": 90,
+    "max_calls": 48,
+    "max_tokens": 480000,
+    "max_prompt_chars": 512 * 1024,
+    "max_call_seconds": 180,
 }
 BOUNDS = {
     "max_calls": (1, 500),
@@ -70,7 +70,7 @@ BOUNDS = {
     "max_prompt_chars": (10000, 1000000),
     "batch_rounds": (1, 16),
     "max_read_rounds": (0, 10),
-    "max_rounds": (1, 10000),
+    "max_rounds": (1, 20000),
     "max_call_seconds": (1, 600),
 }
 
@@ -120,6 +120,8 @@ class SessionSemantic:
                 models = [{"id": key, "label": key if "/" in key else f"{key} · {value.model}"} for key, value in loaded.value.models.items()]
         return {
             "supports_delete": True,
+            "supports_memory": True,
+            "memory_default": True,
             "models": models,
             "default_model": default,
             "defaults": GRAPH_DEFAULTS,
@@ -254,10 +256,15 @@ class SessionSemantic:
 
     def _result(self, body, source, factual, semantic):
         if body.get("analysis_version") in GOAL_ENGINES:
+            report = semantic.get("report")
+            if report and isinstance(report.get("text"), str):
+                report = {**report, "text": f"Session: {body['session_id']}\n\n" + report["text"]}
             return {
                 **semantic,
+                **({"report": report} if report else {}),
+                "session_id": body["session_id"],
                 "analysis_id": body["id"],
-                "source": {**semantic["source"], "analysis_id": body["analysis_id"], "snapshot_boundary": body["source_cursor"]},
+                "source": {**semantic["source"], "session_id": body["session_id"], "analysis_id": body["analysis_id"], "snapshot_boundary": body["source_cursor"]},
                 "analyzer": {
                     **semantic["analyzer"],
                     "model_config_digest": body["config_digest"],
@@ -284,7 +291,7 @@ class SessionSemantic:
         }
 
     def start(self, sid, aid, options):
-        if not isinstance(options, dict) or set(options) - {"model", "resume_id", "analysis_version", "run_id", *DEFAULTS}:
+        if not isinstance(options, dict) or set(options) - {"model", "resume_id", "analysis_version", "run_id", "extract_memory", *DEFAULTS}:
             raise ServiceError("Invalid evaluation options")
         resume_id = options.get("resume_id")
         if resume_id is not None and (not isinstance(resume_id, str) or not resume_id):
@@ -306,8 +313,12 @@ class SessionSemantic:
             **(GRAPH_DEFAULTS if version == GRAPH_ENGINE else GOAL_DEFAULTS if version == GOAL_ENGINE else V3_DEFAULTS if version == "v3" else DEFAULTS),
             **(resumed["settings"] if resumed else {}),
         }
+        if "extract_memory" in options:
+            if version != GRAPH_ENGINE or type(options["extract_memory"]) is not bool:
+                raise ServiceError("extract_memory must be a boolean for incremental graph evaluation")
+            settings["extract_memory"] = options["extract_memory"]
         for key, value in options.items():
-            if key in {"model", "resume_id", "analysis_version", "run_id"}:
+            if key in {"model", "resume_id", "analysis_version", "run_id", "extract_memory"}:
                 continue
             low, high = BOUNDS[key]
             if type(value) is not int or not low <= value <= high:
@@ -374,6 +385,7 @@ class SessionSemantic:
                     or resumed.get("run_id") != run_id
                     or (not protocol_upgrade and (resumed["analyzer_version"] != analyzer_version or resumed["prompt_version"] != prompt_version))
                     or any(settings[k] != resumed["settings"].get(k, DEFAULTS[k]) for k in DEFAULTS if k not in resource_limits(version))
+                    or settings.get("extract_memory", False) != resumed["settings"].get("extract_memory", False)
                 ):
                     raise ServiceError("Resume must keep the same model, snapshot and analysis settings; only resource limits may change")
                 if any(settings[k] < resumed["settings"][k] for k in resource_limits(version) if k != "max_tokens" or version != GRAPH_ENGINE):

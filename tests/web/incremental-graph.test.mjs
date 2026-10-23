@@ -12,12 +12,14 @@ const click=(root,text)=>[...root.querySelectorAll('button')].find(b=>b.textCont
 test('goal tree replaces DAG, lazily expands actions and retains state across revisions',()=>{
   const dom=new JSDOM('<main></main>');globalThis.document=dom.window.document;
   const root=document.querySelector('main'),data=fixture(),refs=[];
+  data.session_id='sess_0c49d485a3a347f18b1e12de860e673f';
   data.evaluator_usage.reservations[0].input_profile={card_count:4,total_chars:10000,components_chars:{cards:4000,state:500,response_schema:2000,contract:0,extra_evidence:0}};
+  data.evaluator_usage.reservations.push({id:'memory:request',input_profile:{total_chars:12000}});
   data.goals[1].objective='<script>unsafe()</script>';
   const view=new IncrementalGraphView(root,{evidence:r=>refs.push(r)});view.update(data,'job-1');
   assert.ok(root.querySelector('[aria-label="Goal process tree"]'));
   assert.equal(root.querySelector('svg'),null);
-  assert.deepEqual([...root.querySelectorAll('[role=tab]')].map(n=>n.textContent),['Skeleton','Acceptance','Report']);
+  assert.deepEqual([...root.querySelectorAll('[role=tab]')].map(n=>n.textContent),['Skeleton','Acceptance','Memory','Report']);
   assert.doesNotMatch(root.textContent,/Task tokens|Calls attributed|Cards reviewed|Evaluator tokens|Export|Entire run/);
   assert.equal(root.querySelector('script'),null);
   assert.equal(root.querySelectorAll('[data-action-detail]').length,0);
@@ -37,7 +39,10 @@ test('goal tree replaces DAG, lazily expands actions and retains state across re
   view.update({...data,graph_revision:3},'job-1');assert.equal(root.querySelector('.goal-tree-goal').open,false);
   click(root,'Acceptance');assert.match(root.textContent,/No verification receipts recorded/);
   click(root,'Report');assert.match(root.querySelector('.skeleton-report').textContent,/Goal process analysis/);
+  assert.equal(root.querySelector('.skeleton-report .analysis-session-id').textContent, `Session: ${data.session_id}`);
   assert.match(root.textContent,/Evaluator input cost/);
+  assert.match(root.textContent,/memory:request/);
+  assert.doesNotMatch(root.textContent,/NaN|undefined/);
   click(root,'Skeleton');assert.equal(root.querySelector('.goal-tree-goal').open,false);
   view.update(data,'job-2');assert.equal(root.querySelector('.goal-tree-goal').open,true);
   assert.equal(root.querySelectorAll('[data-action-detail]').length,0);
@@ -100,11 +105,15 @@ test('goal structure remains visibly pending when all cards have judgments',()=>
   const root=document.querySelector('main'),data=fixture();
   data.coverage.pending_cards=0;
   data.coverage.pending_structure_units=['batch:1','batch:2'];
-  data.coverage.review_gaps=[{batch_id:'batch:1',reason:'Undelivered evidence'}];
+  data.coverage.review_gaps=[
+    {batch_id:'batch:1',record_type:'structure',reason:'Goal structure pending'},
+    {batch_id:'batch:1',record_type:'structure',record:0,path:['reason'],reason:'Field reason: at most 240 characters'},
+  ];
   const view=new IncrementalGraphView(root);view.update(data,'pending-structure');
   assert.match(root.textContent,/Goal structure pending · 2 windows/);
   click(root,'Report');
   assert.match(root.textContent,/Validation issues · 1/);
+  assert.match(root.textContent,/Field reason: at most 240 characters/);
   assert.doesNotMatch(root.textContent,/Unresolved groups/);
   dom.window.close();
 });

@@ -1,6 +1,7 @@
 import {element, renderMarkdown} from '../markdown.mjs';
 import {disclosure, table, seconds, number, badge} from './dashboard.mjs';
 import {goalTree, filterGoalTree, goalEntries, callSummary} from './goal-tree.mjs';
+import {renderTraceMemory} from './trace-memory.mjs';
 
 let viewSequence = 0;
 const button = (text, action) => {
@@ -23,7 +24,7 @@ export class IncrementalGraphView {
   }
   update(data, identity = '') {
     const key = JSON.stringify([identity || data.analysis_id, data.source?.digest, data.source?.run_id]);
-    if (this.identity !== key) {this.opened.clear(); this.filter = 'all'; this.root.replaceChildren();}
+    if (this.identity !== key) {this.opened.clear(); this.filter = 'all'; this.memoryGoal = 'all'; this.root.replaceChildren();}
     this.identity = key; this.data = data; this.tree = goalTree(data);
     if (!['all', 'unassigned'].includes(this.filter) && !this.tree.byGoal.has(this.filter)) this.filter = 'all';
     this.render();
@@ -56,7 +57,7 @@ export class IncrementalGraphView {
     this.root.replaceChildren(); this.root.classList.add('incremental-graph');
     const header = element('div', 'dashboard-toolbar skeleton-toolbar'), tabs = element('div', 'trajectory-tabs');
     tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Analysis result');
-    const modes = ['skeleton', 'acceptance', 'report'];
+    const modes = ['skeleton', 'acceptance', 'memory', 'report'];
     for (const mode of modes) {
       const tab = button(mode[0].toUpperCase() + mode.slice(1), () => {this.mode = mode; this.render();});
       tab.id = `skeleton-tab-${this.uid}-${mode}`; tab.tabIndex = this.mode === mode ? 0 : -1;
@@ -65,7 +66,7 @@ export class IncrementalGraphView {
       tab.addEventListener('keydown', event => {
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
         event.preventDefault(); const i = modes.indexOf(this.mode);
-        this.mode = event.key === 'Home' ? modes[0] : event.key === 'End' ? modes.at(-1) : modes[(i + (event.key === 'ArrowLeft' ? 2 : 1)) % 3];
+        this.mode = event.key === 'Home' ? modes[0] : event.key === 'End' ? modes.at(-1) : modes[(i + (event.key === 'ArrowLeft' ? modes.length - 1 : 1)) % modes.length];
         this.render(); this.root.querySelector('[role=tab][aria-selected=true]')?.focus();
       });
       tabs.append(tab);
@@ -75,25 +76,40 @@ export class IncrementalGraphView {
     content.id = `skeleton-panel-${this.uid}`; content.setAttribute('aria-labelledby', `skeleton-tab-${this.uid}-${this.mode}`);
     this.root.append(content);
     if (this.mode === 'report') this.renderReport(content);
+    else if (this.mode === 'memory') renderTraceMemory(this, content);
     else if (this.mode === 'acceptance') this.renderAcceptance(content);
     else this.renderSkeleton(content);
     // Report disclosures are eager; restore their state as well.
     for (const node of this.root.querySelectorAll('details[data-key]')) if (this.opened.has(node.dataset.key)) node.open = this.opened.get(node.dataset.key);
     viewport.scrollTop = scroll;
   }
-  metrics(cost) {
-    const node = element('span', 'goal-tree-metrics', `${cost.model} model / ${cost.tool} tool · Duration: ${durationLabel(cost)}`);
-    node.title = 'Sum of recorded durations for unique calls in this branch, not wall time. Shared calls cannot be summed across branches.';
+  metrics(cost, parentCost, parentLabel) {
+    const node = element('span', 'goal-tree-metrics');
+    const partial = !!(cost.unknown || parentCost.unknown);
+    const ratio = cost.timed && parentCost.duration > 0 ? cost.duration / parentCost.duration : null;
+    const percent = ratio === null ? '—' : ratio > 0 && ratio < .001 ? '<0.1%' : `${(ratio * 100).toFixed(1).replace(/\.0$/, '')}%`;
+    const share = `${percent} of ${parentLabel}${partial ? ' · known time only' : ''}`;
+    const values = element('span', 'goal-tree-time-values');
+    values.append(element('span', 'goal-tree-duration', durationLabel(cost)), element('span', 'goal-tree-share', share));
+    const track = element('span', `goal-tree-time-track${ratio === null ? ' is-unknown' : ''}${partial ? ' is-partial' : ''}`);
+    track.setAttribute('role', 'img');
+    track.setAttribute('aria-label', `Duration: ${durationLabel(cost)}; ${share}`);
+    if (ratio !== null) {
+      const fill = element('span', 'goal-tree-time-fill');
+      fill.style.width = `${Math.max(0, Math.min(100, ratio * 100))}%`; track.append(fill);
+    }
+    node.append(values, track, element('span', 'goal-tree-call-count', `${cost.model} model / ${cost.tool} tool`));
+    node.title = `Duration: ${durationLabel(cost)}. Compared with ${parentLabel}: ${durationLabel(parentCost)}. Sum of recorded durations for unique calls, not wall time. Shared calls cannot be summed across branches. Parent totals stay unchanged when filtering. A dash means no measurable percentage.`;
     return node;
   }
-  heading(label, title, cost, tags = []) {
+  heading(label, title, cost, tags, parentCost, parentLabel) {
     const row = element('span', 'goal-tree-heading');
     const name = element('span', 'goal-tree-title');
     if (label) name.append(element('span', 'goal-tree-id', label));
     name.append(document.createTextNode(title)); row.append(name);
     const statuses = element('span', 'goal-tree-tags');
     for (const tag of tags.filter(Boolean)) statuses.append(badge(tag));
-    row.append(statuses, this.metrics(cost)); return row;
+    row.append(statuses, this.metrics(cost, parentCost, parentLabel)); return row;
   }
   renderSkeleton(root) {
     const controls = element('div', 'goal-tree-controls'), label = element('label', '', 'Goal');
@@ -103,6 +119,7 @@ export class IncrementalGraphView {
     }
     select.value = this.filter; select.addEventListener('change', () => {this.filter = select.value; this.render();});
     label.append(select); controls.append(label); root.append(controls);
+    root.append(element('p', 'goal-tree-time-legend', 'Time bars: goal / parent goal · stage / goal · action / stage. Recorded call time, not wall time; shared calls count once per branch. Filters retain full parent totals.'));
     const pending = this.data.coverage.pending_structure_units?.length || 0;
     if (pending) controls.append(badge(`Goal structure pending · ${pending} windows`));
     const tree = element('div', 'goal-process-tree'); tree.setAttribute('aria-label', 'Goal process tree'); root.append(tree);
@@ -122,7 +139,10 @@ export class IncrementalGraphView {
     const tags = goal.parent_goal_id ? [status] : [`Process: ${status}`, `Host: ${this.hostState(goal)}`];
     if (Number.isFinite(goal.first_action_line)) tags.push(`L${goal.first_action_line}–${goal.last_action_line}`);
     if (this.tree.byGoal.get(goal.parent_goal_id)?.parent_goal_id && goal.parent_relation_basis === 'unreviewed') tags.push('Nesting unreviewed');
-    const node = this.details(root, `goal:${goal.id}`, this.heading(goal.display_id, goal.objective, goal.cost, tags), body => {
+    const parent = this.tree.byGoal.get(goal.parent_goal_id);
+    const parentCost = parent?.cost || callSummary([...this.tree.atoms.keys()], this.tree.atoms);
+    const node = this.details(root, `goal:${goal.id}`, this.heading(goal.display_id, goal.objective, goal.cost, tags,
+      parentCost, parent?.display_id || 'run'), body => {
       this.details(body, `goal-info:${goal.id}`, goal.parent_goal_id ? 'Goal details' : 'Task requirements', detail => {
         if (goal.parent_goal_id) {
           const parent = this.tree.byGoal.get(goal.parent_goal_id);
@@ -140,7 +160,7 @@ export class IncrementalGraphView {
         } else detail.append(element('p', 'muted', 'Closure not established'));
         for (const q of closure?.open_questions || goal.open_questions || []) detail.append(element('p', '', `Remaining question / feedback: ${q}`));
         this.refs(detail, goal.evidence_refs);
-        for (const item of goal.requirements) this.renderAction(detail, item, `requirements:${goal.id}`);
+        for (const item of goal.requirements) this.renderAction(detail, item, `requirements:${goal.id}`, this.tree.byGoal.get(goal.id).cost, goal.display_id);
         this.findings(detail, goal.id);
       });
       const children = element('div', 'goal-tree-children'); body.append(children);
@@ -156,7 +176,7 @@ export class IncrementalGraphView {
     const tags = [basisLabel[stage.basis], `L${stage.first_line}–${stage.last_line}`];
     if (stage.visits?.length > 1) tags.push(`${stage.visits.length} visits`);
     const node = this.details(root, `stage:${stage.id}`, this.heading(stage.display_id, stage.title, cost,
-      tags), body => {
+      tags, this.tree.byGoal.get(stage.goal_id).cost, this.tree.byGoal.get(stage.goal_id).display_id), body => {
       const models = [...new Set(ids.map(id => this.tree.atoms.get(id)).filter(a => a?.kind === 'model').map(a => a.model || 'Unknown'))];
       const meta = element('div', 'goal-tree-stage-meta', `L${stage.first_line}–${stage.last_line}${models.length ? ' · Models: ' + models.join(', ') : ''}`); body.append(meta);
       this.details(body, `stage-info:${stage.id}`, 'Stage details & dependencies', detail => {
@@ -180,7 +200,8 @@ export class IncrementalGraphView {
         this.findings(detail, stage.goal_id, stage.card_ids);
       });
       const actions = element('div', 'goal-tree-actions'); body.append(actions);
-      for (const item of stage.actions) this.renderAction(actions, item, stage.id);
+      const fullStage = this.tree.stages.find(s => s.id === stage.id);
+      for (const item of stage.actions) this.renderAction(actions, item, stage.id, fullStage.cost, stage.display_id || 'stage');
     }, false, 'goal-tree-stage');
     node.dataset.stageId = stage.source_stage_id;
   }
@@ -197,11 +218,11 @@ export class IncrementalGraphView {
     };
     walk(values);
   }
-  renderAction(root, item, context) {
+  renderAction(root, item, context, parentCost, parentLabel) {
     const {card, assessment, attribution, shared, root_override, framework_rule} = item;
     const cost = callSummary(card.call_ids, this.tree.atoms);
     const heading = this.heading(`A${item.ordinal || this.tree.cards.findIndex(c => c.id === card.id) + 1}`, `${card.kind} · ${card.name} · L${card.start_line}–${card.end_line}`, cost,
-      [card.status, shared ? 'Shared reference' : '', framework_rule ? 'Framework required' : attribution ? 'Default rule' : '']);
+      [card.status, shared ? 'Shared reference' : '', framework_rule ? 'Framework required' : attribution ? 'Default rule' : ''], parentCost, parentLabel);
     const node = this.details(root, `action:${context}:${card.id}`, heading, body => {
       body.dataset.actionDetail = card.id;
       body.append(element('p', 'goal-tree-stage-meta', `L${card.start_line}–${card.end_line} · Review: ${assessment?.status || 'Pending'}`));
@@ -296,18 +317,22 @@ export class IncrementalGraphView {
     }
   }
   renderReport(root) {
-    const article = element('article', 'skeleton-report'); article.append(renderMarkdown(this.data.report.text)); root.append(article);
+    const article = element('article', 'skeleton-report');
+    const sessionId = this.data.session_id || this.data.source?.session_id;
+    if (sessionId && !this.data.report.text.includes(`Session: ${sessionId}`)) article.append(element('p', 'analysis-session-id', `Session: ${sessionId}`));
+    article.append(renderMarkdown(this.data.report.text)); root.append(article);
     const checks = disclosure(article, 'Acceptance evidence'); checks.dataset.key = 'report:acceptance';
     for (const v of this.data.facts.verification) {const row = disclosure(checks, `${v.type} · L${v.line}`); row.append(element('pre', 'goal-report', JSON.stringify(v.value, null, 2))); this.refs(row, v.evidence_refs);}
     const requests = (this.data.evaluator_usage.reservations || []).filter(r => r.input_profile);
     if (requests.length) {
       const costs = disclosure(article, 'Evaluator input cost'); costs.dataset.key = 'report:cost';
       table(costs, ['Request', 'Cards', 'Input chars · incl. schema', 'Cards / state / schema chars', 'Extra evidence chars', 'Reported input / output tokens'], requests.map(r => {
-        const p = r.input_profile, c = p.components_chars;
-        return [r.id, p.card_count, number(p.total_chars), `${c.cards} / ${c.state} / ${c.response_schema+c.contract}`, c.extra_evidence, r.usage ? `${r.usage.prompt_tokens} / ${r.usage.completion_tokens}` : 'Unknown'];
+        const p = r.input_profile, c = p.components_chars || {};
+        const schemaChars = c.response_schema != null && c.contract != null ? c.response_schema + c.contract : null;
+        return [r.id, number(p.card_count), number(p.total_chars), `${number(c.cards)} / ${number(c.state)} / ${number(schemaChars)}`, number(c.extra_evidence), r.usage ? `${number(r.usage.prompt_tokens)} / ${number(r.usage.completion_tokens)}` : 'Unknown'];
       }));
     }
-    const validationIssues = this.data.coverage.review_gaps.filter(gap => gap.record_type !== 'structure');
+    const validationIssues = this.data.coverage.review_gaps.filter(gap => gap.record_type !== 'structure' || 'record' in gap);
     if (validationIssues.length) {
       const gaps = disclosure(article, `Validation issues · ${validationIssues.length}`); gaps.dataset.key = 'report:gaps';
       for (const gap of validationIssues) gaps.append(element('p', '', `${gap.batch_id}: ${gap.reason}`));

@@ -7,8 +7,9 @@ from loom.llm.structured import StructuredProtocol
 
 ENGINE = "goal_graph_v1"
 ANALYZER = "goal-graph.3"
-PROMPT = "goal-graph-rubric.8"
+PROMPT = "goal-graph-rubric.9"
 UPGRADABLE_VERSIONS = {
+    ("goal-graph.3", "goal-graph-rubric.8"),
     ("goal-graph.3", "goal-graph-rubric.7"),
     ("goal-graph.3", "goal-graph-rubric.6"),
     ("goal-graph.3", "goal-graph-rubric.5"), ("goal-graph.3", "goal-graph-rubric.4"),
@@ -127,8 +128,10 @@ Follow contract.format when present. No commentary, markdown fences, indentation
 """
 
 
-def protocol(allow_reads=True, *, metadata_only=False):
+def protocol(allow_reads=True, *, metadata_only=False, structure_only=False):
     schema = obj(deepcopy(METADATA_FIELDS)) if metadata_only else deepcopy(SCHEMA)
+    if structure_only:
+        schema = obj({k: deepcopy(METADATA_FIELDS[k]) for k in ("goals", "stages", "attributions", "structure")})
     if not allow_reads and not metadata_only:
         schema["properties"]["evidence_requests"]["maxItems"] = 0
 
@@ -146,7 +149,7 @@ def protocol(allow_reads=True, *, metadata_only=False):
     return StructuredProtocol("goal_graph", 2, schema, normalize=normalize)
 
 
-def compact_contract(mode="text", *, metadata_only=False):
+def compact_contract(mode="text", *, metadata_only=False, structure_only=False):
     """Text-mode hint is a type grammar, while local validation uses the full schema."""
 
     def hint(spec):
@@ -156,10 +159,13 @@ def compact_contract(mode="text", *, metadata_only=False):
             return [hint(spec["items"])]
         if spec.get("type") == "object":
             return {k: hint(v) for k, v in spec["properties"].items()}
+        if spec.get("type") == "string" and "maxLength" in spec:
+            return f"string (at most {spec['maxLength']} characters)"
         return "integer" if spec.get("type") == "integer" else "string"
 
     return {"format": "jsonl" if mode == "text" else "json",
             "instruction": 'One independent JSON object per line: {"type":"assessments",...fields}. '
             'Use the listed plural type names. No enclosing array. A later attribution links a card to a stage.'
             if mode == "text" else "Return one object with the listed arrays; records are committed independently.",
-            "records": {key: hint(value["items"]) for key, value in (METADATA_FIELDS if metadata_only else UPDATE_FIELDS).items()}}
+            "records": {key: hint(value["items"]) for key, value in (METADATA_FIELDS if metadata_only else UPDATE_FIELDS).items()
+                        if not structure_only or key in {"goals", "stages", "attributions", "structure"}}}

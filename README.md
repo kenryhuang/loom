@@ -9,6 +9,10 @@ resume from saved checkpoints.
 
 ## Key features
 
+- **Deep eval memory:** extract stage contributions, scoped environment and configuration
+  facts, failure lessons, and more efficient workflows from traces. Records link back
+  to goals, stages, actions, and source evidence; observed findings stay distinct from
+  proposed improvements. See [Deep eval Memory](docs/deep-eval-memory.md).
 - **Independent acceptance before completion:** actual command checks and a
   separate semantic review assess task- and workspace-specific requirements.
   Failed candidates enter bounded repair; missing evidence retains a concrete

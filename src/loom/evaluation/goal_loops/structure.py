@@ -5,6 +5,28 @@ from copy import deepcopy
 from loom.evaluation.goal_loops.attribution import root_owned_card
 
 
+def structure_review_context(cp, unit):
+    """Show the unresolved obligation and accepted memberships, without rejudging actions."""
+    goals = {g["id"]: g for g in cp["entities"]["goals"]}
+    eligible = [c for c in cp.get("extraction", {}).get("cards", [])
+                if c["id"] in unit["cards"] and c["kind"] in {"model", "tool"} and not root_owned_card(c)]
+    memberships = []
+    for card in eligible:
+        stages = [cp["stages"][sid] for sid in cp["assessments"].get(card["id"], {}).get("stage_ids", []) if sid in cp["stages"]]
+        memberships.append(dict(card_id=card["id"], stages=[dict(
+            id=s["id"], goal_id=s["goal_id"], parent_goal_id=goals.get(s["goal_id"], {}).get("parent_goal_id")
+        ) for s in stages]))
+    return dict(
+        eligible_card_ids=[c["id"] for c in eligible], accepted_memberships=memberships,
+        instruction="Resolve goal decomposition for this window only. Root-stage attributions alone do not resolve it. "
+        "If these actions only conclude, coordinate or report the root task, emit structure: single_goal with a specific "
+        "reason (at most 240 characters; put evidence IDs only in refs) and current card field refs. "
+        "Existing child goals elsewhere do not prevent a single_goal window. "
+        "Otherwise link eligible actions to supported result-oriented child goals. Do not invent subgoals or repeat "
+        "accepted assessments. If evidence is insufficient, emit structure: insufficient_evidence and explain the gap.",
+    )
+
+
 def commit_structure(cp, row, *, batch_id, delivered, cutoff, cards, target_ids):
     if not row["reason"].strip():
         raise ValueError("Goal structure decision requires a reason")

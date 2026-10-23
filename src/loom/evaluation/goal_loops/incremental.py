@@ -21,7 +21,7 @@ from loom.evaluation.goal_loops.graph_updates import commit_updates, parse_updat
 from loom.evaluation.goal_loops.judge_metadata import VERSION as INPUT_VERSION
 from loom.evaluation.goal_loops.judge_metadata import card_metadata, feedback_metadata, terminal_metadata_records
 from loom.evaluation.goal_loops.packing import REQUEST_CHARS, bounded_state, request_profile, serialized
-from loom.evaluation.goal_loops.structure import pending_structure_units, structure_pending
+from loom.evaluation.goal_loops.structure import pending_structure_units, structure_pending, structure_review_context
 from loom.evaluation.provider import evaluator_provider
 from loom.llm.api import LlmMessage, request_llm_response
 from loom.llm.structured import output_mode, protocol_provider, unsupported_format
@@ -113,7 +113,7 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
     extraction["metadata_links"] = link_cards(cards)
     judge_cards = {c["id"]: card_metadata(source, c, registry) for c in cards}
     extraction["registry"] = registry
-    semantic_settings = {k: v for k, v in settings.items() if k not in RESOURCE_LIMITS}
+    semantic_settings = {k: v for k, v in settings.items() if k not in RESOURCE_LIMITS and k != "extract_memory"}
     expected = dict(
         source=source.source_sha256,
         scope=view["scope_digest"],
@@ -135,6 +135,7 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
     for key, value in initialize(view).items():
         cp.setdefault(key, value)
     cp["identity"] = expected
+    cp["memory_requested"] = settings.get("extract_memory", False)
     cp["resource_limits"] = {k: settings[k] for k in RESOURCE_LIMITS}
     cp["extraction"] = extraction
     cp["input_policy"] = dict(version=INPUT_VERSION, source_reads=False, raw_tool_outputs=False, trace_history=False)
@@ -250,15 +251,18 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
             local_aliases=dict(list(aliases.items())[-12:]),
             boundary_evidence=[{k: e[k] for k in ("id", "text")} for e in boundary.values()],
         )
+        if structure_only:
+            payload["structure_review"] = structure_review_context({**local, "extraction": extraction}, unit)
+        response_protocol = protocol(allow_reads, metadata_only=True, structure_only=structure_only)
         if cp["mode"] != "json_schema":
-            payload["contract"] = compact_contract(cp["mode"], metadata_only=True)
+            payload["contract"] = compact_contract(cp["mode"], metadata_only=True, structure_only=structure_only)
         messages = [
             LlmMessage(
                 role="system", content=SYSTEM + ("\nNo more evidence reads; conclude with supported findings or explicit unknown." if not allow_reads else "")
             ),
             LlmMessage(role="user", content=serialized(payload)),
         ]
-        profile = request_profile(messages, payload, cp["mode"], protocol(allow_reads, metadata_only=True))
+        profile = request_profile(messages, payload, cp["mode"], response_protocol)
         chars = profile["total_chars"]
         if chars > min(settings["max_prompt_chars"], REQUEST_CHARS) and unit["id"] not in cp["units"] and len(subset) > 1:
             half = subset[: max(1, len(subset) // 2)]
@@ -318,7 +322,7 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         start = time.monotonic()
         try:
             wrapped = protocol_provider(
-                evaluator_provider(provider, output_tokens=None, timeout_seconds=timeout), protocol(allow_reads, metadata_only=True), cp["mode"]
+                evaluator_provider(provider, output_tokens=None, timeout_seconds=timeout), response_protocol, cp["mode"]
             )
             async with asyncio.timeout(timeout):
                 response = await request_llm_response(wrapped, messages, tools=None)
@@ -398,4 +402,9 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         pending.pop(0)
     cp["complete"] = all(u["complete"] for u in cp["units"].values())
     await save()
+    if cp["complete"] and cp["memory_requested"]:
+        from loom.evaluation.memory.review import review_memory
+
+        await review_memory(source, cp, run_id=run_id, provider=provider, settings=settings,
+                            save=save, emit=emit, remaining_seconds=remaining_seconds)
     return ok(project(source, facts, run_id, cp, extraction))

@@ -199,7 +199,7 @@ def test_increasing_total_budget_resumes_same_job_without_repeating_saved_batche
 
 def test_exhausted_time_is_rejected_before_any_new_model_call(evaluation):
     _, _, semantic, provider, sid, aid = evaluation
-    job = semantic.start(sid, aid, {"analysis_version": "v2", "max_calls": 1, "batch_rounds": 1})
+    job = semantic.start(sid, aid, {"analysis_version": "v2", "max_calls": 1, "batch_rounds": 1, "max_seconds": 1800})
     wait_job(semantic, sid, aid, job["id"])
     body = semantic._load(sid, aid, job["id"])
     body["elapsed_seconds"] = 1801
@@ -292,8 +292,8 @@ def test_running_behavior_job_exposes_saved_partial_findings(evaluation):
     current = semantic.get(sid, aid, job['id'])
     assert current['state'] == 'running'
     assert current['analysis_version'] == 'v3'
-    assert current['settings']['max_call_seconds'] == 120
-    assert current['settings']['max_seconds'] == 1800
+    assert current['settings']['max_call_seconds'] == 240
+    assert current['settings']['max_seconds'] == 3600
     assert current['scanned_pages'] == current['scan_pages'] == 1
     assert current['evaluation']['semantic']['coverage']['attempted_segments'] == 1
     assert not current['evaluation']['semantic']['coverage']['synthesis_complete']
@@ -314,8 +314,9 @@ def test_catalog_uses_independent_evaluation_model(evaluation, tmp_path):
     catalog = semantic.options()
     assert catalog['defaults'] == catalog['defaults_by_version'][catalog['default_analysis_version']]
     for defaults in catalog['defaults_by_version'].values():
-        assert defaults['max_seconds'] == 1800
-        assert defaults['max_evidence_chars'] == 262144
+        assert defaults['max_seconds'] == 3600
+        assert defaults['max_evidence_chars'] == 524288
+        assert all(catalog['bounds'][key][0] <= value <= catalog['bounds'][key][1] for key, value in defaults.items())
 
 
 def test_saved_graph_upgrade_keeps_snapshot_judgments_and_usage_without_llm_calls(evaluation):

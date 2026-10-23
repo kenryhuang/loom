@@ -8,6 +8,8 @@ import pytest
 from loom.core import ok
 from loom.evaluation.behavior_facts import build_behavior_facts
 from loom.evaluation.goal_loops.graph_updates import parse_updates
+from loom.evaluation.goal_loops.graph_contract import PROMPT, protocol, compact_contract
+from loom.evaluation.goal_loops.judge_metadata import feedback_metadata
 from loom.evaluation.goal_loops.structure import pending_structure_units
 from loom.llm import LlmResponse, TokenUsage
 from tests.evaluation.test_behavior_sequence import action, source
@@ -98,6 +100,11 @@ async def test_root_only_stages_do_not_pass_structure_even_with_all_actions_revi
     assert len(judge.requests) == 2
     assert judge.requests[-1]["review_control"]["mode"] == "structure_only"
     assert len(judge.requests[-1]["accepted_card_ids"]) == 2
+    context = judge.requests[-1]["structure_review"]
+    assert set(context["eligible_card_ids"]) == set(cp["assessments"])
+    assert all(row["stages"] and row["stages"][0]["parent_goal_id"] is None for row in context["accepted_memberships"])
+    assert "Root-stage attributions alone do not resolve it" in context["instruction"]
+    assert "Existing child goals elsewhere" in context["instruction"]
     assert "Goal decomposition pending" in result["report"]["text"]
 
 
@@ -129,14 +136,15 @@ async def test_explicit_structure_decision_is_distinct_from_silent_missing_subgo
 
 
 @pytest.mark.asyncio
-async def test_old_completed_root_only_units_resume_structure_without_losing_judgments():
+@pytest.mark.parametrize("old_prompt", ["goal-graph-rubric.5", "goal-graph-rubric.8"])
+async def test_old_completed_root_only_units_resume_structure_without_losing_judgments(old_prompt):
     store = source(action(1))
     facts = build_behavior_facts(store)
     cp = {}
     await run(store, facts, "run", cp, RootOnlyJudge())
     before = {cid: a["purpose"] for cid, a in cp["assessments"].items()}
     # Simulate v5's complete flag, which only meant cards were reviewed.
-    cp["identity"]["prompt"] = "goal-graph-rubric.5"
+    cp["identity"]["prompt"] = old_prompt
     cp["complete"] = True
     cp["conflicts"] = []
     for unit in cp["units"].values():
@@ -147,4 +155,41 @@ async def test_old_completed_root_only_units_resume_structure_without_losing_jud
     assert len(judge.requests) == 1
     assert judge.requests[0]["review_control"]["mode"] == "structure_only"
     assert {cid: a["purpose"] for cid, a in cp["assessments"].items()} == before
-    assert cp["protocol_upgrades"][-1]["to_prompt"] == "goal-graph-rubric.8"
+    assert cp["protocol_upgrades"][-1]["to_prompt"] == PROMPT
+
+
+def test_structure_repair_protocol_excludes_already_accepted_action_judgments():
+    expected = {"goals", "stages", "attributions", "structure"}
+    assert set(protocol(False, metadata_only=True, structure_only=True).schema["properties"]) == expected
+    for mode in ("text", "json_object"):
+        assert set(compact_contract(mode, metadata_only=True, structure_only=True)["records"]) == expected
+    assert "assessments" in protocol(False, metadata_only=True).schema["properties"]
+
+
+@pytest.mark.asyncio
+async def test_long_structure_reason_has_actionable_feedback_and_counts_as_validation_issue():
+    class LongReasonJudge(RootOnlyJudge):
+        async def chat(self, messages, tools=None, cancellation=None, **kwargs):
+            result = await super().chat(messages, tools=tools, cancellation=cancellation, **kwargs)
+            rows = json.loads(result.unwrap().content)
+            if rows.get("structure"):
+                rows["structure"][0]["reason"] = "Root report and verification. " * 20
+            return ok(LlmResponse(content=json.dumps(rows), usage=TokenUsage(100, 50, 150)))
+
+    store = source(action(1)); facts = build_behavior_facts(store); cp = {}
+    result = await run(store, facts, "run", cp, LongReasonJudge("single_goal"))
+    assert result["coverage"]["pending_cards"] == 0
+    assert result["coverage"]["validation_issue_count"] == 1
+    assert len(result["coverage"]["pending_structure_units"]) == 1
+    errors = cp["responses"][-1]["validation_errors"]
+    feedback = feedback_metadata(errors)
+    assert feedback[0]["path"] == ["reason"]
+    assert "at most 240 characters" in feedback[0]["reason"]
+    assert "Shorten the field" in feedback[0]["reason"]
+    accepted = deepcopy(cp["assessments"])
+    judge = RootOnlyJudge("single_goal")
+    done = await run(store, facts, "run", cp, judge)
+    assert done["coverage"]["pipeline_complete"]
+    assert done["coverage"]["validation_issue_count"] == 0
+    assert len(judge.requests) == 1
+    assert cp["assessments"] == accepted

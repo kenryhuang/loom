@@ -98,6 +98,57 @@ test('missing timing differs from zero and partial durations; repeated atom IDs 
   assert.equal(callSummary(['a', 'b', 'c', 'c'], atoms).calls, 3);
 });
 
+test('time bars compare each level with its full parent and retain that scale when filtered', () => {
+  const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
+  const data = fixture(), goal = data.goals[1];
+  data.cost_ledger.atoms.forEach(a => {a.duration_ms = 1000;});
+  data.goals.push({...goal, id: 'nested', parent_goal_id: goal.id, objective: 'Nested work'});
+  data.stages.push({...data.stages[0], id: 'nested-stage', goal_id: 'nested'});
+  data.record_assessments[2].stage_ids = ['nested-stage'];
+  // Repeated references must not inflate either the duration or the percentage.
+  data.extraction.cards[0].call_ids.push(data.extraction.cards[0].call_ids[0]);
+  const root = document.querySelector('main'), view = new IncrementalGraphView(root); view.update(data);
+  const summary = node => node.querySelector(':scope > summary');
+  const width = node => summary(node).querySelector('.goal-tree-time-fill').style.width;
+  assert.equal(width(root.querySelector('.goal-tree-goal')), '100%');
+  const nested = root.querySelector('[data-goal-id="nested"]');
+  assert.equal(width(nested), '25%');
+  assert.match(summary(nested).textContent, /25% of G1/);
+  const stage = root.querySelector(`[data-stage-id="${data.stages[0].id}"]`);
+  assert.equal(width(stage), '50%');
+  open(stage, dom);
+  assert.equal(width(stage.querySelector('.goal-tree-action')), '50%');
+  assert.match(summary(stage.querySelector('.goal-tree-action')).textContent, /1 s/);
+  view.filter = 'unassigned'; view.render();
+  const filteredStage = root.querySelector('.goal-tree-stage');
+  assert.equal(width(filteredStage), '25%');
+  open(filteredStage, dom);
+  assert.equal(width(filteredStage.querySelector('.goal-tree-action')), '100%');
+  dom.window.close();
+});
+
+test('time bars distinguish measured zero, missing timing, partial totals and empty scopes', () => {
+  const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
+  const view = new IncrementalGraphView(document.querySelector('main'));
+  const atoms = new Map([['zero', {duration_ms: 0}], ['timed', {duration_ms: 1000}], ['missing', {duration_ms: null}]]);
+  const parent = callSummary(['zero', 'timed', 'missing'], atoms);
+  const zero = view.metrics(callSummary(['zero'], atoms), parent, 'G1');
+  assert.equal(zero.querySelector('.goal-tree-time-fill').style.width, '0%');
+  assert.match(zero.textContent, /0 ms.*0% of G1 · known time only/);
+  const unknown = view.metrics(callSummary(['missing'], atoms), parent, 'G1');
+  assert.equal(unknown.querySelector('.goal-tree-time-fill'), null);
+  assert.match(unknown.querySelector('[role="img"]').getAttribute('aria-label'), /Unknown.*— of G1/);
+  const partial = view.metrics(parent, parent, 'run');
+  assert.ok(partial.querySelector('.is-partial'));
+  assert.match(partial.textContent, /1 s \+ 1 unknown.*100%.*known time only/);
+  for (const cost of [callSummary([], atoms), callSummary(['zero'], atoms)]) {
+    const node = view.metrics(cost, cost, 'run');
+    assert.equal(node.querySelector('.goal-tree-time-fill'), null);
+    assert.doesNotMatch(node.outerHTML, /NaN|Infinity/);
+  }
+  dom.window.close();
+});
+
 test('action sources are their own records, attribution anchors stay separate, and shell commands remain visible', () => {
   const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
   const data = fixture(), root = document.querySelector('main'), refs = [];

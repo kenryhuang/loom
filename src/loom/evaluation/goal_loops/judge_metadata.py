@@ -108,7 +108,7 @@ def feedback_metadata(errors):
     """Never replay giant validation messages or entire rejected records."""
     rows, seen = [], set()
     for error in errors:
-        row = {k: error[k] for k in ("record_type", "record_id", "card_ids") if k in error}
+        row = {k: error[k] for k in ("record_type", "record_id", "card_ids", "path") if k in error}
         row["reason"] = str(error.get("reason", "Invalid record"))[:180]
         key = serialized(row)
         if key not in seen:

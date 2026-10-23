@@ -166,7 +166,7 @@ export class TrajectoryView {
     this.deepPanel.append(
       element("p", "muted", "Preparing snapshot for evaluation…"),
     );
-    this.root.append(tabs, heading, this.body, this.deepPanel, this.reasoningPanel, this.diagnosisPanel);
+    this.root.append(element('p', 'analysis-session-id', `Session: ${sessionId}`), tabs, heading, this.body, this.deepPanel, this.reasoningPanel, this.diagnosisPanel);
     this.diagnosisView = new DiagnosisView(this.diagnosisPanel);
     void this.diagnosisView.open(api, sessionId);
     this.traceHeading = heading;

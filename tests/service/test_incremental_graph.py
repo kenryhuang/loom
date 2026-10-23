@@ -21,12 +21,16 @@ def test_incremental_service_checkpoint_resume_artifact_and_legacy_scope(evaluat
     cursor = store.snapshot(sid)["event_cursor"]
     catalog = manager.list(sid, aid)
     assert catalog["default_analysis_version"] == "goal_graph_v1"
-    assert catalog["defaults_by_version"]["goal_graph_v1"]["max_seconds"] == 1800
-    assert catalog["defaults_by_version"]["goal_graph_v1"]["max_evidence_chars"] == 262144
-    assert catalog["defaults_by_version"]["goal_graph_v1"]["max_prompt_chars"] == 262144
+    assert catalog["defaults_by_version"]["goal_graph_v1"]["max_seconds"] == 3600
+    assert catalog["defaults_by_version"]["goal_graph_v1"]["max_evidence_chars"] == 524288
+    assert catalog["defaults_by_version"]["goal_graph_v1"]["max_prompt_chars"] == 524288
+    assert catalog["defaults_by_version"]["goal_graph_v1"]["max_calls"] == 48
+    assert catalog["defaults_by_version"]["goal_graph_v1"]["max_call_seconds"] == 180
     options = dict(analysis_version="goal_graph_v1", run_id="r", batch_rounds=1, max_calls=1, max_tokens=100)
     started = manager.start(sid, aid, options)
     partial = wait_job(manager, sid, aid, started["id"])
+    assert partial["evaluation"]["source"]["session_id"] == sid
+    assert partial["evaluation"]["report"]["text"].count(f"Session: {sid}") == 1
     assert partial["state"] == "budget_exhausted", partial.get("error")
     first_revision = partial["evaluation"]["graph_revision"]
     assert first_revision > 0
@@ -106,3 +110,56 @@ def test_resume_upgrades_old_character_identity_and_preserves_semantic_settings(
     assert result["id"] == job["id"]
     assert len(judge.requests) == 2
     assert manager._load(sid, aid, job["id"])["checkpoint"]["resource_policy_upgrades"]
+
+
+def test_memory_service_budget_resume_persistence_and_option_validation(evaluation):  # noqa: F811
+    import json
+
+    from loom.core import ok
+    from loom.llm import LlmResponse, TokenUsage
+
+    store, trajectory, manager, _, sid, aid = evaluation
+
+    class MemoryJudge(GraphJudge):
+        async def chat(self, messages, tools=None, cancellation=None, **kwargs):
+            payload = json.loads(messages[1].content)
+            if payload.get('mode') not in {'extract', 'synthesis'}:
+                return await super().chat(messages, tools, cancellation, **kwargs)
+            rows = {k: [] for k in ('contributions', 'facts', 'lessons', 'workflows')}
+            if payload['mode'] == 'extract':
+                rows['contributions'] = [dict(stage_id=s['id'], goal_id=s['goal_id'], rating='unknown',
+                    rationale='Only intent was recorded; no useful result established', key_action_ids=[], citations=[]) for s in payload['stages']]
+            return ok(LlmResponse(content=json.dumps(rows), usage=TokenUsage(10, 5, 15)))
+
+    judge = MemoryJudge()
+    manager.provider_factory = lambda _: judge
+    assert manager.options()['supports_memory']
+    assert manager.options()['memory_default']
+    for invalid in ('true', 1, None):
+        with pytest.raises(ServiceError, match='boolean'):
+            manager.start(sid, aid, dict(analysis_version='goal_graph_v1', run_id='r', extract_memory=invalid))
+    with pytest.raises(ServiceError, match='incremental graph'):
+        manager.start(sid, aid, dict(analysis_version='v3', extract_memory=True))
+    cursor = store.snapshot(sid)['event_cursor']
+    options = dict(analysis_version='goal_graph_v1', run_id='r', extract_memory=True, max_calls=2)
+    job = manager.start(sid, aid, options)
+    stopped = wait_job(manager, sid, aid, job['id'])
+    assert stopped['state'] == 'budget_exhausted', stopped.get('error')
+    assert stopped['evaluation']['memory']['status'] == 'partial'
+    with pytest.raises(ServiceError, match='same model'):
+        manager.start(sid, aid, dict(resume_id=job['id'], extract_memory=False, max_calls=4))
+    resumed = manager.start(sid, aid, dict(resume_id=job['id'], max_calls=4))
+    done = wait_job(manager, sid, aid, resumed['id'])
+    assert done['state'] == 'completed', done.get('error')
+    assert done['evaluation']['memory']['status'] == 'complete'
+    assert done['usage']['calls'] == done['evaluation']['evaluator_usage']['calls'] == 3
+    assert len(judge.requests) == 1
+    assert store.snapshot(sid)['event_cursor'] == cursor
+    exported = json.loads(store.artifacts.read(done['result']['sha256']))
+    assert exported['memory'] == done['evaluation']['memory']
+    manager.close()
+    restored = SessionSemantic(trajectory, provider_factory=lambda _: judge)
+    try:
+        assert restored.get(sid, aid, done['id'])['evaluation']['memory'] == exported['memory']
+    finally:
+        restored.close()

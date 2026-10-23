@@ -241,7 +241,7 @@ def project(source, facts, run_id, checkpoint, extraction=None):
         reviewed_packets=len(reviewed),
         structure_complete=not pending and not structural_pending,
         pending_structure_units=structural_pending,
-        validation_issue_count=sum(c.get("record_type") != "structure" for c in conflicts),
+        validation_issue_count=sum(c.get("record_type") != "structure" or "record" in c for c in conflicts),
         reconciliation_complete=not conflicts,
         diagnosed_goals=list({d["goal_id"] for d in cp["diagnostics"]}),
         diagnostic_scope="Only cited findings; unreported goals are not declared efficient",
@@ -327,4 +327,13 @@ def project(source, facts, run_id, checkpoint, extraction=None):
         node.update(display_id=label, goal_display_id=goal_labels.get(node["goal_id"]))
         node["cost"] = summarize([a for a in view["atoms"] if a["id"] in node["call_ids"]])
     bundle["report"] = dict(graph_revision=cp["graph_revision"], status=coverage["status"], format="markdown", text=report(bundle))
+    from loom.evaluation.memory.projection import memory_report, project_memory
+
+    bundle["memory"] = project_memory(cp)
+    if cp.get("memory_requested"):
+        coverage["memory_complete"] = bundle["memory"]["status"] == "complete"
+        if not coverage["memory_complete"]:
+            coverage.update(status="partial", pipeline_complete=False)
+        bundle["report"]["status"] = coverage["status"]
+        bundle["report"]["text"] += memory_report(bundle["memory"])
     return bundle

@@ -12,6 +12,7 @@ const DIMENSIONS = {
   verify_gate: "Verification",
 };
 const stageLabel = (stage) => {
+  if (stage?.startsWith("memory:")) return "Extracting reusable memory from trace evidence";
   if (stage?.startsWith("batch:")) return "Reviewing goals and action contributions";
   if (stage?.startsWith("structure:")) return "Reconstructing goals and phase occurrences";
   if (stage?.startsWith("reconcile:")) return "Reconciling goal boundaries";
@@ -67,7 +68,7 @@ export class EvaluationView {
     this.progress = element("section", "evaluation-progress dashboard-panel");
     this.progress.setAttribute("aria-label", "Evaluation progress");
     this.progress.hidden = true;
-    this.root.append(this.form, this.status, this.progress, this.results);
+    this.root.append(element('p', 'analysis-session-id', `Session: ${this.sessionId}`), this.form, this.status, this.progress, this.results);
     try {
       const catalog = await this.api.evaluations(
         this.sessionId,
@@ -106,7 +107,13 @@ export class EvaluationView {
       for (const id of catalog.run_ids || []) {const option = element("option", "", id); option.value = id; this.runSelect.append(option);}
       this.runSelect.value = catalog.run_ids?.at(-1) || "";
       this.runLabel = element("label", "", "Run scope"); this.runLabel.append(this.runSelect); this.toolbar.prepend(this.runLabel);
+      this.memoryLabel = element('label', 'evaluation-memory-toggle');
+      this.memory = element('input'); this.memory.type = 'checkbox'; this.memory.checked = !!catalog.memory_default;
+      this.memory.setAttribute('aria-label', 'Extract memory');
+      this.memoryLabel.append(this.memory, document.createTextNode('Extract memory · contributions, facts, failure lessons & workflows'));
+      this.settingsPanel.append(this.memoryLabel);
       const scopeVisibility = () => {
+        this.memoryLabel.hidden = !catalog.supports_memory || this.version.value !== 'goal_graph_v1';
         this.runLabel.hidden = !["goal_loops_v1", "goal_graph_v1"].includes(this.version.value);
         for (const key of ["max_rounds", "max_tokens"]) if(this.fields?.[key]) this.fields[key].parentElement.hidden = this.version.value === "goal_graph_v1";
       };
@@ -171,6 +178,7 @@ export class EvaluationView {
         this.model.disabled = this.version.disabled = false;
         if (this.runSelect) {this.runSelect.disabled = false; this.runLabel.hidden = !["goal_loops_v1", "goal_graph_v1"].includes(this.version.value);}
         for (const field of Object.values(this.fields)) field.disabled = false;
+        this.memory.disabled = false;
         if (this.history) this.history.value = "";
         this.renderedData = null;
         this.graphView = null;
@@ -225,6 +233,10 @@ export class EvaluationView {
     const defaults = this.catalog.defaults_by_version?.[this.version.value] || this.catalog.defaults;
     for (const [key, input] of Object.entries(this.fields)) input.value = defaults[key];
     for (const key of ["max_rounds", "max_tokens"]) if(this.fields[key]) this.fields[key].parentElement.hidden = this.version.value === "goal_graph_v1";
+    if (this.memory) {
+      this.memory.checked = !!this.catalog.memory_default;
+      this.memoryLabel.hidden = !this.catalog.supports_memory || this.version.value !== 'goal_graph_v1';
+    }
     this.start.textContent = "Run deep evaluation";
   }
   fail(error) {
@@ -254,6 +266,8 @@ export class EvaluationView {
       };
       for (const [key, input] of Object.entries(this.fields))
         options[key] = Number(input.value);
+      if (this.catalog.supports_memory && this.version.value === 'goal_graph_v1') options.extract_memory = this.memory.checked;
+      else delete options.extract_memory;
       if (
         resumable &&
         options.model === this.job.model &&
@@ -355,6 +369,10 @@ export class EvaluationView {
       this.model.value = job.model;
       this.model.disabled = active;
       if (this.version) { this.version.value = job.analysis_version || "v2"; this.version.disabled = active; }
+      if (this.memory) {
+        this.memory.checked = !!job.settings.extract_memory; this.memory.disabled = active;
+        this.memoryLabel.hidden = !this.catalog.supports_memory || job.analysis_version !== 'goal_graph_v1';
+      }
       for (const key of ["max_rounds", "max_tokens"]) if(this.fields[key]) this.fields[key].parentElement.hidden = job.analysis_version === "goal_graph_v1";
       if(this.catalog.analysis_versions && !this.catalog.analysis_versions.includes(job.analysis_version || "v2")) {
         this.start.disabled = true;
@@ -522,7 +540,7 @@ export class EvaluationView {
     if (signature === this.renderedData) return;
     if (data.skeleton?.projection_version) {
       if (!this.graphView) this.graphView=new IncrementalGraphView(element("section"),{evidence:ref=>this.evidence(ref)});
-      this.results.replaceChildren(this.graphView.root);this.graphView.update(data, this.job?.id);this.renderedData=signature;return;
+      this.results.replaceChildren(this.graphView.root);this.graphView.update({...data, session_id: data.session_id || this.sessionId}, this.job?.id);this.renderedData=signature;return;
     }
     const opened = new Set([...this.results.querySelectorAll("details[open][data-detail]")].map(n => n.dataset.detail));
     const filters = [...this.results.querySelectorAll("[data-deep-filter]")].map(n => [n.dataset.deepFilter, n.value]);

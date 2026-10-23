@@ -135,9 +135,12 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
     items += attributions
 
     def failure(index, kind, raw, exc):
+        path = list(exc.absolute_path) if isinstance(exc, ValidationError) else []
+        reason = exc.message if isinstance(exc, ValidationError) else str(exc)
+        if isinstance(exc, ValidationError) and exc.validator == "maxLength":
+            reason = f"Field {'.'.join(map(str, path))}: at most {exc.validator_value} characters; received {len(exc.instance)}. Shorten the field."
         return dict(record=index, record_type=kind, record_id=raw.get("card_id", raw.get("key")),
-                    path=list(exc.absolute_path) if isinstance(exc, ValidationError) else [],
-                    reason=(exc.message if isinstance(exc, ValidationError) else str(exc))[:450])
+                    path=path, reason=reason[:450])
 
     def apply(item):
         index, kind, raw = item
