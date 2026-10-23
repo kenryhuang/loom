@@ -55,7 +55,7 @@ export function renderTraceMemory(view, root) {
         if (slice.key_action_ids.length) body.append(element('p', 'muted small', `Key actions: ${slice.key_action_ids.join(', ')}`));
         view.refs(body, slice.evidence_refs);
       }
-    }, false, `memory-card memory-rating-${row.rating}`);
+    }, false, `memory-card setup-block memory-rating-${row.rating}`);
   }
   for (const [kind, heading] of [['facts', 'Key facts'], ['lessons', 'Failure lessons'], ['workflows', 'Efficient workflows']]) {
     const rows = memory[kind].filter(r => matches(r.goal_ids));
@@ -76,12 +76,12 @@ export function renderTraceMemory(view, root) {
         body.append(element('p', 'muted small', `Actions: ${row.action_ids.join(', ')}`));
         for (const citation of row.citations) body.append(element('blockquote', 'memory-quote', citation.quote));
         view.refs(body, row.evidence_refs);
-      }, false, 'memory-card');
+      }, false, 'memory-card setup-block');
     }
   }
   view.details(root, 'memory-scope', 'Memory scope & coverage', body => {
     for (const text of memory.limitations) body.append(element('p', 'muted small', text));
     body.append(element('p', 'muted small', `${coverage.truncated_slices} bounded / truncated evidence slices.`));
     for (const error of coverage.errors) body.append(element('p', 'notice', error));
-  });
+  }, false, 'setup-block');
 }

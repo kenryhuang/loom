@@ -97,15 +97,13 @@ test("trajectory renders measured facts, filters calls and reads paginated evide
   assert.equal(view.refresh.parentElement, view.runFilter.parentElement);
   assert.equal(view.status.hidden, true);
   assert.equal(root.querySelectorAll('[aria-label="Filter trajectory by run"]').length, 1);
-  assert.equal(root.querySelectorAll('[role="tab"]').length, 4);
+  assert.deepEqual([...root.querySelectorAll('[role="tab"]')].map(tab => tab.textContent), ['Trace analysis', 'Deep evaluation', 'Session diagnosis']);
+  assert.equal(root.querySelector('.trajectory-reasoning'), null);
   view.tabs[1].dispatchEvent(new dom.window.KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}));
   assert.equal(view.selectedTab, 2);
-  assert.equal(view.reasoningPanel.hidden, false);
   assert.equal(view.deepPanel.hidden, true);
-  view.tabs[2].dispatchEvent(new dom.window.KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}));
-  assert.equal(view.selectedTab, 3);
   assert.equal(view.diagnosisPanel.hidden, false);
-  view.tabs[3].dispatchEvent(new dom.window.KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}));
+  view.tabs[2].dispatchEvent(new dom.window.KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}));
   assert.equal(view.selectedTab, 0);
   assert.equal(view.deepPanel.hidden, true);
   const signal = view.abort.signal;

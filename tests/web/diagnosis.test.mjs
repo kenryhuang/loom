@@ -25,8 +25,8 @@ test('diagnosis remains usable when base analysis fails and does not auto-start 
   const { dom, root } = setup(); let starts = 0;
   const view = new TrajectoryView(root, {}), client = { ...api(), startTrajectory: async () => { throw new Error("list has no read"); }, startDiagnosis: async () => { starts++; return job; } };
   await view.open(client, 'session', 10); await new Promise(resolve => setTimeout(resolve, 0));
-  view.selectTab(3);
-  assert.equal(root.querySelectorAll('[role=tab]').length, 4);
+  view.selectTab(2);
+  assert.equal(root.querySelectorAll('[role=tab]').length, 3);
   assert.equal(view.diagnosisPanel.hidden, false);
   assert.equal(view.diagnosisView.start.disabled, false);
   assert.equal(view.diagnosisView.run.options.length, 4);

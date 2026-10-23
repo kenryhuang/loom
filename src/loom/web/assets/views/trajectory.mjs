@@ -2,7 +2,6 @@ import { renderBaseEvaluation } from "./behavior-evaluation.mjs";
 import { renderBehaviorSequence } from "./behavior-sequence.mjs";
 import { element } from "../markdown.mjs";
 import { seconds, table, badge } from "./dashboard.mjs";
-import { ReasoningView } from "./reasoning.mjs";
 import { EvaluationView } from "./evaluation.mjs";
 import { DiagnosisView } from "./diagnosis.mjs";
 import { renderVerificationArtifact } from "./activity-row.mjs";
@@ -137,11 +136,9 @@ export class TrajectoryView {
     tabs.setAttribute("role", "tablist");
     tabs.setAttribute("aria-label", "Evaluation views");
     this.deepPanel = element("section", "trajectory-evaluation");
-    this.reasoningPanel = element("section", "trajectory-reasoning");
     this.diagnosisPanel = element("section", "trajectory-diagnosis");
-    this.reasoningPanel.append(element("p", "muted", "Preparing reasoning activity…"));
-    const panels = [this.body, this.deepPanel, this.reasoningPanel, this.diagnosisPanel];
-    this.tabs = ["Trace analysis", "Deep evaluation", "Reasoning efficiency", "Session diagnosis"].map((label, index) => {
+    const panels = [this.body, this.deepPanel, this.diagnosisPanel];
+    this.tabs = ["Trace analysis", "Deep evaluation", "Session diagnosis"].map((label, index) => {
       const tab = button(label, () => this.selectTab(index));
       tab.id = `evaluation-tab-${index}`;
       tab.setAttribute("role", "tab");
@@ -166,7 +163,7 @@ export class TrajectoryView {
     this.deepPanel.append(
       element("p", "muted", "Preparing snapshot for evaluation…"),
     );
-    this.root.append(element('p', 'analysis-session-id', `Session: ${sessionId}`), tabs, heading, this.body, this.deepPanel, this.reasoningPanel, this.diagnosisPanel);
+    this.root.append(element('p', 'analysis-session-id', `Session: ${sessionId}`), tabs, heading, this.body, this.deepPanel, this.diagnosisPanel);
     this.diagnosisView = new DiagnosisView(this.diagnosisPanel);
     void this.diagnosisView.open(api, sessionId);
     this.traceHeading = heading;
@@ -197,7 +194,6 @@ export class TrajectoryView {
       this.deepPanel.replaceChildren(
         element("p", "notice error", error.message),
       );
-      this.reasoningPanel.replaceChildren(element("p", "notice error", error.message));
       this.onError(error);
     } finally {
       if (!signal.aborted) this.refresh.disabled = false;
@@ -207,8 +203,7 @@ export class TrajectoryView {
     this.selectedTab = index;
     this.body.hidden = index !== 0;
     this.deepPanel.hidden = index !== 1;
-    this.reasoningPanel.hidden = index !== 2;
-    this.diagnosisPanel.hidden = index !== 3;
+    this.diagnosisPanel.hidden = index !== 2;
     this.traceHeading.hidden = index !== 0;
     this.status.hidden = index !== 0 || !this.status.textContent;
     this.tabs.forEach((tab, i) => {
@@ -224,10 +219,6 @@ export class TrajectoryView {
     for (const [index, id] of runIds.entries()) this.runFilter.append(option(`Run ${index + 1} · ${id}`, id));
     if (runIds.includes(this.selectedRun)) this.runFilter.value = this.selectedRun;
     this.runFilter.disabled = false;
-    this.reasoningView = new ReasoningView(this.reasoningPanel, {
-      baseProcess: data.reasoning_process, evidence: ref => this.showEvidence(ref),
-      onEvaluate: () => this.selectTab(1), onRefresh: () => this.open(this.api, this.sessionId, this.cursor),
-    });
     if (this.api.evaluations) {
       const evaluation = element("section", "trajectory-evaluation");
       this.deepPanel.replaceChildren(evaluation);
@@ -238,8 +229,6 @@ export class TrajectoryView {
         signal: this.abort.signal,
         evidence: (ref) => this.showEvidence(ref),
         onError: this.onError,
-        onResult: (result, job) => this.reasoningView.update(result, job),
-        onExplore: () => this.selectTab(2),
       });
       this.evaluationView.open();
     } else {

@@ -2275,7 +2275,7 @@ section.setup-block { padding: 20px; }
 .trace-memory { display: grid; gap: 16px; }
 .trace-memory .dashboard-panel { min-width: 0; }
 .memory-card { border-inline-start: 3px solid var(--line); }
-.memory-card-heading { display: inline-flex; width: calc(100% - 22px); vertical-align: middle; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.memory-card-heading { display: inline-flex; flex: 1; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
 .memory-card-heading strong, .memory-card p, .memory-card td, .memory-quote { overflow-wrap: anywhere; }
 .memory-card td:first-child { width: 7rem; overflow-wrap: normal; }
 .memory-rating-key { border-inline-start-color: #23956f; }
