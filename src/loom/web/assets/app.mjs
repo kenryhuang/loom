@@ -1,5 +1,5 @@
 import {SettingsView} from "./views/settings.mjs";
-import {ExternalToolsView, bindExternalTools} from "./views/external-tools.mjs";
+import {ExternalToolsView} from "./views/external-tools.mjs";
 import {canRestartTask} from "./state.mjs";
 import { SessionApi } from "./api.mjs";
 import { SessionController } from "./controller.mjs";
@@ -70,18 +70,6 @@ const knowledge = new KnowledgeView({
   changed: () => knowledgeList.refresh(),
   api: () => controller?.api,
 });
-const knowledgeBinding = new KnowledgeView({
-  changed: () => knowledgeList.refresh(),
-  api: () => controller?.api,
-  state: () => controller?.projection?.snapshot,
-  bind: (ids, sid) => {
-    if (controller.selectedId !== sid)
-      throw new Error("Session changed. Reopen knowledge settings.");
-    return controller.command("set_knowledge_bases", {
-      knowledge_base_ids: ids,
-    });
-  },
-});
 const evaluationList = new SessionListView(
   $("evaluation-list"),
   $("evaluation-search"),
@@ -146,14 +134,6 @@ const panels = new PanelsView($("session-panels"), builtinPanels(), {
   command: (kind, payload) => controller.command(kind, payload),
   error: showError,
   artifact: openArtifact,
-  knowledge: () => knowledgeBinding.open(true),
-  externalTools: async () => {
-    const active = controller, sid = active?.selectedId;
-    if (!sid) return;
-    try {await bindExternalTools({api: active.api, selected: active.projection.snapshot.task.external_tool_ids || [],
-      save: ids => {if (controller !== active || active.selectedId !== sid) throw new Error('Session changed. Reopen tool settings.');
-        return active.command('set_external_tools', {external_tool_ids: ids});}});} catch (error) {showError(error);}
-  },
 });
 
 async function deleteSession(session) {
@@ -451,7 +431,6 @@ function disconnect() {
   $("settings-page").replaceChildren();
   $("external-tools-page").replaceChildren();
   knowledge.close();
-  knowledgeBinding.close();
   $("knowledge-page").replaceChildren();
   knowledgeList.reset();
   $("new-knowledge").disabled = true;

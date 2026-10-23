@@ -929,6 +929,9 @@ test("panels show workspace second, dynamic workflow and extension widgets", () 
     /Read source/,
   );
   assert.equal(root.querySelector('[data-panel="domain"]').textContent, "one");
+  assert.equal(root.querySelector('[data-panel="knowledge"] button'), null);
+  assert.equal(root.querySelector('[data-panel="external-tools"] button'), null);
+  assert.equal(root.querySelector('[data-panel="info"] .edit-task-button').textContent, 'Edit task');
   dom.window.close();
 });
 

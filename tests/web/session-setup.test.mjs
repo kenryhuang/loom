@@ -269,8 +269,10 @@ test("task editing preserves existing plugin options, unavailable bindings and v
   const task = {objective: "Inspect again", title: "Existing", workspace: "/old", model: "removed-model", plan_mode: "off", task_spec: spec,
     knowledge_base_ids: ["missing-kb"], external_tool_ids: ["missing-tool"], limits: {
       max_steps: 10, max_llm_calls: 20, max_tokens: 30000, max_duration_seconds: 60, max_window_chars: 9000}};
-  view.configure({...catalog, plugins: {context: [{id: "bounded_context"}], workflow: [{id: "legacy_planning"}]}});
-  view.template({task_spec: spec}); view.loadTask(task, []);
+  view.configure({...catalog, plugins: {context: [{id: "bounded_context"}], workflow: [{id: "legacy_planning"}]},
+    tool_collections: [...catalog.tool_collections, {id: 'external_tools', label: 'External tools', description: 'Registered tools'}],
+    external_tools: [{id: 'new-tool', connector_name: 'Local', name: 'Search', description: 'Search files', kind: 'cli'}]});
+  view.template({task_spec: spec}); view.loadTask(task, [{id: 'new-kb', name: 'Project notes', description: 'Architecture and conventions'}]);
   assert.equal($("create-workspace").readOnly, true);
   assert.match($("workspace-hint").textContent, /fixed for this session/);
   assert.equal($("create-model").value, "removed-model");
@@ -285,6 +287,15 @@ test("task editing preserves existing plugin options, unavailable bindings and v
   assert.deepEqual(payload.task_spec.session_environment.resources, [{id: "source", kind: "directory", uri: "/old", access: "read-only"}]);
   assert.deepEqual(payload.limits, task.limits);
   assert.equal(payload.model, "removed-model");
+  for (const id of ['missing-kb', 'new-kb']) $('create-knowledge').querySelector(`input[value="${id}"]`).click();
+  for (const id of ['missing-tool', 'new-tool']) $('create-external-tools').querySelector(`input[value="${id}"]`).click();
+  view.apply(payload, {task_spec: spec}); view.restartChanges(payload);
+  assert.deepEqual(payload.knowledge_base_ids, ['new-kb']);
+  assert.deepEqual(payload.external_tool_ids, ['new-tool']);
+  assert.ok(payload.task_spec.tools.collections.includes('knowledge'));
+  assert.ok(payload.task_spec.tools.collections.includes('external_tools'));
+  assert.equal(payload.workspace, '/old');
+  assert.match($('create-knowledge').textContent, /Project notesArchitecture and conventions/);
   $("restart-max_tokens").value = "0";
   assert.throws(() => view.restartChanges(payload), /positive integers/);
   dom.window.close();

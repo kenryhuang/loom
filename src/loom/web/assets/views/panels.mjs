@@ -1,5 +1,5 @@
 import { element } from "../markdown.mjs";
-import { parseBudget, canUpdateTaskTools, canRestartTask } from "../state.mjs";
+import { parseBudget, canRestartTask } from "../state.mjs";
 import { acceptanceBudgetText } from '../activity/acceptance.mjs';
 import { acceptanceChecklist } from './acceptance-checklist.mjs';
 
@@ -167,13 +167,10 @@ export function builtinPanels() {
         },
       };
     })
-    .register("knowledge", (actions) => {
+    .register("knowledge", () => {
       const root = panel("Knowledge bases"),
-        text = element("p", "muted"),
-        configure = element("button", "quiet", "Configure knowledge bases");
-      configure.type = "button";
-      configure.addEventListener("click", () => actions.knowledge?.());
-      root.append(text, configure);
+        text = element("p", "muted");
+      root.append(text);
       return {
         element: root,
         update(state) {
@@ -184,13 +181,12 @@ export function builtinPanels() {
         },
       };
     })
-    .register("external-tools", (actions) => {
-      const root = panel("External tools"), text = element("p", "muted"), configure = element("button", "quiet", "Configure external tools");
-      configure.type = "button"; configure.onclick = () => actions.externalTools?.(); root.append(text, configure);
+    .register("external-tools", () => {
+      const root = panel("External tools"), text = element("p", "muted");
+      root.append(text);
       return {element: root, update(state) {
         const tools = state.task.external_tool_bindings || [];
         text.textContent = tools.length ? tools.map(t => `${t.connector_name} / ${t.name}`).join(', ') : 'No external tools attached';
-        configure.disabled = !canUpdateTaskTools(state);
       }};
     })
     .register("workflow", () => {
