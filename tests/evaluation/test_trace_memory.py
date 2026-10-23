@@ -8,7 +8,7 @@ from loom.evaluation.behavior_facts import build_behavior_facts
 from loom.evaluation.goal_loops.graph_projection import project
 from loom.evaluation.memory.evidence import card_evidence
 from loom.evaluation.memory.projection import project_memory
-from loom.evaluation.memory.review import commit, validate_record
+from loom.evaluation.memory.review import commit, validate_record, messages_for, protocol_for
 from loom.llm import LlmResponse, TokenUsage
 from tests.evaluation.test_behavior_sequence import action, source
 from tests.evaluation.test_incremental_graph import GraphJudge, run
@@ -248,6 +248,16 @@ async def test_memory_repairs_invalid_claim_without_repeating_good_memories():
     assert len(result["memory"]["facts"]) == len(result["memory"]["lessons"]) == 1
     assert len(judge.memory_requests) == 3
     assert judge.memory_requests[1]["feedback"]
+    rejected = judge.memory_requests[1]["rejected_records"]
+    assert len(rejected) == 1
+    assert rejected[0]["kind"] == "facts"
+    assert rejected[0]["record"]["citations"][0]["quote"] == "unobserved fact"
+    assert rejected[0]["record"]["citations"][0]["ref"] in rejected[0]["error"]
+    assert "Citation 1" in rejected[0]["error"]
+    assert "verbatim" in rejected[0]["error"]
+    assert "contributions" in judge.memory_requests[1]["empty_record_types"]
+    assert judge.memory_requests[1]["response_contract"]["properties"]["contributions"]["maxItems"] == 0
+    assert not judge.memory_requests[2]["rejected_records"]
 
 
 @pytest.mark.asyncio
@@ -357,6 +367,47 @@ def boundary_memory_case(kind="facts"):
             validation="proposed",
         )
     return unit, row
+
+
+@pytest.mark.parametrize("quote", [
+    "margin 0.9 / spread 1.4 opens a visible gap",  # Joined lines / dropped comment prefix.
+    "margin\n 0.9 / spread 1.4 opens a visible gap",  # Preserved newline but dropped '*'.
+    "margin\n * 0.9 / spread 1.8 opens a visible gap",  # Changed the factual value.
+])
+def test_comment_citations_remain_literal_and_repair_identifies_the_failed_record(quote):
+    unit, row = boundary_memory_case()
+    literal = "margin\n * 0.9 / spread 1.4 opens a visible gap"
+    unit["evidence"][0]["text"] = literal
+    row["citations"][0]["quote"] = quote
+    memory = dict(records={}, identity=dict(source="source", run_id="run", graph_revision=1))
+    response = dict(contributions=[], facts=[row], lessons=[], workflows=[])
+    errors = commit(memory, unit, json.dumps(response))
+    assert len(errors) == 1
+    assert "facts: record 1: Citation 1, ref output" in errors[0]
+    assert unit["rejected_records"][0]["record"] == row
+    assert not memory["records"]
+    row["citations"][0]["quote"] = literal
+    assert not commit(memory, unit, json.dumps(response))
+    assert unit["rejected_records"] == []
+    assert next(iter(memory["records"].values()))["citations"][0]["quote"] == literal
+
+
+def test_windows_without_stages_and_synthesis_cannot_request_spurious_contributions():
+    unit, row = boundary_memory_case()
+    for entry in unit["evidence"]:
+        entry["truncated"] = False
+    messages, _ = messages_for(unit, "text")
+    payload = json.loads(messages[1].content)
+    assert payload["stages"] == []
+    assert set(payload["empty_record_types"]) == {"contributions", "workflows"}
+    assert protocol_for(unit).schema["properties"]["facts"]["maxItems"] > 0
+    bogus = dict(stage_id="unknown", goal_id="goal", rating="supporting", rationale="Test passed", key_action_ids=[], citations=row["citations"])
+    with pytest.raises(ValueError, match="No stages were delivered"):
+        validate_record("contributions", bogus, unit)
+    unit["mode"] = "synthesis"
+    schema = protocol_for(unit).schema["properties"]
+    assert all(schema[k]["maxItems"] == 0 for k in ("contributions", "facts", "lessons"))
+    assert schema["workflows"]["maxItems"] > 0
 
 
 @pytest.mark.parametrize("kind", ["facts", "lessons", "workflows"])

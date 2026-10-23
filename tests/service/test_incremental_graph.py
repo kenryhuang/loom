@@ -84,6 +84,20 @@ def test_incremental_cancel_retains_live_graph(evaluation):  # noqa: F811
     assert stopped["usage"]["unreported_calls"] == 1
 
 
+def test_incomplete_graph_job_reports_issue_detail_and_resume_hint(evaluation):  # noqa: F811
+    from tests.evaluation.test_goal_structure import LongReasonJudge
+
+    _, _, manager, _, sid, aid = evaluation
+    judge = LongReasonJudge("single_goal")
+    manager.provider_factory = lambda _: judge
+    job = manager.start(sid, aid, dict(analysis_version="goal_graph_v1", run_id="r"))
+    stopped = wait_job(manager, sid, aid, job["id"])
+    assert stopped["state"] == "incomplete"
+    assert "goal-structure windows pending" in stopped["error"]
+    assert "at most 240 characters" in stopped["error"]
+    assert "Resume evaluation" in stopped["error"]
+
+
 def test_resume_upgrades_old_character_identity_and_preserves_semantic_settings(evaluation):  # noqa: F811
     _, _, manager, _, sid, aid = evaluation
     judge = GraphJudge()

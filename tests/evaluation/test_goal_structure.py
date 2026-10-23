@@ -166,16 +166,25 @@ def test_structure_repair_protocol_excludes_already_accepted_action_judgments():
     assert "assessments" in protocol(False, metadata_only=True).schema["properties"]
 
 
+class LongReasonJudge(RootOnlyJudge):
+    """Emits an over-long structure reason; times=None keeps it over-long forever."""
+
+    def __init__(self, repair=None, *, times=None):
+        super().__init__(repair)
+        self.times = times
+
+    async def chat(self, messages, tools=None, cancellation=None, **kwargs):
+        result = await super().chat(messages, tools=tools, cancellation=cancellation, **kwargs)
+        rows = json.loads(result.unwrap().content)
+        if rows.get("structure") and (self.times is None or self.times > 0):
+            if self.times is not None:
+                self.times -= 1
+            rows["structure"][0]["reason"] = "Root report and verification. " * 20
+        return ok(LlmResponse(content=json.dumps(rows), usage=TokenUsage(100, 50, 150)))
+
+
 @pytest.mark.asyncio
 async def test_long_structure_reason_has_actionable_feedback_and_counts_as_validation_issue():
-    class LongReasonJudge(RootOnlyJudge):
-        async def chat(self, messages, tools=None, cancellation=None, **kwargs):
-            result = await super().chat(messages, tools=tools, cancellation=cancellation, **kwargs)
-            rows = json.loads(result.unwrap().content)
-            if rows.get("structure"):
-                rows["structure"][0]["reason"] = "Root report and verification. " * 20
-            return ok(LlmResponse(content=json.dumps(rows), usage=TokenUsage(100, 50, 150)))
-
     store = source(action(1)); facts = build_behavior_facts(store); cp = {}
     result = await run(store, facts, "run", cp, LongReasonJudge("single_goal"))
     assert result["coverage"]["pending_cards"] == 0
@@ -193,3 +202,35 @@ async def test_long_structure_reason_has_actionable_feedback_and_counts_as_valid
     assert done["coverage"]["validation_issue_count"] == 0
     assert len(judge.requests) == 1
     assert cp["assessments"] == accepted
+
+
+@pytest.mark.asyncio
+async def test_mechanical_structure_failure_uses_own_repair_budget_and_completes_in_one_run():
+    """A schema-only rejection must not consume the unit's one semantic repair."""
+    store = source(action(1))
+    facts = build_behavior_facts(store)
+    cp = {}
+    judge = LongReasonJudge("single_goal", times=1)
+    result = await run(store, facts, "run", cp, judge)
+    unit = next(iter(cp["units"].values()))
+    assert len(judge.requests) == 3
+    assert unit["repair"] == 1 and unit.get("format_repair") == 1
+    assert result["coverage"]["pipeline_complete"], cp.get("conflicts")
+    assert result["coverage"]["validation_issue_count"] == 0
+    assert next(iter(cp["structure_reviews"].values()))["decision"] == "single_goal"
+
+
+@pytest.mark.asyncio
+async def test_mechanical_repair_budget_is_bounded():
+    """A persistently malformed record still stops, after bounded extra attempts."""
+    store = source(action(1))
+    facts = build_behavior_facts(store)
+    cp = {}
+    judge = LongReasonJudge("single_goal")
+    result = await run(store, facts, "run", cp, judge)
+    unit = next(iter(cp["units"].values()))
+    assert len(judge.requests) == 4
+    assert unit["repair"] == 1 and unit.get("format_repair") == 2
+    assert not result["coverage"]["pipeline_complete"]
+    assert result["coverage"]["validation_issue_count"] == 1
+    assert len(result["coverage"]["pending_structure_units"]) == 1

@@ -139,8 +139,13 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
         reason = exc.message if isinstance(exc, ValidationError) else str(exc)
         if isinstance(exc, ValidationError) and exc.validator == "maxLength":
             reason = f"Field {'.'.join(map(str, path))}: at most {exc.validator_value} characters; received {len(exc.instance)}. Shorten the field."
-        return dict(record=index, record_type=kind, record_id=raw.get("card_id", raw.get("key")),
-                    path=path, reason=reason[:450])
+        error = dict(record=index, record_type=kind, record_id=raw.get("card_id", raw.get("key")),
+                     path=path, reason=reason[:450])
+        # Schema-shape violations are mechanical: repairing them needs no new
+        # evidence judgment, so they draw on a separate bounded repair budget.
+        if isinstance(exc, ValidationError):
+            error["mechanical"] = True
+        return error
 
     def apply(item):
         index, kind, raw = item

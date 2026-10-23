@@ -15,9 +15,9 @@ from loom.evaluation.memory.contracts import FIELDS, PROTOCOL, SYSTEM
 from loom.evaluation.memory.evidence import card_evidence, sanitize
 from loom.evaluation.provider import evaluator_provider
 from loom.llm.api import LlmMessage, LlmResponse, request_llm_response
-from loom.llm.structured import native_schema, output_mode, parse_response, protocol_provider, unsupported_format
+from loom.llm.structured import StructuredProtocol, native_schema, output_mode, parse_response, protocol_provider, unsupported_format
 
-VALIDATION_VERSION = "memory-validation.2"
+VALIDATION_VERSION = "memory-validation.4"
 
 
 def scope(cp, cards, memberships):
@@ -64,6 +64,8 @@ def validate_record(kind, row, unit):
     goals = {g["id"] for g in unit["scope"]["goals"]}
     actions = {c["id"] for c in unit["scope"]["actions"]}
     if kind == "contributions":
+        if not stages:
+            raise ValueError("No stages were delivered in this window; return contributions=[] instead of inventing a stage ID")
         if row["stage_id"] not in stages or row["goal_id"] != stages[row["stage_id"]]["goal_id"]:
             raise ValueError("Contribution must target the delivered stage and its owning goal")
         if not set(row["key_action_ids"]) <= actions:
@@ -80,10 +82,14 @@ def validate_record(kind, row, unit):
         raise ValueError("Memory needs a goal scope")
     evidence = {e["id"]: e for e in unit["evidence"]}
     refs, cited = [], []
-    for citation in row["citations"]:
+    for index, citation in enumerate(row["citations"], 1):
         entry = evidence.get(citation["ref"])
-        if not entry or not citation["quote"].strip() or citation["quote"] not in entry["text"]:
-            raise ValueError("Citation must quote evidence delivered in this memory request")
+        if not entry:
+            raise ValueError(f"Citation {index}: ref {citation['ref']} was not delivered in this memory request")
+        if not citation["quote"].strip() or citation["quote"] not in entry["text"]:
+            raise ValueError(f"Citation {index}, ref {citation['ref']}: must quote evidence verbatim. "
+                             "Copy a short unchanged substring from this ref's text; preserve newlines, spaces and comment markers. "
+                             "If unsupported, omit this record.")
         if entry.get("quotes") and not any(citation["quote"] in q for q in entry["quotes"]):
             raise ValueError("Synthesis citation must stay inside an original quote")
         cited.append(entry)
@@ -126,6 +132,20 @@ def commit(memory, unit, response):
     if not isinstance(value, dict) or set(value) - set(FIELDS):
         raise ValueError("Return a memory object with contributions, facts, lessons and workflows arrays")
     errors = []
+    unit["rejected_records"] = []
+    unit["omitted_rejected_records"] = 0
+
+    def reject(kind, index, row, reason):
+        error = f"{kind}: record {index + 1}: {reason[:300]}"
+        errors.append(error)
+        # Include the failed record, not just a generic error that makes the model
+        # rewrite unrelated accepted memories. Bound and sanitize repair context.
+        rejected = dict(kind=kind, index=index + 1, record=sanitize(row), error=reason[:300])
+        if len(serialized(unit["rejected_records"] + [rejected])) <= 16000:
+            unit["rejected_records"].append(rejected)
+        else:
+            unit["omitted_rejected_records"] += 1
+
     accepted_stages = {r["stage_id"] for r in memory["records"].values() if r["unit_id"] == unit["id"] and r["kind"] == "contributions"}
     for kind in FIELDS:
         rows = value.get(kind)
@@ -138,7 +158,7 @@ def commit(memory, unit, response):
         if unit["mode"] == "extract" and kind == "workflows" and rows:
             errors.append("Extract facts, lessons and contributions first; workflows belong to synthesis")
             continue
-        for row in rows:
+        for index, row in enumerate(rows):
             try:
                 record = validate_record(kind, row, unit)
                 # Contributions are replaced within a window; memories deduplicate
@@ -161,14 +181,14 @@ def commit(memory, unit, response):
                 if kind == "contributions":
                     accepted_stages.add(row["stage_id"])
             except (ValueError, TypeError, KeyError) as exc:
-                errors.append(f"{kind}: {str(exc)[:300]}")
+                reject(kind, index, row, str(exc))
             except Exception as exc:
                 # JSON schema validation messages may contain raw model output.
                 from jsonschema import ValidationError
 
                 if not isinstance(exc, ValidationError):
                     raise
-                errors.append(f"{kind}: invalid {exc.validator} at {'/'.join(map(str, exc.path))}")
+                reject(kind, index, row, f"invalid {exc.validator} at {'/'.join(map(str, exc.path))}")
     if unit["mode"] == "extract":
         missing = {s["id"] for s in unit["scope"]["stages"]} - accepted_stages
         if missing:
@@ -179,6 +199,19 @@ def commit(memory, unit, response):
     return errors
 
 
+def protocol_for(unit):
+    schema = deepcopy(PROTOCOL.schema)
+    accepted = {r["stage_id"] for r in unit.get("accepted_records", []) if r["kind"] == "contributions"}
+    pending = {s["id"] for s in unit["scope"]["stages"]} - accepted
+    if unit["mode"] == "extract":
+        schema["properties"]["contributions"]["maxItems"] = min(16, len(pending))
+        schema["properties"]["workflows"]["maxItems"] = 0
+    else:
+        for kind in ("contributions", "facts", "lessons"):
+            schema["properties"][kind]["maxItems"] = 0
+    return StructuredProtocol(PROTOCOL.name, PROTOCOL.version, schema)
+
+
 def messages_for(unit, mode):
     payload = dict(
         mode=unit["mode"],
@@ -187,11 +220,15 @@ def messages_for(unit, mode):
         previous_memories=unit.get("memories", []),
         accepted_records=unit.get("accepted_records", []),
         feedback=unit.get("errors", []),
+        rejected_records=unit.get("rejected_records", []),
+        omitted_rejected_records=unit.get("omitted_rejected_records", 0),
     )
+    response_protocol = protocol_for(unit)
+    payload["empty_record_types"] = [k for k, spec in response_protocol.schema["properties"].items() if spec["maxItems"] == 0]
     if mode != "json_schema":
-        payload["response_contract"] = PROTOCOL.schema
+        payload["response_contract"] = response_protocol.schema
     messages = [LlmMessage(role="system", content=SYSTEM), LlmMessage(role="user", content=serialized(sanitize(payload)))]
-    schema = serialized(native_schema(PROTOCOL.schema)) if mode == "json_schema" else ""
+    schema = serialized(native_schema(response_protocol.schema)) if mode == "json_schema" else ""
     chars = sum(len(m.content) for m in messages) + len(schema) + 256
     estimate = sum(len(m.content.encode()) for m in messages) + len(schema.encode()) + 512
     return messages, dict(total_chars=chars, input_estimate=estimate, estimation="utf8_bytes_plus_schema_and_512_not_tokenizer")
@@ -257,7 +294,7 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
                 await emit(dict(type="llm.requested", **meta, messages=messages, model=getattr(provider, "model", "unknown")))
                 start = time.monotonic()
                 try:
-                    wrapped = protocol_provider(evaluator_provider(provider, output_tokens=None, timeout_seconds=timeout), PROTOCOL, mode)
+                    wrapped = protocol_provider(evaluator_provider(provider, output_tokens=None, timeout_seconds=timeout), protocol_for(unit), mode)
                     async with asyncio.timeout(timeout):
                         response = await request_llm_response(wrapped, messages, tools=None)
                     if not response.ok:

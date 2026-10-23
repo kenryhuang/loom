@@ -26,6 +26,11 @@ from loom.evaluation.provider import evaluator_provider
 from loom.llm.api import LlmMessage, request_llm_response
 from loom.llm.structured import output_mode, protocol_provider, unsupported_format
 
+# Semantic gaps get one repair per unit per run; schema-only (mechanical)
+# failures get their own bounded allowance so a formatting slip cannot strand
+# an otherwise decided window.
+FORMAT_REPAIRS = 2
+
 
 def context(cp, cards, cutoff):
     terms = set(serialized([c["features"] for c in cards]).lower().replace("/", " ").split())
@@ -171,6 +176,7 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
     pending = sorted((u for u in cp["units"].values() if not u.get("complete")), key=lambda u: (u["cutoff"], u["id"]))
     for unit in pending:
         unit["repair"] = 0
+        unit["format_repair"] = 0
     while pending or cp["cursor"] < len(cards):
         if not pending:
             subset = cards[cp["cursor"] : cp["cursor"] + min(8, settings["batch_rounds"])]
@@ -383,8 +389,11 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         if structure_pending(cp, unit):
             errors.insert(0, dict(record_type="structure",
                                   reason="Subgoal analysis pending: link actions to result-oriented child goals, or explain single_goal with current refs"))
-        if errors and unit["repair"] < 1:
-            unit.update(repair=unit["repair"] + 1, feedback=errors)
+        # A malformed record (schema violation) draws on its own bounded budget;
+        # only semantic gaps consume the unit's single judgment repair.
+        key, limit = ("format_repair", FORMAT_REPAIRS) if any(e.get("mechanical") for e in errors) else ("repair", 1)
+        if errors and unit.get(key, 0) < limit:
+            unit.update(**{key: unit.get(key, 0) + 1}, feedback=errors)
             await save()
             continue
         unit.update(complete=not errors, feedback=errors)

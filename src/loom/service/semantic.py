@@ -728,11 +728,15 @@ class SessionSemantic:
                 self.outputs.track(db, body, ref)
             body.update(state="completed", completed_at=now_iso(), result=ref)
             if body.get("analysis_version") == GRAPH_ENGINE and semantic["coverage"]["status"] != "complete":
+                gaps = [g["reason"] for g in semantic["coverage"].get("review_gaps", []) if g.get("reason")]
+                detail = "; ".join(dict.fromkeys(gaps))[:400]
                 body.update(
                     state="incomplete",
                     error=f"Incremental analysis incomplete: {semantic['coverage']['pending_cards']} cards pending; "
                     f"{len(semantic['coverage'].get('pending_structure_units', []))} goal-structure windows pending; "
-                    f"{semantic['coverage']['validation_issue_count']} validation issues. Accepted graph revisions retained.",
+                    f"{semantic['coverage']['validation_issue_count']} validation issues. "
+                    + (f"Issues: {detail}. " if detail else "")
+                    + "Accepted graph revisions retained. Resume evaluation to retry pending windows.",
                 )
             if body.get("analysis_version") == "v3" and semantic["coverage"]["status"] != "complete":
                 body.update(state="budget_exhausted", error="Evaluation budget reached; focused stages remain unfinished")
