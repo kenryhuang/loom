@@ -2,154 +2,46 @@
 
 from copy import deepcopy
 
-from jsonschema import Draft202012Validator, ValidationError
-
 from loom.evaluation.goal_loops.facts import identity
 from loom.evaluation.goal_loops.graph_contract import GROUP, UPDATE_FIELDS
+from loom.evaluation.goal_loops.graph_decode import parse_updates
+from loom.evaluation.goal_loops.graph_normalization import normalize_records, note
 from loom.evaluation.goal_loops.graph_state import commit_group
 from loom.evaluation.goal_loops.structure import commit_structure
-from loom.llm.api import LlmResponse
-from loom.llm.structured import parse_response
+from loom.evaluation.issues import RuleViolation, issue, validate_schema
+
+__all__ = ["parse_updates", "commit_updates"]
+VALIDATION_VERSION = "graph-validation.1"
 
 
-def parse_updates(answer):
-    """Accept flat structured JSON or independent JSONL records, including complete
-    lines before a truncated tail. Never synthesize missing braces or field values.
-    Legacy group envelopes remain readable, but no longer define atomicity.
-    """
-    records, errors = [], []
-
-    def unpack(value):
-        if not isinstance(value, dict):
-            raise ValueError("Expected an update object")
-        if "type" in value:
-            kind = value["type"]
-            if kind not in UPDATE_FIELDS:
-                raise ValueError(f"Unknown update type: {kind}")
-            records.append((kind, {k: v for k, v in value.items() if k != "type"}))
-            return
-        if "groups" in value:
-            groups = value["groups"]
-            if not isinstance(groups, list) or len(groups) > 8:
-                raise ValueError("Expected at most eight legacy groups")
-            for group in groups:
-                try:
-                    unpack(group)
-                except ValueError as exc:
-                    errors.append(dict(reason=str(exc)))
-        for kind, rows in value.items():
-            if kind == "groups":
-                continue
-            if kind not in UPDATE_FIELDS:
-                errors.append(dict(record_type=kind, reason="Unknown update field"))
-                continue
-            if not isinstance(rows, list) or len(rows) > UPDATE_FIELDS[kind]["maxItems"]:
-                errors.append(dict(record_type=kind, reason="Invalid update array"))
-                continue
-            records.extend((kind, row) for row in rows)
-
-    try:
-        value, _ = parse_response(answer)
-        unpack(value)
-    except ValueError as whole_error:
-        # JSONL records are self-contained. Pretty-printed fragments of malformed
-        # enclosing JSON are deliberately not treated as independent assertions.
-        lines = (answer.content or "").splitlines()
-        if len(answer.content or "") > 1_000_000 or len(lines) > 256 or answer.finish_reason in {"refusal", "content_filter"}:
-            return [], [dict(reason=str(whole_error))]
-        recognized = False
-        for index, line in enumerate(lines):
-            if not line.strip():
-                continue
-            try:
-                value, _ = parse_response(LlmResponse(content=line, finish_reason="stop"))
-                if not isinstance(value, dict) or "type" not in value:
-                    raise ValueError("Expected a complete typed record on this line")
-                unpack(value)
-                recognized = True
-            except ValueError as exc:
-                errors.append(dict(response_line=index + 1, reason=str(exc)[:300]))
-        if not recognized:
-            return [], [dict(reason=str(whole_error)[:450])]
-        if answer.finish_reason in {"length", "max_tokens"}:
-            errors.append(dict(reason="Response truncated; complete independent records retained"))
-    if len(records) > 128:
-        return [], [dict(reason="Too many update records")]
-    return records, errors
-
-
-def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_ids):
+def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_ids, allowed_fields=None):
     """Commit each valid record without rolling back independent siblings.
 
     Declarations are dependency ordered; action assessments need no declared goal.
     Attribution and causal links are separately validated, never inferred from
     sequence/caller metadata alone. Alias mappings are local to one review unit.
     """
-    errors, requests, items, attributions = [], [], [], []
-
-    def normalized(kind, raw, rule, **details):
-        row = dict(batch_id=batch_id, record_type=kind, record_id=raw.get("card_id", raw.get("key")), rule=rule, **details)
-        if row not in cp.setdefault("protocol_normalizations", []):
-            cp["protocol_normalizations"].append(row)
-
+    allowed = set(UPDATE_FIELDS) if allowed_fields is None else set(allowed_fields)
+    admitted, rejected = [], []
     for index, (kind, raw) in enumerate(records):
-        if not isinstance(raw, dict):
-            errors.append(dict(record=index, record_type=kind, reason="Record must be an object"))
-            continue
-        raw = deepcopy(raw)
-        if kind in {"goals", "stages", "attempts"} and "id" in raw:
-            if "key" in raw and raw["key"] != raw["id"]:
-                errors.append(dict(record=index, record_type=kind, reason="Conflicting declaration id and key"))
-                continue
-            raw["key"] = raw.pop("id")
-            normalized(kind, raw, "declaration_id_to_key")
-        if kind == "goals" and any(g["id"] == raw.get("key") and not g.get("parent_goal_id") for g in cp["entities"]["goals"]):
-            # Root is recorded task metadata, never an evaluator-owned declaration.
-            # Ignore echoes (including paraphrases) without applying any mutation.
-            normalized(kind, raw, "root_echo_ignored")
-            continue
-        if kind == "goals" and "root_relation" not in raw:
-            raw["root_relation"] = ""
-            normalized(kind, raw, "missing_parent_relation_unreviewed")
-        if kind == "goals" and "conditions" not in raw:
-            key = cp.get("record_aliases", {}).get(batch_id, {}).get(raw.get("key"), raw.get("key"))
-            old = next((g for g in cp["entities"]["goals"] if g["id"] == key), None)
-            raw["conditions"] = deepcopy(old["conditions"]) if old else []
-            normalized(kind, raw, "omitted_conditions_preserved_or_empty")
-        if kind == "assessments":
-            # Backward-compatible input; semantic judgment is independent of its
-            # possibly broken goal/stage mapping.
-            stage_ids = raw.pop("stage_ids", None)
-            raw.setdefault("expected_refs", [])
-            raw.setdefault("expected", "unknown")
-            if stage_ids:
-                attributions.append((index, "attributions", dict(card_id=raw.get("card_id"), stage_ids=stage_ids, refs=raw.get("refs", []))))
-            prior, uptake = raw.pop("prior_card_ids", []), raw.pop("uptake_card_ids", [])
-            redundancy = raw.pop("redundancy", "not_established")
-            if prior or uptake or redundancy != "not_established":
-                attributions.append((index, "comparisons", dict(card_id=raw.get("card_id"), prior_card_ids=prior, uptake_card_ids=uptake,
-                                                                 redundancy=redundancy, refs=raw.get("refs", []))))
-        if kind == "stages":
-            raw.setdefault("attempt_id", "")
-        items.append((index, kind, raw))
-    items += attributions
+        if kind not in allowed:
+            rejected.append(issue("response.record_type", "Record type is not allowed in this request", category="format",
+                                  phase="decode", stage="graph", unit_id=batch_id, record_type=kind,
+                                  record=index, record_index=index + 1, details=dict(allowed_types=sorted(allowed))))
+        else:
+            admitted.append((index, kind, raw))
+    items, errors = normalize_records(cp, admitted, batch_id)
+    errors = rejected + errors
+    requests = []
 
     def failure(index, kind, raw, exc):
-        path = list(exc.absolute_path) if isinstance(exc, ValidationError) else []
-        reason = exc.message if isinstance(exc, ValidationError) else str(exc)
-        if isinstance(exc, ValidationError) and exc.validator == "maxLength":
-            reason = f"Field {'.'.join(map(str, path))}: at most {exc.validator_value} characters; received {len(exc.instance)}. Shorten the field."
-        error = dict(record=index, record_type=kind, record_id=raw.get("card_id", raw.get("key")),
-                     path=path, reason=reason[:450])
-        # Schema-shape violations are mechanical: repairing them needs no new
-        # evidence judgment, so they draw on a separate bounded repair budget.
-        if isinstance(exc, ValidationError):
-            error["mechanical"] = True
-        return error
+        return {**exc.issue, "stage": "graph", "unit_id": batch_id,
+                "record": index, "record_index": index + 1, "record_type": kind,
+                "record_id": raw.get("card_id", raw.get("key", raw.get("goal_id")))}
 
     def apply(item):
         index, kind, raw = item
-        Draft202012Validator(UPDATE_FIELDS[kind]["items"]).validate(raw)
+        validate_schema(raw, UPDATE_FIELDS[kind]["items"])
         if kind == "evidence_requests":
             requests.append(raw)
             return
@@ -166,7 +58,7 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
                     # A repeated definition is not an edit operation. Keep the
                     # canonical wording; conditions and parent must still match.
                     if old["objective"] != row["objective"]:
-                        normalized(kind, raw, "goal_title_echo_ignored", retained_objective=old["objective"],
+                        note(cp, batch_id, kind, raw, "goal_title_echo_ignored", retained_objective=old["objective"],
                                    proposed_objective=row["objective"])
                         row["objective"] = old["objective"]
                 elif old["objective"] != row["objective"]:
@@ -185,7 +77,7 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
             if old["knowledge_cutoff"] <= cutoff and all(old[k] == row[k] for k in ("goal_id", "title", "kind")) and old["attempt_id"] == (
                 row["attempt_id"] or "attempt:" + identity(row["goal_id"], "unestablished")
             ):
-                normalized(kind, raw, "unchanged_stage_reused")
+                note(cp, batch_id, kind, raw, "unchanged_stage_reused")
                 return
         if kind == "structure":
             commit_structure(cp, row, batch_id=batch_id, delivered=delivered, cutoff=cutoff, cards=cards, target_ids=target_ids)
@@ -199,14 +91,15 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
         elif kind in {"attributions", "comparisons"}:
             old = cp["assessments"].get(row["card_id"])
             if not old:
-                raise ValueError("Relationship awaits an accepted action assessment")
+                raise RuleViolation("graph.assessment_dependency", "Relationship awaits an accepted action assessment", path=("card_id",), category="semantic")
             if not row["refs"]:
                 if kind == "attributions":
-                    normalized(kind, raw, "unsupported_attribution_omitted")
+                    note(cp, batch_id, kind, raw, "unsupported_attribution_omitted")
                     return
-                raise ValueError("Relationship requires delivered evidence")
+                raise RuleViolation("graph.relationship_evidence_required", "Relationship requires delivered evidence", path=("refs",), category="semantic")
             if any(key not in delivered or delivered[key]["line"] > cutoff for key in row["refs"]):
-                raise ValueError("Relationship cites unknown, undelivered or future evidence")
+                raise RuleViolation("graph.relationship_evidence_scope", "Relationship cites unknown, undelivered or future evidence",
+                    path=("refs",), category="semantic")
             # Revalidate the saved judgment with its already accepted evidence.
             # This host-only ledger cannot authorize new model assertions: their
             # references were checked against this request's delivery above.
@@ -246,7 +139,7 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
             cp.setdefault("record_aliases", {}).setdefault(batch_id, {})[raw["key"]] = canonical
             if forked_from:
                 cp["record_aliases"][batch_id][forked_from] = canonical
-                normalized(kind, raw, "declaration_forked", previous_id=forked_from, new_id=canonical)
+                note(cp, batch_id, kind, raw, "declaration_forked", previous_id=forked_from, new_id=canonical)
 
     # Retry declarations only when a dependency was actually resolved; unrelated
     # malformed declarations cannot prevent other goals or stages from committing.
@@ -257,7 +150,7 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
             try:
                 apply(item)
                 accepted += 1
-            except (ValueError, KeyError, ValidationError) as exc:
+            except RuleViolation as exc:
                 rejected.append((item, failure(*item, exc)))
         if not accepted:
             errors.extend(e for _, e in rejected)
@@ -267,9 +160,10 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
         for item in (item for item in items if item[1] == kind):
             try:
                 apply(item)
-            except (ValueError, KeyError, ValidationError) as exc:
+            except RuleViolation as exc:
                 errors.append(failure(*item, exc))
     if len(requests) > 3:
-        errors.append(dict(record_type="evidence_requests", reason="At most three evidence requests per call"))
+        errors.append(issue("response.evidence_request_limit", "At most three evidence requests per call",
+            category="format", record_type="evidence_requests", stage="graph", unit_id=batch_id))
         requests = []
     return errors, requests

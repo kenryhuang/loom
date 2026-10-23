@@ -4,6 +4,7 @@ from copy import deepcopy
 
 from loom.evaluation.goal_loops.facts import identity
 from loom.evaluation.goal_loops.review import initial_state
+from loom.evaluation.issues import RuleViolation
 
 
 def revised(previous, row):
@@ -77,7 +78,7 @@ def commit_group(cp, group, *, group_id, base_revision, cards, delivered, cutoff
     if group_id in cp["applied_groups"]:
         return False
     if cp["graph_revision"] != base_revision:
-        raise ValueError("Stale graph revision")
+        raise RuleViolation("graph.stale_revision", "Stale graph revision", path=(), category="state")
     # Transactions copy semantic state, not raw extraction, responses or request
     # accounting. Independent records must not repeatedly copy the entire trace.
     state = dict(cp)
@@ -95,9 +96,9 @@ def commit_group(cp, group, *, group_id, base_revision, cards, delivered, cutoff
 
     def refs(keys, required=True):
         if required and not keys:
-            raise ValueError("A semantic assertion requires delivered evidence")
+            raise RuleViolation("graph.evidence_required", "A semantic assertion requires delivered evidence", path=("refs",), category="semantic")
         if any(k not in delivered or delivered[k]["line"] > cutoff for k in keys):
-            raise ValueError("Unknown, undelivered or future evidence reference")
+            raise RuleViolation("graph.evidence_scope", "Unknown, undelivered or future evidence reference", path=("refs",), category="semantic")
         return [deepcopy(delivered[k]["ref"]) for k in dict.fromkeys(keys)]
 
     def root_of(gid):
@@ -109,16 +110,16 @@ def commit_group(cp, group, *, group_id, base_revision, cards, delivered, cutoff
             if not parent:
                 return obj
             gid = parent
-        raise ValueError("Unknown or cyclic goal parent")
+        raise RuleViolation("graph.goal_cycle", "Unknown or cyclic goal parent", path=("parent_id",), category="semantic")
 
     def scoped(gid, evidence):
         root = root_of(gid)
         if any(not root["origin_line"] <= r["line_number"] <= root["end_line"] for r in evidence):
-            raise ValueError("Evidence crosses an effective task revision")
+            raise RuleViolation("graph.task_scope", "Evidence crosses an effective task revision", path=("refs",), category="semantic")
 
     def allocate(kind, key):
         if not key or key in names:
-            raise ValueError("Duplicate or empty local declaration key")
+            raise RuleViolation("graph.declaration_key", "Duplicate or empty local declaration key", path=("key",), category="semantic")
         identifier = kind + ":" + identity(group_id, key)
         names[key] = identifier
         return identifier
@@ -127,14 +128,16 @@ def commit_group(cp, group, *, group_id, base_revision, cards, delivered, cutoff
         evidence = refs(raw["refs"])
         parent = resolve(raw["parent_id"])
         if parent not in {g["id"] for g in entities["goals"]}:
-            raise ValueError("Goal parent must be a supplied goal or an earlier declaration")
+            raise RuleViolation("graph.goal_parent", "Goal parent must be a supplied goal or an earlier declaration", path=("parent_id",), category="semantic")
         scoped(parent, evidence)
         if raw["key"] in objects:
             old = objects[raw["key"]]
             if not old.get("parent_goal_id") or old["parent_goal_id"] != parent:
-                raise ValueError("Recorded roots and goal parents cannot be rewritten")
+                raise RuleViolation("graph.goal_parent_immutable", "Recorded roots and goal parents cannot be rewritten",
+                    path=("parent_id",), category="semantic")
             if old["objective"] != raw["objective"] or old["conditions"] != raw["conditions"]:
-                raise ValueError("Stable goal definitions cannot be rewritten; declare a changed objective separately")
+                raise RuleViolation("graph.goal_definition_immutable", "Stable goal definitions cannot be rewritten; declare a changed objective separately",
+                    path=("objective",), category="semantic")
             names[raw["key"]] = raw["key"]
             continue
         gid = allocate("goal", raw["key"])
@@ -160,12 +163,12 @@ def commit_group(cp, group, *, group_id, base_revision, cards, delivered, cutoff
         goal = resolve(raw["goal_id"])
         evidence = refs(raw["refs"])
         if goal not in {g["id"] for g in entities["goals"]}:
-            raise ValueError("Unknown attempt goal")
+            raise RuleViolation("graph.attempt_goal", "Unknown attempt goal", path=("goal_id",), category="semantic")
         scoped(goal, evidence)
         if raw["key"] in objects:
             old = objects[raw["key"]]
             if old.get("goal_id") != goal or old.get("approach") != raw["approach"]:
-                raise ValueError("Stable attempt cannot change goal or approach")
+                raise RuleViolation("graph.attempt_immutable", "Stable attempt cannot change goal or approach", path=("goal_id",), category="semantic")
             names[raw["key"]] = raw["key"]
             continue
         aid = allocate("attempt", raw["key"])
@@ -185,10 +188,10 @@ def commit_group(cp, group, *, group_id, base_revision, cards, delivered, cutoff
         goal, attempt = resolve(raw["goal_id"]), resolve(raw["attempt_id"])
         evidence = refs(raw["refs"])
         if goal not in {g["id"] for g in entities["goals"]}:
-            raise ValueError("Unknown stage goal")
+            raise RuleViolation("graph.stage_goal", "Unknown stage goal", path=("goal_id",), category="semantic")
         scoped(goal, evidence)
         if attempt and (attempt not in objects or objects[attempt].get("goal_id") != goal):
-            raise ValueError("Stage attempt belongs to another goal")
+            raise RuleViolation("graph.stage_attempt", "Stage attempt belongs to another goal", path=("attempt_id",), category="semantic")
         if not attempt:
             attempt = "attempt:" + identity(goal, "unestablished")
             if attempt not in objects:
@@ -197,7 +200,7 @@ def commit_group(cp, group, *, group_id, base_revision, cards, delivered, cutoff
                 entities["attempts"].append(row)
         sid = raw["key"] if raw["key"] in state["stages"] else allocate("stage", raw["key"])
         if sid in state["stages"] and any(state["stages"][sid][k] != v for k, v in (("goal_id", goal), ("attempt_id", attempt), ("kind", raw["kind"]))):
-            raise ValueError("Stable stage cannot change goal, approach or kind")
+            raise RuleViolation("graph.stage_immutable", "Stable stage cannot change goal, approach or kind", path=("goal_id",), category="semantic")
         names[raw["key"]] = sid
         if sid not in state["stages"]:
             state["stages"][sid] = dict(
@@ -207,16 +210,16 @@ def commit_group(cp, group, *, group_id, base_revision, cards, delivered, cutoff
     for raw in group["assessments"]:
         cid = raw["card_id"]
         if cid in seen or cid not in card_map or card_map[cid]["end_line"] > cutoff:
-            raise ValueError("Duplicate, unknown or future card")
+            raise RuleViolation("graph.card_scope", "Duplicate, unknown or future card", path=("card_id",), category="semantic")
         seen.add(cid)
         old = state["assessments"].get(cid)
         if cid not in target_ids and not old:
-            raise ValueError("Card outside the current review window")
+            raise RuleViolation("graph.card_window", "Card outside the current review window", path=("card_id",), category="semantic")
         stage_ids = list(dict.fromkeys(resolve(s) for s in raw["stage_ids"]))
         if any(s not in state["stages"] for s in stage_ids):
-            raise ValueError("Unknown stage reference")
+            raise RuleViolation("graph.stage_reference", "Unknown stage reference", path=("stage_ids",), category="semantic")
         if raw["status"] == "unknown" and stage_ids:
-            raise ValueError("Unknown attribution must not assign cost ownership")
+            raise RuleViolation("graph.unknown_attribution", "Unknown attribution must not assign cost ownership", path=("stage_ids",), category="semantic")
         evidence = refs(raw["refs"], required=raw["status"] != "unknown")
         own = set(card_map[cid]["refs"]) | set(card_map[cid]["raw_refs"])
         if (
@@ -224,26 +227,30 @@ def commit_group(cp, group, *, group_id, base_revision, cards, delivered, cutoff
             and not own.intersection(raw["refs"])
             and not any(r["line_number"] in (card_map[cid]["start_line"], card_map[cid]["end_line"]) for r in evidence)
         ):
-            raise ValueError("Assessment needs evidence from that card")
+            raise RuleViolation("graph.assessment_evidence", "Assessment needs evidence from that card", path=("refs",), category="semantic")
         for sid in stage_ids:
             scoped(state["stages"][sid]["goal_id"], evidence)
         for other in raw["prior_card_ids"] + raw["uptake_card_ids"]:
             if other not in card_map or card_map[other]["end_line"] > cutoff:
-                raise ValueError("Unknown or future comparison/uptake card")
+                raise RuleViolation("graph.comparison_scope", "Unknown or future comparison/uptake card", path=(), category="semantic")
         if any(card_map[o]["end_line"] > card_map[cid]["start_line"] for o in raw["prior_card_ids"]):
-            raise ValueError("Redundancy cannot use evidence acquired after the action")
+            raise RuleViolation("graph.redundancy_cutoff", "Redundancy cannot use evidence acquired after the action",
+                path=("prior_card_ids",), category="semantic")
         for other in raw["uptake_card_ids"]:
             target = card_map[other]
             if target["start_line"] < card_map[cid]["end_line"] or not any(target["start_line"] <= r["line_number"] <= target["end_line"] for r in evidence):
-                raise ValueError("Adoption requires a later card and cited evidence of its use")
+                raise RuleViolation("graph.adoption_evidence", "Adoption requires a later card and cited evidence of its use",
+                    path=("uptake_card_ids",), category="semantic")
         if raw["redundancy"] == "supported" and (
             not raw["prior_card_ids"] or any(not any(p["line"] <= card_map[cid]["start_line"] for p in card_map[o]["presented"]) for o in raw["prior_card_ids"])
         ):
-            raise ValueError("Supported redundancy requires prior presented evidence")
+            raise RuleViolation("graph.redundancy_evidence", "Supported redundancy requires prior presented evidence",
+                path=("prior_card_ids",), category="semantic")
         row = {**deepcopy(raw), "stage_ids": stage_ids, "evidence_refs": evidence, "knowledge_cutoff": cutoff}
         expected_evidence = refs(raw.get("expected_refs", []), required=False)
         if any(r["line_number"] > card_map[cid]["start_line"] for r in expected_evidence):
-            raise ValueError("Expected value must cite evidence available before the action")
+            raise RuleViolation("graph.expectation_cutoff", "Expected value must cite evidence available before the action",
+                path=("expected_refs",), category="semantic")
         row["expected_evidence_refs"] = expected_evidence
         if not expected_evidence:
             row["expected"] = "unknown"
@@ -256,11 +263,12 @@ def commit_group(cp, group, *, group_id, base_revision, cards, delivered, cutoff
     for raw in group["closures"]:
         goal = resolve(raw["goal_id"])
         if goal not in {g["id"] for g in entities["goals"]}:
-            raise ValueError("Unknown closure goal")
+            raise RuleViolation("graph.closure_goal", "Unknown closure goal", path=("goal_id",), category="semantic")
         evidence = refs(raw["refs"])
         scoped(goal, evidence)
         if raw["evidence_state"] == "supported" and not raw["supported_conditions"]:
-            raise ValueError("Supported closure must name its supported conditions")
+            raise RuleViolation("graph.closure_conditions", "Supported closure must name its supported conditions",
+                path=("supported_conditions",), category="semantic")
         previous = state["closures"].get(goal)
         closure = {**deepcopy(raw), "goal_id": goal, "evidence_refs": evidence, "knowledge_cutoff": cutoff}
         state["closures"][goal] = closure = revised(previous, closure)
@@ -271,19 +279,20 @@ def commit_group(cp, group, *, group_id, base_revision, cards, delivered, cutoff
         key = resolve(key)
         matches = [p for p in phases if p["id"] == key or p["stage_id"] == key or p["goal_id"] == key or key in p["card_ids"]]
         if not matches:
-            raise ValueError("Relation endpoint has no established occurrence")
+            raise RuleViolation("graph.relation_endpoint", "Relation endpoint has no established occurrence", path=(), category="semantic")
         return max(matches, key=lambda p: p["end_line"]) if latest else min(matches, key=lambda p: p["start_line"])
 
     for raw in group["relations"]:
         source, target = endpoint(raw["source_id"]), endpoint(raw["target_id"])
         evidence = refs(raw["refs"])
         if source["id"] == target["id"] or source["end_line"] > target["start_line"]:
-            raise ValueError("Occurrence dependency must point forward; do not connect overlapping or earlier work")
+            raise RuleViolation("graph.relation_order", "Occurrence dependency must point forward; do not connect overlapping or earlier work",
+                path=("target_id",), category="semantic")
         lines = {r["line_number"] for r in evidence}
         if any(not lines.intersection(r["line_number"] for r in node["evidence_refs"]) for node in (source, target)):
-            raise ValueError("A dependency requires cited evidence from both endpoints")
+            raise RuleViolation("graph.relation_evidence", "A dependency requires cited evidence from both endpoints", path=("refs",), category="semantic")
         if not raw["result"].strip():
-            raise ValueError("A dependency must name the transmitted result")
+            raise RuleViolation("graph.relation_result", "A dependency must name the transmitted result", path=("result",), category="semantic")
         state["relations"].append(
             dict(
                 id="relation:" + identity(group_id, raw),
@@ -302,7 +311,7 @@ def commit_group(cp, group, *, group_id, base_revision, cards, delivered, cutoff
         evidence = refs(raw["refs"])
         scoped(goal, evidence)
         if any(c not in card_map or card_map[c]["end_line"] > cutoff for c in raw["card_ids"]):
-            raise ValueError("Diagnostic references an unknown/future card")
+            raise RuleViolation("graph.diagnostic_scope", "Diagnostic references an unknown/future card", path=("card_ids",), category="semantic")
         state["diagnostics"].append(
             {
                 **raw,

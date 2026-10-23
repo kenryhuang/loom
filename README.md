@@ -12,7 +12,8 @@ resume from saved checkpoints.
 - **Deep eval memory:** extract stage contributions, scoped environment and configuration
   facts, failure lessons, and more efficient workflows from traces. Records link back
   to goals, stages, actions, and source evidence; observed findings stay distinct from
-  proposed improvements. See [Deep eval Memory](docs/deep-eval-memory.md).
+  proposed improvements. See [Deep eval Memory](docs/deep-eval-memory.md) and the
+  [validation architecture](docs/deep-eval-validation.zh-CN.md) for module boundaries, structured errors, and bounded retries.
 - **Independent acceptance before completion:** actual command checks and a
   separate semantic review assess task- and workspace-specific requirements.
   Failed candidates enter bounded repair; missing evidence retains a concrete

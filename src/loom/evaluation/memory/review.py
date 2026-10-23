@@ -5,233 +5,25 @@ import inspect
 import time
 from copy import deepcopy
 
-from jsonschema import Draft202012Validator
-
 from loom.evaluation.goal_loops.attribution import action_attributions
 from loom.evaluation.goal_loops.facts import identity
-from loom.evaluation.goal_loops.packing import serialized
+from loom.evaluation.issues import EvaluationFailure, describe, stopped
 from loom.evaluation.memory import VERSION
-from loom.evaluation.memory.contracts import FIELDS, PROTOCOL, SYSTEM
+from loom.evaluation.memory.checkpoint import prepare_replay
+from loom.evaluation.memory.contracts import protocol_for
 from loom.evaluation.memory.evidence import card_evidence, sanitize
+from loom.evaluation.memory.records import commit, commit_records
+from loom.evaluation.memory.request import messages_for, scope
+from loom.evaluation.memory.validation import validate_record
 from loom.evaluation.provider import evaluator_provider
-from loom.llm.api import LlmMessage, LlmResponse, request_llm_response
-from loom.llm.structured import StructuredProtocol, native_schema, output_mode, parse_response, protocol_provider, unsupported_format
+from loom.evaluation.repair import begin_cycle, retry
+from loom.llm.api import request_llm_response
+from loom.llm.structured import output_mode, protocol_provider, unsupported_format
 
-VALIDATION_VERSION = "memory-validation.4"
+VALIDATION_VERSION = "memory-validation.5"
 
-
-def scope(cp, cards, memberships):
-    ids = {c["id"] for c in cards}
-    links = [r for r in memberships if r["card_id"] in ids]
-    stage_ids = {r["stage_id"] for r in links if r["stage_id"]}
-    goals = {g["id"]: g for g in cp["entities"]["goals"]}
-    goal_ids = {r["goal_id"] for r in links}
-    for gid in list(goal_ids):
-        while goals.get(gid, {}).get("parent_goal_id"):
-            gid = goals[gid]["parent_goal_id"]
-            goal_ids.add(gid)
-    return dict(
-        goals=[
-            {
-                **{k: g[k] for k in ("id", "parent_goal_id", "objective")},
-                "conditions": [serialized(c)[:400] for c in g.get("conditions", [])[:12]],
-                "omitted_conditions": max(0, len(g.get("conditions", [])) - 12),
-            }
-            for g in goals.values()
-            if g["id"] in goal_ids
-        ],
-        stages=[{k: s[k] for k in ("id", "goal_id", "title", "kind")} for s in cp["stages"].values() if s["id"] in stage_ids],
-        actions=[
-            dict(
-                id=c["id"],
-                kind=c["kind"],
-                name=c["name"],
-                status=c["status"],
-                start_line=c["start_line"],
-                end_line=c["end_line"],
-                memberships=[{k: r[k] for k in ("goal_id", "stage_id", "basis")} for r in links if r["card_id"] == c["id"]],
-            )
-            for c in cards
-        ],
-    )
-
-
-def validate_record(kind, row, unit):
-    Draft202012Validator(FIELDS[kind]["items"]).validate(row)
-    if sanitize(row) != row or "[REDACTED]" in serialized(row):
-        raise ValueError("Memory must not contain credentials or redacted values")
-    stages = {s["id"]: s for s in unit["scope"]["stages"]}
-    goals = {g["id"] for g in unit["scope"]["goals"]}
-    actions = {c["id"] for c in unit["scope"]["actions"]}
-    if kind == "contributions":
-        if not stages:
-            raise ValueError("No stages were delivered in this window; return contributions=[] instead of inventing a stage ID")
-        if row["stage_id"] not in stages or row["goal_id"] != stages[row["stage_id"]]["goal_id"]:
-            raise ValueError("Contribution must target the delivered stage and its owning goal")
-        if not set(row["key_action_ids"]) <= actions:
-            raise ValueError("Unknown key action")
-        for cid in row["key_action_ids"]:
-            action = next(c for c in unit["scope"]["actions"] if c["id"] == cid)
-            if not any(m["stage_id"] == row["stage_id"] for m in action["memberships"]):
-                raise ValueError("Key action is not attributed to this stage")
-        if row["rating"] == "key" and not row["key_action_ids"]:
-            raise ValueError("Key contribution requires key actions")
-    elif not (set(row["goal_ids"]) <= goals and set(row["stage_ids"]) <= set(stages) and set(row["action_ids"]) <= actions):
-        raise ValueError("Memory refers to undelivered goal, stage or action")
-    elif not row["goal_ids"]:
-        raise ValueError("Memory needs a goal scope")
-    evidence = {e["id"]: e for e in unit["evidence"]}
-    refs, cited = [], []
-    for index, citation in enumerate(row["citations"], 1):
-        entry = evidence.get(citation["ref"])
-        if not entry:
-            raise ValueError(f"Citation {index}: ref {citation['ref']} was not delivered in this memory request")
-        if not citation["quote"].strip() or citation["quote"] not in entry["text"]:
-            raise ValueError(f"Citation {index}, ref {citation['ref']}: must quote evidence verbatim. "
-                             "Copy a short unchanged substring from this ref's text; preserve newlines, spaces and comment markers. "
-                             "If unsupported, omit this record.")
-        if entry.get("quotes") and not any(citation["quote"] in q for q in entry["quotes"]):
-            raise ValueError("Synthesis citation must stay inside an original quote")
-        cited.append(entry)
-        if entry["ref"] not in refs:
-            refs.append(entry["ref"])
-    if not refs and not (kind == "contributions" and row["rating"] == "unknown"):
-        raise ValueError("Memory claim requires source evidence")
-    record = deepcopy(row)
-    if kind != "contributions":
-        owners = {e["action_id"] for e in cited}
-        if not owners <= actions:
-            raise ValueError("Cited evidence owner is outside the delivered action scope")
-        # Evidence ownership is host metadata, not another semantic judgment for
-        # the model to reproduce. In particular, verification boundaries often
-        # support a fact alongside the tool actions the model lists explicitly.
-        record["action_ids"] = sorted(set(row["action_ids"]) | owners)
-        if len(record["action_ids"]) > FIELDS[kind]["items"]["properties"]["action_ids"]["maxItems"]:
-            raise ValueError("Memory action scope exceeds the record limit")
-        if added := sorted(owners - set(row["action_ids"])):
-            record["normalizations"] = [dict(rule="include_cited_evidence_owners", added_action_ids=added)]
-        observed = (
-            kind == "facts"
-            and row["basis"] == "observed"
-            or kind == "lessons"
-            and row["validation"] == "observed_recovery"
-            or kind == "workflows"
-            and row["validation"] == "observed"
-        )
-        if observed and not any(e["basis"] == "observed_output" for e in cited):
-            raise ValueError("Observed memory requires recorded tool output; intent alone is not observation")
-    elif cited:
-        related = {a["id"] for a in unit["scope"]["actions"] if any(m["stage_id"] == row["stage_id"] for m in a["memberships"])}
-        if not any(e["action_id"] in related for e in cited):
-            raise ValueError("Contribution needs evidence from its stage's actions")
-    return {**record, "evidence_refs": deepcopy(refs)}
-
-
-def commit(memory, unit, response):
-    value, _ = parse_response(LlmResponse(content=response), PROTOCOL.max_response_chars)
-    if not isinstance(value, dict) or set(value) - set(FIELDS):
-        raise ValueError("Return a memory object with contributions, facts, lessons and workflows arrays")
-    errors = []
-    unit["rejected_records"] = []
-    unit["omitted_rejected_records"] = 0
-
-    def reject(kind, index, row, reason):
-        error = f"{kind}: record {index + 1}: {reason[:300]}"
-        errors.append(error)
-        # Include the failed record, not just a generic error that makes the model
-        # rewrite unrelated accepted memories. Bound and sanitize repair context.
-        rejected = dict(kind=kind, index=index + 1, record=sanitize(row), error=reason[:300])
-        if len(serialized(unit["rejected_records"] + [rejected])) <= 16000:
-            unit["rejected_records"].append(rejected)
-        else:
-            unit["omitted_rejected_records"] += 1
-
-    accepted_stages = {r["stage_id"] for r in memory["records"].values() if r["unit_id"] == unit["id"] and r["kind"] == "contributions"}
-    for kind in FIELDS:
-        rows = value.get(kind)
-        if not isinstance(rows, list) or len(rows) > FIELDS[kind]["maxItems"]:
-            errors.append(f"{kind}: missing or oversized array")
-            continue
-        if unit["mode"] == "synthesis" and kind != "workflows" and rows:
-            errors.append("Synthesis may only add workflows")
-            continue
-        if unit["mode"] == "extract" and kind == "workflows" and rows:
-            errors.append("Extract facts, lessons and contributions first; workflows belong to synthesis")
-            continue
-        for index, row in enumerate(rows):
-            try:
-                record = validate_record(kind, row, unit)
-                # Contributions are replaced within a window; memories deduplicate
-                # identical claims, while scoped contradictions remain visible.
-                if kind == "contributions":
-                    key = identity(kind, unit["id"], row["stage_id"])
-                elif kind == "workflows":
-                    key = identity(kind, unit["id"], sorted(row["goal_ids"]))
-                else:
-                    key = identity(kind, {k: record[k] for k in FIELDS[kind]["items"]["properties"]})
-                record.update(
-                    id="memory:" + key,
-                    kind=kind,
-                    unit_id=unit["id"],
-                    source_digest=memory["identity"]["source"],
-                    run_id=memory["identity"]["run_id"],
-                    graph_revision=memory["identity"]["graph_revision"],
-                )
-                memory["records"][record["id"]] = record
-                if kind == "contributions":
-                    accepted_stages.add(row["stage_id"])
-            except (ValueError, TypeError, KeyError) as exc:
-                reject(kind, index, row, str(exc))
-            except Exception as exc:
-                # JSON schema validation messages may contain raw model output.
-                from jsonschema import ValidationError
-
-                if not isinstance(exc, ValidationError):
-                    raise
-                reject(kind, index, row, f"invalid {exc.validator} at {'/'.join(map(str, exc.path))}")
-    if unit["mode"] == "extract":
-        missing = {s["id"] for s in unit["scope"]["stages"]} - accepted_stages
-        if missing:
-            errors.append("Rate every delivered stage, using unknown when needed: " + ", ".join(sorted(missing)))
-    unit["accepted_records"] = [
-        {k: r[k] for k in ("kind", "title", "summary", "stage_id", "rating") if k in r} for r in memory["records"].values() if r["unit_id"] == unit["id"]
-    ][:48]
-    return errors
-
-
-def protocol_for(unit):
-    schema = deepcopy(PROTOCOL.schema)
-    accepted = {r["stage_id"] for r in unit.get("accepted_records", []) if r["kind"] == "contributions"}
-    pending = {s["id"] for s in unit["scope"]["stages"]} - accepted
-    if unit["mode"] == "extract":
-        schema["properties"]["contributions"]["maxItems"] = min(16, len(pending))
-        schema["properties"]["workflows"]["maxItems"] = 0
-    else:
-        for kind in ("contributions", "facts", "lessons"):
-            schema["properties"][kind]["maxItems"] = 0
-    return StructuredProtocol(PROTOCOL.name, PROTOCOL.version, schema)
-
-
-def messages_for(unit, mode):
-    payload = dict(
-        mode=unit["mode"],
-        **unit["scope"],
-        evidence=[{k: e[k] for k in ("id", "text", "action_id", "basis", "truncated")} for e in unit["evidence"]],
-        previous_memories=unit.get("memories", []),
-        accepted_records=unit.get("accepted_records", []),
-        feedback=unit.get("errors", []),
-        rejected_records=unit.get("rejected_records", []),
-        omitted_rejected_records=unit.get("omitted_rejected_records", 0),
-    )
-    response_protocol = protocol_for(unit)
-    payload["empty_record_types"] = [k for k, spec in response_protocol.schema["properties"].items() if spec["maxItems"] == 0]
-    if mode != "json_schema":
-        payload["response_contract"] = response_protocol.schema
-    messages = [LlmMessage(role="system", content=SYSTEM), LlmMessage(role="user", content=serialized(sanitize(payload)))]
-    schema = serialized(native_schema(response_protocol.schema)) if mode == "json_schema" else ""
-    chars = sum(len(m.content) for m in messages) + len(schema) + 256
-    estimate = sum(len(m.content.encode()) for m in messages) + len(schema.encode()) + 512
-    return messages, dict(total_chars=chars, input_estimate=estimate, estimation="utf8_bytes_plus_schema_and_512_not_tokenizer")
+# Compatibility exports; orchestration uses structured issues exclusively.
+__all__ = ["review_memory", "commit", "validate_record", "messages_for", "protocol_for"]
 
 
 async def review_memory(source, cp, *, run_id, provider, settings, save, emit, remaining_seconds):
@@ -240,7 +32,7 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
     )
     memory = cp.setdefault("memory", dict(identity=expected, units={}, records={}, read_chars=0, cursor=0, complete=False))
     if memory["identity"] != expected:
-        raise ValueError("Memory source or graph changed; create a new evaluation")
+        raise stopped("checkpoint.memory_identity", "Memory source or graph changed; create a new evaluation", category="state", stage="memory")
     if memory["complete"]:
         return
     cards, registry = cp["extraction"]["cards"], cp["extraction"]["registry"]
@@ -254,18 +46,19 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
 
     async def evaluate(unit):
         nonlocal mode
-        repairs = 0
-        if "pending_response" not in unit and unit.get("validation_version") != VALIDATION_VERSION:
-            previous = next((r for r in reversed(cp["responses"]) if r.get("activity") == "memory" and r.get("batch_id") == unit["id"] and r.get("text")), None)
-            if previous:
-                unit["pending_response"] = previous["text"]
+        begin_cycle(unit)
+        prepare_replay(cp, unit, VALIDATION_VERSION)
         while not unit.get("complete"):
             if "pending_response" not in unit:
                 messages, profile = messages_for(unit, mode)
                 if profile["total_chars"] > settings["max_prompt_chars"]:
-                    raise ValueError("Memory input budget reached; increase Request characters per call and Resume evaluation")
+                    raise stopped("budget.request_chars", "Memory input budget reached; increase Request characters per call and Resume evaluation",
+                                  category="budget", stage="memory", unit_id=unit["id"],
+                                  details=dict(limit=settings["max_prompt_chars"], actual_count=profile["total_chars"]))
                 if cp["usage"]["calls"] >= settings["max_calls"] or remaining_seconds() <= 0:
-                    raise ValueError("Memory evaluation budget reached; increase call/time limits and Resume evaluation")
+                    raise stopped("budget.calls_or_time", "Memory evaluation budget reached; increase call/time limits and Resume evaluation",
+                                  category="budget", stage="memory", unit_id=unit["id"],
+                                  details=dict(calls=cp["usage"]["calls"], call_limit=settings["max_calls"], remaining_seconds=remaining_seconds()))
                 timeout = min(settings["max_call_seconds"], remaining_seconds())
                 reservation = dict(
                     id="request:" + str(len(cp["reservations"]) + 1),
@@ -303,7 +96,13 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
                             await emit(dict(type="llm.failed", **meta))
                             await persist()
                             continue
-                        raise ValueError(response.error.message)
+                        raise stopped("request.provider", response.error.message, category="provider", stage="memory", unit_id=unit["id"],
+                                      provider_code=response.error.code)
+                except TimeoutError as exc:
+                    await emit(dict(type="llm.failed", **meta))
+                    await persist()
+                    raise stopped("request.timeout", f"Memory request timed out after {timeout:g}s; accepted records retained",
+                                  category="provider", stage="memory", unit_id=unit["id"], details=dict(timeout_seconds=timeout)) from exc
                 except BaseException:
                     await emit(dict(type="llm.failed", **meta))
                     await persist()
@@ -322,19 +121,23 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
                         activity="memory",
                         usage=usage,
                         text=sanitize(answer.content),
+                        response_schema=deepcopy(protocol_for(unit).schema),
                         finish_reason=answer.finish_reason,
                         duration_seconds=time.monotonic() - start,
                     )
                 )
                 unit["pending_response"] = sanitize(answer.content)
+                unit["pending_finish_reason"] = answer.finish_reason
+                unit["pending_schema"] = deepcopy(protocol_for(unit).schema)
                 await persist()
                 await emit(dict(type="llm.completed", **meta, response=answer))
-            try:
-                errors = commit(memory, unit, unit["pending_response"])
-            except ValueError as exc:
-                errors = [str(exc)[:500]]
+            issues = commit_records(memory, unit, unit["pending_response"], schema=unit.get("pending_schema"),
+                                    finish_reason=unit.get("pending_finish_reason"))
+            errors = [describe(e) for e in issues]
             unit.pop("pending_response", None)
-            unit.update(errors=errors, complete=not errors, validation_version=VALIDATION_VERSION)
+            unit.pop("pending_schema", None)
+            unit.pop("pending_finish_reason", None)
+            unit.update(issues=issues, errors=errors, complete=not issues, validation_version=VALIDATION_VERSION)
             for response_record in reversed(cp["responses"]):
                 if response_record["batch_id"] == unit["id"]:
                     if response_record.get("validation_errors") != errors:
@@ -342,13 +145,15 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
                             dict(version=response_record.get("validation_version", "legacy"), errors=response_record.get("validation_errors", []))
                         )
                     response_record["validation_errors"] = list(errors)
+                    response_record["validation_issues"] = deepcopy(issues)
                     response_record["validation_version"] = VALIDATION_VERSION
                     break
             await persist()
-            if errors:
-                if repairs >= 1:
-                    raise ValueError("Memory validation incomplete; accepted records retained. Resume evaluation. " + "; ".join(errors[:2]))
-                repairs += 1
+            if issues:
+                should_retry = retry(unit, issues)
+                await persist()
+                if not should_retry:
+                    raise EvaluationFailure("Memory validation incomplete; accepted records retained. Resume evaluation.", issues)
         await emit(
             dict(
                 type="evaluation.activity",
@@ -380,7 +185,9 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
         chars = sum(len(e["text"]) for e in evidence)
         if memory["read_chars"] + cp.get("read_chars", 0) + chars > settings["max_evidence_chars"]:
             await persist()
-            raise ValueError("Memory evidence budget reached; increase Evidence characters total and Resume evaluation")
+            raise stopped("budget.evidence_chars", "Memory evidence budget reached; increase Evidence characters total and Resume evaluation",
+                          category="budget", stage="memory", unit_id=unit["id"],
+                          details=dict(limit=settings["max_evidence_chars"], actual_count=memory["read_chars"] + cp.get("read_chars", 0) + chars))
         memory["read_chars"] += chars
         memory["units"][unit["id"]] = unit
         memory["cursor"] += len(subset)

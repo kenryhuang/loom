@@ -3,6 +3,7 @@
 from copy import deepcopy
 
 from loom.evaluation.goal_loops.attribution import root_owned_card
+from loom.evaluation.issues import RuleViolation
 
 
 def structure_review_context(cp, unit):
@@ -29,15 +30,15 @@ def structure_review_context(cp, unit):
 
 def commit_structure(cp, row, *, batch_id, delivered, cutoff, cards, target_ids):
     if not row["reason"].strip():
-        raise ValueError("Goal structure decision requires a reason")
+        raise RuleViolation("graph.structure_reason", "Goal structure decision requires a reason", path=("reason",), category="semantic")
     refs = row["refs"]
     if any(ref not in delivered or delivered[ref]["line"] > cutoff for ref in refs):
-        raise ValueError("Goal structure cites undelivered or future evidence")
+        raise RuleViolation("graph.structure_evidence", "Goal structure cites undelivered or future evidence", path=("refs",), category="semantic")
     current = [c for c in cards if c["id"] in target_ids]
     if row["decision"] == "single_goal" and not any(
         c["start_line"] <= delivered[ref]["line"] <= c["end_line"] for ref in refs for c in current
     ):
-        raise ValueError("Single-goal decision requires current action evidence")
+        raise RuleViolation("graph.structure_current_evidence", "Single-goal decision requires current action evidence", path=("refs",), category="semantic")
     cp.setdefault("structure_reviews", {})[batch_id] = dict(
         **deepcopy(row), card_ids=sorted(target_ids), knowledge_cutoff=cutoff,
         evidence_refs=[deepcopy(delivered[ref]["ref"]) for ref in refs],

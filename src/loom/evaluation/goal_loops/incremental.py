@@ -5,31 +5,29 @@ import inspect
 import time
 from copy import deepcopy
 
-from jsonschema import Draft202012Validator
-
 from loom.core import ok
-from loom.evaluation.evidence_store import text_value
 from loom.evaluation.goal_loops.attribution import action_attributions
 from loom.evaluation.goal_loops.cards import VERSION as EXTRACTOR
 from loom.evaluation.goal_loops.cards import compile_cards, link_cards
 from loom.evaluation.goal_loops.checkpoint_repair import complete_framework_boundaries, reconcile_checkpoint
+from loom.evaluation.goal_loops.coverage import window_issues
 from loom.evaluation.goal_loops.facts import identity, run_facts
-from loom.evaluation.goal_loops.graph_contract import ANALYZER, PROMPT, REQUEST, RESOURCE_LIMITS, SYSTEM, UPGRADABLE_VERSIONS, compact_contract, protocol
+from loom.evaluation.goal_loops.graph_contract import ANALYZER, PROMPT, RESOURCE_LIMITS, SYSTEM, UPGRADABLE_VERSIONS, compact_contract, protocol
 from loom.evaluation.goal_loops.graph_projection import project
 from loom.evaluation.goal_loops.graph_state import initialize, occurrences
-from loom.evaluation.goal_loops.graph_updates import commit_updates, parse_updates
+from loom.evaluation.goal_loops.graph_updates import VALIDATION_VERSION, commit_updates, parse_updates
 from loom.evaluation.goal_loops.judge_metadata import VERSION as INPUT_VERSION
 from loom.evaluation.goal_loops.judge_metadata import card_metadata, feedback_metadata, terminal_metadata_records
+from loom.evaluation.goal_loops.legacy_reads import read_requests
 from loom.evaluation.goal_loops.packing import REQUEST_CHARS, bounded_state, request_profile, serialized
 from loom.evaluation.goal_loops.structure import pending_structure_units, structure_pending, structure_review_context
+from loom.evaluation.issues import EvaluationFailure, stopped
 from loom.evaluation.provider import evaluator_provider
+from loom.evaluation.repair import begin_cycle, retry
 from loom.llm.api import LlmMessage, request_llm_response
 from loom.llm.structured import output_mode, protocol_provider, unsupported_format
 
-# Semantic gaps get one repair per unit per run; schema-only (mechanical)
-# failures get their own bounded allowance so a formatting slip cannot strand
-# an otherwise decided window.
-FORMAT_REPAIRS = 2
+__all__ = ["review", "read_requests", "upgrade_budget_identity"]
 
 
 def context(cp, cards, cutoff):
@@ -54,45 +52,6 @@ def context(cp, cards, cutoff):
             omitted_goals=max(0, len(goals) - len(ids) - 16),
         )
     )
-
-
-def read_requests(source, registry, requests, *, cutoff, inspected, remaining_chars):
-    """Validate the complete plan before reading; aliases cannot bypass range dedup."""
-    pending, used = [], 0
-    for request in requests:
-        Draft202012Validator(REQUEST).validate(request)
-        if not request["question"].strip() or not request["purpose"].strip():
-            raise ValueError("Evidence read requires a question and purpose")
-        if request["ref"] not in registry or registry[request["ref"]]["line"] > cutoff:
-            raise ValueError("Cannot read unregistered or future evidence")
-        base = registry[request["ref"]]["ref"]
-        text = text_value(source.resolve(base))
-        if request["start"] >= len(text):
-            raise ValueError("Evidence range is outside the registered field")
-        start = (base.get("start") or 0) + request["start"]
-        end = start + min(request["length"], len(text) - request["start"])
-        pointer = {**base, "start": start, "end": end}
-        if any(
-            r["line_number"] == pointer["line_number"]
-            and r.get("field_path") == pointer.get("field_path")
-            and (r.get("start") or 0) <= start
-            and (r.get("end") or 0) >= end
-            for r in inspected + [p["ref"] for p in pending]
-        ):
-            raise ValueError("Evidence range was already delivered; request an unseen range or conclude unknown")
-        used += end - start
-        if used > remaining_chars:
-            raise ValueError("Evidence read budget reached")
-        pending.append(
-            dict(
-                id="e" + identity(pointer)[:12],
-                ref=pointer,
-                line=pointer["line_number"],
-                text=text[request["start"] : request["start"] + end - start],
-                question=request["question"],
-            )
-        )
-    return pending
 
 
 def upgrade_budget_identity(checkpoint, saved_settings):
@@ -133,10 +92,10 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
     if cp.get("identity") and cp["identity"] != expected:
         old = cp["identity"]
         if (old.get("analyzer"), old.get("prompt")) not in UPGRADABLE_VERSIONS or {**old, "analyzer": ANALYZER, "prompt": PROMPT} != expected:
-            raise ValueError("Incremental graph identity changed; create a new evaluation")
+            raise stopped("checkpoint.graph_identity", "Incremental graph identity changed; create a new evaluation", category="state", stage="graph")
         cp.setdefault("protocol_upgrades", []).append(dict(from_prompt=old["prompt"], to_prompt=PROMPT, revision=cp["graph_revision"]))
     if any(settings[k] < value for k, value in cp.get("resource_limits", {}).items() if k != "max_tokens"):
-        raise ValueError("Resuming cannot reduce resource limits")
+        raise stopped("checkpoint.resource_limits", "Resuming cannot reduce resource limits", category="state", stage="graph")
     for key, value in initialize(view).items():
         cp.setdefault(key, value)
     cp["identity"] = expected
@@ -165,7 +124,9 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         if inspect.isawaitable(value):
             value = await value
         if value is not None and not value.ok:
-            raise ValueError(value.error.message)
+            raise stopped("runtime." + value.error.code.lower(), value.error.message, stage="graph",
+                          category={"EVALUATION_BUDGET": "budget", "EVALUATION_CANCELLED": "cancelled"}.get(value.error.code, "internal"),
+                          unit_id=event.get("analysis_stage"))
 
     reconcile_checkpoint(cp, cards, metadata=judge_cards)
     # A resumable unit retains its cutoff and bounded read state. Failed earlier
@@ -175,8 +136,7 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
             unit["complete"] = False
     pending = sorted((u for u in cp["units"].values() if not u.get("complete")), key=lambda u: (u["cutoff"], u["id"]))
     for unit in pending:
-        unit["repair"] = 0
-        unit["format_repair"] = 0
+        begin_cycle(unit)
     while pending or cp["cursor"] < len(cards):
         if not pending:
             subset = cards[cp["cursor"] : cp["cursor"] + min(8, settings["batch_rounds"])]
@@ -189,6 +149,7 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
                 repair=0,
                 complete=False,
             )
+            begin_cycle(unit)
             pending.append(unit)
         unit = pending[0]
         subset = [card_map[c] for c in unit["cards"]]
@@ -276,11 +237,12 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
             continue
         if chars > settings["max_prompt_chars"]:
             await save()
-            raise ValueError(
+            raise stopped("budget.request_chars",
                 f"Evaluation input budget reached: {chars} chars including response schema, "
                 f"limit {settings['max_prompt_chars']} (Request characters · per call / max_prompt_chars), "
                 f"{len(subset)} cards; checkpoint retained. Increase Request characters · per call, then Resume evaluation; "
-                "Evidence characters controls cumulative evidence reads, not request size"
+                "Evidence characters controls cumulative evidence reads, not request size",
+                category="budget", stage="graph", unit_id=unit["id"], details=dict(limit=settings["max_prompt_chars"], actual_count=chars)
             )
         if unit["id"] not in cp["units"]:
             cp["units"][unit["id"]] = deepcopy(unit)
@@ -291,10 +253,11 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         input_estimate = profile["input_estimate"]
         if cp["usage"]["calls"] >= settings["max_calls"] or remaining_seconds() <= 0:
             await save()
-            raise ValueError(
+            raise stopped("budget.calls_or_time",
                 f"Evaluation budget reached before request reservation: calls {cp['usage']['calls']}/{settings['max_calls']}; "
                 f"reported tokens {cp['usage']['total_tokens']} (accounting only); "
-                "committed graph retained"
+                "committed graph retained", category="budget", stage="graph", unit_id=unit["id"],
+                details=dict(calls=cp["usage"]["calls"], call_limit=settings["max_calls"], remaining_seconds=remaining_seconds())
             )
         reservation = dict(
             id="request:" + str(len(cp["reservations"]) + 1),
@@ -315,14 +278,14 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         await save()
         meta = dict(
             analysis_stage=unit["id"],
-            evaluation_activity="repair" if unit["repair"] else "scan",
+            evaluation_activity="repair" if unit["repair_state"]["attempts"] else "scan",
             output_token_limit=None,
             timeout_seconds=timeout,
             prompt_chars=chars,
             input_estimate=input_estimate,
             input_profile=profile,
             activity_label=unit["id"],
-            repair_attempt=unit["repair"],
+            repair_attempt=unit["repair_state"]["attempts"],
         )
         await emit(dict(type="llm.requested", **meta, messages=messages, model=expected["model"]))
         start = time.monotonic()
@@ -336,7 +299,8 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
             message = f"Evaluator request timed out after {timeout:g}s at {unit['id']}; accepted records retained"
             await emit(dict(type="llm.failed", **meta, error=message))
             await save()
-            raise ValueError(message) from exc
+            raise stopped("request.timeout", message, category="provider", stage="graph", unit_id=unit["id"],
+                          details=dict(timeout_seconds=timeout)) from exc
         except BaseException:
             await emit(dict(type="llm.failed", **meta))
             await save()
@@ -347,7 +311,8 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
             if unsupported_format(response.error) and cp["mode"] != "text":
                 cp["mode"] = "text"
                 continue
-            raise ValueError(response.error.message)
+            raise stopped("request.provider", response.error.message, category="provider", stage="graph", unit_id=unit["id"],
+                          provider_code=response.error.code)
         answer = response.unwrap()
         usage = {k: getattr(answer.usage, k, 0) for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
         if usage["total_tokens"] > 0:
@@ -373,33 +338,32 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         cp["responses"][-1]["delivered_ref_ids"] = sorted(delivered_ids)
         delivered = {e: registry[e] for e in delivered_ids}
         records, errors = parse_updates(answer)
-        rejected, _ = commit_updates(cp, terminal_metadata_records(
-            records, normalizations=cp.setdefault("protocol_normalizations", []), batch_id=unit["id"]), batch_id=unit["id"], cards=cards, delivered=delivered,
-                                           cutoff=cutoff, target_ids=set(unit["cards"]))
+        errors = [{**e, "stage": "graph", "unit_id": unit["id"]} for e in errors]
+        normalized = terminal_metadata_records(records, normalizations=cp.setdefault("protocol_normalizations", []), batch_id=unit["id"])
+        # The regular pass retains the canonical legacy record vocabulary.
+        # Dedicated structure repair explicitly forbids rejudging accepted cards.
+        rejected, _ = commit_updates(cp, normalized, batch_id=unit["id"], cards=cards, delivered=delivered,
+                                     cutoff=cutoff, target_ids=set(unit["cards"]),
+                                     allowed_fields=response_protocol.schema["properties"] if structure_only else None)
         errors += rejected
         cp["responses"][-1]["validation_errors"] = deepcopy(errors)
+        cp["responses"][-1]["validation_version"] = VALIDATION_VERSION
         complete_framework_boundaries(cp, cards, unit)
         await save()
         # commit_group replaces nested state; reacquire unit before persistence.
         unit = cp["units"][unit["id"]]
         pending[0] = unit
-        missing = [c for c in unit["cards"] if c not in cp["assessments"] or cp["assessments"][c]["status"] == "needs_evidence"]
-        if missing:
-            errors.append(dict(reason="Cards need a terminal assessment (reviewed or explicit unknown)", card_ids=missing))
-        if structure_pending(cp, unit):
-            errors.insert(0, dict(record_type="structure",
-                                  reason="Subgoal analysis pending: link actions to result-oriented child goals, or explain single_goal with current refs"))
-        # A malformed record (schema violation) draws on its own bounded budget;
-        # only semantic gaps consume the unit's single judgment repair.
-        key, limit = ("format_repair", FORMAT_REPAIRS) if any(e.get("mechanical") for e in errors) else ("repair", 1)
-        if errors and unit.get(key, 0) < limit:
-            unit.update(**{key: unit.get(key, 0) + 1}, feedback=errors)
+        errors = window_issues(cp, unit) + errors
+        if retry(unit, errors):
+            unit.update(feedback=errors)
             await save()
             continue
         unit.update(complete=not errors, feedback=errors)
         cp["conflicts"] = [c for c in cp["conflicts"] if c["batch_id"] != unit["id"]]
         cp["conflicts"] += [dict(batch_id=unit["id"], **e) for e in errors]
         await save()
+        if any(e["category"] not in {"format", "semantic", "coverage"} for e in errors):
+            raise EvaluationFailure("Graph evaluation stopped; accepted records retained.", errors)
         await emit(
             dict(
                 type="evaluation.activity",

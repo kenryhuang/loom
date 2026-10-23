@@ -60,7 +60,7 @@ def test_saved_goal_redefinition_replay_uses_only_delivered_metadata():
     cp["responses"][0]["delivered_ref_ids"] = changed["refs"]
     reconcile_checkpoint(cp, extraction["cards"], metadata=metadata)
     assert len(cp["entities"]["goals"]) == 3
-    assert not cp["conflicts"]
+    assert {e["code"] for e in cp["conflicts"]} == {"graph.cards_pending", "graph.structure_pending"}
     assert not cp["units"]["b"]["complete"]  # A new goal cannot hide its unreviewed solver card.
 
 
@@ -128,7 +128,9 @@ def test_local_reconciliation_preserves_independent_failures(failure):
     cp["conflicts"].append(dict(batch_id="b", **error))
     reconcile_checkpoint(cp, cp["extraction"]["cards"])
     assert not cp["units"]["b"]["complete"]
-    assert cp["conflicts"] == [dict(batch_id="b", **error)]
+    assert len(cp["conflicts"]) == 1
+    assert all(cp["conflicts"][0][key] == value for key, value in error.items())
+    assert cp["conflicts"][0]["code"] == "legacy.validation"
 
 
 def test_solver_verification_is_not_exempted_by_a_stage_label_or_tool_name():

@@ -43,6 +43,7 @@ def project_memory(cp):
             evidence_chars=(memory or {}).get("read_chars", 0),
             truncated_slices=sum(e["truncated"] for u in units if u["mode"] == "extract" for e in u["evidence"]),
             errors=[error for u in units for error in u.get("errors", [])],
+            issues=[deepcopy(error) for u in units for error in u.get("issues", [])],
         ),
         limitations=[
             "Scoped to the recorded run; revalidate environment, configuration and capabilities before reuse.",

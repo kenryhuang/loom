@@ -96,6 +96,64 @@ def test_incomplete_graph_job_reports_issue_detail_and_resume_hint(evaluation): 
     assert "goal-structure windows pending" in stopped["error"]
     assert "at most 240 characters" in stopped["error"]
     assert "Resume evaluation" in stopped["error"]
+    detail = next(e for e in stopped["error_details"] if e["code"] == "schema.maxLength")
+    assert detail["unit_id"].startswith("batch:")
+    assert detail["record_type"] == "structure" and detail["path"] == ["reason"]
+    assert detail["details"]["limit"] == 240
+
+
+def test_host_exception_reports_internal_error_without_model_repair(evaluation, monkeypatch):  # noqa: F811
+    _, _, manager, _, sid, aid = evaluation
+    judge = GraphJudge()
+    manager.provider_factory = lambda _: judge
+
+    def broken(*args, **kwargs):
+        raise KeyError("test-invariant")
+
+    monkeypatch.setattr("loom.evaluation.goal_loops.graph_updates.commit_group", broken)
+    job = manager.start(sid, aid, dict(analysis_version="goal_graph_v1", run_id="r"))
+    result = wait_job(manager, sid, aid, job["id"])
+    assert result["state"] == "failed"
+    assert len(judge.requests) == 1
+    assert result["error_details"][0]["code"] == "runtime.internal"
+    assert "KeyError" in result["error"] and "test-invariant" in result["error"]
+
+
+def test_memory_failure_exposes_structured_cause_and_retains_completed_graph(evaluation):  # noqa: F811
+    import json
+
+    from loom.core import ok
+    from loom.llm import LlmResponse
+
+    _, _, manager, _, sid, aid = evaluation
+
+    class InvalidMemory(GraphJudge):
+        memory_calls = 0
+
+        async def chat(self, messages, tools=None, cancellation=None, **kwargs):
+            payload = json.loads(messages[1].content)
+            if payload.get("mode") != "extract":
+                return await super().chat(messages, tools, cancellation, **kwargs)
+            self.memory_calls += 1
+            rows = dict(contributions=[], facts=[], lessons=[], workflows=[])
+            rows["contributions"] = [dict(stage_id=s["id"], goal_id=s["goal_id"], rating="unknown", rationale="Unknown contribution",
+                                           key_action_ids=[], citations=[dict(ref="not-delivered", quote="Invented")]) for s in payload["stages"]]
+            return ok(LlmResponse(content=json.dumps(rows)))
+
+    judge = InvalidMemory()
+    manager.provider_factory = lambda _: judge
+    job = manager.start(sid, aid, dict(analysis_version="goal_graph_v1", run_id="r", extract_memory=True))
+    result = wait_job(manager, sid, aid, job["id"])
+    assert result["state"] == "incomplete", result.get("error")
+    assert judge.memory_calls == 2
+    error = result["error_details"][0]
+    assert error["code"] == "memory.citation_undelivered"
+    assert error["path"] == ["citations", 0, "ref"] and error["record_index"] == 1
+    coverage = result["evaluation"]["coverage"]
+    assert coverage["pending_cards"] == 0 and coverage["structure_complete"] and not coverage["review_gaps"]
+    assert not coverage["pipeline_complete"]  # The whole pipeline also includes Memory.
+    assert result["evaluation"]["memory"]["status"] == "partial"
+    assert result["evaluation"]["memory"]["coverage"]["issues"] == result["error_details"]
 
 
 def test_resume_upgrades_old_character_identity_and_preserves_semantic_settings(evaluation):  # noqa: F811

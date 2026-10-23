@@ -239,6 +239,12 @@ async def test_memory_repairs_invalid_claim_without_repeating_good_memories():
                 value = json.loads(response.value.content)
                 value["facts"][0]["citations"][0]["quote"] = "unobserved fact"
                 return ok(LlmResponse(content=json.dumps(value), usage=TokenUsage(80, 40, 120)))
+            if json.loads(messages[1].content).get("mode") == "extract":
+                value = json.loads(response.value.content)
+                # Repairs follow the actual request contract: previously accepted
+                # contributions and lessons are not submitted again.
+                value.update(contributions=[], lessons=[])
+                return ok(LlmResponse(content=json.dumps(value), usage=TokenUsage(80, 40, 120)))
             return response
 
     store, facts = trace()

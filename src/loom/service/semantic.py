@@ -23,6 +23,8 @@ from loom.evaluation.goal_loops.graph_contract import ENGINE as GRAPH_ENGINE
 from loom.evaluation.goal_loops.graph_contract import PROMPT as GRAPH_PROMPT
 from loom.evaluation.goal_loops.graph_contract import RESOURCE_LIMITS as GRAPH_RESOURCE_LIMITS
 from loom.evaluation.goal_loops.graph_contract import UPGRADABLE_VERSIONS as GRAPH_UPGRADABLE_VERSIONS
+from loom.evaluation.issues import EvaluationFailure, describe, failure_state, issue
+from loom.evaluation.legacy_issues import legacy_job_state
 from loom.evolution.diagnoses import proposals_from_diagnoses
 from loom.service.contracts import ServiceError, canonical, new_id
 from loom.service.evaluation_artifacts import EvaluationArtifacts
@@ -162,8 +164,8 @@ class SessionSemantic:
 
     def _public(self, body):
         public = {k: v for k, v in body.items() if k not in {"checkpoint", "config_digest"}}
-        if public["state"] == "failed" and "budget reached" in (public.get("error") or "").lower():
-            public["state"] = "budget_exhausted"
+        if public["state"] == "failed" and not public.get("error_details"):
+            public["state"] = legacy_job_state(public.get("error") or "")
         return public
 
     def get(self, sid, aid, identifier):
@@ -264,7 +266,8 @@ class SessionSemantic:
                 **({"report": report} if report else {}),
                 "session_id": body["session_id"],
                 "analysis_id": body["id"],
-                "source": {**semantic["source"], "session_id": body["session_id"], "analysis_id": body["analysis_id"], "snapshot_boundary": body["source_cursor"]},
+                "source": {**semantic["source"], "session_id": body["session_id"],
+                           "analysis_id": body["analysis_id"], "snapshot_boundary": body["source_cursor"]},
                 "analyzer": {
                     **semantic["analyzer"],
                     "model_config_digest": body["config_digest"],
@@ -425,7 +428,7 @@ class SessionSemantic:
             if body.get("result"):
                 self.outputs.track(db, body, body["result"])
             body.pop("result", None)
-            body.update(state="queued", error=None, settings=settings, analyzer_version=analyzer_version, prompt_version=prompt_version)
+            body.update(state="queued", error=None, error_details=[], settings=settings, analyzer_version=analyzer_version, prompt_version=prompt_version)
             db.execute("INSERT OR REPLACE INTO semantic_jobs VALUES(?,?,?,?)", (body["id"], sid, key, canonical(body)))
             self.cancels[body["id"]] = threading.Event()
             self.futures[body["id"]] = self.pool.submit(self._work, body)
@@ -728,10 +731,11 @@ class SessionSemantic:
                 self.outputs.track(db, body, ref)
             body.update(state="completed", completed_at=now_iso(), result=ref)
             if body.get("analysis_version") == GRAPH_ENGINE and semantic["coverage"]["status"] != "complete":
-                gaps = [g["reason"] for g in semantic["coverage"].get("review_gaps", []) if g.get("reason")]
+                gaps = [describe(g) for g in sorted(semantic["coverage"].get("review_gaps", []), key=lambda e: e["category"] == "coverage")]
                 detail = "; ".join(dict.fromkeys(gaps))[:400]
                 body.update(
                     state="incomplete",
+                    error_details=semantic["coverage"].get("review_gaps", []),
                     error=f"Incremental analysis incomplete: {semantic['coverage']['pending_cards']} cards pending; "
                     f"{len(semantic['coverage'].get('pending_structure_units', []))} goal-structure windows pending; "
                     f"{semantic['coverage']['validation_issue_count']} validation issues. "
@@ -742,8 +746,15 @@ class SessionSemantic:
                 body.update(state="budget_exhausted", error="Evaluation budget reached; focused stages remain unfinished")
         except InterruptedError as exc:
             body.update(state="interrupted" if self.closed.is_set() else "cancelled", error=str(exc))
+        except EvaluationFailure as exc:
+            body.update(state=failure_state(exc.issues), error=str(exc), error_details=exc.issues)
         except Exception as exc:
-            body.update(state="budget_exhausted" if "budget reached" in str(exc).lower() else "failed", error=str(exc) or type(exc).__name__)
+            if body.get("analysis_version") == GRAPH_ENGINE:
+                detail = issue("runtime.internal", f"{type(exc).__name__}: {exc}", category="internal", phase="orchestrate",
+                               unit_id=body.get("stage"))
+                body.update(state="failed", error=describe(detail), error_details=[detail])
+            else:
+                body.update(state=legacy_job_state(str(exc)), error=str(exc) or type(exc).__name__)
         finally:
             if (body.get("current_call") or {}).get("state") == "waiting":
                 body["current_call"]["state"] = "interrupted"

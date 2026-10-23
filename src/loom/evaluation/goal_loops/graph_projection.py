@@ -11,6 +11,7 @@ from loom.evaluation.goal_loops.graph_contract import ANALYZER, PROMPT
 from loom.evaluation.goal_loops.graph_order import hierarchy_order, order_goals
 from loom.evaluation.goal_loops.graph_state import initialize, occurrences
 from loom.evaluation.goal_loops.structure import pending_structure_units
+from loom.evaluation.legacy_issues import graph_issue
 
 
 def skeleton(cp, cards, phases, attributions=()):
@@ -216,7 +217,7 @@ def project(source, facts, run_id, checkpoint, extraction=None):
     assigned = {r["cost_atom_id"] for r in accounting["assignments"] if r["owner"] != "analysis:unassigned"}
     reviewed = {c for c, a in cp["assessments"].items() if a["status"] in ("reviewed", "unknown")}
     pending = {c["id"] for c in cards} - reviewed
-    conflicts = [c for c in cp["conflicts"] if not c.get("resolved")]
+    conflicts = [graph_issue(c) for c in cp["conflicts"] if not c.get("resolved")]
     structural_pending = pending_structure_units(cp)
     coverage = dict(
         status="complete" if not pending and not conflicts and not structural_pending else "partial",
@@ -241,7 +242,7 @@ def project(source, facts, run_id, checkpoint, extraction=None):
         reviewed_packets=len(reviewed),
         structure_complete=not pending and not structural_pending,
         pending_structure_units=structural_pending,
-        validation_issue_count=sum(c.get("record_type") != "structure" or "record" in c for c in conflicts),
+        validation_issue_count=sum(c["category"] != "coverage" for c in conflicts),
         reconciliation_complete=not conflicts,
         diagnosed_goals=list({d["goal_id"] for d in cp["diagnostics"]}),
         diagnostic_scope="Only cited findings; unreported goals are not declared efficient",

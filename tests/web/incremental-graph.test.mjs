@@ -117,3 +117,16 @@ test('goal structure remains visibly pending when all cards have judgments',()=>
   assert.doesNotMatch(root.textContent,/Unresolved groups/);
   dom.window.close();
 });
+
+test('report distinguishes coverage gaps from validation errors and shows precise rule locations',()=>{
+  const dom=new JSDOM('<main></main>'); globalThis.document=dom.window.document;
+  const root=document.querySelector('main'), data=fixture();
+  data.coverage.review_gaps=[
+    {code:'graph.structure_pending', category:'coverage', batch_id:'b', reason:'Pending decomposition'},
+    {code:'schema.maxLength', category:'format', unit_id:'b', record_type:'structure', record_index:2, path:['reason'], reason:'At most 240 characters'},
+  ];
+  const view=new IncrementalGraphView(root,{evidence:()=>{}}); view.update(data,'job'); click(root,'Report');
+  assert.match(root.textContent,/Validation issues · 1/);
+  assert.match(root.textContent,/\[schema.maxLength\] b · structure #2 · reason: At most 240 characters/);
+  assert.doesNotMatch(root.textContent,/Pending decomposition/);
+});

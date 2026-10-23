@@ -40,7 +40,7 @@ export class IncrementalGraphView {
     if (actions.childNodes.length) root.append(actions);
   }
   details(root, key, title, render, initial = false, className = '') {
-    const node = element('details', `goal-tree-disclosure ${className}`), summary = element('summary');
+    const node = element('details', `goal-tree-disclosure ${this.mode === 'skeleton' ? 'setup-block' : ''} ${className}`), summary = element('summary');
     node.dataset.key = key; summary.append(typeof title === 'string' ? document.createTextNode(title) : title);
     const body = element('div', 'goal-tree-content'); node.append(summary, body); root.append(node);
     let rendered = false;
@@ -332,10 +332,10 @@ export class IncrementalGraphView {
         return [r.id, number(p.card_count), number(p.total_chars), `${number(c.cards)} / ${number(c.state)} / ${number(schemaChars)}`, number(c.extra_evidence), r.usage ? `${number(r.usage.prompt_tokens)} / ${number(r.usage.completion_tokens)}` : 'Unknown'];
       }));
     }
-    const validationIssues = this.data.coverage.review_gaps.filter(gap => gap.record_type !== 'structure' || 'record' in gap);
+    const validationIssues = this.data.coverage.review_gaps.filter(gap => gap.category ? gap.category !== 'coverage' : gap.record_type !== 'structure' || 'record' in gap);
     if (validationIssues.length) {
       const gaps = disclosure(article, `Validation issues · ${validationIssues.length}`); gaps.dataset.key = 'report:gaps';
-      for (const gap of validationIssues) gaps.append(element('p', '', `${gap.batch_id}: ${gap.reason}`));
+      for (const gap of validationIssues) gaps.append(element('p', '', `${gap.code ? `[${gap.code}] ` : ''}${gap.unit_id || gap.batch_id}${gap.record_type ? ` · ${gap.record_type}` : ''}${gap.record_index ? ` #${gap.record_index}` : ''}${gap.path?.length ? ` · ${gap.path.join('/')}` : ''}: ${gap.reason}`));
     }
   }
 }

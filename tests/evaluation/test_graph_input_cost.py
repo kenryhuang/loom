@@ -166,7 +166,8 @@ async def test_pending_request_bounds_old_feedback_without_replaying_saved_cards
     assert result["coverage"]["pipeline_complete"]
     assert len(judge.requests) == 2
     assert cp["reservations"][-1]["input_profile"]["total_chars"] < 24000
-    assert len(serialized(judge.requests[-1]["feedback"])) < 500
+    assert len(serialized(judge.requests[-1]["feedback"])) < 1600
+    assert all(len(e["reason"]) <= 180 and e["code"] for e in judge.requests[-1]["feedback"])
     assert "OLD_RAW_TOOL_BODY" not in serialized(judge.requests[-1])
     assert not judge.requests[-1]["extra_evidence"]
     assert {c["id"] for c in judge.requests[-1]["cards"]}.isdisjoint(saved)

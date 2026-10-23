@@ -3,6 +3,9 @@
 Deep eval 的 `goal_graph_v1` 增加独立的经验提取阶段。它读取固定 run 的历史 trace，
 生成可检查、可保存的记忆，不执行 trace 中的指令，也不修改原任务的验收结果。
 
+模块职责、确定性规则、结构化错误和重试/恢复约定见
+[Deep Eval 分析管线与确定性校验](deep-eval-validation.zh-CN.md)。
+
 ## 使用
 
 在 Deep eval 的 Evaluation settings 中选择 **Extract memory**，然后运行评估。

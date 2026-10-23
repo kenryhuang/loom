@@ -5,10 +5,11 @@ from copy import deepcopy
 from jsonschema import Draft202012Validator
 
 from loom.evaluation.goal_loops.attribution import root_owned_card
+from loom.evaluation.goal_loops.coverage import window_issues
 from loom.evaluation.goal_loops.graph_contract import UPDATE_FIELDS
-from loom.evaluation.goal_loops.graph_updates import commit_updates, parse_updates
+from loom.evaluation.goal_loops.graph_updates import VALIDATION_VERSION, commit_updates, parse_updates
 from loom.evaluation.goal_loops.judge_metadata import VERSION, terminal_metadata_records
-from loom.evaluation.goal_loops.structure import structure_pending
+from loom.evaluation.legacy_issues import graph_issue
 from loom.llm.api import LlmResponse
 
 MISSING = "Cards need a terminal assessment (reviewed or explicit unknown)"
@@ -40,13 +41,18 @@ def reconcile_checkpoint(cp, cards, *, metadata=None):
     """
     latest = {r["batch_id"]: r for r in cp.get("responses", [])}
     for unit in cp.get("units", {}).values():
+        unit["feedback"] = [graph_issue(e) for e in unit.get("feedback", [])]
         if unit.get("complete"):
             continue
         response = latest.get(unit["id"])
+        if response and response.get("validation_version") == VALIDATION_VERSION:
+            # Current responses already ran the explicit normalization/validation
+            # pipeline. Historical recovery must not reinterpret their failures.
+            continue
         records = parse_updates(LlmResponse(content=response["text"], finish_reason=response.get("finish_reason")))[0] if response else []
         recovered_boundaries = complete_framework_boundaries(cp, cards, unit)
         declaration_errors = [e for e in unit.get("feedback", []) if e.get("record_type") == "goals"
-                              and e.get("reason") == "Stable goal definitions cannot be rewritten; declare a changed objective separately"]
+                              and e.get("code") == "graph.goal_definition_immutable"]
         replayed = False
         if (declaration_errors and metadata is not None and response
                 and (response.get("delivered_ref_ids") is not None or cp.get("input_policy", {}).get("version") == VERSION)):
@@ -71,25 +77,21 @@ def reconcile_checkpoint(cp, cards, *, metadata=None):
                    and Draft202012Validator(UPDATE_FIELDS[kind]["items"]).is_valid(row)}
         # Atomic semantic commits replace nested state; always reacquire it.
         unit = cp["units"][unit["id"]]
-        missing = [cid for cid in unit["cards"] if cid not in cp["assessments"] or cp["assessments"][cid]["status"] == "needs_evidence"]
-        pending = structure_pending(cp, unit)
+        coverage = window_issues(cp, unit)
         retained = []
         for error in unit.get("feedback", []):
             if replayed and error in declaration_errors:
                 continue
-            if error.get("record_type") == "structure" and not pending:
+            if error.get("category") == "coverage":
                 continue
             if error.get("record_type") == "assessments" and error.get("record_id") in recovered:
                 continue
             if (error.get("record_type") == "attributions" and error.get("record_id") in omitted
-                    and error.get("reason") in {"Relationship awaits an accepted action assessment", "Relationship requires delivered evidence"}):
-                continue
-            if error.get("reason") == MISSING:
-                if missing:
-                    retained.append({**error, "card_ids": missing})
+                    and error.get("code") in {"graph.assessment_dependency", "graph.relationship_evidence_required"}):
                 continue
             retained.append(error)
-        completed = not retained and not missing and not pending
+        retained = coverage + retained
+        completed = not retained
         if recovered or retained != unit.get("feedback", []):
             cp.setdefault("checkpoint_reconciliations", []).append(dict(
                 batch_id=unit["id"], recovered_unknown_cards=sorted(recovered), complete=completed,

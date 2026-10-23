@@ -1,11 +1,11 @@
 """Small judge inputs. Full traces, outputs and graph history stay on the host."""
 
 import json
-from copy import deepcopy
 from dataclasses import asdict
 
 from loom.evaluation.evidence_store import text_value
 from loom.evaluation.goal_loops.facts import identity
+from loom.evaluation.goal_loops.graph_normalization import terminal_metadata_records as terminal_metadata_records
 from loom.evaluation.goal_loops.packing import serialized
 
 VERSION = "action-metadata.2"
@@ -108,7 +108,8 @@ def feedback_metadata(errors):
     """Never replay giant validation messages or entire rejected records."""
     rows, seen = [], set()
     for error in errors:
-        row = {k: error[k] for k in ("record_type", "record_id", "card_ids", "path") if k in error}
+        fields = ("code", "category", "phase", "unit_id", "record_index", "record_type", "record_id", "card_ids", "path", "details")
+        row = {k: error[k] for k in fields if k in error}
         row["reason"] = str(error.get("reason", "Invalid record"))[:180]
         key = serialized(row)
         if key not in seen:
@@ -117,31 +118,3 @@ def feedback_metadata(errors):
         if len(rows) == 6:
             break
     return rows
-
-
-def terminal_metadata_records(records, *, normalizations=None, batch_id=None):
-    """Metadata-only review cannot verify hidden outputs. Preserve that uncertainty
-    instead of repeatedly fetching source text or asking the model to repair it.
-    """
-    result = []
-    unclear = {raw.get("card_id") for kind, raw in records if kind == "assessments"
-               and isinstance(raw, dict) and (raw.get("status") == "needs_evidence"
-                                           or (raw.get("status") == "reviewed" and raw.get("refs") == []))}
-    for kind, raw in records:
-        if kind == "evidence_requests" or (kind == "attributions" and isinstance(raw, dict) and raw.get("card_id") in unclear):
-            continue
-        raw = deepcopy(raw)
-        if kind == "assessments" and isinstance(raw, dict) and raw.get("card_id") in unclear:
-            if raw.get("refs") == []:
-                raw.update(purpose="Action judgment lacks cited evidence", delta="Contribution not established: no evidence references supplied",
-                           expected="unknown", expected_refs=[])
-                for field in ("prior_card_ids", "uptake_card_ids", "redundancy"):
-                    raw.pop(field, None)
-                if normalizations is not None:
-                    note = dict(batch_id=batch_id, record_type=kind, record_id=raw.get("card_id"), rule="uncited_judgment_retained_as_unknown")
-                    if note not in normalizations:
-                        normalizations.append(note)
-            raw.update(status="unknown", contribution="unknown", necessity="unknown")
-            raw.pop("stage_ids", None)
-        result.append((kind, raw))
-    return result

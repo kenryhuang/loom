@@ -16,7 +16,8 @@ Loom 是一个运行在本地的 AI Agent 任务执行框架，用于编程、�
 
 - **Deep eval 经验记忆**：从 trace 提取 stage 对目标的贡献、环境与配置事实、失败经验和更有效的工作流。
   每条记录保留 goal / stage / action 与原始证据引用，区分观察、推断和待验证建议；支持预算恢复。
-  使用方法与适用范围见 [Deep eval Memory](docs/deep-eval-memory.md)。
+  使用方法与适用范围见 [Deep eval Memory](docs/deep-eval-memory.md)；
+  [分析管线与校验机制](docs/deep-eval-validation.zh-CN.md)说明模块边界、具体错误和有限重试规则。
 - **持久 Session**：保存对话、执行 checkpoint、工具结果、artifact 和事件历史，
   支持界面重连与服务重启后的恢复。一轮任务完成后，新消息会在同一 Session 中开启下一轮。
 - **Web 与 TUI 共用后端**：提供模型流式输出、工具详情、任务控制、历史记录和 token 用量。
