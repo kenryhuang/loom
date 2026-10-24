@@ -525,5 +525,5 @@ def test_real_provider_options_are_serializable_and_caps_apply_to_requests(tmp_p
     result = asyncio.run(judge_behavior(s, build_behavior_facts(s), provider)).unwrap()
     assert result['coverage']['status'] == 'complete'
     assert [body['max_completion_tokens'] for body in sent] == [2048, 4096, 2048]
-    assert all(body['enable_thinking'] is False and body['reasoning_effort'] == 'low' for body in sent)
+    assert all(body['enable_thinking'] is True and body['reasoning_effort'] == 'high' for body in sent)
     assert provider.request_options['enable_thinking'] is True

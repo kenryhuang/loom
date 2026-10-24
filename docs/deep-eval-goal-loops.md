@@ -1118,8 +1118,9 @@ schema）最多 24,000 字符。相关目标状态单独限制为 6,000 字符�
 max_completion_tokens；供应商自身的上下文/输出能力仍适用。Resume 可增加
 calls/seconds，来源、模型配置和语义设置保持不变。
 
-评估复用现有 `evaluator_provider`：配置中有 enable_thinking 时关闭，配置中有
-reasoning_effort 时设 low；不会向不支持的供应商盲目增加参数。
+评估复用现有 `evaluator_provider`，原样保留模型配置中的 `enable_thinking`、
+`reasoning_effort` 等请求参数。输出和超时限制单独应用，避免覆盖模型要求的思考模式；
+不会向供应商盲目增加未配置的参数。
 新引擎不使用 `max_rounds` 抽样限制：完整卡片队列受总预算控制。
 
 ### 14.4 验证及尚未覆盖的设计目标

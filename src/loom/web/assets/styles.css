@@ -1838,12 +1838,40 @@ section.setup-block { padding: 20px; }
 .dashboard-acceptance .base-metrics-table td:first-child { width: 100%; min-width: 240px; }
 
 /* Deep evaluation shares the trace dashboard visual hierarchy. */
-.deep-toolbar { align-items: end; }
+.deep-toolbar { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; align-items:end; }
+.deep-toolbar .deep-actions { flex-wrap:nowrap; }
+.evaluation-history { margin:12px 0; }
+.evaluation-history-list { display:grid; gap:8px; list-style:none; margin:12px 0 0; padding:0; max-height:320px; overflow:auto; }
+.evaluation-history-item { display:grid; grid-template-columns:minmax(0,1fr) 132px 164px; align-items:center; gap:12px; min-width:0; padding:12px; border:1px solid var(--line); border-radius:6px; background:var(--bg); }
+.evaluation-history-item[data-selected="true"] { border-color:var(--accent); box-shadow:inset 3px 0 var(--accent); background:var(--raised); }
+.evaluation-history-record { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(0,1.4fr) minmax(0,.9fr) minmax(0,1fr); gap:16px; width:100%; min-width:0; padding:0; text-align:left; background:transparent; border:0; border-radius:2px; }
+.evaluation-history-record:hover .evaluation-history-field-label { color:var(--text); }
+.evaluation-history-record:focus-visible { outline:2px solid var(--accent); outline-offset:4px; }
+.evaluation-history-field { display:grid; align-content:start; gap:6px; min-width:0; }
+.evaluation-history-field-label { color:var(--muted); font-size:11px; }
+.evaluation-history-field-value { font-size:12px; overflow-wrap:anywhere; white-space:normal; }
+.evaluation-history-status { display:flex; justify-content:center; min-width:0; }
+.evaluation-history-actions { display:grid; grid-template-columns:80px 76px; gap:8px; align-items:center; }
+.evaluation-history-actions button { min-height:34px; padding:7px 12px; font-size:12px; }
+.evaluation-history-resume, .evaluation-history-cancel { grid-column:1; }
+.evaluation-history-delete { grid-column:2; border-color:var(--danger); }
+@media (max-width: 900px) {
+  .evaluation-history-record { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+@media (max-width: 560px) {
+  .evaluation-history-item { grid-template-columns:minmax(0,1fr) 164px; }
+  .evaluation-history-record { grid-column:1 / -1; }
+  .evaluation-history-status { justify-content:flex-start; }
+}
 .deep-toolbar > label { flex: 1 1 190px; min-width: 0; margin: 0; color: var(--muted); font-size: 12px; }
 .deep-toolbar select { display: block; width: 100%; min-width: 0; margin-top: 5px; color: var(--text); }
 .deep-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-left: auto; }
 .deep-actions button { font-size: 12px; white-space: nowrap; }
 .deep-toolbar select, .deep-actions button { box-sizing: border-box; height: 40px; }
+@media (max-width: 700px) {
+  .deep-toolbar { grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
+  .deep-toolbar .deep-actions { grid-column:1 / -1; margin-left:0; flex-wrap:wrap; }
+}
 .deep-evaluation .evaluation-settings { margin: 12px 0; padding: 12px 16px; }
 .deep-evaluation .evaluation-settings > summary { margin: 0; font-size: 12px; }
 .deep-evaluation .evaluation-settings[open] > summary { margin-bottom: 16px; }

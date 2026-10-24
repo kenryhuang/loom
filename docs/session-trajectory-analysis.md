@@ -130,6 +130,16 @@ model, scope, evidence budgets and batching must remain unchanged. Limits are
 cumulative, cannot be reduced during resume, and must exceed already consumed
 usage. Changing analysis settings creates a separate evaluation.
 
+In Deep eval, select **Run scope** first. The history block lists only that
+scope's evaluations; select a record to inspect its details and resume an
+unfinished evaluation. **New evaluation** opens the settings for the selected
+scope, and **Create evaluation** adds an independent history record even when
+its settings match an earlier evaluation. The API uses `new_evaluation: true`
+for explicit creation; it cannot be combined with `resume_id`. The new record's
+cache identity remains separate when resumed. Requests omitting this flag keep
+the existing cache reuse behavior. Legacy snapshot evaluations appear under
+**Snapshot scope**, separately from run-scoped histories.
+
 The call limit is enforced before invoking a provider. Token thresholds are
 checked between calls: an in-flight response may exceed the threshold. Calls
 cancelled or failed without final usage are counted separately as unreported.

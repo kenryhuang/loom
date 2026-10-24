@@ -106,22 +106,23 @@ async def test_incremental_card_coverage_stable_stages_costs_and_no_final_synthe
 
 
 @pytest.mark.asyncio
-async def test_graph_wire_request_omits_output_cap_and_accepts_long_complete_response():
+async def test_glm_graph_wire_preserves_required_thinking_and_omits_output_cap():
     judge, requests = GraphJudge(), []
 
     async def transport(url, request):
         body = request["body"]
         requests.append(body)
         assert "max_completion_tokens" not in body and "max_tokens" not in body
-        assert body["enable_thinking"] is False
+        assert body["enable_thinking"] is True
+        assert body["reasoning_effort"] == "max"
         response = (await judge.chat([LlmMessage(m["role"], m["content"]) for m in body["messages"]])).unwrap()
         return {"status": 200, "ok": True, "json": {
             "choices": [{"message": {"role": "assistant", "content": response.content}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 3000, "completion_tokens": 4200, "total_tokens": 7200},
         }}
 
-    solver = OpenAIProvider(api_key="fixture", model="fixture", max_completion_tokens=2600,
-                            request_options={"enable_thinking": True}, http_client=transport)
+    solver = OpenAIProvider(api_key="fixture", model="glm-5.3", max_completion_tokens=2600,
+                            request_options={"enable_thinking": True, "reasoning_effort": "max"}, http_client=transport)
     store = source([event for n in range(1, 9) for event in action(n)])
     cp = {}
     result = await run(store, build_behavior_facts(store), "run", cp, solver, max_tokens=100)

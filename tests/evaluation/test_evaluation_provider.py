@@ -8,16 +8,20 @@ from loom.evaluation.provider import bounded_http_client, evaluator_provider
 from loom.llm.api import OpenAIProvider
 
 
-def test_evaluator_limits_generation_without_mutating_solver():
+@pytest.mark.parametrize("options", [
+    {"enable_thinking": True, "reasoning_effort": "max"},
+    {"enable_thinking": False, "reasoning_effort": "high"},
+    {},
+])
+def test_evaluator_limits_generation_without_overriding_model_options(options):
     solver = OpenAIProvider(api_key='fixture', model='fixture', max_completion_tokens=65536,
-                            request_options={'enable_thinking': True, 'reasoning_effort': 'high'})
+                            request_options=options)
     judge = evaluator_provider(solver, output_tokens=4096, timeout_seconds=120)
     assert judge.max_completion_tokens == 4096
-    assert judge.request_options['enable_thinking'] is False
-    assert judge.request_options['reasoning_effort'] == 'low'
+    assert judge.request_options == options
     assert judge.http_client is not None
     assert solver.max_completion_tokens == 65536
-    assert solver.request_options['enable_thinking'] is True
+    assert solver.request_options == options
     assert solver.http_client is None
     assert evaluator_provider(judge, output_tokens=8192, timeout_seconds=120).max_completion_tokens == 4096
 

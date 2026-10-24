@@ -294,12 +294,20 @@ class SessionSemantic:
         }
 
     def start(self, sid, aid, options):
-        if not isinstance(options, dict) or set(options) - {"model", "resume_id", "analysis_version", "run_id", "extract_memory", *DEFAULTS}:
+        if not isinstance(options, dict) or set(options) - {"model", "resume_id", "new_evaluation", "analysis_version", "run_id", "extract_memory", *DEFAULTS}:
             raise ServiceError("Invalid evaluation options")
         resume_id = options.get("resume_id")
         if resume_id is not None and (not isinstance(resume_id, str) or not resume_id):
             raise ServiceError("Invalid resume_id")
+        create_new = options.get("new_evaluation", False)
+        if type(create_new) is not bool:
+            raise ServiceError("new_evaluation must be a boolean")
+        if create_new and resume_id:
+            raise ServiceError("new_evaluation and resume_id cannot be used together")
         resumed = self._load(sid, aid, resume_id) if resume_id else None
+        # Explicit new histories have independent cache identities, retained on resume.
+        # Requests without this flag preserve the existing deduplication contract.
+        instance_id = new_id("evaluation") if create_new else resumed.get("instance_id") if resumed else None
         version = options.get("analysis_version", resumed.get("analysis_version", "v2") if resumed else "v3")
         if version not in {"v2", "v3", *GOAL_ENGINES}:
             raise ServiceError("Unsupported analysis_version")
@@ -321,7 +329,7 @@ class SessionSemantic:
                 raise ServiceError("extract_memory must be a boolean for incremental graph evaluation")
             settings["extract_memory"] = options["extract_memory"]
         for key, value in options.items():
-            if key in {"model", "resume_id", "analysis_version", "run_id", "extract_memory"}:
+            if key in {"model", "resume_id", "new_evaluation", "analysis_version", "run_id", "extract_memory"}:
                 continue
             low, high = BOUNDS[key]
             if type(value) is not int or not low <= value <= high:
@@ -359,6 +367,7 @@ class SessionSemantic:
             "settings": settings,
             "session": sid,
             "analysis": aid,
+            **({"instance_id": instance_id} if instance_id else {}),
             **({"run_id": run_id} if version in GOAL_ENGINES else {}),
         }
         key = hashlib.sha256(canonical(identity).encode()).hexdigest()
@@ -404,7 +413,8 @@ class SessionSemantic:
             if active >= MAX_ACTIVE_EVALUATIONS:
                 raise ServiceError("Evaluation queue is full", 429)
             body = previous or {
-                "id": new_id("evaluation"),
+                "id": instance_id or new_id("evaluation"),
+                **({"instance_id": instance_id} if instance_id else {}),
                 "session_id": sid,
                 "analysis_id": aid,
                 "source_cursor": parent["source_cursor"],

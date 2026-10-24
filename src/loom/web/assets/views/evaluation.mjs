@@ -26,6 +26,12 @@ const stageLabel = (stage) => {
 const activityLabel = (call) =>
   ({ read_evidence: "Reviewing additional evidence", repair: "Correcting evaluator output" })[call?.activity] || stageLabel(call?.stage);
 const count = (value) => Number(value || 0).toLocaleString();
+const RESUMABLE = new Set(["failed", "cancelled", "interrupted", "budget_exhausted", "incomplete"]);
+const RUN_VERSIONS = new Set(["goal_loops_v1", "goal_graph_v1"]);
+const createdLabel = value => {
+  const date = value ? new Date(value) : null;
+  return date && !Number.isNaN(date.getTime()) ? date.toLocaleString() : "Creation time unavailable";
+};
 const button = (text, action) => {
   const node = element("button", "quiet", text);
   node.type = "button";
@@ -48,7 +54,12 @@ export class EvaluationView {
     });
     this.generation = 0;
     this.timer = null;
-    signal.addEventListener("abort", () => clearTimeout(this.timer), {
+    this.cancellingIds = new Set();
+    this.cancelTimers = new Map();
+    signal.addEventListener("abort", () => {
+      clearTimeout(this.timer);
+      for (const timer of this.cancelTimers.values()) clearTimeout(timer);
+    }, {
       once: true,
     });
   }
@@ -58,12 +69,19 @@ export class EvaluationView {
     this.status.setAttribute("role", "status");
     this.form = element("form", "deep-controls");
     this.toolbar = element("div", "dashboard-toolbar deep-toolbar");
+    this.historyPanel = element("section", "evaluation-history dashboard-panel");
+    this.historyPanel.setAttribute("aria-label", "Evaluation history");
+    this.historyHeading = element("header", "dashboard-panel-heading");
+    this.historyTitle = element("h3", "", "Evaluation history");
+    this.historyHeading.append(this.historyTitle);
+    this.historyList = element("ul", "evaluation-history-list");
+    this.historyPanel.append(this.historyHeading, this.historyList);
     this.settingsPanel = element("details", "evaluation-settings dashboard-panel");
     this.settingsSummary = element("summary", "", "Evaluation settings · New evaluation");
     this.settingsPanel.append(this.settingsSummary);
     this.settingsFields = element("div", "evaluation-controls");
     this.settingsPanel.append(this.settingsFields);
-    this.form.append(this.toolbar, this.settingsPanel);
+    this.form.append(this.toolbar, this.historyPanel, this.settingsPanel);
     this.results = element("div", "evaluation-results");
     this.progress = element("section", "evaluation-progress dashboard-panel");
     this.progress.setAttribute("aria-label", "Evaluation progress");
@@ -104,8 +122,10 @@ export class EvaluationView {
       versionLabel.append(this.version);
       this.settingsFields.append(versionLabel);
       this.runSelect = element("select"); this.runSelect.setAttribute("aria-label", "Evaluation run scope");
-      for (const id of catalog.run_ids || []) {const option = element("option", "", id); option.value = id; this.runSelect.append(option);}
-      this.runSelect.value = catalog.run_ids?.at(-1) || "";
+      for (const id of catalog.run_ids || []) this.ensureRunOption(id);
+      for (const job of catalog.jobs) this.ensureScopeOption(job);
+      if (!this.runSelect.options.length || [...this.version.options].some(option => !RUN_VERSIONS.has(option.value))) this.ensureScopeOption({});
+      this.runSelect.value = catalog.run_ids?.at(-1) || this.runSelect.options[0]?.value || "";
       this.runLabel = element("label", "", "Run scope"); this.runLabel.append(this.runSelect); this.toolbar.prepend(this.runLabel);
       this.memoryLabel = element('label', 'evaluation-memory-toggle');
       this.memory = element('input'); this.memory.type = 'checkbox'; this.memory.checked = !!catalog.memory_default;
@@ -114,7 +134,6 @@ export class EvaluationView {
       this.settingsPanel.append(this.memoryLabel);
       const scopeVisibility = () => {
         this.memoryLabel.hidden = !catalog.supports_memory || this.version.value !== 'goal_graph_v1';
-        this.runLabel.hidden = !["goal_loops_v1", "goal_graph_v1"].includes(this.version.value);
         for (const key of ["max_rounds", "max_tokens"]) if(this.fields?.[key]) this.fields[key].parentElement.hidden = this.version.value === "goal_graph_v1";
       };
       scopeVisibility();
@@ -147,52 +166,10 @@ export class EvaluationView {
       this.start = element("button", "primary", "Run deep evaluation");
       this.start.type = "submit";
       this.start.disabled = !catalog.models.length;
-      this.cancel = button("Cancel evaluation", async () => {
-        this.cancel.disabled = true;
-        try {
-          await this.api.cancelEvaluation(
-            this.sessionId,
-            this.analysisId,
-            this.job.id,
-            this.signal,
-          );
-          this.status.textContent = "Cancelling evaluation…";
-          this.status.hidden = false;
-        } catch (error) {
-          this.fail(error);
-        }
-      });
-      this.cancel.hidden = true;
-      this.fresh = button("New evaluation", () => {
-        clearTimeout(this.timer);
-        ++this.generation;
-        this.job = null;
-        this.cancel.hidden = true;
-        this.deleteButton.hidden = true;
-        this.fresh.disabled = false;
-        this.version.value = this.catalog.default_analysis_version || "v2";
-        this.model.value = this.catalog.default_model;
-        this.applyDefaults();
-        this.start.textContent = "Run deep evaluation";
-        this.start.disabled = !this.catalog.models.length;
-        this.model.disabled = this.version.disabled = false;
-        if (this.runSelect) {this.runSelect.disabled = false; this.runLabel.hidden = !["goal_loops_v1", "goal_graph_v1"].includes(this.version.value);}
-        for (const field of Object.values(this.fields)) field.disabled = false;
-        this.memory.disabled = false;
-        if (this.history) this.history.value = "";
-        this.renderedData = null;
-        this.graphView = null;
-        this.onResult?.(null);
-        this.results.replaceChildren(element("p", "empty-state", "No evaluation selected"));
-        this.progress.hidden = true;
-        this.settingsPanel.open = false;
-        this.status.hidden = true;
-      });
-      this.deleteButton = button("Delete evaluation", () => this.deleteSelected());
-      this.deleteButton.classList.add("danger");
-      this.deleteButton.hidden = true;
+      this.fresh = button("New evaluation", () => this.newEvaluation());
+      this.fresh.className = "evaluation-new";
       const actions = element("div", "deep-actions");
-      actions.append(this.start, this.cancel, this.fresh, this.deleteButton); this.toolbar.append(actions);
+      actions.append(this.fresh, this.start); this.toolbar.append(actions);
       const notes = disclosure(this.settingsPanel, "Budget accounting");
       notes.append(element("p", "muted small", "Evaluator usage is separate from task usage. Incremental graph review records tokens without a token budget or output cap. Time and call limits still apply; unknown usage is marked explicitly. Legacy evaluators check reported usage between requests."));
       this.status.textContent = catalog.models.length ? "" : "Configure a judge model to run evaluation.";
@@ -203,30 +180,145 @@ export class EvaluationView {
         event.preventDefault();
         this.run();
       });
-      this.history = element("select");
-      this.history.setAttribute("aria-label", "Evaluation history");
-      const freshOption = element("option", "", "New evaluation"); freshOption.value = ""; this.history.append(freshOption);
-      for (const job of catalog.jobs) this.historyOption(job);
-      this.history.addEventListener("change", () => this.history.value ? this.follow(this.history.value) : this.fresh.click());
-      const historyLabel = element("label", "", "Saved evaluations"); historyLabel.append(this.history);
-      this.toolbar.prepend(historyLabel);
+      this.runSelect.addEventListener("change", () => {
+        this.newEvaluation();
+        this.settingsPanel.hidden = this.start.hidden = true;
+      });
+      this.matchScopeVersion();
       this.applyDefaults();
-      if (catalog.jobs.length) {
-        this.history.value = catalog.jobs[0].id;
-        this.follow(catalog.jobs[0].id);
-      }
+      this.renderHistory();
+      const latest = this.scopedJobs()[0];
+      if (latest) this.follow(latest.id);
 
     } catch (error) {
       this.fail(error);
     }
   }
-  historyOption(job) {
-    if (!this.history) return;
-    let option = [...this.history.options].find(o => o.value === job.id);
-    if (!option) { option = element("option"); option.value = job.id; this.history.append(option); }
-    const date = job.created_at ? new Date(job.created_at) : null;
-    option.textContent = `${date && !Number.isNaN(date.getTime()) ? date.toLocaleString() + " · " : ""}${label(job.state)}`;
-    option.title = `${job.model || ""} · ${job.id}`;
+  newEvaluation() {
+    if (this.deleting || this.submitting) return;
+    clearTimeout(this.timer);
+    ++this.generation;
+    this.job = null;
+    this.selectedHistoryId = null;
+    this.settingsPanel.hidden = false;
+    this.fresh.disabled = false;
+    this.version.value = this.catalog.default_analysis_version || "v2";
+    this.matchScopeVersion();
+    this.model.value = this.catalog.default_model;
+    this.applyDefaults();
+    this.start.hidden = false;
+    this.start.textContent = "Create evaluation";
+    this.start.disabled = !this.catalog.models.length || !this.version.value;
+    this.model.disabled = this.version.disabled = false;
+    if (this.runSelect) {
+      this.runSelect.disabled = false;
+    }
+    for (const field of Object.values(this.fields)) field.disabled = false;
+    this.memory.disabled = false;
+    this.renderHistory();
+    this.renderedData = null;
+    this.graphView = null;
+    this.onResult?.(null);
+    this.results.replaceChildren(element("p", "empty-state", "No evaluation selected"));
+    this.progress.hidden = true;
+    this.settingsPanel.open = false;
+    this.status.hidden = true;
+  }
+  runName(id) {
+    const index = (this.catalog?.run_ids || []).indexOf(id);
+    return index >= 0 ? `Run ${index + 1}` : `Run ${id}`;
+  }
+  savedScope(job) {
+    if (job.run_id) return {key: `run:${job.run_id}`, label: this.runName(job.run_id), id: job.run_id};
+    if (["goal_graph_v1", "goal_loops_v1"].includes(job.analysis_version)) return {key: "missing-run", label: "Run unavailable"};
+    return {key: "snapshot", label: "Snapshot scope"};
+  }
+  ensureRunOption(id) {
+    if ([...this.runSelect.options].some(option => option.value === id)) return;
+    const name = this.runName(id);
+    const option = element("option", "", name === `Run ${id}` ? name : `${name} · ${id}`);
+    option.value = id; this.runSelect.append(option);
+  }
+  scopeValue(job) {
+    return job.run_id || (this.savedScope(job).key === "missing-run" ? "__missing_run__" : "");
+  }
+  ensureScopeOption(job) {
+    if (job.run_id) return this.ensureRunOption(job.run_id);
+    const value = this.scopeValue(job);
+    if ([...this.runSelect.options].some(option => option.value === value)) return;
+    const option = element("option", "", this.savedScope(job).label);
+    option.value = value; this.runSelect.append(option);
+  }
+  matchScopeVersion() {
+    const run = !!this.runSelect.value && this.runSelect.value !== "__missing_run__";
+    for (const option of this.version.options) option.disabled = RUN_VERSIONS.has(option.value) !== run;
+    if (this.version.selectedOptions[0]?.disabled) this.version.value = [...this.version.options].find(option => !option.disabled)?.value || "";
+  }
+  scopedJobs() {
+    return this.catalog.jobs.filter(job => this.scopeValue(job) === this.runSelect.value);
+  }
+  rememberJob(job) {
+    const index = this.catalog.jobs.findIndex(row => row.id === job.id);
+    if (index < 0) this.catalog.jobs.unshift(job);
+    else this.catalog.jobs[index] = job;
+    this.ensureScopeOption(job);
+  }
+  renderHistory() {
+    if (!this.historyList) return;
+    const jobs = this.scopedJobs();
+    this.historyTitle.textContent = `Evaluation history · ${jobs.length}`;
+    this.fresh.disabled = !!this.submitting || !!this.deleting || this.runSelect.value === "__missing_run__";
+    this.historyList.replaceChildren();
+    for (const job of jobs) {
+      const item = element("li", "evaluation-history-item");
+      item.dataset.selected = String(this.selectedHistoryId === job.id);
+      const select = button("", () => this.follow(job.id));
+      select.className = "evaluation-history-record";
+      select.dataset.evaluationId = job.id;
+      select.setAttribute("aria-current", String(this.selectedHistoryId === job.id));
+      select.disabled = !!this.submitting || !!this.deleting;
+      const scope = this.savedScope(job);
+      const field = (name, value, code = false) => {
+        const cell = element("span", "evaluation-history-field");
+        cell.append(element("span", "evaluation-history-field-label", name), element(code ? "code" : "span", "evaluation-history-field-value", value));
+        select.append(cell);
+      };
+      field(scope.id ? scope.label : "Run scope", scope.id || (scope.key === "snapshot" ? "Snapshot scope" : "Run ID was not recorded"), !!scope.id);
+      field("Evaluation", job.id, true);
+      field("Created", createdLabel(job.created_at));
+      field("Judge model", job.model || "Unknown model");
+      const status = element("span", "evaluation-history-status");
+      status.append(badge(label(job.state), job.state));
+      const actions = element("div", "evaluation-history-actions");
+      if (["queued", "running"].includes(job.state)) {
+        const cancel = button("Cancel", () => this.cancelEvaluation(job.id));
+        cancel.className = "evaluation-history-cancel";
+        cancel.setAttribute("aria-label", `Cancel evaluation ${job.id}`);
+        cancel.title = this.cancellingIds.has(job.id) ? "Cancellation requested; waiting for the evaluation to stop." : "Cancel this evaluation.";
+        cancel.disabled = !!this.submitting || !!this.deleting || this.cancellingIds.has(job.id);
+        actions.append(cancel);
+      } else if (RESUMABLE.has(job.state)) {
+        const resume = button("Resume", () => this.resumeEvaluation(job.id));
+        resume.className = "primary evaluation-history-resume";
+        resume.setAttribute("aria-label", `Resume evaluation ${job.id}`);
+        resume.disabled = !!this.submitting || !!this.deleting || !!this.resumingId || !this.catalog.models.some(model => model.id === job.model)
+          || (this.catalog.analysis_versions && !this.catalog.analysis_versions.includes(job.analysis_version || "v2"));
+        actions.append(resume);
+      }
+      item.append(select, status, actions);
+      if (this.catalog.supports_delete) {
+        const remove = button("Delete", () => this.deleteEvaluation(job.id));
+        remove.className = "danger evaluation-history-delete";
+        remove.setAttribute("aria-label", `Delete evaluation ${job.id}`);
+        remove.disabled = !!this.submitting || !!this.deleting || ["queued", "running"].includes(job.state);
+        remove.title = ["queued", "running"].includes(job.state)
+          ? "Cancel the evaluation and wait for it to stop before deleting."
+          : "Permanently delete this evaluation and its saved records.";
+        actions.append(remove);
+      }
+      this.historyList.append(item);
+    }
+    if (!jobs.length) this.historyList.append(element("li", "empty-state", "No evaluations in this scope. Start a new evaluation to create a history record."));
   }
   applyDefaults() {
     this.settingsSummary.textContent = "Evaluation settings · New evaluation";
@@ -237,7 +329,7 @@ export class EvaluationView {
       this.memory.checked = !!this.catalog.memory_default;
       this.memoryLabel.hidden = !this.catalog.supports_memory || this.version.value !== 'goal_graph_v1';
     }
-    this.start.textContent = "Run deep evaluation";
+    this.start.textContent = "Create evaluation";
   }
   fail(error) {
     if (this.signal.aborted) return;
@@ -247,15 +339,14 @@ export class EvaluationView {
     this.onError?.(error);
   }
   async run() {
-    if (this.deleting) return;
+    if (this.deleting || this.submitting || (this.selectedHistoryId && this.selectedHistoryId !== this.job?.id)) return;
+    if (this.job && !RESUMABLE.has(this.job.state)) return;
+    this.submitting = true;
     this.start.disabled = true;
-    this.deleteButton.disabled = true;
+    this.runSelect.disabled = true;
+    this.renderHistory();
     try {
-      const resumable =
-        this.job &&
-        ["failed", "cancelled", "interrupted", "budget_exhausted", "incomplete"].includes(
-          this.job.state,
-        );
+      const resumable = this.job && RESUMABLE.has(this.job.state);
       const options = {
         ...(resumable && this.version.value === (this.job.analysis_version || "v2")
           ? this.job.settings
@@ -281,21 +372,80 @@ export class EvaluationView {
       ) {
         options.resume_id = this.job.id;
       }
+      if (this.job && !options.resume_id) throw new Error("Resume must keep the saved model, run and analysis settings. Use New evaluation to change them.");
+      if (!this.job) options.new_evaluation = true;
       const job = await this.api.startEvaluation(
         this.sessionId,
         this.analysisId,
         options,
         this.signal,
       );
-      if (!this.signal.aborted) this.follow(job.id);
+      this.submitting = false;
+      if (!this.signal.aborted) {
+        this.rememberJob(job);
+        await this.follow(job.id);
+      }
     } catch (error) {
-      this.deleteButton.disabled = !this.job || ["queued", "running"].includes(this.job.state);
       this.fail(error);
+    } finally {
+      this.submitting = false;
+      if (!this.signal.aborted) {
+        this.runSelect.disabled = false;
+        this.renderHistory();
+      }
     }
   }
-  async deleteSelected() {
-    const job = this.job;
-    if (!this.catalog.supports_delete || !job || this.deleting || this.history.value !== job.id || ["queued", "running"].includes(job.state)) return;
+  async cancelEvaluation(id) {
+    const job = this.catalog.jobs.find(row => row.id === id);
+    if (this.deleting || this.submitting || this.cancellingIds.has(id) || !["queued", "running"].includes(job?.state)) return;
+    this.cancellingIds.add(id);
+    this.renderHistory();
+    try {
+      await this.api.cancelEvaluation(this.sessionId, this.analysisId, id, this.signal);
+      if (!this.signal.aborted) await this.refreshCancellation(id);
+    } catch (error) {
+      this.cancellingIds.delete(id);
+      if (!this.signal.aborted) { this.renderHistory(); this.fail(error); }
+    }
+  }
+  async refreshCancellation(id) {
+    this.cancelTimers.delete(id);
+    try {
+      const job = await this.api.evaluation(this.sessionId, this.analysisId, id, this.signal);
+      if (this.signal.aborted) return;
+      if (!this.catalog.jobs.some(row => row.id === id)) { this.cancellingIds.delete(id); return; }
+      this.rememberJob(job);
+      if (["queued", "running"].includes(job.state)) {
+        this.cancelTimers.set(id, setTimeout(() => this.refreshCancellation(id), 1200));
+      } else {
+        this.cancellingIds.delete(id);
+        if (this.selectedHistoryId === id && !this.deleting && !this.submitting) await this.follow(id);
+      }
+      if (!this.signal.aborted) this.renderHistory();
+    } catch (error) {
+      this.cancellingIds.delete(id);
+      if (!this.signal.aborted) { this.renderHistory(); this.fail(error); }
+    }
+  }
+  async resumeEvaluation(id) {
+    if (this.deleting || this.submitting || this.resumingId) return;
+    this.resumingId = id;
+    this.renderHistory();
+    try {
+      if (this.selectedHistoryId !== id || this.job?.id !== id) {
+        const loaded = await this.follow(id);
+        if (!loaded || this.selectedHistoryId !== id || this.job?.id !== id) return;
+      }
+      if (this.signal.aborted || !RESUMABLE.has(this.job.state) || this.start.disabled) return;
+      if (this.form.reportValidity()) await this.run();
+    } finally {
+      this.resumingId = null;
+      if (!this.signal.aborted) this.renderHistory();
+    }
+  }
+  async deleteEvaluation(id) {
+    const job = this.catalog.jobs.find(row => row.id === id);
+    if (!this.catalog.supports_delete || !job || this.deleting || this.submitting || ["queued", "running"].includes(job.state)) return;
     const confirmed = this.root.ownerDocument.defaultView.confirm(
       `Permanently delete evaluation ${job.id}?\n\nThis removes its metadata, checkpoint, evaluator records and saved results, including earlier revisions. The original task trace and results shared by other evaluations are retained. This cannot be undone.`,
     );
@@ -303,31 +453,47 @@ export class EvaluationView {
     this.deleting = true;
     clearTimeout(this.timer);
     ++this.generation;
-    // Freeze selection and settings until the scoped delete finishes.
+    const selected = this.selectedHistoryId;
     const controls = [...this.form.querySelectorAll("button, input, select")];
     const disabled = controls.map(node => node.disabled);
     controls.forEach(node => { node.disabled = true; });
-    let deleted = false;
+    let error;
     try {
       await this.api.deleteEvaluation(this.sessionId, this.analysisId, job.id, this.signal);
-      deleted = true;
-    } catch (error) {
-      this.fail(error);
+      this.catalog.jobs = this.catalog.jobs.filter(row => row.id !== job.id);
+    } catch (failure) {
+      error = failure;
     } finally {
       this.deleting = false;
       if (!this.signal.aborted) controls.forEach((node, i) => { node.disabled = disabled[i]; });
     }
-    if (this.signal.aborted || !deleted) return;
-    [...this.history.options].find(option => option.value === job.id)?.remove();
-    this.catalog.jobs = this.catalog.jobs.filter(row => row.id !== job.id);
-    this.fresh.click();
-    this.status.textContent = "Evaluation permanently deleted.";
-    this.status.hidden = false;
+    if (this.signal.aborted) return;
+    if (!error && selected === job.id) this.newEvaluation();
+    else {
+      this.renderHistory();
+      // Deleting a different row preserves the selection, including an in-flight detail load or polling.
+      if (selected && (this.job?.id !== selected || ["queued", "running"].includes(this.job?.state))) await this.follow(selected);
+    }
+    if (error) this.fail(error);
+    else {
+      this.status.textContent = "Evaluation permanently deleted.";
+      this.status.hidden = false;
+    }
   }
-  async follow(id, generation = ++this.generation) {
-    if (this.deleting) return;
+  async follow(id, generation) {
+    if (this.deleting || this.submitting) return;
+    generation ??= ++this.generation;
     clearTimeout(this.timer);
-    this.deleteButton.disabled = true;
+    this.selectedHistoryId = id;
+    this.renderHistory();
+    this.start.disabled = true;
+    if (this.job?.id !== id) {
+      this.progress.hidden = true;
+      this.settingsPanel.hidden = this.start.hidden = true;
+      this.renderedData = this.graphView = null;
+      this.onResult?.(null);
+      this.results.replaceChildren(element("p", "empty-state", "Loading evaluation…"));
+    }
     try {
       const job = await this.api.evaluation(
         this.sessionId,
@@ -341,36 +507,24 @@ export class EvaluationView {
         this.results.replaceChildren();
         this.renderedData = null;
       }
-      this.historyOption(job);
-      if (this.history) this.history.value = job.id;
+      this.rememberJob(job);
       const wasActive =
         this.job && ["queued", "running"].includes(this.job.state);
       this.job = job;
+      this.settingsPanel.hidden = false;
       this.settingsSummary.textContent = "Evaluation settings · Saved evaluation";
       const active = ["queued", "running"].includes(job.state);
-      this.deleteButton.hidden = !this.catalog.supports_delete;
-      this.deleteButton.disabled = active;
-      this.deleteButton.title = active ? "Cancel the evaluation and wait for it to stop before deleting." : "Permanently delete this evaluation and its saved records.";
       if (active && !wasActive && this.settingsPanel)
         this.settingsPanel.open = false;
-      this.start.disabled = active;
-      if (this.fresh) this.fresh.disabled = active;
-      this.start.textContent = [
-        "failed",
-        "cancelled",
-        "interrupted",
-        "budget_exhausted",
-        "incomplete",
-      ].includes(job.state)
-        ? "Resume evaluation"
-        : "Run deep evaluation";
-      this.cancel.hidden = !active;
-      this.cancel.disabled = false;
+      const resumable = RESUMABLE.has(job.state);
+      this.start.disabled = !resumable || !this.catalog.models.length;
+      this.start.hidden = true;
+      this.start.textContent = "Resume evaluation";
       this.model.value = job.model;
-      this.model.disabled = active;
-      if (this.version) { this.version.value = job.analysis_version || "v2"; this.version.disabled = active; }
+      this.model.disabled = true;
+      if (this.version) { this.version.value = job.analysis_version || "v2"; this.version.disabled = true; }
       if (this.memory) {
-        this.memory.checked = !!job.settings.extract_memory; this.memory.disabled = active;
+        this.memory.checked = !!job.settings.extract_memory; this.memory.disabled = true;
         this.memoryLabel.hidden = !this.catalog.supports_memory || job.analysis_version !== 'goal_graph_v1';
       }
       for (const key of ["max_rounds", "max_tokens"]) if(this.fields[key]) this.fields[key].parentElement.hidden = job.analysis_version === "goal_graph_v1";
@@ -378,10 +532,17 @@ export class EvaluationView {
         this.start.disabled = true;
         this.start.textContent = "Legacy result · read only";
       }
-      if (this.runSelect) {this.runSelect.disabled = active; this.runLabel.hidden = !["goal_loops_v1", "goal_graph_v1"].includes(job.analysis_version); if (job.run_id) this.runSelect.value = job.run_id;}
+      if (this.runSelect) {
+        this.runSelect.disabled = false;
+        this.runSelect.value = this.scopeValue(job);
+        this.matchScopeVersion();
+        this.version.value = job.analysis_version || "v2";
+        this.renderHistory();
+      }
       for (const [key, input] of Object.entries(this.fields)) {
         input.value = job.settings[key] ?? this.catalog?.defaults_by_version?.[job.analysis_version || "v2"]?.[key] ?? this.catalog?.defaults[key] ?? "";
-        input.disabled = active;
+        const resources = ["max_seconds", "max_tokens", "max_calls", ...(job.analysis_version === "goal_graph_v1" ? ["max_prompt_chars", "max_evidence_chars"] : [])];
+        input.disabled = !resumable || !resources.includes(key);
       }
       this.status.textContent = job.error || "";
       if (job.state === "budget_exhausted") {
@@ -394,6 +555,7 @@ export class EvaluationView {
       if (job.evaluation) this.render(job.evaluation);
       if (active)
         this.timer = setTimeout(() => this.follow(id, generation), 1200);
+      return job;
     } catch (error) {
       if (generation !== this.generation) return;
       this.fail(error);

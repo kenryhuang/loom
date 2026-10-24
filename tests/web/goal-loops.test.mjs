@@ -60,8 +60,8 @@ test('new evaluation version sends explicit run scope and links to goal process'
   const view=new EvaluationView(root,{api,sessionId:'s',analysisId:'a',signal:controller.signal,evidence:()=>{},
     onError:e=>errors.push(e),onResult:r=>results.push(r),onExplore:()=>explore.push(true)});
   await view.open();
-  assert.equal(view.runLabel.hidden,true);
-  view.version.value='goal_loops_v1';view.version.dispatchEvent(new dom.window.Event('change'));
+  assert.equal(view.runLabel.hidden,false);
+  assert.equal(view.version.value,'goal_loops_v1'); // A run scope selects a run-based evaluator.
   assert.equal(view.runLabel.hidden,false);assert.equal(typeof view.run,'function');
   assert.equal(view.runSelect.value,'second');
   await view.run();await new Promise(resolve=>setTimeout(resolve,0));

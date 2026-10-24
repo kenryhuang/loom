@@ -388,3 +388,53 @@ def test_parallel_evaluations_report_queue_cancel_immediately_and_dispatch_next(
     assert wait_job(semantic, sid, aid, jobs[1]["id"])["state"] == "cancelled"
     resumed = semantic.start(sid, aid, {"resume_id": jobs[2]["id"]})
     assert wait_job(semantic, sid, aid, resumed["id"])["state"] == "completed"
+
+
+def test_explicit_new_evaluations_keep_independent_history_with_identical_settings(evaluation):
+    _, _, semantic, provider, sid, aid = evaluation
+    options = {"analysis_version": "v2", "new_evaluation": True}
+    first = semantic.start(sid, aid, options)
+    saved = wait_job(semantic, sid, aid, first["id"])
+    second = semantic.start(sid, aid, options)
+    done = wait_job(semantic, sid, aid, second["id"])
+    assert first["id"] != second["id"]
+    assert saved["state"] == done["state"] == "completed"
+    assert provider.calls == 2
+    assert {job["id"] for job in semantic.list(sid, aid)["jobs"]} == {first["id"], second["id"]}
+    assert semantic.get(sid, aid, first["id"]) == saved
+
+
+def test_resume_of_new_history_keeps_its_checkpoint_and_other_records_after_restart(evaluation):
+    _, trajectory, semantic, provider, sid, aid = evaluation
+    options = {"analysis_version": "v2", "new_evaluation": True, "batch_rounds": 1, "max_calls": 1}
+    first = semantic.start(sid, aid, options)
+    stopped = wait_job(semantic, sid, aid, first["id"])
+    second = semantic.start(sid, aid, options)
+    other = wait_job(semantic, sid, aid, second["id"])
+    assert stopped["state"] == other["state"] == "budget_exhausted"
+    semantic.close()
+    restored = SessionSemantic(trajectory, provider_factory=lambda model: provider)
+    try:
+        for job in (first, second):
+            resumed = restored.start(sid, aid, {"resume_id": job["id"], "max_calls": 10})
+            assert resumed["id"] == job["id"]
+            done = wait_job(restored, sid, aid, job["id"])
+            assert done["state"] == "completed", done
+            assert done["usage"]["calls"] == 3
+            if job is first:
+                assert restored.get(sid, aid, second["id"]) == other
+        assert provider.calls == 6  # Neither resume repeats its first saved batch.
+        assert len(restored.list(sid, aid)["jobs"]) == 2
+    finally:
+        restored.close()
+
+
+@pytest.mark.parametrize("options, message", [
+    ({"new_evaluation": "yes"}, "must be a boolean"),
+    ({"new_evaluation": True, "resume_id": "saved"}, "cannot be used together"),
+])
+def test_explicit_new_evaluation_options_are_validated(evaluation, options, message):
+    _, _, semantic, provider, sid, aid = evaluation
+    with pytest.raises(ServiceError, match=message):
+        semantic.start(sid, aid, options)
+    assert provider.calls == 0

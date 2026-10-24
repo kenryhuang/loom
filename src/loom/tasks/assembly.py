@@ -902,8 +902,7 @@ class TaskAssembly:
             selected_provider = replace(selected_provider, request_options=options)
         if images and hasattr(selected_provider, "image_reader"):
             selected_provider = replace(selected_provider, image_reader=self.read_image)
-        provider = evaluator_provider(selected_provider, output_tokens=cap, timeout_seconds=timeout, install_http=not stream,
-                                      preserve_options=bool(images) or selected_provider is self.visual_provider)
+        provider = evaluator_provider(selected_provider, output_tokens=cap, timeout_seconds=timeout, install_http=not stream)
         if protocol:
             provider = protocol_provider(provider, protocol, mode)
         timer = asyncio.timeout(timeout)
