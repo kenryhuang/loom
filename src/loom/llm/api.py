@@ -915,16 +915,18 @@ async def _consume_streaming_chat(
             emitted = await _emit_stream_delta_event(emit_event, event, metadata, now)
             if not emitted.ok:
                 return emitted
-    except BaseException as exc:
-        cause = {"name": type(exc).__name__, "message": str(exc)}
+    except Exception as exc:
+        timed_out = isinstance(exc, TimeoutError) or (isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, TimeoutError))
+        message = str(exc) or ("LLM request timed out" if timed_out else type(exc).__name__)
+        cause = {"name": type(exc).__name__, "message": message}
         status = getattr(exc, "status", None)
         if isinstance(status, int):
             cause["status"] = status
             cause["body"] = getattr(exc, "body", {})
         return err(
             make_loom_error(
-                "LLM_FAILED",
-                str(exc),
+                "TIMEOUT" if timed_out else "LLM_FAILED",
+                message,
                 retryable=status is None or status == 429 or status >= 500,
                 cause=cause,
             )
@@ -1033,13 +1035,15 @@ class OpenAIProvider:
         url = f"{base_url}/chat/completions"
         try:
             response = await self._send(url, request)
-        except BaseException as exc:
+        except Exception as exc:
+            timed_out = isinstance(exc, TimeoutError) or (isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, TimeoutError))
+            message = str(exc) or ("LLM request timed out" if timed_out else type(exc).__name__)
             return err(
                 make_loom_error(
-                    "LLM_FAILED",
-                    str(exc),
+                    "TIMEOUT" if timed_out else "LLM_FAILED",
+                    message,
                     retryable=True,
-                    cause={"name": type(exc).__name__, "message": str(exc)},
+                    cause={"name": type(exc).__name__, "message": message},
                 )
             )
 

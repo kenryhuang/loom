@@ -255,6 +255,10 @@ uv run loom session budget SESSION_ID 20M
 default_model: dashscope/your-model-id
 # 可选：为评估选择独立配置的模型别名。
 # evaluation_model: dashscope/your-fast-model-id
+# 可选：仅覆盖 Deep Eval（含 Memory）及 CLI judge 的参数，需所选模型支持。
+# evaluation_request_options:
+#   enable_thinking: true
+#   reasoning_effort: low
 # 可选：运行时验收模型，默认使用任务模型。
 # verification_model: dashscope/your-fast-model-id
 # 可选：独立的视觉验收模型，必须声明支持 image 输入。

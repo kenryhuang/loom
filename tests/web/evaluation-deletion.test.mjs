@@ -84,7 +84,6 @@ test("failed deletion retains the selected evaluation for retry and unlocks cont
   assert.equal([...view.historyList.querySelectorAll("button")].every(button => button.disabled), true);
   assert.equal(removeButton(view, job.id).disabled, true);
   assert.equal(view.start.disabled, true);
-  assert.equal(view.fresh.disabled, true);
   finish(new Error("File cleanup pending. Retry deletion."));
   await pending;
   assert.equal(view.job.id, job.id);

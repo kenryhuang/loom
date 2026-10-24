@@ -7,7 +7,7 @@ from copy import deepcopy
 
 from loom.evaluation.goal_loops.attribution import action_attributions
 from loom.evaluation.goal_loops.facts import identity
-from loom.evaluation.issues import EvaluationFailure, describe, stopped
+from loom.evaluation.issues import EvaluationFailure, describe, provider_failure, request_failure_event, request_timeout, stopped
 from loom.evaluation.memory import VERSION
 from loom.evaluation.memory.checkpoint import prepare_replay
 from loom.evaluation.memory.contracts import protocol_for
@@ -93,18 +93,17 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
                     if not response.ok:
                         if unsupported_format(response.error) and mode != "text":
                             mode = memory["output_mode"] = "text"
-                            await emit(dict(type="llm.failed", **meta))
+                            await emit(request_failure_event(meta, response.error))
                             await persist()
                             continue
-                        raise stopped("request.provider", response.error.message, category="provider", stage="memory", unit_id=unit["id"],
-                                      provider_code=response.error.code)
+                        raise provider_failure(response.error, stage="memory", unit_id=unit["id"], timeout_seconds=timeout)
                 except TimeoutError as exc:
-                    await emit(dict(type="llm.failed", **meta))
+                    failure = request_timeout(stage="memory", unit_id=unit["id"], timeout_seconds=timeout)
+                    await emit(request_failure_event(meta, failure))
                     await persist()
-                    raise stopped("request.timeout", f"Memory request timed out after {timeout:g}s; accepted records retained",
-                                  category="provider", stage="memory", unit_id=unit["id"], details=dict(timeout_seconds=timeout)) from exc
-                except BaseException:
-                    await emit(dict(type="llm.failed", **meta))
+                    raise failure from exc
+                except BaseException as exc:
+                    await emit(request_failure_event(meta, exc))
                     await persist()
                     raise
                 answer = response.unwrap()

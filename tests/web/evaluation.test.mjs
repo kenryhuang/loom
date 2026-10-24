@@ -411,7 +411,7 @@ test("new v3 evaluation uses version defaults instead of legacy resume settings"
   assert.equal(view.version.value, "v2");
   assert.equal(view.fields.max_seconds.value, "600");
   assert.match(view.settingsSummary.textContent, /Saved evaluation/);
-  view.fresh.click();
+  view.newEvaluation();
   assert.equal(view.version.value, "v3");
   assert.equal(view.fields.max_seconds.value, "1800");
   assert.equal(view.fields.max_evidence_chars.value, "262144");

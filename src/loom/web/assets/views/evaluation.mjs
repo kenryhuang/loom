@@ -76,12 +76,12 @@ export class EvaluationView {
     this.historyHeading.append(this.historyTitle);
     this.historyList = element("ul", "evaluation-history-list");
     this.historyPanel.append(this.historyHeading, this.historyList);
-    this.settingsPanel = element("details", "evaluation-settings dashboard-panel");
+    this.settingsPanel = element("details", "evaluation-settings dashboard-panel setup-block");
     this.settingsSummary = element("summary", "", "Evaluation settings · New evaluation");
     this.settingsPanel.append(this.settingsSummary);
     this.settingsFields = element("div", "evaluation-controls");
     this.settingsPanel.append(this.settingsFields);
-    this.form.append(this.toolbar, this.historyPanel, this.settingsPanel);
+    this.form.append(this.toolbar, this.settingsPanel, this.historyPanel);
     this.results = element("div", "evaluation-results");
     this.progress = element("section", "evaluation-progress dashboard-panel");
     this.progress.setAttribute("aria-label", "Evaluation progress");
@@ -163,13 +163,11 @@ export class EvaluationView {
         this.fields[key] = input;
       }
       scopeVisibility();
-      this.start = element("button", "primary", "Run deep evaluation");
+      this.start = element("button", "primary", "New evaluation");
       this.start.type = "submit";
       this.start.disabled = !catalog.models.length;
-      this.fresh = button("New evaluation", () => this.newEvaluation());
-      this.fresh.className = "evaluation-new";
       const actions = element("div", "deep-actions");
-      actions.append(this.fresh, this.start); this.toolbar.append(actions);
+      actions.append(this.start); this.toolbar.append(actions);
       const notes = disclosure(this.settingsPanel, "Budget accounting");
       notes.append(element("p", "muted small", "Evaluator usage is separate from task usage. Incremental graph review records tokens without a token budget or output cap. Time and call limits still apply; unknown usage is marked explicitly. Legacy evaluators check reported usage between requests."));
       this.status.textContent = catalog.models.length ? "" : "Configure a judge model to run evaluation.";
@@ -178,11 +176,10 @@ export class EvaluationView {
       this.form.addEventListener("invalid", () => { this.settingsPanel.open = true; }, true);
       this.form.addEventListener("submit", (event) => {
         event.preventDefault();
-        this.run();
+        this.createEvaluation();
       });
       this.runSelect.addEventListener("change", () => {
         this.newEvaluation();
-        this.settingsPanel.hidden = this.start.hidden = true;
       });
       this.matchScopeVersion();
       this.applyDefaults();
@@ -201,13 +198,12 @@ export class EvaluationView {
     this.job = null;
     this.selectedHistoryId = null;
     this.settingsPanel.hidden = false;
-    this.fresh.disabled = false;
     this.version.value = this.catalog.default_analysis_version || "v2";
     this.matchScopeVersion();
     this.model.value = this.catalog.default_model;
     this.applyDefaults();
     this.start.hidden = false;
-    this.start.textContent = "Create evaluation";
+    this.start.textContent = "New evaluation";
     this.start.disabled = !this.catalog.models.length || !this.version.value;
     this.model.disabled = this.version.disabled = false;
     if (this.runSelect) {
@@ -223,6 +219,7 @@ export class EvaluationView {
     this.progress.hidden = true;
     this.settingsPanel.open = false;
     this.status.hidden = true;
+    this.root.insertBefore(this.status, this.progress);
   }
   runName(id) {
     const index = (this.catalog?.run_ids || []).indexOf(id);
@@ -267,7 +264,8 @@ export class EvaluationView {
     if (!this.historyList) return;
     const jobs = this.scopedJobs();
     this.historyTitle.textContent = `Evaluation history · ${jobs.length}`;
-    this.fresh.disabled = !!this.submitting || !!this.deleting || this.runSelect.value === "__missing_run__";
+    this.start.disabled = !!this.submitting || !!this.deleting || !this.catalog.models.length || !this.model.value || !this.version.value
+      || this.runSelect.value === "__missing_run__" || !!(this.selectedHistoryId && this.selectedHistoryId !== this.job?.id);
     this.historyList.replaceChildren();
     for (const job of jobs) {
       const item = element("li", "evaluation-history-item");
@@ -329,14 +327,35 @@ export class EvaluationView {
       this.memory.checked = !!this.catalog.memory_default;
       this.memoryLabel.hidden = !this.catalog.supports_memory || this.version.value !== 'goal_graph_v1';
     }
-    this.start.textContent = "Create evaluation";
+    this.start.textContent = "New evaluation";
   }
   fail(error) {
     if (this.signal.aborted) return;
     this.status.textContent = error.message;
     this.status.hidden = false;
+    // Request failures can happen before a saved evaluation has loaded.
+    // Keep those errors visible in the run panel without stale metrics.
+    const existingHeading = this.progress.querySelector(".dashboard-panel-heading");
+    if (!existingHeading || !this.job || this.selectedHistoryId !== this.job.id) {
+      const heading = element("header", "dashboard-panel-heading");
+      heading.append(element("h3", "", "Evaluation run"));
+      this.progress.replaceChildren(heading, this.status);
+    } else existingHeading.after(this.status);
+    this.progress.hidden = false;
     if (this.start) this.start.disabled = false;
     this.onError?.(error);
+  }
+  async createEvaluation() {
+    if (this.start.disabled || this.deleting || this.submitting || !this.form.reportValidity()) return;
+    const model = this.model.value, version = this.version.value, memory = this.memory.checked;
+    const values = Object.fromEntries(Object.entries(this.fields).map(([key, input]) => [key, input.value]));
+    this.newEvaluation();
+    this.model.value = model;
+    this.version.value = version;
+    this.applyDefaults();
+    this.memory.checked = memory;
+    for (const [key, value] of Object.entries(values)) this.fields[key].value = value;
+    await this.run();
   }
   async run() {
     if (this.deleting || this.submitting || (this.selectedHistoryId && this.selectedHistoryId !== this.job?.id)) return;
@@ -366,7 +385,7 @@ export class EvaluationView {
         this.version.value === (this.job.analysis_version || "v2") &&
         Object.keys(this.job.settings).every(
           (key) =>
-            ["max_seconds", "max_tokens", "max_calls", ...(options.analysis_version === "goal_graph_v1" ? ["max_prompt_chars", "max_evidence_chars"] : [])].includes(key) ||
+            ["max_seconds", "max_tokens", "max_calls", ...(options.analysis_version === "goal_graph_v1" ? ["max_prompt_chars", "max_evidence_chars", "max_call_seconds"] : [])].includes(key) ||
             options[key] === this.job.settings[key],
         )
       ) {
@@ -489,7 +508,7 @@ export class EvaluationView {
     this.start.disabled = true;
     if (this.job?.id !== id) {
       this.progress.hidden = true;
-      this.settingsPanel.hidden = this.start.hidden = true;
+      this.settingsPanel.hidden = true;
       this.renderedData = this.graphView = null;
       this.onResult?.(null);
       this.results.replaceChildren(element("p", "empty-state", "Loading evaluation…"));
@@ -510,41 +529,35 @@ export class EvaluationView {
       this.rememberJob(job);
       const wasActive =
         this.job && ["queued", "running"].includes(this.job.state);
+      const loadSettings = this.job?.id !== job.id;
       this.job = job;
       this.settingsPanel.hidden = false;
       this.settingsSummary.textContent = "Evaluation settings · Saved evaluation";
       const active = ["queued", "running"].includes(job.state);
       if (active && !wasActive && this.settingsPanel)
         this.settingsPanel.open = false;
-      const resumable = RESUMABLE.has(job.state);
-      this.start.disabled = !resumable || !this.catalog.models.length;
-      this.start.hidden = true;
-      this.start.textContent = "Resume evaluation";
-      this.model.value = job.model;
-      this.model.disabled = true;
-      if (this.version) { this.version.value = job.analysis_version || "v2"; this.version.disabled = true; }
-      if (this.memory) {
-        this.memory.checked = !!job.settings.extract_memory; this.memory.disabled = true;
-        this.memoryLabel.hidden = !this.catalog.supports_memory || job.analysis_version !== 'goal_graph_v1';
-      }
-      for (const key of ["max_rounds", "max_tokens"]) if(this.fields[key]) this.fields[key].parentElement.hidden = job.analysis_version === "goal_graph_v1";
-      if(this.catalog.analysis_versions && !this.catalog.analysis_versions.includes(job.analysis_version || "v2")) {
-        this.start.disabled = true;
-        this.start.textContent = "Legacy result · read only";
-      }
-      if (this.runSelect) {
-        this.runSelect.disabled = false;
-        this.runSelect.value = this.scopeValue(job);
-        this.matchScopeVersion();
+      this.start.hidden = false;
+      if (loadSettings) {
+        this.model.value = this.catalog.models.some(model => model.id === job.model) ? job.model : this.catalog.default_model;
         this.version.value = job.analysis_version || "v2";
-        this.renderHistory();
+        if (!this.version.value) this.version.value = this.catalog.default_analysis_version || "v2";
+        this.memory.checked = !!job.settings.extract_memory;
+        for (const [key, input] of Object.entries(this.fields)) {
+          input.value = job.settings[key] ?? this.catalog.defaults_by_version?.[this.version.value]?.[key] ?? this.catalog.defaults[key] ?? "";
+        }
       }
-      for (const [key, input] of Object.entries(this.fields)) {
-        input.value = job.settings[key] ?? this.catalog?.defaults_by_version?.[job.analysis_version || "v2"]?.[key] ?? this.catalog?.defaults[key] ?? "";
-        const resources = ["max_seconds", "max_tokens", "max_calls", ...(job.analysis_version === "goal_graph_v1" ? ["max_prompt_chars", "max_evidence_chars"] : [])];
-        input.disabled = !resumable || !resources.includes(key);
-      }
+      this.model.disabled = this.version.disabled = this.memory.disabled = false;
+      for (const input of Object.values(this.fields)) input.disabled = false;
+      this.memoryLabel.hidden = !this.catalog.supports_memory || this.version.value !== 'goal_graph_v1';
+      for (const key of ["max_rounds", "max_tokens"]) if(this.fields[key]) this.fields[key].parentElement.hidden = this.version.value === "goal_graph_v1";
+      this.runSelect.disabled = false;
+      this.runSelect.value = this.scopeValue(job);
+      this.matchScopeVersion();
+      this.renderHistory();
       this.status.textContent = job.error || "";
+      if (job.error_details?.some(detail => detail.code === "request.timeout")) {
+        this.status.textContent += " Increase Call timeout · seconds in Evaluation settings, then use Resume on this history record. Saved results are retained.";
+      }
       if (job.state === "budget_exhausted") {
         this.status.textContent += /input budget reached/i.test(job.error || "")
           ? " Increase Request characters · per call in Evaluation settings, then Resume evaluation. Saved stages are retained."
@@ -675,7 +688,7 @@ export class EvaluationView {
     const logOpen = this.progress.querySelector("details")?.open || false;
     const logs = element("details", "dashboard-disclosure"); logs.open = logOpen;
     logs.append(element("summary", "", `Activity log · ${job.completed_batches || 0} saved ${behavior ? "stages" : "batches"}`), log);
-    this.progress.replaceChildren(heading, phases, coverage, metrics, current, logs);
+    this.progress.replaceChildren(heading, ...(this.status ? [this.status] : []), phases, coverage, metrics, current, logs);
     log.scrollTop = bottom ? log.scrollHeight : scroll;
   }
   refs(root, refs = []) {

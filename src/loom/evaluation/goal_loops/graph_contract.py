@@ -15,7 +15,7 @@ UPGRADABLE_VERSIONS = {
     ("goal-graph.3", "goal-graph-rubric.5"), ("goal-graph.3", "goal-graph-rubric.4"),
     ("goal-graph.2", "goal-graph-rubric.2"), ("goal-graph.2", "goal-graph-rubric.3"),
 }
-RESOURCE_LIMITS = {"max_calls", "max_tokens", "max_seconds", "max_prompt_chars", "max_evidence_chars"}
+RESOURCE_LIMITS = {"max_calls", "max_tokens", "max_seconds", "max_prompt_chars", "max_evidence_chars", "max_call_seconds"}
 TEXT = dict(type="string", maxLength=600)
 SHORT = dict(type="string", maxLength=240)
 KINDS = ["goal_definition", "approach", "investigation", "action", "verification", "conclusion", "framework"]

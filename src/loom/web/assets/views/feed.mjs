@@ -128,9 +128,9 @@ export class FeedView {
       expanded: details.length > 0 && details.every((node) => node.open),
     });
   }
-  toggleAll() {
+  toggleAll(expanded) {
     const details = [...this.root.querySelectorAll("details")];
-    this.detailMode = !details.every((node) => node.open);
+    this.detailMode = expanded ?? !details.every((node) => node.open);
     this.manualProcesses.clear();
     for (const node of details) node.open = this.detailMode;
     for (const group of this.groups.values())
@@ -601,6 +601,8 @@ export class FeedView {
         inspect: (trigger) => this.inspector.open(record, trigger),
         expand: () => this.detail(record),
         loadArtifact: this.loadArtifact,
+        detailMode: () => this.detailMode,
+        detailsChanged: () => this.detailsChanged(),
       });
       view.node.open = this.detailMode === true;
       view.summary.addEventListener("click", () => {
@@ -637,7 +639,7 @@ export class FeedView {
       workspace: this.snapshot?.task.workspace,
     });
     if (activity.kind === "acceptance" && activity.state === "failed" && !record.failureExpanded) {
-      record.node.open = true;
+      if (this.detailMode !== false) record.node.open = true;
       record.failureExpanded = true;
     }
     const timedSources = (descriptor.sources || []).filter(source => source.timestamp && Number.isFinite(Date.parse(source.timestamp)));

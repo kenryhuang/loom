@@ -25,6 +25,7 @@ export class SettingsView {
     const tabs = element('div', 'evaluation-tabs settings-tabs'), body = element('div', 'settings-body');
     tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Configuration categories'); controls.append(tabs, body);
     const groups = [['general', 'Model selection'], ['providers', 'Models'], ['embedding_profiles', 'Embedding services'],
+      ['evaluation_request_options', 'Deep eval request options'],
       ['task', 'Task defaults'], ['run', 'Run defaults'], ['meta_harness', 'Evaluation / Evolve']];
     const extras = Object.keys(draft).filter(key => key !== 'model_aliases' && draft[key] !== null && typeof draft[key] === 'object' && !groups.some(([id]) => key === id));
     groups.push(...extras.map(key => [key, labelFor(key)]));
@@ -58,6 +59,10 @@ export class SettingsView {
         }, {default_model: modelChoice('Default task model'), evaluation_model: modelChoice('Deep evaluation model'), verification_model: modelChoice('Acceptance verifier model'), visual_verification_model: modelChoice('Visual acceptance model')}, context);
       } else if (key === 'providers') this.providers(panel, context, announce);
       else if (key === 'embedding_profiles') this.embeddings(panel, context);
+      else if (key === 'evaluation_request_options') {
+        panel.append(element('p', 'muted', 'Override the selected judge model’s request options for Deep eval, including memory extraction. Configuration changes require a new evaluation.'));
+        fields(panel, () => draft[key], value => {draft[key] = value;}, requestFields, context, key, true);
+      }
       else {
         if (key === 'run') panel.append(element('p', 'muted', 'Defaults for new task runs. Empty fields retain Loom defaults.'));
         if (key === 'meta_harness') panel.append(element('p', 'muted', 'Configure optimization models, candidate search and trial budgets.'));

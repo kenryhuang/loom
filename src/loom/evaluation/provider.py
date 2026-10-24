@@ -8,8 +8,23 @@ import urllib.request
 from contextlib import suppress
 from dataclasses import is_dataclass, replace
 
+from loom.core import ok
 from loom.llm.api import OpenAIProvider
 from loom.llm.request_options import materialize_request_options
+from loom.tasks.config import create_provider_from_task_config
+
+
+def create_evaluation_provider(config, *, model_name=None, env=None, http_client=None):
+    """Apply explicit evaluation options to a private copy of the selected model."""
+    created = create_provider_from_task_config(
+        config, model_name=model_name or config.evaluation_model, env=env, http_client=http_client,
+    )
+    if not created.ok:
+        return created
+    provider = created.value
+    options = materialize_request_options(provider.request_options)
+    options.update(materialize_request_options(config.evaluation_request_options))
+    return ok(replace(provider, request_options=options))
 
 
 def evaluator_provider(provider, *, output_tokens, timeout_seconds, install_http=True):

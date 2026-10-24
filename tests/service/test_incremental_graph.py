@@ -60,7 +60,8 @@ def test_incremental_service_checkpoint_resume_artifact_and_legacy_scope(evaluat
         restored.close()
 
 
-def test_incremental_cancel_retains_live_graph(evaluation):  # noqa: F811
+@pytest.mark.parametrize("stop_kind", ["cancel", "shutdown"])
+def test_incremental_cancel_retains_live_graph(evaluation, stop_kind):  # noqa: F811
     _, _, manager, _, sid, aid = evaluation
     judge = GraphJudge()
     original = judge.chat
@@ -76,9 +77,20 @@ def test_incremental_cancel_retains_live_graph(evaluation):  # noqa: F811
     manager.provider_factory = lambda _: judge
     job = manager.start(sid, aid, dict(analysis_version="goal_graph_v1", run_id="r", batch_rounds=1))
     assert blocked.wait(5)
-    manager.cancel(sid, aid, job["id"])
+    if stop_kind == "shutdown":
+        manager.closed.set()
+    else:
+        manager.cancel(sid, aid, job["id"])
     stopped = wait_job(manager, sid, aid, job["id"])
-    assert stopped["state"] == "cancelled"
+    expected = "interrupted" if stop_kind == "shutdown" else "cancelled"
+    assert stopped["state"] == expected
+    assert stopped["current_call"]["state"] == expected
+    assert stopped["current_call"]["error_code"] == "runtime." + expected
+    assert stopped["call_history"][-1] == stopped["current_call"]
+    assert stopped["error_details"][0]["code"] == "runtime." + expected
+    event = next(row for row in stopped["progress"] if row["kind"] == "call." + expected)
+    assert ("shutting down" if stop_kind == "shutdown" else "Cancellation requested") in event["message"]
+    assert not any(row["kind"] == "call.failed" for row in stopped["progress"])
     assert stopped["evaluation"]["graph_revision"] > 0
     assert stopped["evaluation"]["coverage"]["status"] == "partial"
     assert stopped["usage"]["unreported_calls"] == 1
@@ -235,3 +247,72 @@ def test_memory_service_budget_resume_persistence_and_option_validation(evaluati
         assert restored.get(sid, aid, done['id'])['evaluation']['memory'] == exported['memory']
     finally:
         restored.close()
+
+
+def test_call_timeout_can_increase_on_resume_from_old_checkpoint_without_repeating_work(evaluation):  # noqa: F811
+    from loom.evaluation.goal_loops.graph_contract import RESOURCE_LIMITS
+
+    _, _, manager, _, sid, aid = evaluation
+    judge = GraphJudge()
+    manager.provider_factory = lambda _: judge
+    started = manager.start(sid, aid, dict(analysis_version="goal_graph_v1", run_id="r", batch_rounds=1, max_calls=1))
+    stopped = wait_job(manager, sid, aid, started["id"])
+    assert stopped["state"] == "budget_exhausted"
+    saved = manager._load(sid, aid, started["id"])
+    # The previous version included the call timeout in semantic identity.
+    saved["checkpoint"]["identity"]["settings"] = identity({
+        k: v for k, v in saved["settings"].items() if k not in (RESOURCE_LIMITS - {"max_call_seconds"}) | {"extract_memory"}
+    })
+    saved["checkpoint"]["resource_limits"].pop("max_call_seconds")
+    manager._save(saved)
+    with pytest.raises(ServiceError, match="cannot reduce"):
+        manager.start(sid, aid, dict(resume_id=started["id"], max_calls=10, max_call_seconds=100))
+    resumed = manager.start(sid, aid, dict(resume_id=started["id"], max_calls=10, max_call_seconds=600))
+    assert resumed["id"] == started["id"]
+    done = wait_job(manager, sid, aid, resumed["id"])
+    assert done["state"] == "completed", done.get("error")
+    assert done["settings"]["max_call_seconds"] == 600
+    assert len(judge.requests) == 2
+    assert done["evaluation"]["graph_revision"] > stopped["evaluation"]["graph_revision"]
+
+
+def test_service_exposes_timeout_reason_limit_and_failed_call_details(evaluation):  # noqa: F811
+    from loom.llm.api import OpenAIProvider
+
+    _, _, manager, _, sid, aid = evaluation
+
+    async def transport(*args):
+        raise TimeoutError()
+
+    manager.provider_factory = lambda _: OpenAIProvider(api_key="fixture", model="glm-5.3", http_client=transport)
+    started = manager.start(sid, aid, dict(analysis_version="goal_graph_v1", run_id="r", max_call_seconds=180))
+    failed = wait_job(manager, sid, aid, started["id"])
+    assert failed["state"] == "failed"
+    assert failed["error_details"][0]["code"] == "request.timeout"
+    assert failed["error_details"][0]["details"]["timeout_seconds"] == 180
+    assert "180s" in failed["error"]
+    assert "Resume" in failed["error"]
+    assert "Evaluator request timed out" in failed["current_call"]["error"]
+    assert "180s" in failed["current_call"]["error"]
+    assert failed["current_call"]["error_code"] == "request.timeout"
+    assert failed["call_history"][-1] == failed["current_call"]
+    assert failed["current_call"]["duration_seconds"] >= 0
+    assert any("180s" in event["message"] for event in failed["progress"] if event["kind"] == "call.failed")
+    assert failed["usage"]["unreported_calls"] == 1
+
+
+def test_total_time_budget_is_not_reported_as_provider_failure(evaluation):  # noqa: F811
+    _, _, manager, _, sid, aid = evaluation
+    judge = GraphJudge()
+
+    async def chat(*args, **kwargs):
+        await asyncio.sleep(10)
+
+    judge.chat = chat
+    manager.provider_factory = lambda _: judge
+    started = manager.start(sid, aid, dict(analysis_version="goal_graph_v1", run_id="r", max_seconds=1))
+    stopped = wait_job(manager, sid, aid, started["id"])
+    assert stopped["state"] == "budget_exhausted"
+    assert stopped["current_call"]["error_code"] == "budget.seconds"
+    assert "time budget reached (1s)" in stopped["current_call"]["error"]
+    assert stopped["call_history"][-1] == stopped["current_call"]

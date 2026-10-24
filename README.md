@@ -304,6 +304,10 @@ For multiple models or provider-specific options, create a configuration file:
 default_model: dashscope/your-model-id
 # Optional: select a separately configured judge model for evaluation.
 # evaluation_model: dashscope/your-fast-model-id
+# Optional judge-only overrides; use values supported by the selected model.
+# evaluation_request_options:
+#   enable_thinking: true
+#   reasoning_effort: low
 # Optional independent runtime acceptance model (otherwise uses the task model).
 # verification_model: dashscope/your-fast-model-id
 # Optional independent visual verifier; the model must support image input.

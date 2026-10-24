@@ -236,7 +236,8 @@ def test_progress_is_durable_and_heartbeats_while_evaluator_waits(evaluation):
     semantic.cancel(sid, aid, job["id"])
     done = wait_job(semantic, sid, aid, job["id"])
     assert done["progress"][-1]["kind"] == "cancelled"
-    assert done["current_call"]["state"] == "interrupted"
+    assert done["current_call"]["state"] == "cancelled"
+    assert "Cancellation requested" in done["current_call"]["error"]
 
 
 class BehaviorProvider:
@@ -317,6 +318,31 @@ def test_catalog_uses_independent_evaluation_model(evaluation, tmp_path):
         assert defaults['max_seconds'] == 3600
         assert defaults['max_evidence_chars'] == 524288
         assert all(catalog['bounds'][key][0] <= value <= catalog['bounds'][key][1] for key, value in defaults.items())
+
+
+def test_service_applies_evaluation_request_options_to_real_provider(evaluation, tmp_path, monkeypatch):
+    from loom.llm.api import OpenAIProvider
+
+    _, _, semantic, judge, sid, aid = evaluation
+    config = tmp_path / 'config.yaml'
+    config.write_text('default_model: main\nevaluation_request_options:\n  enable_thinking: true\n'
+                      '  reasoning_effort: low\nmodels:\n  main:\n    model: evaluator\n'
+                      '    api_key: fixture\n    base_url: https://example.test/v1\n'
+                      '    request_options:\n      enable_thinking: false\n      reasoning_effort: max\n')
+    seen = []
+
+    async def chat(provider, messages, *args, **kwargs):
+        seen.append(provider._request_body(messages, None, None, stream=False))
+        return await judge.chat(messages, *args, **kwargs)
+
+    monkeypatch.setattr(OpenAIProvider, 'chat', chat)
+    semantic.provider_factory = None
+    semantic.config_path = config
+    job = semantic.start(sid, aid, {'analysis_version': 'v2'})
+    done = wait_job(semantic, sid, aid, job['id'])
+    assert done['state'] == 'completed', done.get('error')
+    assert seen
+    assert all(body['enable_thinking'] is True and body['reasoning_effort'] == 'low' for body in seen)
 
 
 def test_saved_graph_upgrade_keeps_snapshot_judgments_and_usage_without_llm_calls(evaluation):

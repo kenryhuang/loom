@@ -1,6 +1,19 @@
 from loom.tasks.config import ModelConfig, TaskRunnerConfig, create_provider_from_task_config, load_task_config
 
 
+def test_evaluation_request_options_load_and_validate(tmp_path):
+    from loom.service.settings import yaml_text
+
+    path = tmp_path / "config.yaml"
+    path.write_text("evaluation_request_options:\n  enable_thinking: true\n  reasoning_effort: low\n")
+    assert load_task_config(path).unwrap().evaluation_request_options == {"enable_thinking": True, "reasoning_effort": "low"}
+    for value in (["low"], "low", {"model": "other"}, {"max_tokens": 100}):
+        path.write_text(yaml_text({"evaluation_request_options": value}))
+        result = load_task_config(path)
+        assert not result.ok
+        assert "evaluation_request_options" in result.error.message
+
+
 def test_provider_models_share_connection_but_keep_model_options(tmp_path):
     from loom.service.settings import yaml_text
 

@@ -15,6 +15,7 @@ from loom.evaluation.behavior_sequence import focus_context
 from loom.evaluation.evidence_review import EvidenceReview
 from loom.evaluation.evidence_store import text_value
 from loom.evaluation.focus_evidence import focus_evidence_refs
+from loom.evaluation.issues import request_failure_event
 from loom.evaluation.provider import evaluator_provider
 from loom.evaluation.reasoning_metrics import build_reasoning_process
 from loom.evaluation.reasoning_process import RUBRIC as REASONING_RUBRIC
@@ -556,16 +557,16 @@ async def judge_behavior(
                 if timer.expired():
                     raise TimeoutError
             except TimeoutError as exc:
-                await emit({"type": "llm.failed", **base})
+                await emit(request_failure_event(base, exc))
                 raise ValueError(f"Evaluation call time budget reached at {key}; saved findings retained") from exc
             finally:
                 stage_usage["elapsed_seconds"] = round(stage_usage.get("elapsed_seconds", 0) + time.monotonic() - call_started, 2)
                 await persist()
             if not response.ok:
                 if getattr(response.error, "cause", None) and response.error.cause.get("name") in {"TimeoutError", "CancelledError"}:
-                    await emit({"type": "llm.failed", **base, "error": response.error})
+                    await emit(request_failure_event(base, response.error))
                     raise ValueError(f"Evaluation call time budget reached at {key}; saved findings retained")
-                await emit({"type": "llm.failed", **base, "error": response.error})
+                await emit(request_failure_event(base, response.error))
                 raise ValueError(response.error.message)
             await emit({"type": "llm.completed", **base, "response": response.value})
             usage["unreported_calls"] -= 1

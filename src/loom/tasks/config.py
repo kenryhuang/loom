@@ -85,6 +85,7 @@ class TaskRunnerConfig:
     verification_model: str | None = None
     visual_verification_model: str | None = None
     model_aliases: Mapping[str, str] = field(default_factory=dict)
+    evaluation_request_options: Mapping[str, Any] = field(default_factory=dict)
 
     def resolve_model_name(self, name: str | None) -> str | None:
         return self.model_aliases.get(name, name)
@@ -92,6 +93,7 @@ class TaskRunnerConfig:
     def __post_init__(self) -> None:
         object.__setattr__(self, "models", dict(self.models))
         object.__setattr__(self, "model_aliases", dict(self.model_aliases))
+        object.__setattr__(self, "evaluation_request_options", normalize_request_options(self.evaluation_request_options))
 
 
 def load_task_config(path: str | os.PathLike[str]) -> Result:
@@ -343,6 +345,10 @@ def _parse_task_config(payload: Mapping[str, Any], path: Path) -> Result:
     evaluation_model = payload.get("evaluation_model")
     if evaluation_model is not None and (not isinstance(evaluation_model, str) or evaluation_model not in models):
         return err(make_loom_error("VALIDATION_FAILED", "evaluation_model must name a configured model", retryable=False))
+    try:
+        evaluation_options = normalize_request_options(payload.get("evaluation_request_options", {}))
+    except (TypeError, ValueError) as exc:
+        return err(make_loom_error("VALIDATION_FAILED", f"evaluation_request_options: {exc}", retryable=False))
     verification_model = payload.get("verification_model")
     if verification_model is not None and (not isinstance(verification_model, str) or verification_model not in models):
         return err(make_loom_error("VALIDATION_FAILED", "verification_model must name a configured model", retryable=False))
@@ -351,6 +357,7 @@ def _parse_task_config(payload: Mapping[str, Any], path: Path) -> Result:
         return err(make_loom_error("VALIDATION_FAILED", "visual_verification_model must name a configured image-capable model", retryable=False))
     return ok(TaskRunnerConfig(default_model=default_model, task=task.value, run=run.value, models=models,
                                visual_verification_model=visual_model,
+                               evaluation_request_options=evaluation_options,
                                evaluation_model=evaluation_model, verification_model=verification_model, model_aliases=aliases))
 
 

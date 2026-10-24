@@ -22,7 +22,8 @@ from loom.evaluation.judge import (
     build_step_evidence_pack,
 )
 from loom.evaluation.metrics import MetricResult, calculate_metrics
-from loom.tasks.config import create_provider_from_task_config, load_task_config
+from loom.evaluation.provider import create_evaluation_provider
+from loom.tasks.config import load_task_config
 from loom.trace_analysis import EpisodeGraph, build_episode_graph, load_normalized_events
 
 
@@ -399,7 +400,7 @@ def _create_judge_provider(config: EvaluationConfig) -> Result:
     loaded = load_task_config(config.config_path)
     if not loaded.ok:
         return loaded
-    return create_provider_from_task_config(loaded.value, model_name=config.model_name or loaded.value.evaluation_model)
+    return create_evaluation_provider(loaded.value, model_name=config.model_name)
 
 
 async def run_evaluation_trace_with_tui(

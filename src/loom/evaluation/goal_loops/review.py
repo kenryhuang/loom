@@ -15,6 +15,7 @@ from loom.evaluation.goal_loops.facts import packets, run_facts
 from loom.evaluation.goal_loops.projection import process_graph
 from loom.evaluation.goal_loops.state import apply_patch, overlaps, root_of
 from loom.evaluation.goal_loops.utility import accept_assessments, action_facts, project_utility, review_units
+from loom.evaluation.issues import request_failure_event
 from loom.evaluation.provider import evaluator_provider
 from loom.llm.api import LlmMessage, request_llm_response
 from loom.llm.structured import ProtocolExhausted, UnsupportedFormat, output_mode, protocol_provider, request_structured, unsupported_format
@@ -286,11 +287,11 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
                 try:
                     async with asyncio.timeout(seconds):
                         response = await request_llm_response(capped, messages, tools=None)
-                except BaseException:
-                    await emit(dict(type="llm.failed", **metadata))
+                except BaseException as exc:
+                    await emit(request_failure_event(metadata, exc))
                     raise
                 if not response.ok:
-                    await emit(dict(type="llm.failed", **metadata))
+                    await emit(request_failure_event(metadata, response.error))
                     if unsupported_format(response.error):
                         raise UnsupportedFormat()
                     raise ValueError(response.error.message)

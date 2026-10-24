@@ -26,6 +26,19 @@ function setup(config) {
   return {dom, view, calls, input, click, save, close: () => {view.close(); dom.window.close();}};
 }
 
+test('Deep eval options can be configured independently of model options', async () => {
+  const ctx = setup({models: {main: {model: 'main', request_options: {reasoning_effort: 'max', enable_thinking: true}}}, default_model: 'main'});
+  try {
+    await ctx.view.open(); ctx.click('Deep eval request options');
+    ctx.input('evaluation_request_options.enable_thinking', 'true');
+    ctx.input('evaluation_request_options.reasoning_effort', 'low');
+    await ctx.save();
+    const saved = ctx.calls.find(([, options]) => options?.body)[1].body.config;
+    assert.deepEqual(saved.evaluation_request_options, {enable_thinking: true, reasoning_effort: 'low'});
+    assert.deepEqual(saved.providers.example.models.main.request_options, {enable_thinking: true, reasoning_effort: 'max'});
+  } finally {ctx.close();}
+});
+
 test('typed settings save numbers, booleans, lists and model selection while preserving untouched fields and masked secrets', async () => {
   const config = {models: {main: {model: 'test', api_key: '••••••••', request_options: {custom: {threshold: 0.25}, enable_thinking: false}}},
     default_model: 'main', run: {timeout_ms: null}, task: {expected_outputs: ['Report']}, extension: {enabled: true, tags: ['keep']}};

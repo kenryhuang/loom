@@ -474,3 +474,26 @@ async def test_resume_revalidates_saved_scope_failure_without_another_model_call
     assert unit["validation_version"] == VALIDATION_VERSION
     assert response["validation_errors"] == []
     assert response["validation_history"][-1]["errors"] == [failure]
+
+
+@pytest.mark.asyncio
+async def test_memory_provider_timeout_keeps_graph_and_reports_the_call_limit():
+    from loom.core import err, make_loom_error
+    from loom.evaluation.issues import EvaluationFailure
+
+    class TimeoutMemory(GraphJudge):
+        async def chat(self, messages, tools=None, cancellation=None, **kwargs):
+            if json.loads(messages[1].content).get("mode") in {"extract", "synthesis"}:
+                return err(make_loom_error("TIMEOUT", "", retryable=True))
+            return await super().chat(messages, tools, cancellation, **kwargs)
+
+    store, facts = trace()
+    checkpoint = {}
+    with pytest.raises(EvaluationFailure) as failed:
+        await run(store, facts, "run", checkpoint, TimeoutMemory(), extract_memory=True)
+    assert checkpoint["graph_revision"] > 0
+    detail = failed.value.issues[0]
+    assert detail["stage"] == "memory"
+    assert detail["code"] == "request.timeout"
+    assert detail["details"]["timeout_seconds"] > 0
+    assert "Resume" in detail["reason"]

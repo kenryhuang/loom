@@ -1129,3 +1129,22 @@ test("failed acceptance expands by default and retries, changed goals and runs s
   assert.equal(root.querySelectorAll(".event-row").length, 4);
   dom.window.close();
 });
+
+test("Fold all stays effective when failed acceptance arrives and history replays", () => {
+  const dom = setup(), root = document.getElementById("feed"), feed = new FeedView(root);
+  try {
+    const events = verificationEvents({failed: true});
+    feed.append(events[0]);
+    feed.toggleAll(true);
+    feed.toggleAll(false);
+    for (const e of events.slice(1)) feed.append(e);
+    assert.match(root.textContent, /needs attention/);
+    assert.equal(root.querySelectorAll('details[open]').length, 0);
+    feed.restore({snapshot: state(), events});
+    assert.equal(root.querySelectorAll('details[open]').length, 0);
+    feed.toggleAll(true);
+    assert.equal(root.querySelectorAll('details:not([open])').length, 0);
+    feed.toggleAll(false);
+    assert.equal(root.querySelectorAll('details[open]').length, 0);
+  } finally {feed.destroy(); dom.window.close();}
+});

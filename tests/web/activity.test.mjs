@@ -52,6 +52,43 @@ const evidenceArtifact = () => ({
   ],
 });
 
+test('Fold all still collapses after delayed evidence adds nested disclosures', async () => {
+  let resolve;
+  const changes = [];
+  const {dom, root, feed} = setup({
+    onDetailsChange: state => changes.push(state),
+    loadArtifact: () => new Promise(done => {resolve = done;}),
+  });
+  try {
+    feed.append(event(1, 'artifact.created', {artifact: {kind: 'visual_evidence', sha256: 'bundle'}}));
+    feed.toggleAll(); await tick();
+    assert.equal(changes.at(-1).expanded, true);
+    resolve({frames: [{id: 'first', width: 320, height: 240, artifact: {sha256: 'image'}}]});
+    await tick();
+    assert.ok(root.querySelector('.visual-evidence details'));
+    assert.equal(root.querySelectorAll('details:not([open])').length, 0);
+    feed.toggleAll(); await tick();
+    assert.equal(root.querySelectorAll('details[open]').length, 0);
+    assert.equal(changes.at(-1).expanded, false);
+  } finally {feed.destroy(); dom.window.close();}
+});
+
+test('evidence arriving after Fold all stays folded', async () => {
+  let resolve;
+  const {dom, root, feed} = setup({loadArtifact: () => new Promise(done => {resolve = done;})});
+  try {
+    feed.append(event(1, 'artifact.created', {artifact: {kind: 'visual_evidence', sha256: 'bundle'}}));
+    feed.toggleAll(true); await tick();
+    feed.toggleAll(false);
+    resolve({frames: [{id: 'first', width: 320, height: 240, artifact: {sha256: 'image'}}]});
+    await tick();
+    assert.equal(root.querySelectorAll('details[open]').length, 0);
+    feed.toggleAll(true); await tick();
+    assert.ok(root.querySelector('.visual-evidence details'));
+    assert.equal(root.querySelectorAll('details:not([open])').length, 0);
+  } finally {feed.destroy(); dom.window.close();}
+});
+
 test('visual evidence loads original screenshots on demand with normalized finding overlays', async () => {
   const {dom, root} = setup();
   const requests = [];

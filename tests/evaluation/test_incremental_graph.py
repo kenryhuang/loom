@@ -334,3 +334,30 @@ async def test_unknown_card_is_a_projection_boundary_and_expected_is_not_hindsig
             cutoff=8,
             target_ids={c["id"] for c in cards},
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outer_deadline", [False, True])
+async def test_graph_transport_timeouts_have_precise_errors_and_retain_reservations(outer_deadline):
+    import asyncio
+
+    from loom.evaluation.issues import EvaluationFailure
+
+    async def transport(*args):
+        if outer_deadline:
+            await asyncio.sleep(10)
+        raise TimeoutError()
+
+    provider = OpenAIProvider(api_key="fixture", model="glm-5.3", http_client=transport)
+    store, facts, rid = example()
+    cp = {}
+    with pytest.raises(EvaluationFailure) as failed:
+        await run(store, facts, rid, cp, provider, max_call_seconds=.02)
+    detail = failed.value.issues[0]
+    assert detail["code"] == "request.timeout"
+    assert detail["stage"] == "graph"
+    assert detail["details"]["timeout_seconds"] == .02
+    assert "Call timeout" in detail["reason"]
+    assert "Resume" in detail["reason"]
+    assert cp["usage"]["calls"] == cp["usage"]["unreported_calls"] == 1
+    assert cp["reservations"][0]["state"] == "unknown"

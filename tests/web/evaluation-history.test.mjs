@@ -10,7 +10,7 @@ const select = (view, id) => [...view.historyList.querySelectorAll('button')].fi
 async function fixture(t) {
   const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
   const abort = new AbortController(); t.after(() => {abort.abort(); dom.window.close();});
-  const settings = {max_calls: 10, max_seconds: 1800, max_tokens: 10000};
+  const settings = {max_calls: 10, max_seconds: 1800, max_tokens: 10000, max_call_seconds: 180};
   const base = {state: 'completed', model: 'judge', settings, usage: {calls: 0, total_tokens: 0}, created_at: '2026-10-24T03:00:00Z', analysis_version: 'goal_graph_v1'};
   const jobs = [
     {...base, id: 'evaluation-one', run_id: 'run-one'}, // Newest overall is NOT in the selected run.
@@ -45,19 +45,19 @@ test('scope filters history before selection; clicking a record shows its detail
   assert.doesNotMatch(view.root.textContent, /Saved evaluations/);
   assert.deepEqual(ids(view), ['evaluation-two', 'evaluation-two-again']);
   assert.equal(view.job.id, 'evaluation-two');
-  assert.equal(view.start.hidden, true); // Completed records cannot resume.
+  assert.equal(view.start.hidden, false); // New evaluation remains available while viewing history.
   assert.match(view.historyList.textContent, /judge.*completed/);
   select(view, 'evaluation-two-again'); await tick();
   assert.match(selectedRecord(view).textContent, /Evaluationevaluation-two-again/);
   assert.equal(view.historyList.querySelector('[aria-current="true"]').dataset.evaluationId, 'evaluation-two-again');
-  assert.equal(view.start.hidden, true);
+  assert.equal(view.start.hidden, false);
   assert.ok(view.historyList.querySelector('[aria-label="Resume evaluation evaluation-two-again"]'));
   scope('run-one');
   assert.deepEqual(ids(view), ['evaluation-one']);
   assert.equal(view.job, null);
   assert.equal(selectedRecord(view), null);
   assert.equal(view.toolbar.hidden, false);
-  assert.equal(view.start.hidden, true);
+  assert.equal(view.start.hidden, false);
   select(view, 'evaluation-one'); await tick();
   assert.match(selectedRecord(view).textContent, /run-one/);
   assert.doesNotMatch(selectedRecord(view).textContent, /run-two/);
@@ -72,21 +72,51 @@ test('resume keeps selected identity; new evaluations create separate records in
   assert.equal(starts[0].resume_id, 'evaluation-two-again');
   assert.equal(starts[0].new_evaluation, undefined);
   assert.equal(starts[0].max_seconds, 3600);
-  assert.equal(view.model.disabled, true);
-  view.fresh.click();
+  assert.equal(view.model.disabled, false);
+  view.newEvaluation();
   assert.equal(view.runSelect.value, 'run-two');
   assert.equal(view.selectedHistoryId, null);
   assert.equal(selectedRecord(view), null);
-  assert.equal(view.start.textContent, 'Create evaluation');
+  assert.equal(view.start.textContent, 'New evaluation');
   await view.run();
   assert.equal(starts[1].new_evaluation, true);
   assert.equal(starts[1].resume_id, undefined);
   assert.equal(starts[1].run_id, 'run-two');
   assert.equal(view.job.id, 'evaluation-new-2');
   assert.deepEqual(ids(view), ['evaluation-new-2', 'evaluation-two', 'evaluation-two-again']);
-  view.fresh.click(); await view.run();
+  view.newEvaluation(); await view.run();
   assert.equal(view.job.id, 'evaluation-new-3');
   assert.equal(ids(view).length, 4);
+});
+
+test('the single New evaluation button creates directly using current settings, even when an incomplete record is selected', async t => {
+  const {view, starts} = await fixture(t);
+  select(view, 'evaluation-two-again'); await tick();
+  const actions = [...view.toolbar.querySelectorAll('button')];
+  assert.deepEqual(actions.map(node => node.textContent), ['New evaluation']);
+  assert.equal(view.fields.max_seconds.disabled, false);
+  assert.equal(view.model.disabled, false);
+  view.fields.max_seconds.value = '3600';
+  view.start.click(); await tick();
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].new_evaluation, true);
+  assert.equal(starts[0].resume_id, undefined);
+  assert.equal(starts[0].max_seconds, 3600);
+  assert.equal(starts[0].run_id, 'run-two');
+  assert.equal(view.job.id, 'evaluation-new-1');
+  view.start.click(); await tick();
+  assert.equal(starts.length, 2);
+  assert.equal(view.job.id, 'evaluation-new-2');
+});
+
+test('polling saved history preserves edited settings for the next evaluation', async t => {
+  const {view, starts} = await fixture(t);
+  view.fields.max_seconds.value = '3600';
+  await view.follow(view.job.id);
+  assert.equal(view.fields.max_seconds.value, '3600');
+  view.start.click(); await tick();
+  assert.equal(starts[0].max_seconds, 3600);
+  assert.equal(starts[0].new_evaluation, true);
 });
 
 test('empty, legacy, missing and archived scopes never mix records from another run', async t => {
@@ -94,7 +124,7 @@ test('empty, legacy, missing and archived scopes never mix records from another 
   scope('run-empty');
   assert.deepEqual(ids(view), []);
   assert.match(view.historyList.textContent, /No evaluations in this scope/);
-  view.fresh.click();
+  view.newEvaluation();
   assert.equal(view.runSelect.value, 'run-empty');
   scope('');
   assert.deepEqual(ids(view), ['evaluation-legacy']);
@@ -103,12 +133,12 @@ test('empty, legacy, missing and archived scopes never mix records from another 
   assert.equal(view.runLabel.hidden, false);
   scope('__missing_run__');
   assert.deepEqual(ids(view), ['evaluation-missing']);
-  assert.equal(view.fresh.disabled, true);
+  assert.equal(view.start.disabled, true);
   select(view, 'evaluation-missing'); await tick();
   assert.match(selectedRecord(view).textContent, /Run ID was not recorded/);
   scope('run-archived');
   assert.deepEqual(ids(view), ['evaluation-archived']);
-  assert.equal(view.fresh.disabled, false);
+  assert.equal(view.start.disabled, false);
   select(view, 'evaluation-archived'); await tick();
   assert.match(selectedRecord(view).textContent, /run-archived/);
 });
@@ -134,23 +164,24 @@ test('a failed detail load cannot turn Resume into a new evaluation', async t =>
   await view.run();
   assert.equal(starts.length, 0);
   assert.match(view.status.textContent, /Detail unavailable/);
+  assert.equal(view.status.parentElement, view.progress);
+  assert.equal(view.progress.hidden, false);
 });
 
 test('pending creation prevents duplicate submissions and history changes', async t => {
   const {view, api} = await fixture(t);
   let finish, calls = 0;
   api.startEvaluation = () => {calls++; return new Promise((_resolve, reject) => {finish = reject;});};
-  view.fresh.click();
+  view.newEvaluation();
   const pending = view.run();
   await view.run();
   assert.equal(calls, 1);
   assert.equal(view.runSelect.disabled, true);
-  assert.equal(view.fresh.disabled, true);
+  assert.equal(view.start.disabled, true);
   assert.ok([...view.historyList.querySelectorAll('button')].every(node => node.disabled));
   finish(new Error('Service unavailable'));
   await pending;
   assert.equal(view.runSelect.disabled, false);
-  assert.equal(view.fresh.disabled, false);
   assert.equal(view.start.disabled, false);
   assert.equal(view.selectedHistoryId, null);
   assert.match(view.status.textContent, /Service unavailable/);
@@ -159,15 +190,18 @@ test('pending creation prevents duplicate submissions and history changes', asyn
 
 test('toolbar actions are buttons and each horizontal history row contains its complete identity and aligned actions', async t => {
   const {view, scope} = await fixture(t);
-  for (const control of [view.runSelect, view.model, view.fresh, view.start]) {
+  for (const control of [view.runSelect, view.model, view.start]) {
     assert.equal(control.closest('.deep-toolbar'), view.toolbar);
   }
   assert.equal(view.form.firstElementChild, view.toolbar);
+  assert.equal(view.toolbar.nextElementSibling, view.settingsPanel);
+  assert.equal(view.settingsPanel.nextElementSibling, view.historyPanel);
+  assert.equal(view.settingsPanel.classList.contains('setup-block'), true);
   assert.equal(view.root.querySelectorAll('.deep-toolbar').length, 1);
   assert.equal(view.historyList.closest('.dashboard-panel'), view.historyPanel);
   assert.equal(view.root.querySelector('.evaluation-identity'), null);
   assert.doesNotMatch(view.root.textContent, /Viewing saved evaluation/);
-  assert.equal(view.fresh.classList.contains('quiet'), false);
+  assert.equal(view.start.classList.contains('quiet'), false);
   for (const item of view.historyList.children) {
     const record = item.querySelector('.evaluation-history-record');
     const fields = [...record.querySelectorAll('.evaluation-history-field')];
@@ -185,14 +219,14 @@ test('toolbar actions are buttons and each horizontal history row contains its c
   }
   assert.equal(view.historyPanel.querySelectorAll('.dashboard-panel').length, 0);
   select(view, 'evaluation-two-again'); await tick();
-  assert.equal(view.start.hidden, true);
+  assert.equal(view.start.hidden, false);
   assert.ok(view.historyList.querySelector('[aria-label="Resume evaluation evaluation-two-again"]'));
   assert.equal(view.toolbar.hidden, false);
   scope('run-one');
   assert.equal(view.toolbar.hidden, false);
-  assert.equal(view.fresh.disabled, false);
-  view.fresh.click();
-  assert.equal(view.start.textContent, 'Create evaluation');
+  assert.equal(view.start.disabled, false);
+  view.newEvaluation();
+  assert.equal(view.start.textContent, 'New evaluation');
   assert.equal(view.start.hidden, false);
 });
 
@@ -208,7 +242,7 @@ test('row Resume selects and resumes that record, with Delete as its sibling', a
   assert.equal(starts[0].resume_id, 'evaluation-two-again');
   assert.equal(starts[0].new_evaluation, undefined);
   assert.equal(view.selectedHistoryId, 'evaluation-two-again');
-  assert.equal(view.start.hidden, true);
+  assert.equal(view.start.hidden, false);
 });
 
 test('changing scope during row Resume loading cancels the pending resume', async t => {
@@ -229,5 +263,42 @@ test('a failed row detail load does not resume another record or create a new ev
   await view.resumeEvaluation('evaluation-two-again');
   assert.equal(starts.length, 0);
   assert.match(view.status.textContent, /Detail unavailable/);
+  assert.equal(view.status.parentElement, view.progress);
+  assert.equal(view.progress.hidden, false);
   assert.equal(view.resumingId, null);
+});
+
+
+test('a timed out graph history exposes its call limit and resumes the same record with a larger limit', async t => {
+  const {view, jobs, starts} = await fixture(t);
+  const job = jobs.find(row => row.id === 'evaluation-two-again');
+  job.state = 'failed';
+  job.error = 'Evaluator request timed out';
+  job.error_details = [{code: 'request.timeout', details: {timeout_seconds: 180}}];
+  await view.follow(job.id);
+  assert.match(view.status.textContent, /Increase Call timeout/);
+  assert.equal(view.status.parentElement, view.progress);
+  assert.equal(view.progress.hidden, false);
+  assert.equal(view.progress.firstElementChild.nextElementSibling, view.status);
+  assert.equal(view.fields.max_call_seconds.disabled, false);
+  view.fields.max_call_seconds.value = '600';
+  await view.resumeEvaluation(job.id);
+  assert.equal(starts[0].resume_id, job.id);
+  assert.equal(starts[0].max_call_seconds, 600);
+  assert.equal(starts[0].new_evaluation, undefined);
+});
+
+
+test('new evaluation request errors appear in Evaluation run and clear when starting a fresh draft', async t => {
+  const {view, api} = await fixture(t);
+  view.newEvaluation();
+  api.startEvaluation = async () => {throw new Error('Provider unavailable');};
+  await view.run();
+  assert.equal(view.status.parentElement, view.progress);
+  assert.equal(view.progress.hidden, false);
+  assert.match(view.progress.textContent, /Evaluation runProvider unavailable/);
+  assert.equal(view.progress.querySelector('.deep-budget-grid'), null);
+  view.newEvaluation();
+  assert.equal(view.status.hidden, true);
+  assert.equal(view.progress.hidden, true);
 });

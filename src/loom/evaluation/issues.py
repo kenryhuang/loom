@@ -5,6 +5,9 @@ messages are presentation only, never inputs to retry or recovery decisions.
 Do not include raw model values or evidence in issue details.
 """
 
+import asyncio
+from collections.abc import Mapping
+
 from jsonschema import Draft202012Validator
 
 VERSION = "evaluation-issue.1"
@@ -33,6 +36,38 @@ class EvaluationFailure(ValueError):
 def stopped(code, reason, *, category, stage, unit_id=None, **context):
     return EvaluationFailure("Evaluation stopped.", [issue(code, reason, category=category, phase="orchestrate",
                                                          stage=stage, unit_id=unit_id, **context)])
+
+
+def request_timeout(*, stage, unit_id, timeout_seconds):
+    return stopped("request.timeout", f"Evaluator request timed out (call limit {timeout_seconds:g}s); accepted records retained. "
+                   "Increase Call timeout in Evaluation settings, then Resume evaluation.",
+                   category="provider", stage=stage, unit_id=unit_id, provider_code="TIMEOUT",
+                   details=dict(timeout_seconds=timeout_seconds))
+
+
+def provider_failure(error, *, stage, unit_id, timeout_seconds):
+    """Translate typed provider failures without guessing from message text."""
+    if error.code == "TIMEOUT":
+        return request_timeout(stage=stage, unit_id=unit_id, timeout_seconds=timeout_seconds)
+    return stopped("request.provider", error.message or f"Provider failed ({error.code}) without an error message",
+                   category="provider", stage=stage, unit_id=unit_id, provider_code=error.code)
+
+
+def request_failure_event(metadata, error):
+    """Keep request failures nonempty and serializable, including cancellation."""
+    if isinstance(error, EvaluationFailure):
+        code, message = error.issues[0]["code"] if error.issues else "request.failed", str(error)
+    elif isinstance(error, asyncio.CancelledError):
+        code, message = "request.cancelled", "Evaluator request cancelled before a response was received"
+    elif isinstance(error, TimeoutError):
+        code, message = "request.timeout", str(error) or "Evaluator request timed out"
+    else:
+        code = error.get("code") if isinstance(error, Mapping) else getattr(error, "code", None)
+        message = error.get("message") if isinstance(error, Mapping) else getattr(error, "message", None)
+        code = code or (type(error).__name__ if isinstance(error, BaseException) else "request.failed")
+        message = message or (str(error) if isinstance(error, (str, BaseException)) else None)
+        message = message or f"Evaluator request failed ({code}); no error message was recorded"
+    return dict(type="llm.failed", **metadata, error=str(message), error_code=str(code))
 
 
 def failure_state(issues):

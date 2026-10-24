@@ -4,8 +4,36 @@ import time
 
 import pytest
 
-from loom.evaluation.provider import bounded_http_client, evaluator_provider
+from loom.evaluation.provider import bounded_http_client, create_evaluation_provider, evaluator_provider
 from loom.llm.api import OpenAIProvider
+from loom.tasks.config import ModelConfig, TaskRunnerConfig, create_provider_from_task_config
+
+
+@pytest.mark.parametrize("selected", [None, "other"])
+def test_explicit_evaluation_options_override_judge_only(selected):
+    models = {name: ModelConfig(model=name, api_key="fixture", base_url="https://example.test/v1",
+                               request_options={"enable_thinking": False, "reasoning_effort": "max",
+                                                "parallel_tool_calls": False}) for name in ("main", "other")}
+    config = TaskRunnerConfig(default_model="main", evaluation_model="main", models=models,
+                              evaluation_request_options={"enable_thinking": True, "reasoning_effort": "low"})
+    judge = create_evaluation_provider(config, model_name=selected).unwrap()
+    wrapped = evaluator_provider(judge, output_tokens=None, timeout_seconds=180)
+    body = wrapped._request_body([], None, None, stream=False)
+    assert body["model"] == (selected or "main")
+    assert body["enable_thinking"] is True
+    assert body["reasoning_effort"] == "low"
+    assert body["parallel_tool_calls"] is False
+    solver = create_provider_from_task_config(config, model_name=selected).unwrap()
+    assert solver.request_options["reasoning_effort"] == "max"
+    assert solver.request_options["enable_thinking"] is False
+    assert config.models[selected or "main"].request_options == solver.request_options
+
+
+def test_evaluation_without_options_inherits_model_and_reports_creation_errors():
+    config = TaskRunnerConfig(default_model="main", models={"main": ModelConfig(
+        model="main", api_key="fixture", base_url="https://example.test/v1", request_options={"reasoning_effort": "high"})})
+    assert create_evaluation_provider(config).unwrap().request_options == {"reasoning_effort": "high"}
+    assert not create_evaluation_provider(config, model_name="missing").ok
 
 
 @pytest.mark.parametrize("options", [

@@ -24,6 +24,18 @@ def test_cli_defaults_to_v2_and_python_callers_retain_explicit_v1_compatibility(
     assert EvaluationConfig(path).analysis_version == "v1"
 
 
+def test_cli_judge_uses_evaluation_request_options(tmp_path):
+    from loom.evaluation.analyze import _create_judge_provider
+
+    path = tmp_path / 'config.yaml'
+    path.write_text('default_model: main\nevaluation_request_options:\n  enable_thinking: true\n'
+                    '  reasoning_effort: low\nmodels:\n  main:\n    model: evaluator\n'
+                    '    api_key: fixture\n    base_url: https://example.test/v1\n'
+                    '    request_options:\n      reasoning_effort: max\n')
+    provider = _create_judge_provider(EvaluationConfig(tmp_path / 'trace.jsonl', config_path=path)).unwrap()
+    assert provider.request_options == {'enable_thinking': True, 'reasoning_effort': 'low'}
+
+
 def test_v2_analyze_writes_facts_and_unknown_semantics_without_judge(tmp_path):
     path = tmp_path / "trace.jsonl"
     write_trace(path)

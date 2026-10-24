@@ -678,7 +678,7 @@ $("message").addEventListener("keydown", (event) => {
   }
 });
 $("redirect").addEventListener("click", () => send(true));
-$("toggle-details").addEventListener("click", () => feed.toggleAll());
+$("toggle-details").addEventListener("click", () => feed.toggleAll($("toggle-details").getAttribute("aria-expanded") !== "true"));
 $("history").addEventListener("click", async () => {
   $("history").disabled = true;
   try {

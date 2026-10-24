@@ -13,12 +13,17 @@ function safeLink(value) {
     return null;
   }
 }
-function renderSection(item, loadArtifact) {
+function applyDetailMode(root, detailMode) {
+  const expanded = detailMode?.();
+  if (expanded != null) for (const node of root.querySelectorAll('details')) node.open = expanded;
+  return root;
+}
+function renderSection(item, loadArtifact, detailMode) {
   const node = element("section", "activity-section");
   if (item.label) node.append(element("small", "activity-label", item.label));
   const value = item.value;
   if (item.kind === "visual-evidence") {
-    const view = renderVerificationArtifact(value, loadArtifact);
+    const view = renderVerificationArtifact(value, loadArtifact, detailMode);
     if (view) node.append(view);
   } else if (item.kind === "acceptance-criterion") {
     node.append(element("p", "", value.description || "No criterion description recorded"));
@@ -48,7 +53,7 @@ function renderSection(item, loadArtifact) {
         button.disabled = true;
         try {
           const content = await loadArtifact(value.artifact.sha256);
-          evidence.replaceChildren(renderVerificationArtifact(content, loadArtifact) || element("pre", "activity-raw-content", JSON.stringify(content, null, 2)));
+          evidence.replaceChildren(renderVerificationArtifact(content, loadArtifact, detailMode) || element("pre", "activity-raw-content", JSON.stringify(content, null, 2)));
         } catch (error) {
           evidence.textContent = `Could not load evidence: ${error.message}`;
           button.disabled = false;
@@ -139,11 +144,11 @@ function renderSection(item, loadArtifact) {
         "Preview shortened. Open raw records for the full content.",
       ),
     );
-  return node;
+  return applyDetailMode(node, detailMode);
 }
 
 /** Stable summary, controls, and section nodes; closed rows do no detail work. */
-export function renderVerificationArtifact(value, loadArtifact) {
+export function renderVerificationArtifact(value, loadArtifact, detailMode) {
   if (value?.media_type === 'image/png' && /^data:image\/png;base64,/.test(value.data_url || '')) {
     const image = element('img', 'visual-original'); image.src = value.data_url; image.alt = 'Original browser screenshot'; return image;
   }
@@ -184,24 +189,26 @@ export function renderVerificationArtifact(value, loadArtifact) {
     if (value.url) root.append(element('p', 'muted small', `Target: ${value.url}`));
     if (value.result?.reason || value.judgment?.reason) root.append(element('p', '', value.result?.reason || value.judgment.reason));
     const raw = element('details'); raw.append(element('summary', '', 'Capture metadata and raw evidence'), element('pre', 'activity-raw-content', JSON.stringify(value, null, 2))); root.append(raw);
-    return root;
+    return applyDetailMode(root, detailMode);
   }
   const sections = verificationArtifactSections(value);
   if (!sections) return null;
   const root = element("div", "verification-evidence");
-  root.append(...sections.map(item => renderSection(item, loadArtifact)));
+  root.append(...sections.map(item => renderSection(item, loadArtifact, detailMode)));
   const raw = element("details");
   raw.append(element("summary", "", "Raw verification evidence"));
   raw.addEventListener("toggle", () => {
     if (raw.open && !raw.querySelector("pre")) raw.append(element("pre", "activity-raw-content", JSON.stringify(value, null, 2)));
   });
   root.append(raw);
-  return root;
+  return applyDetailMode(root, detailMode);
 }
 
 export class ActivityRow {
-  constructor(key, { inspect, expand, loadArtifact }) {
+  constructor(key, { inspect, expand, loadArtifact, detailMode, detailsChanged }) {
     this.loadArtifact = loadArtifact;
+    this.detailMode = detailMode;
+    this.detailsChanged = detailsChanged;
     this.node = element("details", "event-row");
     this.node.dataset.key = key;
     this.summary = element("summary");
@@ -288,7 +295,15 @@ export class ActivityRow {
         previous.node.contains(selection.anchorNode)
       )
         return;
-      const node = renderSection(item, this.loadArtifact);
+      const node = renderSection(item, this.loadArtifact, this.detailMode);
+      // A refreshed section keeps explicit choices for existing disclosures;
+      // only newly introduced disclosures inherit the feed-wide mode.
+      const states = new Map([...(previous?.node.querySelectorAll('details') || [])]
+        .map((detail, index) => [detail.dataset.key || index, detail.open]));
+      [...node.querySelectorAll('details')].forEach((detail, index) => {
+        const key = detail.dataset.key || index;
+        if (states.has(key)) detail.open = states.get(key);
+      });
       if (previous) previous.node.replaceWith(node);
       else this.content.append(node);
       this.sections[index] = { signature, node };
@@ -296,5 +311,6 @@ export class ActivityRow {
     for (const section of this.sections.slice(items.length))
       section.node.remove();
     this.sections.length = items.length;
+    this.detailsChanged?.();
   }
 }

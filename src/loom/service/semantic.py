@@ -23,13 +23,15 @@ from loom.evaluation.goal_loops.graph_contract import ENGINE as GRAPH_ENGINE
 from loom.evaluation.goal_loops.graph_contract import PROMPT as GRAPH_PROMPT
 from loom.evaluation.goal_loops.graph_contract import RESOURCE_LIMITS as GRAPH_RESOURCE_LIMITS
 from loom.evaluation.goal_loops.graph_contract import UPGRADABLE_VERSIONS as GRAPH_UPGRADABLE_VERSIONS
-from loom.evaluation.issues import EvaluationFailure, describe, failure_state, issue
+from loom.evaluation.issues import EvaluationFailure, describe, failure_state, issue, request_failure_event
 from loom.evaluation.legacy_issues import legacy_job_state
+from loom.evaluation.provider import create_evaluation_provider
 from loom.evolution.diagnoses import proposals_from_diagnoses
 from loom.service.contracts import ServiceError, canonical, new_id
 from loom.service.evaluation_artifacts import EvaluationArtifacts
+from loom.service.evaluation_progress import finish_request, present_legacy_request_failure
 from loom.service.insights import build_insights
-from loom.tasks.config import create_provider_from_task_config, load_task_config
+from loom.tasks.config import load_task_config
 
 GOAL_ENGINES = {GOAL_ENGINE, GRAPH_ENGINE}
 
@@ -166,7 +168,7 @@ class SessionSemantic:
         public = {k: v for k, v in body.items() if k not in {"checkpoint", "config_digest"}}
         if public["state"] == "failed" and not public.get("error_details"):
             public["state"] = legacy_job_state(public.get("error") or "")
-        return public
+        return present_legacy_request_failure(public)
 
     def get(self, sid, aid, identifier):
         body = self._load(sid, aid, identifier)
@@ -508,6 +510,29 @@ class SessionSemantic:
             body["elapsed_seconds"] = prior_elapsed + round(time.monotonic() - started, 2)
             self._save(body)
 
+        def interruption():
+            if self.closed.is_set():
+                return "interrupted", "runtime.interrupted", "Service is shutting down; evaluator request interrupted; accepted records retained"
+            if stop.is_set():
+                return "cancelled", "runtime.cancelled", "Cancellation requested; evaluator request cancelled; accepted records retained"
+            if prior_elapsed + time.monotonic() - started >= settings["max_seconds"]:
+                return "budget_exhausted", "budget.seconds", f"Evaluation time budget reached ({settings['max_seconds']}s); accepted records retained"
+            return None
+
+        def failed_request(error, code=None, state="failed"):
+            event = request_failure_event({}, error)
+            reason, code = event["error"], code or event["error_code"]
+            stopped = interruption()
+            if code == "request.cancelled" or (code == "request.timeout" and stopped and stopped[0] == "budget_exhausted"):
+                if stopped:
+                    state, code, reason = stopped
+                else:
+                    state = "cancelled"
+            message = finish_request(body, elapsed_seconds=prior_elapsed + time.monotonic() - started,
+                                     state=state, error=reason, error_code=code)
+            if message:
+                progress("call." + state, message)
+
         class Sink:
             def emit(_, event):
                 if event["type"] == "llm.requested":
@@ -549,8 +574,7 @@ class SessionSemantic:
                     body["call_history"] = [*body.get("call_history", []), dict(body["current_call"])][-500:]
                     progress("call.completed", f"Response received: {body.get('stage')} · {usage.total_tokens} reported tokens")
                 elif event["type"] == "llm.failed":
-                    body["current_call"]["state"] = "failed"
-                    progress("call.failed", f"Evaluator request failed: {body.get('stage')}")
+                    failed_request(event.get("error"), event.get("error_code"))
                 elif event["type"] == "evaluation.activity":
                     body["stage"] = event["stage"]
                     body["activity"] = event["activity"]
@@ -695,7 +719,7 @@ class SessionSemantic:
                 loaded = load_task_config(self.config_path)
                 if not loaded.ok:
                     raise ValueError("Could not load evaluator configuration")
-                created = create_provider_from_task_config(loaded.value, model_name=body["model"])
+                created = create_evaluation_provider(loaded.value, model_name=body["model"])
                 if not created.ok:
                     raise ValueError(created.error.message)
                 provider = created.value
@@ -755,9 +779,22 @@ class SessionSemantic:
             if body.get("analysis_version") == "v3" and semantic["coverage"]["status"] != "complete":
                 body.update(state="budget_exhausted", error="Evaluation budget reached; focused stages remain unfinished")
         except InterruptedError as exc:
-            body.update(state="interrupted" if self.closed.is_set() else "cancelled", error=str(exc))
+            state, code, reason = interruption() or ("interrupted", "runtime.interrupted", str(exc) or "Evaluation interrupted")
+            detail = issue(code, reason, category="cancelled", phase="orchestrate", unit_id=body.get("stage"))
+            body.update(state=state, error=describe(detail), error_details=[detail])
+        except TimeoutError as exc:
+            state, code, reason = interruption() or ("failed", "runtime.timeout", str(exc) or "Evaluation timed out")
+            detail = issue(code, reason, category="budget" if state == "budget_exhausted" else "internal",
+                           phase="orchestrate", unit_id=body.get("stage"))
+            body.update(state=state, error=describe(detail), error_details=[detail])
         except EvaluationFailure as exc:
-            body.update(state=failure_state(exc.issues), error=str(exc), error_details=exc.issues)
+            stopped = interruption()
+            if stopped and stopped[0] == "budget_exhausted" and any(e["code"] == "request.timeout" for e in exc.issues):
+                state, code, reason = stopped
+                detail = issue(code, reason, category="budget", phase="orchestrate", unit_id=body.get("stage"))
+                body.update(state=state, error=describe(detail), error_details=[detail])
+            else:
+                body.update(state=failure_state(exc.issues), error=str(exc), error_details=exc.issues)
         except Exception as exc:
             if body.get("analysis_version") == GRAPH_ENGINE:
                 detail = issue("runtime.internal", f"{type(exc).__name__}: {exc}", category="internal", phase="orchestrate",
@@ -767,7 +804,8 @@ class SessionSemantic:
                 body.update(state=legacy_job_state(str(exc)), error=str(exc) or type(exc).__name__)
         finally:
             if (body.get("current_call") or {}).get("state") == "waiting":
-                body["current_call"]["state"] = "interrupted"
+                details = body.get("error_details") or []
+                failed_request(body.get("error"), details[0]["code"] if details else "runtime." + body["state"], state=body["state"])
             progress(body["state"], body.get("error") or ("Evaluation completed" if body["state"] == "completed" else f"Evaluation {body['state']}"))
             with self.lock:
                 persist()

@@ -1116,11 +1116,28 @@ schema）最多 24,000 字符。相关目标状态单独限制为 6,000 字符�
 作为输入成本估计，不作为 token 准入门槛，也不假定是 tokenizer 的准确计数。
 实际 usage 和未知 usage 分别保留，不将失败调用的费用清零。输出请求不传
 max_completion_tokens；供应商自身的上下文/输出能力仍适用。Resume 可增加
-calls/seconds，来源、模型配置和语义设置保持不变。
+calls/seconds 和单次调用超时（`max_call_seconds`），来源、模型配置和语义设置保持不变。
+单次超时会报告 `request.timeout`、阶段、请求单元及限时；在 Evaluation settings 中提高
+Call timeout 后可以 Resume 同一条 history，已保存结果和累计用量继续保留。
+Activity log 和调用历史记录失败原因、错误码与实际等待时间，区分供应商错误、单次超时、
+总时间耗尽、取消和服务关闭。旧记录缺少原因时，仅为与最终状态对应的最后一次失败补充
+展示说明，并标记来源为终止状态；不改写原记录，也不推测更早失败的原因。
 
-评估复用现有 `evaluator_provider`，原样保留模型配置中的 `enable_thinking`、
-`reasoning_effort` 等请求参数。输出和超时限制单独应用，避免覆盖模型要求的思考模式；
-不会向供应商盲目增加未配置的参数。
+评估通过 `create_evaluation_provider` 创建所选 judge 的独立配置副本：继承模型的请求
+参数，再用顶层 `evaluation_request_options` 覆盖同名参数。Web Deep Eval（包括图分析、
+Memory）与 CLI judge 共用这一入口，任务 solver 和运行时验收仍使用原模型参数。
+例如 GLM-5.3 可以在评估时使用下面的轻量推理配置，同时保留 solver 的 `max`：
+
+```yaml
+evaluation_request_options:
+  enable_thinking: true
+  reasoning_effort: low
+```
+
+Settings → Deep eval request options 可编辑这些参数；未配置时完全继承模型选项。
+参数是否受支持由所选模型决定。更改这组配置后需 New eval，旧 history 保留原配置身份，
+不能通过 Resume 混入新推理设置。`evaluator_provider` 只处理输出和超时限制，
+不会再硬编码修改思考参数。
 新引擎不使用 `max_rounds` 抽样限制：完整卡片队列受总预算控制。
 
 ### 14.4 验证及尚未覆盖的设计目标

@@ -21,7 +21,7 @@ from loom.evaluation.goal_loops.judge_metadata import card_metadata, feedback_me
 from loom.evaluation.goal_loops.legacy_reads import read_requests
 from loom.evaluation.goal_loops.packing import REQUEST_CHARS, bounded_state, request_profile, serialized
 from loom.evaluation.goal_loops.structure import pending_structure_units, structure_pending, structure_review_context
-from loom.evaluation.issues import EvaluationFailure, stopped
+from loom.evaluation.issues import EvaluationFailure, provider_failure, request_failure_event, request_timeout, stopped
 from loom.evaluation.provider import evaluator_provider
 from loom.evaluation.repair import begin_cycle, retry
 from loom.llm.api import LlmMessage, request_llm_response
@@ -61,12 +61,19 @@ def upgrade_budget_identity(checkpoint, saved_settings):
     No source, model, protocol or semantic identity component is relaxed.
     """
     old = checkpoint.get("identity")
-    legacy = {k: v for k, v in saved_settings.items() if k not in {"max_calls", "max_tokens", "max_seconds"}}
-    if old and old.get("settings") == identity(legacy):
-        old["settings"] = identity({k: v for k, v in saved_settings.items() if k not in RESOURCE_LIMITS})
-        checkpoint.setdefault("resource_limits", {k: saved_settings[k] for k in RESOURCE_LIMITS})
+    legacy_limits = ({"max_calls", "max_tokens", "max_seconds"}, RESOURCE_LIMITS - {"max_call_seconds"})
+    legacy_digests = {
+        identity({k: v for k, v in saved_settings.items() if k not in limits | memory_keys})
+        for limits in legacy_limits for memory_keys in (set(), {"extract_memory"})
+    }
+    current = identity({k: v for k, v in saved_settings.items() if k not in RESOURCE_LIMITS | {"extract_memory"}})
+    if old and old.get("settings") != current and old.get("settings") in legacy_digests:
+        old["settings"] = current
+        resources = checkpoint.setdefault("resource_limits", {})
+        for key in RESOURCE_LIMITS:
+            resources.setdefault(key, saved_settings[key])
         checkpoint.setdefault("resource_policy_upgrades", []).append(
-            dict(revision=checkpoint.get("graph_revision", 0), reason="Character capacities are resumable resource limits")
+            dict(revision=checkpoint.get("graph_revision", 0), reason="Character capacities and call timeout are resumable resource limits")
         )
 
 
@@ -296,23 +303,21 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
             async with asyncio.timeout(timeout):
                 response = await request_llm_response(wrapped, messages, tools=None)
         except TimeoutError as exc:
-            message = f"Evaluator request timed out after {timeout:g}s at {unit['id']}; accepted records retained"
-            await emit(dict(type="llm.failed", **meta, error=message))
+            failure = request_timeout(stage="graph", unit_id=unit["id"], timeout_seconds=timeout)
+            await emit(request_failure_event(meta, failure))
             await save()
-            raise stopped("request.timeout", message, category="provider", stage="graph", unit_id=unit["id"],
-                          details=dict(timeout_seconds=timeout)) from exc
-        except BaseException:
-            await emit(dict(type="llm.failed", **meta))
+            raise failure from exc
+        except BaseException as exc:
+            await emit(request_failure_event(meta, exc))
             await save()
             raise
         if not response.ok:
-            await emit(dict(type="llm.failed", **meta))
+            await emit(request_failure_event(meta, provider_failure(response.error, stage="graph", unit_id=unit["id"], timeout_seconds=timeout)))
             await save()
             if unsupported_format(response.error) and cp["mode"] != "text":
                 cp["mode"] = "text"
                 continue
-            raise stopped("request.provider", response.error.message, category="provider", stage="graph", unit_id=unit["id"],
-                          provider_code=response.error.code)
+            raise provider_failure(response.error, stage="graph", unit_id=unit["id"], timeout_seconds=timeout)
         answer = response.unwrap()
         usage = {k: getattr(answer.usage, k, 0) for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
         if usage["total_tokens"] > 0:
