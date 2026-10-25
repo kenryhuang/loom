@@ -24,11 +24,6 @@ export const requestFields = {
   reasoning_effort: choice('Reasoning effort', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
   stream_options: {label: 'Stream options', fields: {include_usage: flag('Include usage')}},
 };
-export const taskFields = {
-  objective: textField('Default objective', {type: 'multiline'}), workspace: textField('Workspace path'),
-  profile: textField('Task profile', {placeholder: 'Use task default'}),
-  expected_outputs: {label: 'Expected outputs', type: 'list'},
-};
 export const runFields = {
   plan_mode: choice('Planning mode', [['auto', 'Automatic'], ['force', 'Always plan'], ['off', 'Off']]),
   max_steps: numberField('Maximum steps'), timeout_ms: numberField('Run timeout · milliseconds'),

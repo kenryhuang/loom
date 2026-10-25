@@ -1,5 +1,5 @@
 import {element} from '../markdown.mjs';
-import {action, fields, textField, modelChoice, providerFields, modelFields, requestFields, taskFields, runFields, metaFields, labelFor} from './settings-fields.mjs';
+import {action, fields, textField, modelChoice, providerFields, modelFields, requestFields, runFields, metaFields, labelFor} from './settings-fields.mjs';
 
 export class SettingsView {
   constructor(root, {api, changed}) {Object.assign(this, {root, api, changed});}
@@ -16,6 +16,7 @@ export class SettingsView {
   render(data, message = '') {
     this.data = data;
     this.draft = structuredClone(data.config);
+    delete this.draft.task;
     const draft = this.draft, signal = this.abort.signal;
     this.root.replaceChildren(element('h1', '', 'Settings'), element('p', 'muted small settings-path', data.path));
     const notice = element('p', 'notice', message); notice.hidden = !message; notice.setAttribute('role', 'status');
@@ -26,7 +27,7 @@ export class SettingsView {
     tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Configuration categories'); controls.append(tabs, body);
     const groups = [['general', 'Model selection'], ['providers', 'Models'], ['embedding_profiles', 'Embedding services'],
       ['evaluation_request_options', 'Deep eval request options'],
-      ['task', 'Task defaults'], ['run', 'Run defaults'], ['meta_harness', 'Evaluation / Evolve']];
+      ['run', 'Run defaults'], ['meta_harness', 'Evaluation / Evolve']];
     const extras = Object.keys(draft).filter(key => key !== 'model_aliases' && draft[key] !== null && typeof draft[key] === 'object' && !groups.some(([id]) => key === id));
     groups.push(...extras.map(key => [key, labelFor(key)]));
     const panels = new Map();
@@ -68,7 +69,7 @@ export class SettingsView {
         if (key === 'meta_harness') panel.append(element('p', 'muted', 'Configure optimization models, candidate search and trial budgets.'));
         if (Array.isArray(draft[key])) fields(panel, () => ({items: draft[key]}), value => {draft[key] = value.items;},
           {items: {label: title, type: 'list'}}, context, key);
-        else fields(panel, () => draft[key], value => {draft[key] = value;}, {task: taskFields, run: runFields, meta_harness: metaFields}[key] || {}, context, key);
+        else fields(panel, () => draft[key], value => {draft[key] = value;}, {run: runFields, meta_harness: metaFields}[key] || {}, context, key);
       }
     }
     choose(panels.has(this.selected) ? this.selected : 'general');

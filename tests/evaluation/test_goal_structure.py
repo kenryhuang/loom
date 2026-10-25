@@ -7,8 +7,8 @@ import pytest
 
 from loom.core import ok
 from loom.evaluation.behavior_facts import build_behavior_facts
+from loom.evaluation.goal_loops.graph_contract import PROMPT, compact_contract, protocol
 from loom.evaluation.goal_loops.graph_updates import parse_updates
-from loom.evaluation.goal_loops.graph_contract import PROMPT, protocol, compact_contract
 from loom.evaluation.goal_loops.judge_metadata import feedback_metadata
 from loom.evaluation.goal_loops.structure import pending_structure_units
 from loom.llm import LlmResponse, TokenUsage
@@ -159,7 +159,7 @@ async def test_old_completed_root_only_units_resume_structure_without_losing_jud
 
 
 def test_structure_repair_protocol_excludes_already_accepted_action_judgments():
-    expected = {"goals", "stages", "attributions", "structure"}
+    expected = {"goals", "stages", "reuse", "attributions", "structure"}
     assert set(protocol(False, metadata_only=True, structure_only=True).schema["properties"]) == expected
     for mode in ("text", "json_object"):
         assert set(compact_contract(mode, metadata_only=True, structure_only=True)["records"]) == expected
@@ -179,13 +179,15 @@ class LongReasonJudge(RootOnlyJudge):
         if rows.get("structure") and (self.times is None or self.times > 0):
             if self.times is not None:
                 self.times -= 1
-            rows["structure"][0]["reason"] = "Root report and verification. " * 20
+            rows["structure"][0]["reason"] = "Root report and verification. " * 30
         return ok(LlmResponse(content=json.dumps(rows), usage=TokenUsage(100, 50, 150)))
 
 
 @pytest.mark.asyncio
 async def test_long_structure_reason_has_actionable_feedback_and_counts_as_validation_issue():
-    store = source(action(1)); facts = build_behavior_facts(store); cp = {}
+    store = source(action(1))
+    facts = build_behavior_facts(store)
+    cp = {}
     result = await run(store, facts, "run", cp, LongReasonJudge("single_goal"))
     assert result["coverage"]["pending_cards"] == 0
     assert result["coverage"]["validation_issue_count"] == 1
@@ -193,10 +195,12 @@ async def test_long_structure_reason_has_actionable_feedback_and_counts_as_valid
     errors = cp["responses"][-1]["validation_errors"]
     feedback = feedback_metadata(errors)
     assert feedback[0]["path"] == ["reason"]
-    assert "at most 240 characters" in feedback[0]["reason"]
+    assert "at most 600 characters" in feedback[0]["reason"]
     assert "Shorten the field" in feedback[0]["reason"]
     accepted = deepcopy(cp["assessments"])
     judge = RootOnlyJudge("single_goal")
+    from loom.evaluation.work_items import retry_failed
+    retry_failed(cp)
     done = await run(store, facts, "run", cp, judge)
     assert done["coverage"]["pipeline_complete"]
     assert done["coverage"]["validation_issue_count"] == 0
@@ -214,7 +218,8 @@ async def test_mechanical_structure_failure_uses_own_repair_budget_and_completes
     result = await run(store, facts, "run", cp, judge)
     unit = next(iter(cp["units"].values()))
     assert len(judge.requests) == 3
-    assert unit["repair"] == 1 and unit.get("format_repair") == 1
+    assert sum(unit['repair_ledger'][key].get('candidate', 0) for key in unit['repair_ledger']) == 1
+    assert sum(unit['repair_ledger'][key].get('format', 0) for key in unit['repair_ledger']) == 1
     assert result["coverage"]["pipeline_complete"], cp.get("conflicts")
     assert result["coverage"]["validation_issue_count"] == 0
     assert next(iter(cp["structure_reviews"].values()))["decision"] == "single_goal"
@@ -229,8 +234,8 @@ async def test_mechanical_repair_budget_is_bounded():
     judge = LongReasonJudge("single_goal")
     result = await run(store, facts, "run", cp, judge)
     unit = next(iter(cp["units"].values()))
-    assert len(judge.requests) == 4
-    assert unit["repair"] == 1 and unit.get("format_repair") == 2
+    assert len(judge.requests) == 3
+    assert sum(unit['repair_ledger'][key].get('format', 0) for key in unit['repair_ledger']) == 1
     assert not result["coverage"]["pipeline_complete"]
     assert result["coverage"]["validation_issue_count"] == 1
     assert len(result["coverage"]["pending_structure_units"]) == 1

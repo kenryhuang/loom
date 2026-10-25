@@ -150,7 +150,7 @@ def test_reconciliation_does_not_erase_invalid_structure_record_when_coverage_is
 def test_narrow_graph_request_rejects_extra_types_without_losing_record_location():
     _, _, cp, extraction = fixture()
     card = extraction["cards"][0]
-    errors, _ = commit_updates(cp, [("assessments", assessment(card)), ("structure", dict(decision="single_goal", reason="x" * 241, refs=[]))],
+    errors, _ = commit_updates(cp, [("assessments", assessment(card)), ("structure", dict(decision="single_goal", reason="x" * 601, refs=[]))],
                               batch_id="b", cards=extraction["cards"], delivered=extraction["registry"], cutoff=100,
                               target_ids={card["id"]}, allowed_fields={"structure"})
     assert [(e["code"], e["record_index"]) for e in errors] == [("response.record_type", 1), ("schema.maxLength", 2)]

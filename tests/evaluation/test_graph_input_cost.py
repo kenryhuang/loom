@@ -112,7 +112,7 @@ async def test_schema_cost_is_measured_without_a_token_budget_gate():
     result = await run(store, facts, "run", cp, judge, max_tokens=100)
     assert result["coverage"]["pipeline_complete"]
     assert judge.requests and cp["usage"]["total_tokens"] > 100
-    assert 0 < cp["reservations"][0]["input_profile"]["schema_chars"] < 4000
+    assert 0 < cp["reservations"][0]["input_profile"]["schema_chars"] < 4500  # Includes explicit reuse records.
     assert cp["reservations"][0]["output_token_limit"] is None
 
 

@@ -22,7 +22,11 @@ export function renderTraceMemory(view, root) {
   }
   const coverage = memory.coverage;
   root.append(element('p', 'muted', `${coverage.completed_windows} / ${coverage.total_windows} memory windows complete · ${coverage.evidence_chars.toLocaleString()} evidence characters`));
-  if (memory.status !== 'complete') root.append(element('p', 'notice', 'Partial memory: saved records remain available. Resume the evaluation to finish remaining windows.'));
+  if (coverage.processed_actions != null) root.append(element('p', 'muted',
+    `${coverage.processed_actions} / ${coverage.source_actions} actions processed · ${coverage.published_records} available records · ${coverage.quarantined_records} quarantined · ${coverage.stale_records} stale · ${coverage.unknown_contributions} unknown contributions`));
+  if (memory.status !== 'complete') root.append(element('p', 'notice', memory.execution_complete
+    ? 'Processing finished with quality gaps. Available records remain usable; quarantined and stale records are excluded from session memory. Use Retry failed items on this history record.'
+    : 'Partial memory: saved records remain available. Resume the evaluation to finish remaining windows.'));
   const goals = new Map((view.data.goals || []).map(g => [g.id, g]));
   const stages = new Map((view.data.stages || []).map(s => [s.id, s]));
   const name = id => {const row = goals.get(id) || stages.get(id); return row ? `${row.display_id || ''} · ${row.objective || row.title}` : id;};
@@ -71,6 +75,11 @@ export function renderTraceMemory(view, root) {
         if (row.category) body.append(badge(row.category));
         table(body, ['Field', 'Memory'], Object.entries(fields).filter(([key]) => row[key]).map(([key, label]) => [label, row[key]]));
         if (row.steps) {const list = element('ol'); for (const step of row.steps) list.append(element('li', '', step)); body.append(list);}
+        for (const step of row.provenance?.step_support || []) {
+          const item = element('div', 'memory-step-support');
+          item.append(element('p', 'muted small', `${step.basis === 'observed' ? 'Observed step' : 'Proposed step'}: ${step.text}`));
+          view.refs(item, step.evidence_refs || []); body.append(item);
+        }
         body.append(element('p', 'muted small', `Goals: ${row.goal_ids.map(name).join('; ')}`));
         if (row.stage_ids.length) body.append(element('p', 'muted small', `Stages: ${row.stage_ids.map(name).join('; ')}`));
         body.append(element('p', 'muted small', `Actions: ${row.action_ids.join(', ')}`));
@@ -80,8 +89,18 @@ export function renderTraceMemory(view, root) {
     }
   }
   view.details(root, 'memory-scope', 'Memory scope & coverage', body => {
+    if (memory.analysis_epoch) body.append(element('p', 'muted small', `Memory epoch ${memory.analysis_epoch}`));
+    for (const epoch of memory.previous_epochs || []) body.append(element('p', 'muted small',
+      `Archived epoch ${epoch.epoch} · ${epoch.identity.version} · ${epoch.reason}`));
     for (const text of memory.limitations) body.append(element('p', 'muted small', text));
     body.append(element('p', 'muted small', `${coverage.truncated_slices} bounded / truncated evidence slices.`));
     for (const error of coverage.errors) body.append(element('p', 'notice', error));
+  }, false, 'setup-block');
+  if (memory.quarantine?.length) view.details(root, 'memory-quarantine', `Quarantined candidates · ${memory.quarantine.length}`, body => {
+    for (const row of memory.quarantine) view.details(body, `quarantine:${row.id}`, `${row.kind} · ${row.issue.code}`, detail => {
+      detail.append(element('p', '', row.issue.reason));
+      table(detail, ['Field', 'Value'], [['Window', row.unit_id], ['Candidate', row.id],
+        ['Field path', (row.issue.path || []).join('/')], ['Disposition', row.issue.disposition || 'quarantine']]);
+    }, false, 'setup-block');
   }, false, 'setup-block');
 }

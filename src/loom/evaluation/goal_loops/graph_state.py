@@ -218,12 +218,12 @@ def commit_group(cp, group, *, group_id, base_revision, cards, delivered, cutoff
         stage_ids = list(dict.fromkeys(resolve(s) for s in raw["stage_ids"]))
         if any(s not in state["stages"] for s in stage_ids):
             raise RuleViolation("graph.stage_reference", "Unknown stage reference", path=("stage_ids",), category="semantic")
-        if raw["status"] == "unknown" and stage_ids:
-            raise RuleViolation("graph.unknown_attribution", "Unknown attribution must not assign cost ownership", path=("stage_ids",), category="semantic")
-        evidence = refs(raw["refs"], required=raw["status"] != "unknown")
+        # Membership and action utility are independent claims. Unknown utility
+        # may have supported ownership, but ownership always requires evidence.
+        evidence = refs(raw["refs"], required=raw["status"] != "unknown" or bool(stage_ids))
         own = set(card_map[cid]["refs"]) | set(card_map[cid]["raw_refs"])
         if (
-            raw["status"] != "unknown"
+            (raw["status"] != "unknown" or stage_ids)
             and not own.intersection(raw["refs"])
             and not any(r["line_number"] in (card_map[cid]["start_line"], card_map[cid]["end_line"]) for r in evidence)
         ):
@@ -256,7 +256,9 @@ def commit_group(cp, group, *, group_id, base_revision, cards, delivered, cutoff
             row["expected"] = "unknown"
         if old:
             # Later evidence may change retrospective value, never what was expected then.
-            row["expected"], row["purpose"] = old["expected"], old["purpose"]
+            row["expected"] = old["expected"]
+            if old['status'] != 'unknown':
+                row['purpose'] = old['purpose']
             row["expected_refs"] = old.get("expected_refs", [])
             row["expected_evidence_refs"] = old.get("expected_evidence_refs", [])
         state["assessments"][cid] = revised(old, row)

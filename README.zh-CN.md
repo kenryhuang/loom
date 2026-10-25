@@ -16,8 +16,12 @@ Loom 是一个运行在本地的 AI Agent 任务执行框架，用于编程、�
 
 - **Deep eval 经验记忆**：从 trace 提取 stage 对目标的贡献、环境与配置事实、失败经验和更有效的工作流。
   每条记录保留 goal / stage / action 与原始证据引用，区分观察、推断和待验证建议；支持预算恢复。
+  Session 可检索同一 workspace 的相关记忆，CLI 通过 `--memory-store` 显式接入。
+  [执行期 Memory 设计](docs/runtime-memory.md)说明检索、注入与追踪机制。
   使用方法与适用范围见 [Deep eval Memory](docs/deep-eval-memory.md)；
   [分析管线与校验机制](docs/deep-eval-validation.zh-CN.md)说明模块边界、具体错误和有限重试规则。
+  Memory 使用宿主生成的证据锚点，隔离无效候选，并分别展示处理进度与结果质量。
+  Resume 继续未完成工作，Retry failed items 定向重试质量缺口，保留已有有效记录。
 - **持久 Session**：保存对话、执行 checkpoint、工具结果、artifact 和事件历史，
   支持界面重连与服务重启后的恢复。一轮任务完成后，新消息会在同一 Session 中开启下一轮。
 - **Web 与 TUI 共用后端**：提供模型流式输出、工具详情、任务控制、历史记录和 token 用量。
@@ -425,15 +429,10 @@ uv run loom task '读取 https://www.python.org/about/ 并总结，注明来源'
 ```
 
 与 `loom serve` 不同，`loom task` 会自动发现 `./config.yaml` 或
-`./config.yml`，命令行参数覆盖配置默认值。
-可选的 `task`、`run` 块用于一次性执行：
+`./config.yml`。任务目标及任务参数由命令行明确提供；顶层 `task` 默认配置已移除。
+可选的 `run` 块提供执行默认值：
 
 ```yaml
-task:
-  workspace: .
-  expected_outputs:
-    - A Markdown analysis report.
-
 run:
   tui: true
   stream: true
@@ -443,10 +442,19 @@ run:
   timeout_ms: 120000
 ```
 
-`timeout_ms` 是每个 step 的超时。这两个块不配置持久 Session 的执行限制。
-传入 `--task-spec` 后，一次性任务不继承 `task` 块，
-模型和 `run` 配置仍然生效。
+`timeout_ms` 是每个 step 的超时，`run` 块不配置持久 Session 的执行限制。
+通过 `--workspace`、`--profile`、`--expected-output` 设置任务参数，或通过
+`--task-spec` 选择执行环境。模型和 `run` 配置仍然生效。
 默认 JSONL trace 写入 `runs/`；一次性任务依赖启动它的进程存活。
+
+独立 CLI 也可复用本地服务数据目录中已接受的 Deep eval memory，无需启动服务：
+
+```bash
+uv run loom task '修复太阳系多余行星的渲染' --workspace ~/workspace/solaris \
+  --memory-store runs/service
+```
+
+检索范围限定为实际绑定的 workspace。历史事实、失败经验和建议仅作为参考，使用前仍需核验。
 
 ## 进一步阅读
 

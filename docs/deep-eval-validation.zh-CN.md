@@ -3,6 +3,9 @@
 本文描述当前 `goal_graph_v1` 的 Graph + Memory 管线。旧版 v2/v3/goal_loops
 保留原行为，不在这次重构中迁移历史评估语义。
 
+针对反复校验失败的整体改造，见[Deep Eval 可靠性重构设计](deep-eval-reliability-design.zh-CN.md)。
+该设计的实现以本文及源码为准；真实模型的语义质量仍需单独评测。
+
 ## 职责边界
 
 模型负责语义判断：目标如何分解、动作贡献、哪些事实和经验值得保存。
@@ -27,27 +30,34 @@ flowchart LR
 | 模块 | 单一职责 |
 |---|---|
 | `evaluation/issues.py` | 错误结构、Schema 错误转换、可读错误、停止状态；不解读业务文案 |
-| `evaluation/repair.py` | 按类别计数的有限重试；保存每次决策及 Resume 历史 |
+| `evaluation/rules.py` | 规则类别对应的 scope、severity、disposition 与恢复策略 |
+| `evaluation/repair.py` | 输入级持久化重试额度、自动修复总额与提供方退避 |
+| `evaluation/work_items.py` | settled/deferred 工作、执行与质量状态、显式定向重试 |
+| `evaluation/evidence_delivery.py` | 来源 span、请求 manifest、短句柄、受限 trace 分页 |
 | `goal_loops/graph_decode.py` | JSON/JSONL/旧 group 解码；完整独立行可保留，不补括号或猜字段 |
 | `goal_loops/graph_normalization.py` | 旧字段别名、缺省值及明确的元数据兼容转换；写入审计记录 |
 | `goal_loops/graph_updates.py` | 记录的 Schema、声明依赖顺序及独立提交边界 |
 | `goal_loops/graph_state.py`、`structure.py` | 引用范围、时间边界、目标/阶段归属、不可变定义及结构决策规则 |
 | `goal_loops/coverage.py` | 统一计算未完成的 action 判断和目标结构窗口 |
+| `goal_loops/graph_replay.py` | 在明确支持的校验版本之间，按原始交付引用重放未完成窗口；不调用模型 |
 | `goal_loops/incremental.py` | Graph 请求、资源预约、持久化与阶段调度 |
 | `memory/contracts.py` | Memory 记录 Schema 和按窗口生成的请求契约 |
+| `memory/wire.py` | 精简 v2 模型输出转 canonical 记录，宿主生成引文及 owning scope |
 | `memory/request.py` | scope、证据、反馈与请求大小；不提交记录 |
 | `memory/validation.py` | 纯记录校验；不访问模型，不修改 checkpoint |
 | `memory/records.py` | 契约准入、独立记录提交、去重、失败记录反馈与 stage 覆盖 |
 | `memory/review.py` | Memory 提取和工作流归纳的请求、预算与调度 |
+| `memory/lifecycle.py` | 原始 epoch 归档、发布状态、细粒度依赖与 stale 传播 |
 | `legacy_issues.py`、各 `checkpoint` 模块 | 历史错误和 checkpoint 兼容；新规则不得按错误文案分支 |
 
 历史 raw evidence read API 留在 `goal_loops/legacy_reads.py`，当前 Graph 元数据分析不调用它。
 正常 Graph 输入仍支持旧协议的 canonical 记录种类及 group 格式；结构专用修复窗口
-只接收 goals/stages/attributions/structure。兼容能力不授权读取未交付的证据。
+只接收 goals/stages/reuse/attributions/structure。声明新对象与引用旧对象分开；
+reuse 只能指向当次交付且在截止时间之前的对象。兼容能力不授权读取未交付的证据。
 
 ## 校验顺序与不变量
 
-Memory 按 Schema → scope → citations → observed/proposed 来源条件执行。
+Memory v2 按 wire Schema → manifest 锚点 → 宿主物化来源 → scope/citations → observed/proposed 来源条件执行。
 每条记录报告第一个失败规则；不同记录独立校验，因此错误引文不会丢弃同一响应中的有效事实。
 Schema 错误按字段路径和规则稳定排序，不依赖模型 JSON 的键顺序。
 
@@ -55,14 +65,25 @@ Memory 请求和本地准入使用同一个 `protocol_for(unit)`。例如，没�
 contributions 的上限为 0；extract 的 workflows 为 0；synthesis 的其他类型为 0。
 修复请求只要求未完成的贡献记录，响应同时保存当时的 Schema，重放不会误用后续更窄的契约。
 
-字面引用必须是本次交付文本的原样子串；归纳阶段还必须位于某条原始引文内部。
+模型只返回 `A1.E2.S3` 等证据句柄，不生成 quote 或字符偏移。每次响应保存原始 manifest；
+宿主生成兼容 citations，文本必须是交付 span。旧 v1 响应仍按原始字面引用校验，
+不模糊匹配或跨 ref 偷换。归纳只收到已接受引文，不能扩展到其未引用上下文。
 引用来源 action 的补齐是宿主已有元数据的规范化，有独立审计，不修改引文或事实内容。
 观察类记录必须有工具结果来源，但来源存在不等于证明其全部语义；贡献度、因果性和
-工作流有效性仍是模型基于有限证据的判断。
+工作流有效性仍是模型基于有限证据的判断。observed 工作流必须逐步提供 observed 来源；
+未执行的新增步骤只能标 proposed。关键证据截断时可请求目录内一个有界 trace page，不能读当前 workspace。
 
 Graph 不允许未来证据、越过任务修订的证据、未知父目标或不合法的阶段归属。
 有效的 action 判断可以独立于失败的 attribution 提交。声明按依赖顺序处理。
 未提供引用的元数据判断可显式降为 unknown；不能自动修复虚构引用或把 unknown 升为成功。
+动作贡献未知与动作归属未知不是同一件事：unknown 判断仍可具有单独引用证据的归属，
+不会因此升级贡献或验收状态。归属仍须引用当次交付、时间范围内的动作证据。
+
+stage 的 goal、attempt、kind 是不可变身份。声明已有 ID 却改变身份时，宿主创建
+确定性的新 stage，并只在当前窗口建立别名；原 stage、其他窗口引用及归属历史保留。
+重复提交同一声明复用新身份，不重复增加修订。此转换写入 `declaration_forked` 审计记录。
+结构说明 `structure.reason` 与解释文本统一为最多 600 字符，由请求协议与本地校验共用；
+超长仍报告 `schema.maxLength`，不截断模型文本。
 
 覆盖缺口与无效记录是两件事：`graph.structure_pending` 消失，不会删除同一窗口中
 `schema.maxLength` 等真实错误。Complete 表示安排的分析完成，不表示原任务验收通过。
@@ -106,20 +127,33 @@ Memory 的失败记录反馈有独立大小限制和脱敏处理。
 
 ## 统一重试与恢复
 
-每个窗口、每次运行，格式修复最多 2 次，语义/覆盖修复最多 1 次，总计最多 3 次追加请求。
-这是校验修复的上限；提供方不支持结构化输出时，每个分析阶段还允许一次降级为文本格式，计入总调用预算。
-同时含格式和语义错误时同时扣两类配额；已有记录错误时，不另扣由其导致的覆盖缺口配额。
-某类别耗尽不能借用另一类别继续试。只有覆盖缺口时使用语义配额。
+当前 Graph/Memory 的自动修复按输入身份持久化：格式最多一次、候选/覆盖最多一次，
+累计最多占总调用上限的 20%（向下取整），为尚未扫描的工作预留调用。
+普通 Resume 不重置额度；`retry_failed: true` 是用户明确要求的额外定向处理，仍受原总预算约束。
+旧 `begin_cycle/retry` 留给旧协议兼容，不再决定新 Graph/Memory 的恢复行为。
+已有记录错误时，不另扣其导致的覆盖缺口；提供方不支持结构化输出时仍允许一次文本降级。
+瞬时提供方错误最多退避重试一次，连续两次失败暂停，非 retryable 配置错误直接停止。
 外部调用数、时间、请求字符等预算始终优先。服务不再凭 `budget reached` 英文子串
 推断新评估状态；旧版本数据的字符串适配集中在 `legacy_issues.py`。
 
-每次决策保存在 `repair_state.decisions`，记录错误 code、类别和是否重试。
-显式 Resume 开始新周期，之前的周期进入 `repair_history`；已完成窗口不重新分析。
-停止后的有效记录始终保留，不通过重新生成全部结果来掩盖局部失败。
+决策保存在 `repair_ledger/repair_decisions`，请求发出前保留修复预约，预算中断不重复扣额度。
+局部拒绝进入 quarantine，后续无依赖窗口继续。可信来源无法确定时仍拒绝该记录，不能标成成功。
+能确定失败候选的来源 action 时，只重新交付相关 spans；无法确定时保留窗口证据，避免猜测来源。
 
-Memory 校验版本升级时，仅重放未完成窗口最近的已保存响应；保存历史校验错误。
-新响应有原始请求 Schema，旧响应缺失时由兼容模块重建初始窗口契约。
-Graph 历史恢复不重新解释已由当前 `graph-validation.1` 校验过的响应。
+`execution_state` 描述队列是否处理结束，`result_state` 描述是否仍有缺口；unknown、隔离及未处理分别计数。
+完成但有缺口时旧 `state` 保守投影为 incomplete，新 UI 显示 **Retry failed items**；
+预算/取消等导致有未完成工作时显示 **Resume**。所有候选被拒绝不会显示为 ready。
+Session 检索仅使用 published 记录；stale、quarantined、未验证 legacy 不进入执行期提示词。
+
+Memory 迁移到 `trace-memory.2` / `memory-validation.6` 时归档原 epoch，在原交付范围重验未完成响应，
+保留原错误并追加 revalidations。有效旧记录保留，错配引用成为新协议的待修候选，不自动换 ref。
+依赖 digest 按实际 stage/action/支撑记录计算；无关 Graph revision 不影响 Memory。
+查看归档：`GET /v1/sessions/{sid}/trajectory/{aid}/evaluation/{eid}/epochs/{epoch}`（只读 Memory 视图）。
+Graph 当前为 `graph-validation.2`，支持在 Resume 时重放未完成窗口最后一条
+`graph-validation.1` 响应。仅使用保存的 `delivered_ref_ids` 与原截止时间，不能把整个
+证据仓库当作已交付输入。保留原响应和原错误，在 `revalidations` 单独记录新校验结果；
+已有成功提交保持幂等。原请求的记录类型限制同样保留，旧版从结构化类型拒绝信息恢复。
+缺少原始交付范围的响应不走此重放；当前版本的失败保留，交由正常的有限重试处理。
 读取页面和离线重放不调用模型，也不更改原任务。
 
 ## 新增规则的方式
@@ -132,4 +166,6 @@ Graph 历史恢复不重新解释已由当前 `graph-validation.1` 校验过的�
    checkpoint/legacy 模块，并明确其适用版本。
 
 回归入口：`tests/evaluation/test_validation_pipeline.py`、现有 Graph/Memory 测试、
-`tests/service/test_incremental_graph.py` 和 Web Report 测试。
+`tests/evaluation/test_memory_anchors.py`、`tests/service/test_incremental_graph.py` 和 Web Report 测试。
+只读迁移审计：`python -m loom.evaluation.replay_audit --database runs/service/service.sqlite --evaluation-id <id>`。
+该命令不调用模型、不写数据库，输出机械覆盖和历史成本，不声称评估语义正确率。

@@ -7,8 +7,10 @@ from loom.llm.structured import StructuredProtocol
 
 ENGINE = "goal_graph_v1"
 ANALYZER = "goal-graph.3"
-PROMPT = "goal-graph-rubric.9"
+PROMPT = "goal-graph-rubric.11"
 UPGRADABLE_VERSIONS = {
+    ("goal-graph.3", "goal-graph-rubric.10"),
+    ("goal-graph.3", "goal-graph-rubric.9"),
     ("goal-graph.3", "goal-graph-rubric.8"),
     ("goal-graph.3", "goal-graph-rubric.7"),
     ("goal-graph.3", "goal-graph-rubric.6"),
@@ -78,12 +80,13 @@ UPDATE_FIELDS["attributions"] = rows(dict(card_id=ID, stage_ids=IDS, refs=IDS), 
 UPDATE_FIELDS["comparisons"] = rows(dict(card_id=ID, prior_card_ids=IDS, uptake_card_ids=IDS,
                                         redundancy=dict(enum=["not_established", "candidate", "supported"]), refs=IDS), 16)
 UPDATE_FIELDS["evidence_requests"] = dict(type="array", items=REQUEST, maxItems=3)
-UPDATE_FIELDS["structure"] = rows(dict(decision=dict(enum=["single_goal", "insufficient_evidence"]), reason=SHORT, refs=IDS), 1)
+UPDATE_FIELDS["structure"] = rows(dict(decision=dict(enum=["single_goal", "insufficient_evidence"]), reason=TEXT, refs=IDS), 1)
+UPDATE_FIELDS['reuse'] = rows(dict(key=ID, target_id=ID, kind=dict(enum=['goal', 'stage', 'attempt'])), 16)
 SCHEMA = obj(UPDATE_FIELDS)
 
 # The primary judge classifies actions and tree membership. Expensive causal/use
 # comparisons are not required to recover that tree; recorded links stay local.
-METADATA_FIELDS = {k: deepcopy(UPDATE_FIELDS[k]) for k in ("goals", "stages", "assessments", "attributions", "closures", "diagnostics", "structure")}
+METADATA_FIELDS = {k: deepcopy(UPDATE_FIELDS[k]) for k in ("goals", "stages", "reuse", "assessments", "attributions", "closures", "diagnostics", "structure")}
 for kind, names in (("stages", ("attempt_id",)), ("assessments", ("expected", "expected_refs"))):
     for name in names:
         METADATA_FIELDS[kind]["items"]["properties"].pop(name)
@@ -115,6 +118,11 @@ Goal: reconstruct Root -> subgoal -> stage -> action and judge each action's con
    Harness verification (usage_role=verification), acceptance receipts and finish belong to Root; do not invent child goals for them.
 3. Use attributions only when supplied fields support membership. Otherwise omit it: the host defaults to the preceding
    action's goal within the same sequential execution scope, marked default_rule, never evidence-backed or a causal link.
+   Action judgment status and membership are independent: an unknown judgment may still have an evidence-backed attribution.
+   Existing stage IDs denote immutable goal/approach/kind identities. For a different kind or owner, declare a NEW local key;
+   the host versions conflicting declarations without changing the saved stage or other batches' references.
+   goals/stages arrays DECLARE new objects with local keys. To reuse a supplied object, reference its ID directly,
+   or emit reuse: {key: local_alias, target_id: existing_id, kind: goal|stage|attempt}; do not redeclare it with changed fields.
 4. Closure/diagnostics only for explicitly supported changes. Do not invent output contents, adoption or verification.
 Return changes only, one short phrase per judgment field. Use empty arrays for unused record types; never repeat saved objects.
 refs must be IDs from fields actually supplied in cards or boundary_evidence, not card/goal/stage IDs.
@@ -131,7 +139,7 @@ Follow contract.format when present. No commentary, markdown fences, indentation
 def protocol(allow_reads=True, *, metadata_only=False, structure_only=False):
     schema = obj(deepcopy(METADATA_FIELDS)) if metadata_only else deepcopy(SCHEMA)
     if structure_only:
-        schema = obj({k: deepcopy(METADATA_FIELDS[k]) for k in ("goals", "stages", "attributions", "structure")})
+        schema = obj({k: deepcopy(METADATA_FIELDS[k]) for k in ("goals", "stages", "reuse", "attributions", "structure")})
     if not allow_reads and not metadata_only:
         schema["properties"]["evidence_requests"]["maxItems"] = 0
 
@@ -168,4 +176,4 @@ def compact_contract(mode="text", *, metadata_only=False, structure_only=False):
             'Use the listed plural type names. No enclosing array. A later attribution links a card to a stage.'
             if mode == "text" else "Return one object with the listed arrays; records are committed independently.",
             "records": {key: hint(value["items"]) for key, value in (METADATA_FIELDS if metadata_only else UPDATE_FIELDS).items()
-                        if not structure_only or key in {"goals", "stages", "attributions", "structure"}}}
+                        if not structure_only or key in {"goals", "stages", "reuse", "attributions", "structure"}}}

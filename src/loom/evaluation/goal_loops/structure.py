@@ -3,6 +3,7 @@
 from copy import deepcopy
 
 from loom.evaluation.goal_loops.attribution import root_owned_card
+from loom.evaluation.goal_loops.graph_contract import TEXT
 from loom.evaluation.issues import RuleViolation
 
 
@@ -21,7 +22,7 @@ def structure_review_context(cp, unit):
         eligible_card_ids=[c["id"] for c in eligible], accepted_memberships=memberships,
         instruction="Resolve goal decomposition for this window only. Root-stage attributions alone do not resolve it. "
         "If these actions only conclude, coordinate or report the root task, emit structure: single_goal with a specific "
-        "reason (at most 240 characters; put evidence IDs only in refs) and current card field refs. "
+        f"reason (at most {TEXT['maxLength']} characters; put evidence IDs only in refs) and current card field refs. "
         "Existing child goals elsewhere do not prevent a single_goal window. "
         "Otherwise link eligible actions to supported result-oriented child goals. Do not invent subgoals or repeat "
         "accepted assessments. If evidence is insufficient, emit structure: insufficient_evidence and explain the gap.",

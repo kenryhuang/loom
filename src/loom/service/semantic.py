@@ -27,6 +27,7 @@ from loom.evaluation.issues import EvaluationFailure, describe, failure_state, i
 from loom.evaluation.legacy_issues import legacy_job_state
 from loom.evaluation.provider import create_evaluation_provider
 from loom.evolution.diagnoses import proposals_from_diagnoses
+from loom.memory.store import bound_workspace
 from loom.service.contracts import ServiceError, canonical, new_id
 from loom.service.evaluation_artifacts import EvaluationArtifacts
 from loom.service.evaluation_progress import finish_request, present_legacy_request_failure
@@ -166,6 +167,14 @@ class SessionSemantic:
 
     def _public(self, body):
         public = {k: v for k, v in body.items() if k not in {"checkpoint", "config_digest"}}
+        if body.get('analysis_version') == GRAPH_ENGINE and body.get('checkpoint', {}).get('entities'):
+            from loom.evaluation.work_items import status
+
+            public.update(status(body['checkpoint']))
+            if body['state'] in {'queued', 'running', 'failed', 'cancelled'}:
+                public['execution_state'] = body['state']
+            elif body['state'] in {'budget_exhausted', 'interrupted'}:
+                public['execution_state'] = 'paused'
         if public["state"] == "failed" and not public.get("error_details"):
             public["state"] = legacy_job_state(public.get("error") or "")
         return present_legacy_request_failure(public)
@@ -245,6 +254,21 @@ class SessionSemantic:
             result["evaluation"] = self._result(body, source, factual, semantic)
         return result
 
+    def memory_epoch(self, sid, aid, identifier, epoch):
+        """Read-only archived memory view; never roll live runtime memory back."""
+        from loom.evaluation.memory.projection import project_memory
+
+        body = self._load(sid, aid, identifier)
+        cp = body.get('checkpoint', {})
+        saved = next((r for r in cp.get('analysis_epochs', []) if r['kind'] == 'memory' and str(r['epoch']) == str(epoch)), None)
+        if saved is None:
+            raise ServiceError('Memory epoch not found', 404)
+        snapshot = saved['snapshot']
+        stages = {s['id']: s for u in snapshot['units'].values() for s in u['scope']['stages']}
+        return dict(evaluation_id=identifier, epoch=saved['epoch'], read_only=True,
+                    memory=project_memory(dict(memory=snapshot, memory_requested=True, stages=stages,
+                        graph_revision=snapshot['identity']['graph_revision'], extraction=cp.get('extraction', {}))))
+
     def _queue_info(self, identifier):
         with self.store.transaction() as db:
             jobs = [
@@ -296,7 +320,8 @@ class SessionSemantic:
         }
 
     def start(self, sid, aid, options):
-        if not isinstance(options, dict) or set(options) - {"model", "resume_id", "new_evaluation", "analysis_version", "run_id", "extract_memory", *DEFAULTS}:
+        allowed = {"model", "resume_id", "retry_failed", "new_evaluation", "analysis_version", "run_id", "extract_memory", *DEFAULTS}
+        if not isinstance(options, dict) or set(options) - allowed:
             raise ServiceError("Invalid evaluation options")
         resume_id = options.get("resume_id")
         if resume_id is not None and (not isinstance(resume_id, str) or not resume_id):
@@ -307,6 +332,9 @@ class SessionSemantic:
         if create_new and resume_id:
             raise ServiceError("new_evaluation and resume_id cannot be used together")
         resumed = self._load(sid, aid, resume_id) if resume_id else None
+        retry_failed_items = options.get('retry_failed', False)
+        if type(retry_failed_items) is not bool or (retry_failed_items and not resumed):
+            raise ServiceError('retry_failed requires a saved evaluation and must be a boolean')
         # Explicit new histories have independent cache identities, retained on resume.
         # Requests without this flag preserve the existing deduplication contract.
         instance_id = new_id("evaluation") if create_new else resumed.get("instance_id") if resumed else None
@@ -331,7 +359,7 @@ class SessionSemantic:
                 raise ServiceError("extract_memory must be a boolean for incremental graph evaluation")
             settings["extract_memory"] = options["extract_memory"]
         for key, value in options.items():
-            if key in {"model", "resume_id", "new_evaluation", "analysis_version", "run_id", "extract_memory"}:
+            if key in {"model", "resume_id", "retry_failed", "new_evaluation", "analysis_version", "run_id", "extract_memory"}:
                 continue
             low, high = BOUNDS[key]
             if type(value) is not int or not low <= value <= high:
@@ -374,7 +402,7 @@ class SessionSemantic:
         }
         key = hashlib.sha256(canonical(identity).encode()).hexdigest()
         with self.lock, self.store.transaction() as db:
-            self.store._load(db, sid)
+            session = self.store._load(db, sid)
             if self.closed.is_set():
                 raise ServiceError("Service is closing", 503)
             row = db.execute("SELECT body FROM semantic_jobs WHERE cache_key=?", (key,)).fetchone()
@@ -406,8 +434,16 @@ class SessionSemantic:
                     raise ServiceError("Resuming cannot reduce resource limits")
                 if version == GRAPH_ENGINE:
                     from loom.evaluation.goal_loops.incremental import upgrade_budget_identity
+                    from loom.evaluation.work_items import retry_failed, status
 
                     upgrade_budget_identity(resumed["checkpoint"], resumed["settings"])
+                    work_status = status(resumed['checkpoint'])
+                    if retry_failed_items:
+                        if not work_status['retryable_work']:
+                            raise ServiceError('No settled failed items are available to retry', 409)
+                        retry_failed(resumed['checkpoint'])
+                    elif work_status['execution_state'] == 'completed' and work_status['retryable_work']:
+                        raise ServiceError('Processing has finished with quality gaps. Use Retry failed items instead of Resume.', 409)
                 previous = resumed
             if previous and previous["state"] in {"queued", "running", "completed"}:
                 return self._public(previous)
@@ -418,6 +454,7 @@ class SessionSemantic:
                 "id": instance_id or new_id("evaluation"),
                 **({"instance_id": instance_id} if instance_id else {}),
                 "session_id": sid,
+                "memory_scope": {"workspace": bound_workspace(session["task"])},
                 "analysis_id": aid,
                 "source_cursor": parent["source_cursor"],
                 "model": model,
@@ -776,6 +813,18 @@ class SessionSemantic:
                     + (f"Issues: {detail}. " if detail else "")
                     + "Accepted graph revisions retained. Resume evaluation to retry pending windows.",
                 )
+            if body.get('analysis_version') == GRAPH_ENGINE:
+                from loom.evaluation.work_items import status
+
+                assessment = status(body['checkpoint'])
+                body.update(assessment)
+                if assessment['result_state'] == 'partial':
+                    details = semantic['coverage'].get('review_gaps', []) + semantic.get('memory', {}).get('coverage', {}).get('issues', [])
+                    body.update(state='incomplete', error_details=details,
+                        error=('Processing finished with quality gaps. Accepted records remain available. Use Retry failed items.'
+                               if assessment['execution_state'] == 'completed' else 'Analysis has unfinished work. Resume evaluation to continue.'))
+                    if details:
+                        body['error'] += ' ' + '; '.join(describe(e) for e in details[:2])
             if body.get("analysis_version") == "v3" and semantic["coverage"]["status"] != "complete":
                 body.update(state="budget_exhausted", error="Evaluation budget reached; focused stages remain unfinished")
         except InterruptedError as exc:

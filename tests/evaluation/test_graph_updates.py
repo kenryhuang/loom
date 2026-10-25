@@ -9,6 +9,7 @@ from loom.evaluation.goal_loops.facts import run_facts
 from loom.evaluation.goal_loops.graph_projection import project
 from loom.evaluation.goal_loops.graph_state import initialize
 from loom.evaluation.goal_loops.graph_updates import commit_updates, parse_updates
+from loom.evaluation.issues import EvaluationFailure
 from loom.llm import LlmResponse
 from tests.evaluation.test_behavior_sequence import action, source
 from tests.evaluation.test_incremental_graph import GraphJudge, assessment, run
@@ -239,8 +240,8 @@ async def test_resume_orders_units_by_source_not_serialized_dictionary_keys():
     with pytest.raises(ValueError, match="budget reached"):
         await run(store, facts, "run", cp, judge, max_calls=1, batch_rounds=2)
     first = next(iter(cp["units"].values()))
-    cp["units"]["z-earlier"] = {**first, "id": "z-earlier", "complete": False}
-    cp["units"]["a-later"] = {**first, "id": "a-later", "cutoff": 8, "complete": False}
+    cp["units"]["z-earlier"] = {**first, "id": "z-earlier", "complete": False, 'work_state': 'pending'}
+    cp["units"]["a-later"] = {**first, "id": "a-later", "cutoff": 8, "complete": False, 'work_state': 'pending'}
     cp["units"] = dict(sorted(cp["units"].items()))
     await run(store, facts, "run", cp, judge, max_calls=20, batch_rounds=2)
     assert judge.requests[1]["batch_id"] == "z-earlier"
@@ -255,7 +256,11 @@ async def test_timeout_reports_request_and_retains_committed_actions():
             return await super().chat(*args, **kwargs)
 
     store, facts, cp, _ = fixture()
-    with pytest.raises(ValueError, match=r"timed out after .* at batch:.*accepted records retained"):
+    with pytest.raises(EvaluationFailure) as caught:
         await run(store, facts, "run", cp, Slow(), batch_rounds=2, max_call_seconds=.02)
+    error = caught.value.issues[0]
+    assert error["code"] == "request.timeout" and error["unit_id"].startswith("batch:")
+    assert error["details"]["timeout_seconds"] == .02
+    assert "accepted records retained" in error["reason"]
     assert len(cp["assessments"]) == 2
-    assert cp["usage"]["unreported_calls"] == 1
+    assert cp["usage"]["unreported_calls"] == 2

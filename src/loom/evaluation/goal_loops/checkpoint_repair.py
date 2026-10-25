@@ -1,4 +1,4 @@
-"""Reconcile saved metadata-only failures without another evaluator call."""
+"""Reconcile saved failures through explicit, versioned compatibility rules."""
 
 from copy import deepcopy
 
@@ -7,7 +7,8 @@ from jsonschema import Draft202012Validator
 from loom.evaluation.goal_loops.attribution import root_owned_card
 from loom.evaluation.goal_loops.coverage import window_issues
 from loom.evaluation.goal_loops.graph_contract import UPDATE_FIELDS
-from loom.evaluation.goal_loops.graph_updates import VALIDATION_VERSION, commit_updates, parse_updates
+from loom.evaluation.goal_loops.graph_replay import replay_saved_response
+from loom.evaluation.goal_loops.graph_updates import commit_updates, parse_updates
 from loom.evaluation.goal_loops.judge_metadata import VERSION, terminal_metadata_records
 from loom.evaluation.legacy_issues import graph_issue
 from loom.llm.api import LlmResponse
@@ -34,10 +35,10 @@ def complete_framework_boundaries(cp, cards, unit):
 
 
 def reconcile_checkpoint(cp, cards, *, metadata=None):
-    """Only recover uncited judgments as unknown and obsolete structural demands.
+    """Replay supported validator upgrades, then apply legacy metadata recovery.
 
-    No historical evidence is re-delivered or accepted here. All unrelated parse,
-    schema and citation failures remain pending. Existing accepted judgments win.
+    Versioned replay uses only originally delivered references. Current-validator
+    failures remain pending; legacy recovery cannot authorize unseen evidence.
     """
     latest = {r["batch_id"]: r for r in cp.get("responses", [])}
     for unit in cp.get("units", {}).values():
@@ -45,9 +46,11 @@ def reconcile_checkpoint(cp, cards, *, metadata=None):
         if unit.get("complete"):
             continue
         response = latest.get(unit["id"])
-        if response and response.get("validation_version") == VALIDATION_VERSION:
-            # Current responses already ran the explicit normalization/validation
-            # pipeline. Historical recovery must not reinterpret their failures.
+        if response and replay_saved_response(cp, unit, response, cards):
+            continue
+        if response and response.get("revalidated_with", response.get("validation_version")):
+            # Versioned responses require a supported replay with original
+            # delivery. Legacy recovery must not bypass this boundary.
             continue
         records = parse_updates(LlmResponse(content=response["text"], finish_reason=response.get("finish_reason")))[0] if response else []
         recovered_boundaries = complete_framework_boundaries(cp, cards, unit)

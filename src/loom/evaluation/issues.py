@@ -14,8 +14,10 @@ VERSION = "evaluation-issue.1"
 
 
 def issue(code, reason, *, category="semantic", phase="validate", path=(), **context):
-    return dict(version=VERSION, code=code, category=category, phase=phase,
-                path=list(path), reason=reason, **context)
+    from loom.evaluation.rules import policy
+
+    return policy(dict(version=VERSION, code=code, category=category, phase=phase,
+                       path=list(path), reason=reason, **context))
 
 
 class RuleViolation(ValueError):
@@ -41,7 +43,7 @@ def stopped(code, reason, *, category, stage, unit_id=None, **context):
 def request_timeout(*, stage, unit_id, timeout_seconds):
     return stopped("request.timeout", f"Evaluator request timed out (call limit {timeout_seconds:g}s); accepted records retained. "
                    "Increase Call timeout in Evaluation settings, then Resume evaluation.",
-                   category="provider", stage=stage, unit_id=unit_id, provider_code="TIMEOUT",
+                   category="provider", stage=stage, unit_id=unit_id, provider_code="TIMEOUT", retryable=True,
                    details=dict(timeout_seconds=timeout_seconds))
 
 
@@ -50,7 +52,7 @@ def provider_failure(error, *, stage, unit_id, timeout_seconds):
     if error.code == "TIMEOUT":
         return request_timeout(stage=stage, unit_id=unit_id, timeout_seconds=timeout_seconds)
     return stopped("request.provider", error.message or f"Provider failed ({error.code}) without an error message",
-                   category="provider", stage=stage, unit_id=unit_id, provider_code=error.code)
+                   category="provider", stage=stage, unit_id=unit_id, provider_code=error.code, retryable=error.retryable)
 
 
 def request_failure_event(metadata, error):

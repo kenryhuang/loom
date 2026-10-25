@@ -1,6 +1,17 @@
 from loom.tasks.config import ModelConfig, TaskRunnerConfig, create_provider_from_task_config, load_task_config
 
 
+def test_retired_task_defaults_are_rejected_in_yaml_and_toml(tmp_path):
+    for suffix, text in [('yaml', 'task:\n  objective: Old audit\n  workspace: ~/workspace/yakDB\n'),
+                         ('toml', '[task]\nobjective = "Old audit"\n')]:
+        path = tmp_path / ('config.' + suffix)
+        path.write_text(text)
+        result = load_task_config(path)
+        assert not result.ok
+        assert 'Top-level task defaults are no longer supported' in result.error.message
+        assert 'remove task' in result.error.message
+
+
 def test_evaluation_request_options_load_and_validate(tmp_path):
     from loom.service.settings import yaml_text
 
@@ -351,17 +362,11 @@ def test_load_task_config_rejects_non_json_request_option_with_path(tmp_path):
     assert "request_options.top_p" in result.error.message
 
 
-def test_load_task_config_reads_task_and_run_defaults_from_yaml(tmp_path):
+def test_load_task_config_reads_run_defaults_from_yaml(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text(
         """
 default_model: main
-task:
-  objective: Audit this project briefly
-  workspace: .
-  profile: project_audit
-  expected_outputs:
-    - Brief markdown audit report.
 run:
   tui: false
   stream: true
@@ -380,10 +385,7 @@ models:
 
     loaded = load_task_config(path).unwrap()
 
-    assert loaded.task.objective == "Audit this project briefly"
-    assert loaded.task.workspace == "."
-    assert loaded.task.profile == "project_audit"
-    assert loaded.task.expected_outputs == ("Brief markdown audit report.",)
+    assert not hasattr(loaded, "task")
     assert loaded.run.tui is False
     assert loaded.run.stream is True
     assert loaded.run.trace_path_template == "runs/{task_slug}-{timestamp}.jsonl"

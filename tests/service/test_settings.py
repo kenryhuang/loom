@@ -8,6 +8,26 @@ from loom.service.settings import Settings
 from loom.tasks.config import load_task_config, parse_yaml_document
 
 
+def test_settings_removes_retired_task_defaults_and_cannot_reintroduce_them(tmp_path):
+    path = tmp_path / 'config.yaml'
+    path.write_text('models: {}\ntask:\n  objective: Old audit\n  workspace: ~/workspace/yakDB\n')
+    service = LoomService(tmp_path / 'data', config_path=path)
+    try:
+        settings = Settings(service)
+        value = settings.get()
+        assert 'task' not in value['config']
+        saved = settings.save({k: value[k] for k in ('revision', 'config')})
+        assert 'task' not in parse_yaml_document(path.read_text(), path).unwrap()
+        assert load_task_config(path).ok
+        before = path.read_bytes()
+        saved['config']['task'] = {'objective': 'Old audit'}
+        with pytest.raises(ServiceError, match='Top-level task defaults are no longer supported'):
+            settings.save({k: saved[k] for k in ('revision', 'config')})
+        assert path.read_bytes() == before
+    finally:
+        service.close()
+
+
 def test_settings_atomic_roundtrip_secrets_and_revision(tmp_path):
     path = tmp_path / 'config.yaml'
     path.write_text('default_model: main\nmodels:\n  main:\n    model: test\n    api_key: private-value\n')
@@ -17,7 +37,7 @@ def test_settings_atomic_roundtrip_secrets_and_revision(tmp_path):
         value = settings.get()
         assert 'private-value' not in json.dumps(value)
         value['config']['providers']['provider_1']['models']['test']['temperature'] = .3
-        value['config']['task'] = {'objective': 'Explain "quoted" text\nwith another line'}
+        value['config']['metadata'] = {'description': 'Explain "quoted" text\nwith another line'}
         value['config']['embedding_profiles'] = [{'id': 'emb_test', 'name': 'Test', 'model': 'embed',
                                                  'endpoint': 'http://localhost:1234/embeddings', 'api_key_env': 'EMBED_KEY'}]
         saved = settings.save({k: value[k] for k in ('revision', 'config')})
@@ -26,7 +46,7 @@ def test_settings_atomic_roundtrip_secrets_and_revision(tmp_path):
         assert 'models' not in parse_yaml_document(path.read_text(), path).unwrap()
         config = load_task_config(path).unwrap()
         assert config.models['provider_1/test'].api_key == 'private-value'
-        assert config.task.objective == value['config']['task']['objective']
+        assert parse_yaml_document(path.read_text(), path).unwrap()['metadata'] == value['config']['metadata']
         assert service.store.knowledge.profiles()[0]['id'] == 'emb_test'
         with pytest.raises(ServiceError, match='changed'):
             settings.save({k: value[k] for k in ('revision', 'config')})

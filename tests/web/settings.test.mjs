@@ -51,7 +51,9 @@ test('typed settings save numbers, booleans, lists and model selection while pre
     ctx.input('providers.example.models.main.temperature', '.3');
     ctx.input('providers.example.models.main.request_options.enable_thinking', 'true');
     ctx.input('run.max_steps', '12'); ctx.input('run.stream', 'false');
-    ctx.input('task.expected_outputs.0', 'Analysis report'); ctx.input('evaluation_model', 'example/main');
+    assert.equal(document.querySelector('[name^="task."]'), null);
+    assert.doesNotMatch(document.body.textContent, /Task defaults/);
+    ctx.input('evaluation_model', 'example/main');
     await ctx.save();
     const saved = ctx.calls.find(([, options]) => options?.body)[1].body;
     assert.equal(saved.revision, 'one'); assert.equal(saved.config.providers.example.models.main.model, undefined);
@@ -59,7 +61,7 @@ test('typed settings save numbers, booleans, lists and model selection while pre
     assert.equal(saved.config.providers.example.models.main.api_key, '••••••••');
     assert.deepEqual(saved.config.providers.example.models.main.request_options, {custom: {threshold: .25}, enable_thinking: true});
     assert.deepEqual(saved.config.run, {timeout_ms: null, max_steps: 12, stream: false});
-    assert.deepEqual(saved.config.task.expected_outputs, ['Analysis report']);
+    assert.equal(Object.hasOwn(saved.config, 'task'), false);
     assert.equal(saved.config.evaluation_model, 'example/main'); assert.deepEqual(saved.config.extension, config.extension);
     assert.equal(Object.hasOwn(saved.config, 'meta_harness'), false);
     assert.match(document.body.textContent, /Configuration saved/);
@@ -87,11 +89,11 @@ test('invalid values focus the right tab and prevent save without losing draft',
   const ctx = setup({models: {main: {model: 'test'}}, default_model: 'main'});
   try {
     await ctx.view.open(); ctx.input('providers.example.models.main.context_window_tokens', '50');
-    ctx.input('task.objective', 'Keep this draft');
+    ctx.input('run.trace_path_template', 'runs/keep-this-draft.jsonl');
     await ctx.save();
     assert.equal(ctx.calls.filter(([, options]) => options?.body).length, 0);
     assert.equal(document.getElementById('settings-tab-providers').getAttribute('aria-selected'), 'true');
-    assert.equal(document.querySelector('[name="task.objective"]').value, 'Keep this draft');
+    assert.equal(document.querySelector('[name="run.trace_path_template"]').value, 'runs/keep-this-draft.jsonl');
     ctx.input('providers.example.models.main.context_window_tokens', '128000'); await ctx.save();
     assert.equal(ctx.calls.filter(([, options]) => options?.body).length, 1);
   } finally {ctx.close();}

@@ -8,7 +8,7 @@ from loom.evaluation.behavior_facts import build_behavior_facts
 from loom.evaluation.goal_loops.graph_projection import project
 from loom.evaluation.memory.evidence import card_evidence
 from loom.evaluation.memory.projection import project_memory
-from loom.evaluation.memory.review import commit, validate_record, messages_for, protocol_for
+from loom.evaluation.memory.review import commit, messages_for, protocol_for, validate_record
 from loom.llm import LlmResponse, TokenUsage
 from tests.evaluation.test_behavior_sequence import action, source
 from tests.evaluation.test_incremental_graph import GraphJudge, run
@@ -36,8 +36,8 @@ class MemoryJudge(GraphJudge):
             return await super().chat(messages, **kwargs)
         self.memory_requests.append(payload)
         result = {k: [] for k in ("contributions", "facts", "lessons", "workflows")}
-        evidence = payload["evidence"]
-        stage = payload["stages"][0]
+        evidence = payload.get('evidence', [{**e, 'action_id': a['id']} for a in payload['actions'] for e in a.get('evidence', [])])
+        stage = next(iter(payload['stages']), next(m for a in payload['actions'] for m in a['memberships']))
 
         def common(entry, title):
             return dict(
@@ -46,7 +46,7 @@ class MemoryJudge(GraphJudge):
                 scope="Recorded workspace on this macOS host; this run only",
                 confidence="medium",
                 goal_ids=[stage["goal_id"]],
-                stage_ids=[stage["id"]],
+                stage_ids=[stage.get('id', stage.get('stage_id'))],
                 action_ids=[entry["action_id"]],
                 citations=[dict(ref=entry["id"], quote=entry["text"])],
             )
@@ -93,6 +93,19 @@ class MemoryJudge(GraphJudge):
                     validation="proposed",
                 )
             ]
+        if payload.get('delivery_id'):
+            for kind, rows in result.items():
+                for index, row in enumerate(rows):
+                    row['key'] = f'{kind}:{index}'
+                    row['evidence'] = [c['ref'] for c in row.pop('citations')]
+                    if kind == 'contributions':
+                        row.pop('goal_id')
+                    else:
+                        for key in ('title', 'action_ids', 'stage_ids', 'goal_ids'):
+                            row.pop(key)
+                    if kind == 'workflows':
+                        row['steps'] = [dict(text=s, evidence=row['evidence'], basis='proposed') for s in row['steps']]
+            result['evidence_requests'] = []
         return ok(LlmResponse(content=json.dumps(result), usage=TokenUsage(80, 40, 120)))
 
 
@@ -237,7 +250,7 @@ async def test_memory_repairs_invalid_claim_without_repeating_good_memories():
             response = await super().chat(messages, tools, cancellation, **kwargs)
             if json.loads(messages[1].content).get("mode") == "extract" and len(self.memory_requests) == 1:
                 value = json.loads(response.value.content)
-                value["facts"][0]["citations"][0]["quote"] = "unobserved fact"
+                value["facts"][0]["evidence"] = ["undelivered"]
                 return ok(LlmResponse(content=json.dumps(value), usage=TokenUsage(80, 40, 120)))
             if json.loads(messages[1].content).get("mode") == "extract":
                 value = json.loads(response.value.content)
@@ -257,10 +270,8 @@ async def test_memory_repairs_invalid_claim_without_repeating_good_memories():
     rejected = judge.memory_requests[1]["rejected_records"]
     assert len(rejected) == 1
     assert rejected[0]["kind"] == "facts"
-    assert rejected[0]["record"]["citations"][0]["quote"] == "unobserved fact"
-    assert rejected[0]["record"]["citations"][0]["ref"] in rejected[0]["error"]
-    assert "Citation 1" in rejected[0]["error"]
-    assert "verbatim" in rejected[0]["error"]
+    assert rejected[0]["record"]["evidence"] == ["undelivered"]
+    assert rejected[0]['issue']['code'] == 'memory.anchor_undelivered'
     assert "contributions" in judge.memory_requests[1]["empty_record_types"]
     assert judge.memory_requests[1]["response_contract"]["properties"]["contributions"]["maxItems"] == 0
     assert not judge.memory_requests[2]["rejected_records"]
@@ -445,9 +456,8 @@ def test_action_scope_normalization_still_rejects_out_of_scope_or_unread_evidenc
 
 
 @pytest.mark.asyncio
-async def test_resume_revalidates_saved_scope_failure_without_another_model_call():
-    from loom.evaluation.memory.review import VALIDATION_VERSION
-    from loom.llm.structured import parse_response
+async def test_resume_revalidates_saved_scope_failure_without_another_extraction_call():
+    from loom.evaluation.memory.contracts import FIELDS, PROTOCOL
 
     store, facts = trace()
     cp, judge = {}, MemoryJudge()
@@ -455,25 +465,31 @@ async def test_resume_revalidates_saved_scope_failure_without_another_model_call
     memory = cp["memory"]
     unit = next(u for u in memory["units"].values() if u["mode"] == "extract")
     response = next(r for r in reversed(cp["responses"]) if r["batch_id"] == unit["id"])
-    value, _ = parse_response(LlmResponse(content=response["text"]), 1000000)
+    value = {kind: [{k: r[k] for k in FIELDS[kind]['items']['properties']} for r in memory['records'].values()
+                    if r['kind'] == kind and r['unit_id'] == unit['id']] for kind in FIELDS}
     fact = value["facts"][0]
     owner = fact["action_ids"][0]
     fact["action_ids"] = [next(a["id"] for a in unit["scope"]["actions"] if a["id"] != owner)]
     response["text"] = json.dumps(value)
+    response['response_schema'] = deepcopy(PROTOCOL.schema)
     failure = "facts: Cited evidence must belong to the memory's action scope"
     response.update(validation_errors=[failure], validation_version="legacy")
-    unit.update(complete=False, errors=[failure], validation_version="legacy")
+    unit.update(complete=False, work_state='pending', protocol_version=1, errors=[failure], validation_version="legacy")
+    unit.pop('manifest')
+    memory['identity']['version'] = 'trace-memory.1'
+    memory['execution_complete'] = False
     memory["complete"] = False
     memory["records"] = {k: r for k, r in memory["records"].items() if r["kind"] != "facts"}
     calls, usage = len(judge.memory_requests), deepcopy(cp["usage"])
     result = await run(store, facts, "run", cp, judge, extract_memory=True)
     assert result["memory"]["status"] == "complete"
-    assert len(judge.memory_requests) == calls
-    assert cp["usage"] == usage
+    assert len(judge.memory_requests) == calls + 1
+    assert judge.memory_requests[-1]['mode'] == 'synthesis'  # Recovered input has a new record identity.
+    assert cp['usage']['calls'] == usage['calls'] + 1
     assert owner in result["memory"]["facts"][0]["action_ids"]
-    assert unit["validation_version"] == VALIDATION_VERSION
-    assert response["validation_errors"] == []
-    assert response["validation_history"][-1]["errors"] == [failure]
+    assert response["validation_errors"] == [failure]
+    assert response['revalidations'][-1]['issues'] == []
+    assert cp['analysis_epochs'][-1]['snapshot']['units'][unit['id']]['errors'] == [failure]
 
 
 @pytest.mark.asyncio
@@ -497,3 +513,20 @@ async def test_memory_provider_timeout_keeps_graph_and_reports_the_call_limit():
     assert detail["code"] == "request.timeout"
     assert detail["details"]["timeout_seconds"] > 0
     assert "Resume" in detail["reason"]
+
+
+@pytest.mark.asyncio
+async def test_retrieved_memory_cannot_become_fresh_observed_evidence():
+    store = source(action(1, 'memory_read', {'evaluation_id': 'old', 'record_id': 'm'}, {'text': 'Historical host was Darwin'}))
+    cp = {}
+    await run(store, build_behavior_facts(store), 'run', cp, GraphJudge())
+    card = next(c for c in cp['extraction']['cards'] if c['name'] == 'memory_read')
+    evidence = card_evidence(store, card, cp['extraction']['registry'])
+    assert evidence and all(e['basis'] == 'historical_reference' for e in evidence)
+    unit = dict(mode='extract', scope=dict(goals=[{'id': 'g'}], stages=[], actions=[{'id': card['id']}]), evidence=evidence)
+    entry = evidence[0]
+    row = dict(title='Host', summary='Host was Darwin', scope='Historical run', confidence='medium',
+               goal_ids=['g'], stage_ids=[], action_ids=[card['id']], citations=[{'ref': entry['id'], 'quote': entry['text']}],
+               category='environment', basis='observed', revalidate_when='Before use')
+    with pytest.raises(ValueError, match='recorded tool output'):
+        validate_record('facts', row, unit)

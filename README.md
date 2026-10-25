@@ -12,8 +12,11 @@ resume from saved checkpoints.
 - **Deep eval memory:** extract stage contributions, scoped environment and configuration
   facts, failure lessons, and more efficient workflows from traces. Records link back
   to goals, stages, actions, and source evidence; observed findings stay distinct from
-  proposed improvements. See [Deep eval Memory](docs/deep-eval-memory.md) and the
+  proposed improvements. Sessions retrieve relevant accepted memories within the same workspace;
+  standalone tasks opt in with `--memory-store /path/to/service-data`. See [runtime memory](docs/runtime-memory.md), [Deep eval Memory](docs/deep-eval-memory.md) and the
   [validation architecture](docs/deep-eval-validation.zh-CN.md) for module boundaries, structured errors, and bounded retries.
+  Memory uses host-generated evidence anchors, isolates rejected candidates, and separates processing progress from result quality.
+  Resume continues unfinished work; Retry failed items explicitly revisits quality gaps without discarding accepted records.
 - **Independent acceptance before completion:** actual command checks and a
   separate semantic review assess task- and workspace-specific requirements.
   Failed candidates enter bounded repair; missing evidence retains a concrete
@@ -483,15 +486,11 @@ uv run loom task 'Read https://www.python.org/about/ and summarize with sources'
 ```
 
 Unlike `loom serve`, `loom task` discovers `./config.yaml` or `./config.yml`
-automatically. Command-line options override defaults. Optional `task` and
-`run` blocks apply to one-shot execution:
+automatically. Task objectives and task-specific options are supplied explicitly
+on the command line; top-level `task` defaults are no longer supported.
+The optional `run` block supplies execution defaults:
 
 ```yaml
-task:
-  workspace: .
-  expected_outputs:
-    - A Markdown analysis report.
-
 run:
   tui: true
   stream: true
@@ -501,10 +500,22 @@ run:
   timeout_ms: 120000
 ```
 
-`timeout_ms` is a per-step timeout. These blocks do not configure persistent
-session limits. With `--task-spec`, one-shot execution does not inherit the
-`task` block; model and `run` settings still apply. One-shot runs write JSONL
-traces under `runs/` by default and are tied to their launching process.
+`timeout_ms` is a per-step timeout. The `run` block does not configure persistent
+session limits. Use `--workspace`, `--profile`, and `--expected-output` for task
+options, or `--task-spec` for the execution environment. Model and `run` settings
+still apply. One-shot runs write JSONL traces under `runs/` by default and are
+tied to their launching process.
+
+To reuse accepted Deep eval memories from a local service data directory without
+starting the service:
+
+```bash
+uv run loom task 'Fix duplicate planet rendering' --workspace ~/workspace/solaris \
+  --memory-store runs/service
+```
+
+Retrieval is restricted to the bound workspace. Historical facts and proposed
+workflows remain reference material and require fresh verification.
 
 ## Further reading
 

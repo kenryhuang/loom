@@ -2,7 +2,7 @@
 
 一次性任务和持久 session 共用 `TaskAssembly`。通过 `--task-spec` 选择 session 环境、上下文管理、工具集合、执行后端和 workflow。配置支持 JSON、YAML、TOML；现有模型配置继续使用 `config.yaml` 或环境变量。
 
-一次性任务传入 `--task-spec` 后，不再继承 `config.yaml` 的 `task` 项（objective、workspace、profile、expected_outputs），避免项目审计配置影响通用任务。模型和 `run` 配置继续生效，显式任务参数仍优先。`--task-spec` 只能传一次；启动时展示配置路径和工具集合。
+`config.yaml` 顶层的 `task` 默认配置及 Settings 编辑入口已移除。任务目标由 CLI 明确传入，workspace、profile、expected outputs 使用对应命令行参数；持久 Session 在 New session 中配置。旧配置若仍含 `task` 块，加载时会提示删除。模型和 `run` 配置继续生效。`--task-spec` 只能传一次；启动时展示配置路径和工具集合。
 
 ## 运行示例
 

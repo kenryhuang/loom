@@ -64,6 +64,8 @@ Judge only supplied actions; this may be one slice of a longer stage. Failed exp
 Do not treat tool success, duration, token cost, default membership or chronological order as contribution proof.
 2. Extract material environment facts, configuration, investigated capabilities and project facts.
 Separate observed tool output from model claims/inference. Commands describe intent, not what exists.
+Memory search/read results marked historical_reference are prior claims, not fresh observations of the current environment.
+Do not turn retrieved memories into new observed facts merely because the retrieval tool succeeded.
 Record exact applicability (host/workspace/version/time as known), unknown scope explicitly, and when to revalidate.
 Do not generalize a local snapshot into a timeless global fact. Preserve conflicting observations with their scope.
 3. Learn from failed approaches: trigger, attempted approach, observed failure, cause (unknown if not evidenced),
@@ -95,6 +97,14 @@ Keep records concise, in the language of the task. Do not duplicate the same fac
 
 def protocol_for(unit):
     schema = deepcopy(PROTOCOL.schema)
+    version = PROTOCOL.version
+    if unit.get('protocol_version') == 2:
+        from loom.evaluation.memory.wire import fields
+
+        schema = obj(fields())
+        schema['properties']['evidence_requests'] = dict(type='array', items=ID, maxItems=0 if unit.get('page_reads') else 1)
+        schema['required'].append('evidence_requests')
+        version = 2
     accepted = {r["stage_id"] for r in unit.get("accepted_records", []) if r["kind"] == "contributions"}
     pending = {s["id"] for s in unit["scope"]["stages"]} - accepted
     if unit["mode"] == "extract":
@@ -103,4 +113,4 @@ def protocol_for(unit):
     else:
         for kind in ("contributions", "facts", "lessons"):
             schema["properties"][kind]["maxItems"] = 0
-    return StructuredProtocol(PROTOCOL.name, PROTOCOL.version, schema)
+    return StructuredProtocol(PROTOCOL.name, version, schema)

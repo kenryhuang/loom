@@ -5,22 +5,24 @@ import inspect
 import time
 from copy import deepcopy
 
+from loom.evaluation.evidence_delivery import cited_evidence, page_catalog, prepare, read_page
 from loom.evaluation.goal_loops.attribution import action_attributions
 from loom.evaluation.goal_loops.facts import identity
-from loom.evaluation.issues import EvaluationFailure, describe, provider_failure, request_failure_event, request_timeout, stopped
-from loom.evaluation.memory import VERSION
-from loom.evaluation.memory.checkpoint import prepare_replay
+from loom.evaluation.issues import EvaluationFailure, describe, issue, provider_failure, request_failure_event, request_timeout, stopped
 from loom.evaluation.memory.contracts import protocol_for
 from loom.evaluation.memory.evidence import card_evidence, sanitize
+from loom.evaluation.memory.lifecycle import VERSION, dependencies, migrate
 from loom.evaluation.memory.records import commit, commit_records
-from loom.evaluation.memory.request import messages_for, scope
+from loom.evaluation.memory.request import focus_repair, memory_input, messages_for, scope
 from loom.evaluation.memory.validation import validate_record
 from loom.evaluation.provider import evaluator_provider
-from loom.evaluation.repair import begin_cycle, retry
+from loom.evaluation.repair import provider_retry, reserve_repair
+from loom.evaluation.rules import fatal
+from loom.evaluation.work_items import settle, terminal
 from loom.llm.api import request_llm_response
 from loom.llm.structured import output_mode, protocol_provider, unsupported_format
 
-VALIDATION_VERSION = "memory-validation.5"
+VALIDATION_VERSION = "memory-validation.6"
 
 # Compatibility exports; orchestration uses structured issues exclusively.
 __all__ = ["review_memory", "commit", "validate_record", "messages_for", "protocol_for"]
@@ -30,10 +32,8 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
     expected = dict(
         version=VERSION, source=source.source_sha256, run_id=run_id, graph_revision=cp["graph_revision"], model=getattr(provider, "model", "unknown")
     )
-    memory = cp.setdefault("memory", dict(identity=expected, units={}, records={}, read_chars=0, cursor=0, complete=False))
-    if memory["identity"] != expected:
-        raise stopped("checkpoint.memory_identity", "Memory source or graph changed; create a new evaluation", category="state", stage="memory")
-    if memory["complete"]:
+    memory = migrate(cp, expected)
+    if memory.get('execution_complete'):
         return
     cards, registry = cp["extraction"]["cards"], cp["extraction"]["registry"]
     memberships = action_attributions(cp, cards)
@@ -46,9 +46,29 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
 
     async def evaluate(unit):
         nonlocal mode
-        begin_cycle(unit)
-        prepare_replay(cp, unit, VALIDATION_VERSION)
-        while not unit.get("complete"):
+        if unit.get('dependency_changed'):
+            unit.pop('delivery_span_ids', None)
+            subset = [c for c in cards if c['id'] in {a['id'] for a in unit['scope']['actions']}]
+            unit['scope'] = scope(cp, subset, memberships)
+            unit['accepted_records'] = [{k: r[k] for k in ('kind', 'stage_id', 'rating', 'title', 'summary') if k in r}
+                                        for r in memory['records'].values() if r['unit_id'] == unit['id'] and r['publication_state'] == 'published']
+            if unit['mode'] == 'synthesis':
+                inputs = [memory['records'][key] for key in unit.get('source_record_ids', [])
+                          if key in memory['records'] and memory['records'][key].get('publication_state') == 'published']
+                if not inputs:
+                    settle(unit, [issue('memory.dependencies_pending', 'No current published supporting records remain',
+                                        category='coverage', stage='memory', unit_id=unit['id'])])
+                    await persist()
+                    return
+                unit['memories'] = [memory_input(r) for r in inputs]
+                unit['evidence'] = cited_evidence(inputs, [memory['units'][r['unit_id']] for r in inputs])
+                unit.pop('delivery_span_ids', None)
+            unit.pop('dependency_changed')
+        prepare(unit)
+        if unit.get('repair_targets'):
+            focus_repair(unit)
+        unit.setdefault('pages', page_catalog(unit, source) if unit['mode'] == 'extract' else {})
+        while not terminal(unit):
             if "pending_response" not in unit:
                 messages, profile = messages_for(unit, mode)
                 if profile["total_chars"] > settings["max_prompt_chars"]:
@@ -71,13 +91,18 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
                     output_token_limit=None,
                 )
                 cp["reservations"].append(reservation)
+                reserved, requested = unit.pop('repair_reserved', False), unit.pop('retry_requested', False)
+                is_repair = bool(reserved or requested)
+                if is_repair:
+                    unit['repair_attempts'] = unit.get('repair_attempts', 0) + 1
                 cp["usage"]["calls"] += 1
                 cp["usage"]["unreported_calls"] += 1
                 await persist()
                 meta = dict(
                     analysis_stage=unit["id"],
                     evaluation_activity="memory",
-                    activity_label="Extracting trace memory",
+                    activity_label="Repairing memory candidates" if is_repair else "Extracting trace memory",
+                    repair_attempt=unit.get('repair_attempts', 0),
                     prompt_chars=profile["total_chars"],
                     input_estimate=profile["input_estimate"],
                     input_profile=profile,
@@ -100,13 +125,26 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
                 except TimeoutError as exc:
                     failure = request_timeout(stage="memory", unit_id=unit["id"], timeout_seconds=timeout)
                     await emit(request_failure_event(meta, failure))
+                    retry_request = provider_retry(cp, failure, settings)
                     await persist()
+                    if retry_request:
+                        await asyncio.sleep(.1)
+                        continue
                     raise failure from exc
+                except EvaluationFailure as exc:
+                    await emit(request_failure_event(meta, exc))
+                    retry_request = provider_retry(cp, exc, settings)
+                    await persist()
+                    if retry_request:
+                        await asyncio.sleep(.1)
+                        continue
+                    raise
                 except BaseException as exc:
                     await emit(request_failure_event(meta, exc))
                     await persist()
                     raise
                 answer = response.unwrap()
+                cp['provider_failures'] = 0
                 usage = {k: getattr(answer.usage, k, 0) for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
                 if usage["total_tokens"] > 0:
                     reservation.update(state="settled", usage=usage)
@@ -121,6 +159,8 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
                         usage=usage,
                         text=sanitize(answer.content),
                         response_schema=deepcopy(protocol_for(unit).schema),
+                        manifest=deepcopy(unit['manifest']),
+                        analysis_epoch=memory['epoch'],
                         finish_reason=answer.finish_reason,
                         duration_seconds=time.monotonic() - start,
                     )
@@ -136,23 +176,21 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
             unit.pop("pending_response", None)
             unit.pop("pending_schema", None)
             unit.pop("pending_finish_reason", None)
-            unit.update(issues=issues, errors=errors, complete=not issues, validation_version=VALIDATION_VERSION)
+            unit.update(issues=issues, errors=errors, validation_version=VALIDATION_VERSION)
+            accepted = [r for r in memory['records'].values() if r['unit_id'] == unit['id'] and r.get('publication_state') == 'published']
+            for record in accepted:
+                record['dependencies'] = dependencies(record, cp)
+            settle(unit, issues, accepted=len(accepted), unknown=any(r.get('rating') == 'unknown' for r in accepted))
             for response_record in reversed(cp["responses"]):
                 if response_record["batch_id"] == unit["id"]:
-                    if response_record.get("validation_errors") != errors:
-                        response_record.setdefault("validation_history", []).append(
-                            dict(version=response_record.get("validation_version", "legacy"), errors=response_record.get("validation_errors", []))
-                        )
-                    response_record["validation_errors"] = list(errors)
-                    response_record["validation_issues"] = deepcopy(issues)
+                    response_record.setdefault('revalidations', []).append(dict(version=VALIDATION_VERSION, issues=deepcopy(issues)))
+                    response_record.setdefault("validation_errors", list(errors))
+                    response_record.setdefault("validation_issues", deepcopy(issues))
                     response_record["validation_version"] = VALIDATION_VERSION
                     break
             await persist()
-            if issues:
-                should_retry = retry(unit, issues)
-                await persist()
-                if not should_retry:
-                    raise EvaluationFailure("Memory validation incomplete; accepted records retained. Resume evaluation.", issues)
+            if fatal(issues):
+                raise EvaluationFailure('Memory request stopped; accepted records retained.', fatal(issues))
         await emit(
             dict(
                 type="evaluation.activity",
@@ -165,7 +203,7 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
     # Finish interrupted units before admitting fresh evidence. Their exact delivered
     # slices and responses survive cancellation, format repair and budget increases.
     for unit in list(memory["units"].values()):
-        if not unit.get("complete"):
+        if not terminal(unit):
             await evaluate(unit)
     while memory["cursor"] < len(cards):
         subset = cards[memory["cursor"] : memory["cursor"] + min(8, settings["batch_rounds"])]
@@ -178,6 +216,8 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
                 evidence=evidence,
                 complete=False,
             )
+            prepare(unit)
+            unit['pages'] = page_catalog(unit, source)
             if messages_for(unit, mode)[1]["total_chars"] <= settings["max_prompt_chars"] or len(subset) == 1:
                 break
             subset = subset[: max(1, len(subset) // 2)]
@@ -193,36 +233,69 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
         await persist()
         await evaluate(unit)
 
+    async def repairs(kind):
+        for unit in list(memory['units'].values()):
+            if unit['mode'] != kind or not unit.get('issues'):
+                continue
+            remaining = int('synthesis_ids' not in memory and any(r['kind'] != 'workflows' for r in memory['records'].values()))
+            if not reserve_repair(cp, unit, unit['issues'], settings, remaining_work=remaining):
+                continue
+            if unit.get('requested_pages') and not unit.get('page_reads'):
+                from loom.evaluation.issues import RuleViolation
+
+                try:
+                    extra = read_page(unit, unit['requested_pages'][0], source)
+                    extra = [e for e in extra if e['id'] not in {r['id'] for r in unit['evidence']}]
+                    chars = sum(len(e['text']) for e in extra)
+                    if memory['read_chars'] + cp.get('read_chars', 0) + chars > settings['max_evidence_chars']:
+                        raise stopped('budget.evidence_chars', 'Memory evidence page exceeds total evidence capacity', category='budget', stage='memory')
+                    memory['read_chars'] += chars
+                    unit['evidence'] += extra
+                    unit['page_reads'] = 1
+                    prepare(unit)
+                except RuleViolation as exc:
+                    unit['issues'].append(exc.issue)
+                    unit.pop('repair_reserved', None)
+                    await persist()
+                    continue
+            rejected = [r for r in memory['quarantine'].values() if r['unit_id'] == unit['id']]
+            unit['repair_targets'] = [r['id'] for r in rejected]
+            unit['rejected_records'] = rejected
+            focus_repair(unit)
+            unit.update(work_state='pending', complete=False)
+            await persist()
+            await evaluate(unit)
+
+    await repairs('extract')
+
     # Consolidate reusable routes across actions/stages from cited memory records,
     # without retransmitting raw trace bodies. Large histories stay in bounded pages.
     if "synthesis_ids" not in memory:
-        memory["synthesis_ids"] = [r["id"] for r in memory["records"].values() if r["kind"] != "workflows"]
+        memory["synthesis_ids"] = [r["id"] for r in memory["records"].values()
+                                   if r["kind"] != "workflows" and r.get('publication_state') == 'published' and r.get('citations')]
         memory["synthesis_cursor"] = 0
+    # New or corrected facts after an explicit retry get a new synthesis input
+    # generation. Existing workflows remain linked to their original input set.
+    additional = [r['id'] for r in memory['records'].values() if r['kind'] != 'workflows'
+                  and r.get('publication_state') == 'published' and r.get('citations') and r['id'] not in memory['synthesis_ids']]
+    memory['synthesis_ids'] += additional
     while memory["synthesis_cursor"] < len(memory["synthesis_ids"]):
         ids = memory["synthesis_ids"][memory["synthesis_cursor"] : memory["synthesis_cursor"] + 16]
         while True:
             records = [memory["records"][key] for key in ids]
             units = [memory["units"][r["unit_id"]] for r in records]
-            cites = {c["ref"] for r in records for c in r["citations"]}
-            evidence = {
-                e["id"]: {
-                    **e,
-                    "quotes": list(dict.fromkeys(c["quote"] for r in records for c in r["citations"] if c["ref"] == e["id"])),
-                    "text": "\n".join(dict.fromkeys(c["quote"] for r in records for c in r["citations"] if c["ref"] == e["id"])),
-                }
-                for u in units
-                for e in u["evidence"]
-                if e["id"] in cites
-            }
+            evidence = cited_evidence(records, units)
             scoped = {key: list({r["id"]: r for u in units for r in u["scope"][key]}.values()) for key in ("goals", "stages", "actions")}
             unit = dict(
                 id="memory:synthesis:" + identity(ids),
                 mode="synthesis",
                 scope=scoped,
-                evidence=list(evidence.values()),
-                memories=[{k: v for k, v in r.items() if k not in {"evidence_refs", "source_digest", "run_id", "graph_revision"}} for r in records],
+                evidence=evidence,
+                memories=[memory_input(r) for r in records],
                 complete=False,
+                source_record_ids=ids,
             )
+            prepare(unit)
             if messages_for(unit, mode)[1]["total_chars"] <= settings["max_prompt_chars"] or len(ids) == 1:
                 break
             ids = ids[: max(1, len(ids) // 2)]
@@ -230,5 +303,7 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
         memory["synthesis_cursor"] += len(ids)
         await persist()
         await evaluate(unit)
-    memory["complete"] = True
+    await repairs('synthesis')
+    memory['execution_complete'] = True
+    memory["complete"] = all(u.get('complete') for u in memory['units'].values()) and not memory['quarantine']
     await persist()

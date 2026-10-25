@@ -63,7 +63,10 @@ class Settings:
         if not parsed.ok:
             raise ServiceError('Cannot parse configuration: ' + parsed.error.message)
         try:
-            return raw, provider_config_document(parsed.value or {})
+            data = provider_config_document(parsed.value or {})
+            # Retired task defaults are omitted from the editor and removed on save.
+            data.pop("task", None)
+            return raw, data
         except ValueError as exc:
             raise ServiceError(str(exc)) from exc
 

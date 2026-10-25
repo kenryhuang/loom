@@ -11,10 +11,10 @@ from loom.evaluation.goal_loops.structure import commit_structure
 from loom.evaluation.issues import RuleViolation, issue, validate_schema
 
 __all__ = ["parse_updates", "commit_updates"]
-VALIDATION_VERSION = "graph-validation.1"
+VALIDATION_VERSION = "graph-validation.2"
 
 
-def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_ids, allowed_fields=None):
+def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_ids, allowed_fields=None, visible_ids=None):
     """Commit each valid record without rolling back independent siblings.
 
     Declarations are dependency ordered; action assessments need no declared goal.
@@ -46,6 +46,19 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
             requests.append(raw)
             return
         aliases = cp.setdefault("record_aliases", {}).setdefault(batch_id, {})
+        if kind == 'reuse':
+            if visible_ids is not None and raw['target_id'] not in visible_ids:
+                raise RuleViolation('graph.reuse_scope', 'Reused object was not delivered in this request', path=('target_id',))
+            objects = cp['stages'] if raw['kind'] == 'stage' else {r['id']: r for r in cp['entities'][raw['kind'] + 's']}
+            target = objects.get(raw['target_id'])
+            if target is None or target.get('knowledge_cutoff', target.get('origin_line', 0)) > cutoff:
+                raise RuleViolation('graph.reuse_scope', 'Reused object is unknown or outside this time boundary', path=('target_id',))
+            previous = aliases.get(raw['key'])
+            if previous and previous != raw['target_id']:
+                raise RuleViolation('graph.reuse_alias', 'An existing local alias cannot be redirected by reuse', path=('key',))
+            aliases[raw['key']] = raw['target_id']
+            note(cp, batch_id, kind, raw, 'object_reused', target_id=raw['target_id'])
+            return
         row = deepcopy(raw)
         for key in ("key", "parent_id", "goal_id", "attempt_id", "source_id", "target_id"):
             if key in row:
@@ -68,10 +81,12 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
                     row["key"] = "new-goal:" + identity(batch_id, raw)
         if kind == "stages" and row["key"] in cp["stages"]:
             old = cp["stages"][row["key"]]
-            remapped_goal = aliases.get(old["goal_id"], old["goal_id"])
-            if row["goal_id"] != old["goal_id"] and row["goal_id"] == remapped_goal:
+            attempt = row["attempt_id"] or "attempt:" + identity(row["goal_id"], "unestablished")
+            if (row["goal_id"], attempt, row["kind"]) != (old["goal_id"], old["attempt_id"], old["kind"]):
+                # A declaration creates/reuses an identity; it is not an edit.
+                # Preserve the old stage and move only this batch's alias.
                 forked_from = old["id"]
-                row["key"] = "new-stage:" + identity(batch_id, raw, row["goal_id"])
+                row["key"] = "new-stage:" + identity(batch_id, raw, row["goal_id"], attempt)
         if kind == "stages" and row["key"] in cp["stages"]:
             old = cp["stages"][row["key"]]
             if old["knowledge_cutoff"] <= cutoff and all(old[k] == row[k] for k in ("goal_id", "title", "kind")) and old["attempt_id"] == (
@@ -143,7 +158,7 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
 
     # Retry declarations only when a dependency was actually resolved; unrelated
     # malformed declarations cannot prevent other goals or stages from committing.
-    declarations = [item for item in items if item[1] in {"goals", "attempts", "stages"}]
+    declarations = sorted([item for item in items if item[1] in {"reuse", "goals", "attempts", "stages"}], key=lambda item: item[1] != 'reuse')
     while declarations:
         rejected, accepted = [], 0
         for item in declarations:

@@ -268,6 +268,8 @@ async def test_independent_groups_survive_failure_and_later_batches_continue():
     assert len(cp["stages"]) == 1
     saved = deepcopy(cp["assessments"])
     judge.broken = False
+    from loom.evaluation.work_items import retry_failed
+    retry_failed(cp)
     final = await run(store, facts, "run", cp, judge, batch_rounds=2)
     assert final["coverage"]["pipeline_complete"]
     assert len(cp["stages"]) == 1
@@ -359,5 +361,5 @@ async def test_graph_transport_timeouts_have_precise_errors_and_retain_reservati
     assert detail["details"]["timeout_seconds"] == .02
     assert "Call timeout" in detail["reason"]
     assert "Resume" in detail["reason"]
-    assert cp["usage"]["calls"] == cp["usage"]["unreported_calls"] == 1
+    assert cp["usage"]["calls"] == cp["usage"]["unreported_calls"] == 2
     assert cp["reservations"][0]["state"] == "unknown"

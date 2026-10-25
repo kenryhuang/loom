@@ -209,6 +209,7 @@ class LoomService:
             descriptor["checkpoint_value"] = encode(self._checkpoint_value(state))
             descriptor["knowledge_directory"] = str(self.store.knowledge.directory)
             descriptor["external_tools_directory"] = str(self.store.external_tools.directory)
+            descriptor["memory_database"] = str(self.store.path)
             return descriptor
 
         return self.store.update(sid, prepare)

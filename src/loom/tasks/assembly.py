@@ -195,6 +195,12 @@ class TaskAssembly:
         workspace_id = self.spec["execution_runtime"].get("workspace_resource")
         workspace = next((r for r in directories if r.id == workspace_id), None)
         self.tool_request = replace(request, workspace=Path(workspace.uri) if workspace else None)
+        from loom.memory.runtime import RuntimeMemory
+
+        self.memory = RuntimeMemory(
+            request.metadata["memory_database"], workspace=self.tool_request.workspace, session_id=session_id,
+            allowed_tools=harness.allowed_tools if harness else None,
+        ) if request.metadata.get("memory_database") else None
         self.report_workspace = Path(workspace.uri) if workspace and workspace.access == "read-write" else None
         self.collections = [
             self.registry.create(
@@ -231,7 +237,8 @@ class TaskAssembly:
                     raise ValueError("Duplicate tool entrypoint")
                 self.entrypoints[entrypoint] = handler
         if harness and harness.allowed_tools is not None:
-            unknown = set(harness.allowed_tools) - self.bindings.keys() - {"read_artifact"}
+            unknown = set(harness.allowed_tools) - self.bindings.keys() - {"read_artifact"} - (
+                self.memory.allowed if self.memory else set())
             if unknown:
                 raise ValueError(f"Unknown allowed tools: {sorted(unknown)}")
             self.bindings = {name: binding for name, binding in self.bindings.items() if name in harness.allowed_tools}
@@ -306,6 +313,8 @@ class TaskAssembly:
             execution.binding_effects = {name: binding.effect_kind for name, binding in self.bindings.items()}
             execution.binding_effects.update({ref.id: "service_control" for ref in self.workflow.tool_refs()})
             execution.binding_effects["revise_acceptance_plan"] = "service_control"
+            if self.memory:
+                execution.binding_effects.update({name: "read_only" for name in self.memory.allowed})
 
     def publish_artifact(self, value, kind):
         if self.execution:
@@ -393,7 +402,7 @@ class TaskAssembly:
         self.context_manager.restore(snapshot["context"])
         self.runtime.restore(snapshot["execution_runtime"])
         self.workflow.restore_plugin(snapshot["workflow"])
-        self.workflow.configure_normal_tool_refs(self.normal_refs)
+        self.workflow.configure_normal_tool_refs(self.context_tools())
         if set(snapshot["tools"]) != {c.manifest.plugin_id for c in self.collections}:
             raise ValueError("Checkpoint tool collection set changed")
         for collection in self.collections:
@@ -415,7 +424,9 @@ class TaskAssembly:
             return refs
         from loom.tools.contracts import CatalogTool, ToolLifecycle
 
-        required = tuple(ref.id for ref in refs if ref.id not in self.bindings or self.bindings[ref.id].placement == "control")
+        memory_ids = self.memory.allowed if self.memory else set()
+        required = tuple(ref.id for ref in refs if ref.id not in memory_ids and (
+            ref.id not in self.bindings or self.bindings[ref.id].placement == "control"))
         if self.acceptance_policy:
             # This fixed collection is the diagnosis contract, including validation and diff tools.
             required = tuple(ref.id for ref in refs)
@@ -554,6 +565,8 @@ class TaskAssembly:
             )
 
         handlers["revise_acceptance_plan"] = revise_acceptance
+        if self.memory:
+            handlers.update(self.memory.handlers())
         wrapped = self.workflow.wrap_tools(handlers)
         for name in ("process_execute", "shell_execute"):
             if name in handlers:
@@ -588,6 +601,8 @@ class TaskAssembly:
 
     def context_tools(self):
         refs = (*self.normal_refs, self.artifact_tool_ref()) if self.expose_artifacts else self.normal_refs
+        if self.memory:
+            refs = (*refs, *self.memory.refs())
         return (
             *refs,
             ToolRef(
@@ -717,10 +732,21 @@ class TaskAssembly:
             )
             emitted.unwrap()
 
+    async def prepare_memory(self, context, runtime):
+        if not self.memory:
+            return context
+        context = await self.memory.attach(context, runtime)
+        self.workflow.configure_normal_tool_refs(self.context_tools())
+        return replace(context, affordances=replace(context.affordances,
+            tools=self.workflow.visible_tool_refs(self.context_tools())))
+
     def wrap_loop(self, definition):
         wrapped = self.workflow.wrap_loop(definition)
 
         async def task_step(context, runtime):
+            # Durable workers attach at ManagedStep's new-request boundary, after replaying saved tools.
+            if self.memory and self.execution is None:
+                context = await self.prepare_memory(context, runtime)
             self.context, self._task_runtime = context, runtime
             if not self.execution:
                 try:

@@ -287,6 +287,7 @@ export class EvaluationView {
       field("Judge model", job.model || "Unknown model");
       const status = element("span", "evaluation-history-status");
       status.append(badge(label(job.state), job.state));
+      if (job.status_version) status.append(badge(`${label(job.execution_state)} · ${label(job.result_state)}`));
       const actions = element("div", "evaluation-history-actions");
       if (["queued", "running"].includes(job.state)) {
         const cancel = button("Cancel", () => this.cancelEvaluation(job.id));
@@ -296,9 +297,11 @@ export class EvaluationView {
         cancel.disabled = !!this.submitting || !!this.deleting || this.cancellingIds.has(job.id);
         actions.append(cancel);
       } else if (RESUMABLE.has(job.state)) {
-        const resume = button("Resume", () => this.resumeEvaluation(job.id));
+        const retry = job.execution_state === 'completed' && job.retryable_work > 0;
+        const resume = button(retry ? "Retry failed items" : "Resume", () => this.resumeEvaluation(job.id, retry));
         resume.className = "primary evaluation-history-resume";
-        resume.setAttribute("aria-label", `Resume evaluation ${job.id}`);
+        resume.setAttribute("aria-label", `${retry ? 'Retry failed items in' : 'Resume'} evaluation ${job.id}`);
+        if (retry) resume.title = `Retry ${job.retryable_work} settled items within the saved total budget; accepted results remain saved.`;
         resume.disabled = !!this.submitting || !!this.deleting || !!this.resumingId || !this.catalog.models.some(model => model.id === job.model)
           || (this.catalog.analysis_versions && !this.catalog.analysis_versions.includes(job.analysis_version || "v2"));
         actions.append(resume);
@@ -390,6 +393,7 @@ export class EvaluationView {
         )
       ) {
         options.resume_id = this.job.id;
+        if (this.retryFailed) options.retry_failed = true;
       }
       if (this.job && !options.resume_id) throw new Error("Resume must keep the saved model, run and analysis settings. Use New evaluation to change them.");
       if (!this.job) options.new_evaluation = true;
@@ -446,9 +450,10 @@ export class EvaluationView {
       if (!this.signal.aborted) { this.renderHistory(); this.fail(error); }
     }
   }
-  async resumeEvaluation(id) {
+  async resumeEvaluation(id, retryFailed = false) {
     if (this.deleting || this.submitting || this.resumingId) return;
     this.resumingId = id;
+    this.retryFailed = retryFailed;
     this.renderHistory();
     try {
       if (this.selectedHistoryId !== id || this.job?.id !== id) {
@@ -459,6 +464,7 @@ export class EvaluationView {
       if (this.form.reportValidity()) await this.run();
     } finally {
       this.resumingId = null;
+      this.retryFailed = false;
       if (!this.signal.aborted) this.renderHistory();
     }
   }
@@ -589,6 +595,7 @@ export class EvaluationView {
     const call = job.current_call;
     const heading = element("header", "dashboard-panel-heading");
     heading.append(element("h3", "", "Evaluation run"), badge(label(job.state), job.state));
+    if (job.status_version) heading.append(badge(`${label(job.execution_state)} · ${label(job.result_state)}`));
     const coverage = element("progress");
     coverage.setAttribute("aria-label", goalLoops ? "Reviewed evidence coverage" : behavior ? "Reviewed segment coverage" : "Reviewed round coverage");
     if (total != null && total > 0) { coverage.max = total; coverage.value = Math.min(reviewed, total); }
@@ -596,6 +603,11 @@ export class EvaluationView {
     if (job.analysis_version === "goal_graph_v1") {
       for (const [title,value] of [["Cards reviewed",`${reviewed} / ${total ?? "—"}`],["Graph revision",job.graph_revision||0],["Conflicts",job.review_gaps||0]]) {
         const phase=element("div","deep-phase");phase.append(element("strong","",title),element("span","",String(value)));phases.append(phase);
+      }
+      if (job.status_version) {
+        for (const [title, value] of [['Unfinished work', job.pending_work], ['Quality gaps', job.retryable_work], ['Unknown judgments', job.unknown_judgments]]) {
+          const phase = element('div', 'deep-phase'); phase.append(element('strong', '', title), element('span', '', String(value ?? 0))); phases.append(phase);
+        }
       }
     } else if (goalLoops) {
       for (const [title, value] of [["Structure", `${reviewed} / ${total ?? "—"} evidence pages`], ["Reconciliation", job.reconciliation_complete ? (job.execution_protocol >= 2 && !job.reconciliation_candidates ? "Skipped · no candidates" : "Saved") : "Pending"], ["Diagnosis", `${job.diagnosed_goals || 0} goals`]]) {

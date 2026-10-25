@@ -8,7 +8,8 @@ from loom.evaluation.memory import VERSION
 def project_memory(cp):
     memory = cp.get("memory")
     requested = cp.get("memory_requested", False)
-    records = list((memory or {}).get("records", {}).values())
+    all_records = list((memory or {}).get("records", {}).values())
+    records = [r for r in all_records if r.get('publication_state', 'published') == 'published']
     units = list((memory or {}).get("units", {}).values())
     ratings = []
     for stage in cp.get("stages", {}).values():
@@ -40,16 +41,30 @@ def project_memory(cp):
             reviewed_actions=sum(len(u["scope"]["actions"]) for u in units if u["mode"] == "extract" and u.get("complete")),
             completed_windows=sum(u.get("complete", False) for u in units),
             total_windows=len(units),
+            settled_windows=sum(u.get('work_state') == 'settled' or u.get('complete', False) for u in units),
+            source_actions=len(cp.get('extraction', {}).get('cards', [])),
+            processed_actions=sum(len(u['scope']['actions']) for u in units if u['mode'] == 'extract'
+                                  and (u.get('work_state') == 'settled' or u.get('complete'))),
+            published_records=len(records),
+            quarantined_records=len((memory or {}).get('quarantine', {})),
+            stale_records=sum(r.get('publication_state') == 'stale' for r in all_records),
+            unknown_contributions=sum(r.get('rating') == 'unknown' for r in records),
             evidence_chars=(memory or {}).get("read_chars", 0),
             truncated_slices=sum(e["truncated"] for u in units if u["mode"] == "extract" for e in u["evidence"]),
             errors=[error for u in units for error in u.get("errors", [])],
             issues=[deepcopy(error) for u in units for error in u.get("issues", [])],
         ),
+        execution_complete=(memory or {}).get('execution_complete', (memory or {}).get('complete', False)),
+        quarantine=[{k: deepcopy(v) for k, v in row.items() if k != 'record'} for row in (memory or {}).get('quarantine', {}).values()],
+        analysis_epoch=(memory or {}).get('epoch', 1),
+        previous_epochs=[{k: deepcopy(v) for k, v in row.items() if k != 'snapshot'}
+                         for row in cp.get('analysis_epochs', []) if row.get('kind') == 'memory'],
         limitations=[
             "Scoped to the recorded run; revalidate environment, configuration and capabilities before reuse.",
             "Contribution is a qualitative assessment of supplied evidence, not an additive percentage or a causal measurement.",
             "Bounded evidence excerpts may omit relevant output. Complete means scheduled memory windows were reviewed.",
-            "Workflow improvements marked proposed are untested. Memories are not automatically injected into future sessions.",
+            "Workflow improvements marked proposed are untested. Relevant accepted memories may be retrieved by tasks "
+            "in the same workspace; revalidate before use.",
         ],
     )
 

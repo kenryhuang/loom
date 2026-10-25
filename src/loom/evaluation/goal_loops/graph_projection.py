@@ -331,10 +331,16 @@ def project(source, facts, run_id, checkpoint, extraction=None):
     from loom.evaluation.memory.projection import memory_report, project_memory
 
     bundle["memory"] = project_memory(cp)
+    from loom.evaluation.work_items import status
+
+    bundle.update(status(cp))
+    coverage['graph_complete'] = coverage['pipeline_complete']
     if cp.get("memory_requested"):
         coverage["memory_complete"] = bundle["memory"]["status"] == "complete"
         if not coverage["memory_complete"]:
             coverage.update(status="partial", pipeline_complete=False)
         bundle["report"]["status"] = coverage["status"]
         bundle["report"]["text"] += memory_report(bundle["memory"])
+    bundle['report']['text'] += (f"\nExecution: {bundle['execution_state']}; result: {bundle['result_state']}; "
+                               f"unknown judgments: {bundle['unknown_judgments']}.\n")
     return bundle

@@ -16,7 +16,7 @@ from loom.llm import load_env_openai_config
 from loom.llm.request_options import materialize_request_options
 from loom.runtime import PlanMode
 from loom.tasks.assembly import load_task_spec
-from loom.tasks.config import RunDefaults, TaskDefaults, TaskRunnerConfig, load_task_config
+from loom.tasks.config import RunDefaults, TaskRunnerConfig, load_task_config
 from loom.tasks.request import TaskRequest, TaskRunOptions
 from loom.tasks.runner import run_generic_task
 
@@ -37,12 +37,11 @@ def parse_task_cli_args(argv: tuple[str, ...] | list[str] | None = None) -> Task
     config_path = args.config or _discover_default_config_path()
     config = _load_cli_config(config_path, parser)
     config_dir = config_path.expanduser().resolve().parent if config_path is not None else None
-    task_defaults = config.task if config is not None and args.task_spec is None else TaskDefaults()
     run_defaults = config.run if config is not None else RunDefaults()
 
-    objective = " ".join(args.objective).strip() or task_defaults.objective or ""
+    objective = " ".join(args.objective).strip()
     if not objective:
-        parser.error("task objective is required; pass it on the command line or set task.objective in config.yaml/--config")
+        parser.error("task objective is required; pass it on the command line")
 
     task_spec = None
     if args.task_spec:
@@ -50,15 +49,15 @@ def parse_task_cli_args(argv: tuple[str, ...] | list[str] | None = None) -> Task
             task_spec = load_task_spec(args.task_spec)
         except (OSError, ValueError) as exc:
             parser.error(f"Cannot load task plugin specification: {exc}")
-    workspace = _resolve_configurable_path(args.workspace if args.workspace is not None else task_defaults.workspace, config_dir)
+    workspace = _resolve_configurable_path(args.workspace, config_dir)
     if workspace is None and task_spec is not None:
         workspace = next(
             (Path(resource["uri"]) for resource in task_spec.get("session_environment", {}).get("resources", []) if resource.get("kind") == "directory"), None
         )
     if workspace is None and task_spec is None:
         workspace = Path.cwd()
-    profile = args.profile if args.profile is not None else task_defaults.profile or "auto"
-    expected_outputs = tuple(args.expected_outputs) if args.expected_outputs is not None else task_defaults.expected_outputs
+    profile = args.profile or "auto"
+    expected_outputs = tuple(args.expected_outputs or ())
     model_name = args.model if args.model is not None else (config.default_model if config is not None else None)
     tui = _coalesce(args.tui, run_defaults.tui, False)
     stream = _coalesce(args.stream, run_defaults.stream, False) or tui
@@ -80,6 +79,7 @@ def parse_task_cli_args(argv: tuple[str, ...] | list[str] | None = None) -> Task
             expected_outputs=expected_outputs,
             risk_level=args.risk_level or "auto",
             task_spec=task_spec,
+            metadata={"memory_database": str(args.memory_store.expanduser().resolve() / "service.sqlite")} if args.memory_store else {},
         ),
         options=TaskRunOptions(
             tui=tui,
@@ -135,6 +135,8 @@ def _format_task_configuration(options: TaskCliOptions) -> str:
         lines.append(f"  constraints: {_format_json(request.constraints)}")
     if request.expected_outputs:
         lines.append(f"  expected_outputs: {_format_json(request.expected_outputs)}")
+    if request.metadata.get("memory_database"):
+        lines.append(f"  memory_database: {request.metadata['memory_database']} (workspace-scoped historical references)")
     lines.append(f"  config: {options.config_path.expanduser().resolve() if options.config_path is not None else '<environment>'}")
     if request.task_spec is not None:
         lines.append(f"  task_spec: {options.task_spec_path.expanduser().resolve() if options.task_spec_path else '<inline>'}")
@@ -216,9 +218,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", type=Path, help="Workspace root for file and shell tools.")
     parser.add_argument(
         "--task-spec", type=Path, action=_SingleTaskSpec,
-        help="JSON/YAML/TOML task plugin specification; a workspace is optional. Overrides task defaults from config.",
+        help="JSON/YAML/TOML task plugin specification; a workspace is optional.",
     )
     parser.add_argument("--profile", help="Task profile, such as auto, general, or project_audit.")
+    parser.add_argument("--memory-store", type=Path,
+                        help="Read accepted Deep eval memories from this service data directory, scoped to the task workspace; no server required.")
     parser.add_argument("--risk-level", help="Optional risk label stored in task context metadata.")
     parser.add_argument("--constraint", dest="constraints", action="append", help="Additional task constraint. Repeatable.")
     parser.add_argument("--expected-output", dest="expected_outputs", action="append", help="Expected final output. Repeatable.")

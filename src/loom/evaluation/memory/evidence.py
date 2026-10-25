@@ -67,7 +67,9 @@ def card_evidence(source, card, registry):
             snippet = clean[start:end]
             event_type = source.event(ref).event_type
             basis = (
-                "model_claim"
+                "historical_reference"
+                if card.get("name") in {"memory_search", "memory_read"}
+                else "model_claim"
                 if card["kind"] == "model"
                 else "observed_output"
                 if event_type in {"tool.completed", "tool.failed"}

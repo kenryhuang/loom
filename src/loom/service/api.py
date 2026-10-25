@@ -271,6 +271,8 @@ class SessionHandler(BaseHTTPRequestHandler):
                         self._json(202, evaluation.start(sid, parts[4], self._body()))
                     elif len(parts) == 7 and method == "GET":
                         self._json(200, evaluation.get(sid, parts[4], parts[6]))
+                    elif len(parts) == 9 and parts[7] == 'epochs' and method == 'GET':
+                        self._json(200, evaluation.memory_epoch(sid, parts[4], parts[6], parts[8]))
                     elif len(parts) == 8 and parts[7] == "cancel" and method == "POST":
                         if self._body() != {}:
                             raise ServiceError("Cancel accepts an empty object")

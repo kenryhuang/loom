@@ -54,17 +54,6 @@ class ModelConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class TaskDefaults:
-    objective: str | None = None
-    workspace: str | None = None
-    profile: str | None = None
-    expected_outputs: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "expected_outputs", tuple(self.expected_outputs))
-
-
-@dataclass(frozen=True, slots=True)
 class RunDefaults:
     tui: bool | None = None
     stream: bool | None = None
@@ -78,7 +67,6 @@ class RunDefaults:
 @dataclass(frozen=True, slots=True)
 class TaskRunnerConfig:
     default_model: str | None = None
-    task: TaskDefaults = field(default_factory=TaskDefaults)
     run: RunDefaults = field(default_factory=RunDefaults)
     models: Mapping[str, ModelConfig] = field(default_factory=dict)
     evaluation_model: str | None = None
@@ -303,9 +291,10 @@ def _parse_task_config(payload: Mapping[str, Any], path: Path) -> Result:
             payload = provider_config_document(payload)
         except ValueError as exc:
             return err(make_loom_error("VALIDATION_FAILED", str(exc), retryable=False, metadata={"path": str(path)}))
-    task = _parse_task_defaults(payload.get("task", {}), path)
-    if not task.ok:
-        return task
+    if "task" in payload:
+        return err(make_loom_error("VALIDATION_FAILED",
+            "Top-level task defaults are no longer supported; remove task from the config and specify the task in New session or CLI arguments",
+            retryable=False, metadata={"path": str(path)}))
     run = _parse_run_defaults(payload.get("run", {}), path)
     if not run.ok:
         return run
@@ -355,36 +344,10 @@ def _parse_task_config(payload: Mapping[str, Any], path: Path) -> Result:
     visual_model = payload.get("visual_verification_model")
     if visual_model is not None and (not isinstance(visual_model, str) or visual_model not in models or "image" not in models[visual_model].input_modalities):
         return err(make_loom_error("VALIDATION_FAILED", "visual_verification_model must name a configured image-capable model", retryable=False))
-    return ok(TaskRunnerConfig(default_model=default_model, task=task.value, run=run.value, models=models,
+    return ok(TaskRunnerConfig(default_model=default_model, run=run.value, models=models,
                                visual_verification_model=visual_model,
                                evaluation_request_options=evaluation_options,
                                evaluation_model=evaluation_model, verification_model=verification_model, model_aliases=aliases))
-
-
-def _parse_task_defaults(payload: Any, path: Path) -> Result:
-    if payload is None:
-        payload = {}
-    if not isinstance(payload, Mapping):
-        return err(make_loom_error("VALIDATION_FAILED", "Task config task must be a table", retryable=False, metadata={"path": str(path)}))
-    try:
-        return ok(
-            TaskDefaults(
-                objective=_optional_str(payload.get("objective")),
-                workspace=_optional_str(payload.get("workspace")),
-                profile=_optional_str(payload.get("profile")),
-                expected_outputs=_optional_str_tuple(payload.get("expected_outputs")),
-            )
-        )
-    except (TypeError, ValueError) as exc:
-        return err(
-            make_loom_error(
-                "VALIDATION_FAILED",
-                "Task config task contains invalid values",
-                retryable=False,
-                cause={"name": type(exc).__name__, "message": str(exc)},
-                metadata={"path": str(path)},
-            )
-        )
 
 
 def _parse_run_defaults(payload: Any, path: Path) -> Result:
@@ -798,16 +761,6 @@ def _optional_bool(value: Any) -> bool | None:
     raise TypeError("value is not a boolean")
 
 
-def _optional_str_tuple(value: Any) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        raise TypeError("expected a list of strings")
-    if isinstance(value, tuple | list):
-        return tuple(str(item) for item in value)
-    raise TypeError("expected a list of strings")
-
-
 def _env_value(name: str | None, env: Mapping[str, str] | None) -> str | None:
     if not name:
         return None
@@ -839,7 +792,6 @@ def _read_dotenv(path: Path) -> dict[str, str]:
 __all__ = [
     "ModelConfig",
     "RunDefaults",
-    "TaskDefaults",
     "TaskRunnerConfig",
     "create_provider_from_task_config",
     "load_task_config",

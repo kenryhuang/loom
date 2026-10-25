@@ -10,13 +10,25 @@ from loom.tasks.config import ModelConfig, TaskRunnerConfig
 from loom.tasks.request import TaskRequest, TaskRunOptions
 
 
-def test_explicit_research_spec_ignores_project_task_defaults(tmp_path, monkeypatch):
+def test_cli_requires_explicit_objective_and_rejects_retired_task_config(tmp_path, capsys):
+    path = tmp_path / 'config.yaml'
+    path.write_text('models: {}\n')
+    with pytest.raises(SystemExit):
+        parse_task_cli_args(['--config', str(path)])
+    assert 'task objective is required; pass it on the command line' in capsys.readouterr().err
+    path.write_text('task:\n  objective: Old audit\n  workspace: ~/workspace/yakDB\n')
+    with pytest.raises(SystemExit):
+        parse_task_cli_args(['Explicit task', '--config', str(path)])
+    assert 'Top-level task defaults are no longer supported' in capsys.readouterr().err
+
+
+def test_explicit_research_spec_uses_model_and_run_defaults(tmp_path, monkeypatch):
     import loom.tasks.cli as cli
 
     spec = Path("examples/task-specs/research.yaml").resolve()
     config = tmp_path / "config.toml"
     config.write_text(
-        'default_model = "main"\n[task]\nworkspace = "yakDB"\nprofile = "project_audit"\nexpected_outputs = ["project audit"]\n'
+        'default_model = "main"\n'
         '[run]\ntui = true\n[models.main]\nprovider = "openai"\nmodel = "test"\nbase_url = "https://example.test/v1"\napi_key_env = "TEST_KEY"\n'
     )
     monkeypatch.chdir(tmp_path)
@@ -131,19 +143,13 @@ def test_parse_task_cli_args_defaults_trace_path_to_runs_directory(tmp_path, mon
     assert parsed.options.trace_path.suffix == ".jsonl"
 
 
-def test_parse_task_cli_args_uses_config_task_and_run_defaults(tmp_path):
+def test_parse_task_cli_args_uses_config_run_defaults(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
 default_model: main
-task:
-  objective: Audit this project briefly
-  workspace: workspace
-  profile: project_audit
-  expected_outputs:
-    - Brief markdown audit report.
 run:
   tui: false
   stream: true
@@ -160,12 +166,12 @@ models:
         encoding="utf-8",
     )
 
-    parsed = parse_task_cli_args(["--config", str(config_path)])
+    parsed = parse_task_cli_args(["Audit this project briefly", "--workspace", str(workspace), "--config", str(config_path)])
 
     assert parsed.request.objective == "Audit this project briefly"
     assert parsed.request.workspace == workspace
-    assert parsed.request.profile == "project_audit"
-    assert parsed.request.expected_outputs == ("Brief markdown audit report.",)
+    assert parsed.request.profile == "auto"
+    assert parsed.request.expected_outputs == ()
     assert parsed.model_name == "main"
     assert parsed.options.tui is False
     assert parsed.options.stream is True
@@ -187,12 +193,6 @@ def test_parse_task_cli_args_cli_values_override_config_defaults(tmp_path):
     config_path.write_text(
         """
 default_model: main
-task:
-  objective: Config task
-  workspace: config-workspace
-  profile: project_audit
-  expected_outputs:
-    - Config report.
 run:
   tui: true
   stream: true
@@ -257,10 +257,6 @@ def test_parse_task_cli_args_discovers_default_config_yaml(tmp_path, monkeypatch
     Path("config.yaml").write_text(
         """
 default_model: main
-task:
-  objective: Audit this project briefly
-  workspace: workspace
-  profile: project_audit
 run:
   stream: true
   trace_path_template: runs/{task_slug}-{model}-{timestamp}.jsonl
@@ -279,12 +275,12 @@ models:
         encoding="utf-8",
     )
 
-    parsed = parse_task_cli_args(["--model", "glm"])
+    parsed = parse_task_cli_args(["Audit this project briefly", "--workspace", str(workspace), "--model", "glm"])
 
     assert parsed.config_path == Path("config.yaml")
     assert parsed.request.objective == "Audit this project briefly"
     assert parsed.request.workspace == workspace
-    assert parsed.request.profile == "project_audit"
+    assert parsed.request.profile == "auto"
     assert parsed.model_name == "glm"
     assert parsed.options.stream is True
     assert parsed.options.trace_path is not None

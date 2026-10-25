@@ -23,7 +23,8 @@ from loom.evaluation.goal_loops.packing import REQUEST_CHARS, bounded_state, req
 from loom.evaluation.goal_loops.structure import pending_structure_units, structure_pending, structure_review_context
 from loom.evaluation.issues import EvaluationFailure, provider_failure, request_failure_event, request_timeout, stopped
 from loom.evaluation.provider import evaluator_provider
-from loom.evaluation.repair import begin_cycle, retry
+from loom.evaluation.repair import begin_cycle, provider_retry, reserve_repair
+from loom.evaluation.work_items import settle, terminal
 from loom.llm.api import LlmMessage, request_llm_response
 from loom.llm.structured import output_mode, protocol_provider, unsupported_format
 
@@ -95,6 +96,7 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         settings=identity(semantic_settings),
     )
     cp = checkpoint
+    protocol_changed = bool(cp.get('identity') and cp['identity'].get('prompt') != PROMPT)
     upgrade_budget_identity(cp, settings)
     if cp.get("identity") and cp["identity"] != expected:
         old = cp["identity"]
@@ -141,10 +143,21 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
     for unit in cp["units"].values():
         if structure_pending(cp, unit):
             unit["complete"] = False
-    pending = sorted((u for u in cp["units"].values() if not u.get("complete")), key=lambda u: (u["cutoff"], u["id"]))
+        if protocol_changed and not unit.get('complete'):
+            unit['work_state'] = 'pending'
+        unit['protocol_version'] = PROMPT
+    pending = sorted((u for u in cp["units"].values() if not terminal(u)), key=lambda u: (u["cutoff"], u["id"]))
+    deferred = []
     for unit in pending:
         begin_cycle(unit)
-    while pending or cp["cursor"] < len(cards):
+    while pending or cp["cursor"] < len(cards) or deferred:
+        if not pending and cp['cursor'] >= len(cards):
+            candidate = deferred.pop(0)
+            remaining_memory = (len(cards) + 7) // 8 + 1 if cp['memory_requested'] and not cp.get('memory') else 0
+            if not reserve_repair(cp, candidate, candidate['feedback'], settings, remaining_work=remaining_memory):
+                continue
+            candidate.update(work_state='pending', complete=False)
+            pending.append(candidate)
         if not pending:
             subset = cards[cp["cursor"] : cp["cursor"] + min(8, settings["batch_rounds"])]
             unit = dict(
@@ -155,6 +168,7 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
                 extra=[],
                 repair=0,
                 complete=False,
+                protocol_version=PROMPT,
             )
             begin_cycle(unit)
             pending.append(unit)
@@ -205,7 +219,8 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         known_state = context(local, subset, cutoff)
         known_ids = {r["id"] for key in ("roots", "goals", "stages") for r in known_state[key]}
         aliases = {k: v for k, v in cp.get("record_aliases", {}).get(unit["id"], {}).items() if v in known_ids}
-        accepted_ids = [c["id"] for c in subset if c["id"] in cp["assessments"] and cp["assessments"][c["id"]]["status"] != "needs_evidence"]
+        accepted_ids = [c["id"] for c in subset if c["id"] in cp["assessments"] and cp["assessments"][c["id"]]["status"] != "needs_evidence"
+                        and c['id'] not in unit.get('rejudge_cards', [])]
         structure_only = len(accepted_ids) == len(subset) and structure_pending(cp, unit) and not any(
             e.get("record_type") not in {"structure", "goals", "stages", "attributions"} for e in unit.get("feedback", [])
         )
@@ -279,20 +294,24 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
             state="unknown",
         )
         cp["reservations"].append(reservation)
+        reserved, requested = unit.pop('repair_reserved', False), unit.pop('retry_requested', False)
+        is_repair = bool(reserved or requested)
+        if is_repair:
+            unit['repair_attempts'] = unit.get('repair_attempts', 0) + 1
         cp["usage"]["calls"] += 1
         cp["usage"]["unreported_calls"] += 1
         timeout = min(settings["max_call_seconds"], remaining_seconds())
         await save()
         meta = dict(
             analysis_stage=unit["id"],
-            evaluation_activity="repair" if unit["repair_state"]["attempts"] else "scan",
+            evaluation_activity="repair" if is_repair else "scan",
             output_token_limit=None,
             timeout_seconds=timeout,
             prompt_chars=chars,
             input_estimate=input_estimate,
             input_profile=profile,
             activity_label=unit["id"],
-            repair_attempt=unit["repair_state"]["attempts"],
+            repair_attempt=unit.get('repair_attempts', 0),
         )
         await emit(dict(type="llm.requested", **meta, messages=messages, model=expected["model"]))
         start = time.monotonic()
@@ -305,7 +324,11 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         except TimeoutError as exc:
             failure = request_timeout(stage="graph", unit_id=unit["id"], timeout_seconds=timeout)
             await emit(request_failure_event(meta, failure))
+            retry_request = provider_retry(cp, failure, settings)
             await save()
+            if retry_request:
+                await asyncio.sleep(.1)
+                continue
             raise failure from exc
         except BaseException as exc:
             await emit(request_failure_event(meta, exc))
@@ -317,8 +340,14 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
             if unsupported_format(response.error) and cp["mode"] != "text":
                 cp["mode"] = "text"
                 continue
-            raise provider_failure(response.error, stage="graph", unit_id=unit["id"], timeout_seconds=timeout)
+            failure = provider_failure(response.error, stage="graph", unit_id=unit["id"], timeout_seconds=timeout)
+            if provider_retry(cp, failure, settings):
+                await save()
+                await asyncio.sleep(.1)
+                continue
+            raise failure
         answer = response.unwrap()
+        cp['provider_failures'] = 0
         usage = {k: getattr(answer.usage, k, 0) for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
         if usage["total_tokens"] > 0:
             reservation.update(state="settled", usage=usage)
@@ -341,6 +370,9 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         await save()
         delivered_ids = {e for c in payload["cards"] for e in c["refs"]} | set(boundary)
         cp["responses"][-1]["delivered_ref_ids"] = sorted(delivered_ids)
+        cp["responses"][-1]["allowed_record_types"] = list(response_protocol.schema["properties"]) if structure_only else None
+        visible_ids = known_ids | {r['id'] for r in known_state.get('older_goal_index', [])}
+        cp['responses'][-1]['visible_entity_ids'] = sorted(visible_ids)
         delivered = {e: registry[e] for e in delivered_ids}
         records, errors = parse_updates(answer)
         errors = [{**e, "stage": "graph", "unit_id": unit["id"]} for e in errors]
@@ -349,7 +381,7 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         # Dedicated structure repair explicitly forbids rejudging accepted cards.
         rejected, _ = commit_updates(cp, normalized, batch_id=unit["id"], cards=cards, delivered=delivered,
                                      cutoff=cutoff, target_ids=set(unit["cards"]),
-                                     allowed_fields=response_protocol.schema["properties"] if structure_only else None)
+                                     allowed_fields=response_protocol.schema["properties"] if structure_only else None, visible_ids=visible_ids)
         errors += rejected
         cp["responses"][-1]["validation_errors"] = deepcopy(errors)
         cp["responses"][-1]["validation_version"] = VALIDATION_VERSION
@@ -359,16 +391,16 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         unit = cp["units"][unit["id"]]
         pending[0] = unit
         errors = window_issues(cp, unit) + errors
-        if retry(unit, errors):
-            unit.update(feedback=errors)
-            await save()
-            continue
         unit.update(complete=not errors, feedback=errors)
+        settle(unit, errors, accepted=sum(cid in cp['assessments'] for cid in unit['cards']),
+               unknown=any(cp['assessments'].get(cid, {}).get('status') == 'unknown' for cid in unit['cards']))
         cp["conflicts"] = [c for c in cp["conflicts"] if c["batch_id"] != unit["id"]]
         cp["conflicts"] += [dict(batch_id=unit["id"], **e) for e in errors]
         await save()
         if any(e["category"] not in {"format", "semantic", "coverage"} for e in errors):
             raise EvaluationFailure("Graph evaluation stopped; accepted records retained.", errors)
+        if errors:
+            deferred.append(unit)
         await emit(
             dict(
                 type="evaluation.activity",
@@ -380,7 +412,7 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         pending.pop(0)
     cp["complete"] = all(u["complete"] for u in cp["units"].values())
     await save()
-    if cp["complete"] and cp["memory_requested"]:
+    if cp["memory_requested"]:
         from loom.evaluation.memory.review import review_memory
 
         await review_memory(source, cp, run_id=run_id, provider=provider, settings=settings,
