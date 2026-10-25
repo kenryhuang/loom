@@ -64,8 +64,16 @@ Schema 错误按字段路径和规则稳定排序，不依赖模型 JSON 的键�
 Memory 请求和本地准入使用同一个 `protocol_for(unit)`。例如，没有 stage 时
 contributions 的上限为 0；extract 的 workflows 为 0；synthesis 的其他类型为 0。
 修复请求只要求未完成的贡献记录，响应同时保存当时的 Schema，重放不会误用后续更窄的契约。
+接收贡献数组时先检查原始数组的绝对上限，再按当前窗口的 published stage 身份忽略重复提交，
+最后检查新增记录是否超过 pending 配额。重复提交写审计，不覆盖原判断；stale 记录和未知 stage
+不能走这条规则。这样 `maxItems: 0` 不会把已接受记录的重复输出变成新的失败。
+
+Graph closure 仅在 `evidence_state=unknown` 时允许省略 `supported_conditions`，并确定性补为
+空数组、记录归一化审计。supported/partial 仍要求显式条件字段，不推断任何条件已满足。
 
 模型只返回 `A1.E2.S3` 等证据句柄，不生成 quote 或字符偏移。每次响应保存原始 manifest；
+响应 Schema 的共享 `$defs/evidence_handle` 枚举只列出本次 manifest 中的句柄，
+所有候选和工作流步骤的 evidence 字段引用同一枚举；未交付句柄和自然语言说明仍被本地解析器拒绝。
 宿主生成兼容 citations，文本必须是交付 span。旧 v1 响应仍按原始字面引用校验，
 不模糊匹配或跨 ref 偷换。归纳只收到已接受引文，不能扩展到其未引用上下文。
 引用来源 action 的补齐是宿主已有元数据的规范化，有独立审计，不修改引文或事实内容。
@@ -145,12 +153,20 @@ Memory 的失败记录反馈有独立大小限制和脱敏处理。
 预算/取消等导致有未完成工作时显示 **Resume**。所有候选被拒绝不会显示为 ready。
 Session 检索仅使用 published 记录；stale、quarantined、未验证 legacy 不进入执行期提示词。
 
+显式重评 unknown 通过 `rejudge_stages` 表达，不预先把已接受记录标为 stale。
+原判断在新候选通过完整校验之前继续有效；有效替代按窗口/stage 身份提交并保留旧判断历史，
+同一判断的旧失败候选进入 resolved 审计。新候选失败仍被隔离，但不会制造 `stages_pending`。
+只有依赖变化才使既有判断失效。旧重试策略错误失效的 unknown，可在来源、scope、依赖及
+canonical 校验全部通过后恢复，记录一次性迁移审计；这不会把 unknown 升级为确定结论。
+
 Memory 迁移到 `trace-memory.2` / `memory-validation.6` 时归档原 epoch，在原交付范围重验未完成响应，
 保留原错误并追加 revalidations。有效旧记录保留，错配引用成为新协议的待修候选，不自动换 ref。
 依赖 digest 按实际 stage/action/支撑记录计算；无关 Graph revision 不影响 Memory。
 查看归档：`GET /v1/sessions/{sid}/trajectory/{aid}/evaluation/{eid}/epochs/{epoch}`（只读 Memory 视图）。
-Graph 当前为 `graph-validation.2`，支持在 Resume 时重放未完成窗口最后一条
-`graph-validation.1` 响应。仅使用保存的 `delivered_ref_ids` 与原截止时间，不能把整个
+Memory 当前为 `memory-validation.7`，可按未改变的原 manifest 和原 Schema 重验 v6 的贡献配额错误；
+保留原响应与错误。依赖已改变或用户明确要求重新判断的窗口不使用此回放替代新判断。
+Graph 当前为 `graph-validation.3`，支持在 Resume 时重放未完成窗口最后一条
+`graph-validation.1/.2` 响应。仅使用保存的 `delivered_ref_ids` 与原截止时间，不能把整个
 证据仓库当作已交付输入。保留原响应和原错误，在 `revalidations` 单独记录新校验结果；
 已有成功提交保持幂等。原请求的记录类型限制同样保留，旧版从结构化类型拒绝信息恢复。
 缺少原始交付范围的响应不走此重放；当前版本的失败保留，交由正常的有限重试处理。

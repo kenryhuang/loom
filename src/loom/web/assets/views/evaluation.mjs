@@ -564,7 +564,7 @@ export class EvaluationView {
       if (job.error_details?.some(detail => detail.code === "request.timeout")) {
         this.status.textContent += " Increase Call timeout · seconds in Evaluation settings, then use Resume on this history record. Saved results are retained.";
       }
-      if (job.state === "budget_exhausted") {
+      if (job.state === "budget_exhausted" && !job.error_details?.some(detail => detail.details?.setting && ["budget.calls", "budget.seconds"].includes(detail.code))) {
         this.status.textContent += /input budget reached/i.test(job.error || "")
           ? " Increase Request characters · per call in Evaluation settings, then Resume evaluation. Saved stages are retained."
           : " Adjust the exhausted total budget in settings, then Resume evaluation. Saved stages are retained.";

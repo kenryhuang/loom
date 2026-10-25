@@ -10,7 +10,7 @@ from loom.evaluation.issues import RuleViolation, issue, validate_schema
 
 
 def note(cp, batch_id, kind, raw, rule, **details):
-    row = dict(batch_id=batch_id, record_type=kind, record_id=raw.get("card_id", raw.get("key")), rule=rule, **details)
+    row = dict(batch_id=batch_id, record_type=kind, record_id=raw.get("card_id", raw.get("key", raw.get('goal_id'))), rule=rule, **details)
     if row not in cp.setdefault("protocol_normalizations", []):
         cp["protocol_normalizations"].append(row)
 
@@ -67,6 +67,11 @@ def normalize_records(cp, records, batch_id):
                                                                  redundancy=redundancy, refs=raw.get("refs", []))))
         if kind == "stages":
             raw.setdefault("attempt_id", "")
+        if kind == 'closures' and raw.get('evidence_state') == 'unknown' and 'supported_conditions' not in raw:
+            # Unknown support asserts no satisfied conditions. Never infer a
+            # missing positive claim for a supported/partial closure.
+            raw['supported_conditions'] = []
+            note(cp, batch_id, kind, raw, 'unknown_closure_empty_support')
         items.append((index, kind, raw))
     items += attributions
 

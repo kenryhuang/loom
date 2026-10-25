@@ -5,13 +5,51 @@ import pytest
 
 from loom.core import ok
 from loom.evaluation.evidence_delivery import prepare, resolve
-from loom.evaluation.issues import RuleViolation
+from loom.evaluation.issues import EvaluationFailure, RuleViolation, request_budget_failure
+from loom.evaluation.memory.contracts import protocol_for
 from loom.evaluation.memory.lifecycle import dependencies, migrate
+from loom.evaluation.memory.records import commit_records, replay_admission
 from loom.evaluation.memory.wire import materialize
 from loom.evaluation.work_items import retry_failed
 from loom.llm import LlmResponse, TokenUsage
 from tests.evaluation.test_incremental_graph import GraphJudge, run
 from tests.evaluation.test_trace_memory import trace
+
+
+@pytest.mark.parametrize('calls,remaining,codes', [
+    (47, 1, []), (48, 2728, ['budget.calls']), (2, 0, ['budget.seconds']),
+    (48, -1, ['budget.calls', 'budget.seconds']),
+])
+def test_request_budget_reports_only_exhausted_dimensions(calls, remaining, codes):
+    failure = request_budget_failure(dict(calls=calls), dict(max_calls=48, max_seconds=3600), remaining,
+                                     stage='memory', unit_id='memory:extract:test')
+    assert ([e['code'] for e in failure.issues] if failure else []) == codes
+    if failure:
+        assert all(e['details']['used'] >= e['details']['limit'] for e in failure.issues)
+        assert 'cumulative across resumes' in str(failure)
+
+
+@pytest.mark.asyncio
+async def test_memory_retry_pauses_at_shared_call_limit_and_resumes_without_losing_records():
+    source, facts = trace()
+    cp, judge = {}, AnchorJudge(bad=True)
+    await run(source, facts, 'run', cp, judge, extract_memory=True)
+    accepted = deepcopy(cp['memory']['records'])
+    retry_failed(cp)
+    # Simulate a history whose earlier graph/repair calls consumed the ceiling.
+    used = cp['usage']['calls'] = cp['resource_limits']['max_calls']
+    requests = len(judge.memory_requests)
+    with pytest.raises(EvaluationFailure) as error:
+        await run(source, facts, 'run', cp, judge, extract_memory=True, max_calls=used)
+    detail = error.value.issues[0]
+    assert detail['code'] == 'budget.calls' and detail['stage'] == 'memory'
+    assert detail['details'] == dict(setting='max_calls', used=used, limit=used)
+    assert len(judge.memory_requests) == requests
+    assert cp['memory']['records'] == accepted
+    judge.bad = False
+    done = await run(source, facts, 'run', cp, judge, extract_memory=True, max_calls=used + 10)
+    assert done['execution_state'] == 'completed'
+    assert all(cp['memory']['records'][k] == v for k, v in accepted.items())
 
 
 class AnchorJudge(GraphJudge):
@@ -39,6 +77,123 @@ class AnchorJudge(GraphJudge):
                     category='environment', basis='observed' if observed['basis'] == 'observed_output' else 'inferred', revalidate_when='Before use',
                     evidence=['A999.E1.S1'] if self.bad else [observed['id']]))
         return ok(LlmResponse(content=json.dumps(rows), usage=TokenUsage(20, 10, 30)))
+
+
+@pytest.mark.asyncio
+async def test_failed_reassessment_retains_unknown_until_valid_replacement_and_resolves_old_candidate():
+    class Rejudge(AnchorJudge):
+        phase = 'unknown'
+
+        async def chat(self, messages, *args, **kwargs):
+            answer = await super().chat(messages, *args, **kwargs)
+            if json.loads(messages[1].content).get('mode') == 'extract':
+                rows = json.loads(answer.value.content)
+                for row in rows['contributions']:
+                    row['key'] = self.phase + row['stage_id']
+                    if self.phase == 'unknown':
+                        row.update(rating='unknown', evidence=[])
+                    elif self.phase == 'invalid':
+                        row.update(rating='key', evidence=['a natural language description, not a delivered handle'])
+                return ok(LlmResponse(content=json.dumps(rows)))
+            return answer
+
+    source, facts = trace()
+    cp, judge = {}, Rejudge()
+    await run(source, facts, 'run', cp, judge, extract_memory=True)
+    original = deepcopy(cp['memory']['records'])
+    retry_failed(cp)
+    assert cp['memory']['records'] == original
+    judge.phase = 'invalid'
+    await run(source, facts, 'run', cp, judge, extract_memory=True)
+    assert all(cp['memory']['records'][k] == v for k, v in original.items())
+    assert cp['memory']['quarantine']
+    issues = [e for u in cp['memory']['units'].values() for e in u.get('issues', [])]
+    assert any(e['code'] == 'memory.anchor_undelivered' for e in issues)
+    assert not any(e['code'] == 'memory.stages_pending' for e in issues)
+    retry_failed(cp)
+    judge.phase = 'corrected'
+    done = await run(source, facts, 'run', cp, judge, extract_memory=True)
+    assert done['result_state'] == 'ready'
+    assert not cp['memory']['quarantine']
+    for record in cp['memory']['records'].values():
+        if record['kind'] == 'contributions':
+            assert record['rating'] == 'supporting'
+            assert record['history'][-1]['rating'] == 'unknown'
+
+
+@pytest.mark.asyncio
+async def test_anchor_contract_enumerates_only_current_delivery_and_legacy_retry_restore_checks_dependencies():
+    from jsonschema import Draft202012Validator
+
+    from loom.evaluation.memory.lifecycle import restore_retry_unknowns
+
+    source, facts = trace()
+    cp = {}
+    await run(source, facts, 'run', cp, AnchorJudge(), extract_memory=True)
+    record = next(r for r in cp['memory']['records'].values() if r['kind'] == 'contributions')
+    unit = cp['memory']['units'][record['unit_id']]
+    unit['delivery_span_ids'] = [unit['evidence'][0]['id']]
+    prepare(unit)
+    schema = protocol_for(unit).schema
+    Draft202012Validator.check_schema(schema)
+    evidence = {**schema['properties']['facts']['items']['properties']['evidence'], '$defs': schema['$defs']}
+    validator = Draft202012Validator(evidence)
+    assert validator.is_valid(list(unit['manifest']['handles']))
+    assert not validator.is_valid(['a prose description'])
+    assert not validator.is_valid(['A999.E1.S1'])
+    # v1 Retry incorrectly made a still-valid unknown stale. Restore only that case.
+    unit['retry_generation'] = 1
+    record.update(rating='unknown', citations=[], evidence_refs=[], publication_state='stale')
+    cp['memory'].pop('retry_policy_version', None)
+    restore_retry_unknowns(cp)
+    assert record['publication_state'] == 'published'
+    assert cp['memory']['retry_migrations'][-1]['record_id'] == record['id']
+    record['publication_state'] = 'stale'
+    record['dependencies']['stage'] = 'different-stage-identity'
+    cp['memory'].pop('retry_policy_version', None)
+    restore_retry_unknowns(cp)
+    assert record['publication_state'] == 'stale'
+
+
+@pytest.mark.asyncio
+async def test_published_contribution_echo_is_idempotent_before_pending_capacity_check():
+    source, facts = trace()
+    cp = {}
+    await run(source, facts, 'run', cp, AnchorJudge(), extract_memory=True)
+    memory = cp['memory']
+    record = next(r for r in memory['records'].values() if r['kind'] == 'contributions')
+    unit = memory['units'][record['unit_id']]
+    original = deepcopy(memory['records'])
+    schema = protocol_for(unit).schema
+    assert schema['properties']['contributions']['maxItems'] == 0
+    # Same stable stage, different local key and proposed content: never overwrite.
+    echo = dict(stage_id=record['stage_id'], key='new-local-key', rating='hindering')
+    rows = dict(contributions=[echo], facts=[], lessons=[], workflows=[], evidence_requests=[])
+    raw = json.dumps(rows)
+    assert not commit_records(memory, unit, raw, schema=schema)
+    assert memory['records'] == original
+    assert unit['normalizations'][-1]['rule'] == 'published_contribution_echo_ignored'
+    rows['contributions'].append(dict(stage_id='undelivered-stage', key='new'))
+    errors = commit_records(memory, unit, json.dumps(rows), schema=schema)
+    assert errors[0]['code'] == 'schema.maxItems'
+    assert memory['records'] == original
+    # Replay only the saved delivery; preserve raw response and original errors.
+    unit['issues'] = [dict(code='schema.maxItems', record_type='contributions')]
+    response = dict(batch_id=unit['id'], activity='memory', text=raw, response_schema=schema,
+                    manifest=deepcopy(unit['manifest']), validation_version='memory-validation.6',
+                    validation_issues=deepcopy(unit['issues']))
+    cp['responses'].append(response)
+    replay_admission(cp)
+    assert not unit['issues']
+    assert response['text'] == raw and response['validation_issues']
+    assert response['revalidations'][-1]['model_calls'] == 0
+    assert memory['records'] == original
+    snapshot = deepcopy(cp)
+    replay_admission(cp)
+    assert cp == snapshot
+    # Stale judgments are eligible for a new assessment; never suppress them.
+    memory['records'][record['id']]['publication_state'] = 'stale'
+    assert commit_records(memory, unit, raw, schema=schema)[0]['code'] == 'schema.maxItems'
 
 
 @pytest.mark.asyncio

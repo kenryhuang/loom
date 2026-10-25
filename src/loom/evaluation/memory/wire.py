@@ -88,6 +88,7 @@ Preserve goal conditions and necessary checks. Never invent measured savings or 
 applies_to optionally links additional delivered goals/stages; source ownership is attached by the host.
 No reusable findings is a valid empty result. Never invent records to meet a quota.
 During repair, return only requested candidate keys and pending contributions; accepted records remain saved.
+rejudge_stages explicitly requests a replacement judgment; the previous accepted judgment remains valid until replacement validates.
 Use the provided candidate key when correcting a rejected record; omit an unsupported record to leave it quarantined.
 If crucial evidence was truncated, request at most one page handle from evidence_pages; do not invent paths or offsets.
 Keep scope, confidence, inference and uncertainty explicit. Do not store credentials or redacted values.

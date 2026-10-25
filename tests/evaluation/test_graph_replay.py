@@ -12,6 +12,28 @@ from tests.evaluation.test_graph_updates import commit, fixture
 from tests.evaluation.test_incremental_graph import assessment
 
 
+@pytest.mark.parametrize('support', ['unknown', 'partial', 'supported'])
+def test_omitted_closure_support_is_empty_only_for_unknown_and_replays(support):
+    cp, extraction, card, _, _, unit, response = saved_case()
+    row = dict(goal_id=cp['entities']['goals'][0]['id'], claim='unknown', disposition='open',
+               evidence_state=support, open_questions=['Verification output unavailable'],
+               reason='Result unknown', refs=card['refs'][:1])
+    response.update(text=json.dumps(dict(type='closures', **row)), validation_version='graph-validation.2')
+    original, usage = deepcopy(response), deepcopy(cp['usage'])
+    assert replay_saved_response(cp, unit, response, extraction['cards'])
+    if support == 'unknown':
+        assert cp['closures'][row['goal_id']]['supported_conditions'] == []
+        assert cp['closures'][row['goal_id']]['evidence_state'] == 'unknown'
+        assert any(n['rule'] == 'unknown_closure_empty_support' for n in cp['protocol_normalizations'])
+        assert not any(e['code'] == 'schema.required' for e in unit['issues'])
+    else:
+        assert any(e['code'] == 'schema.required' for e in unit['issues'])
+        assert row['goal_id'] not in cp['closures']
+    assert response['text'] == original['text'] and response['validation_errors'] == original['validation_errors']
+    assert cp['usage'] == usage
+    assert not replay_saved_response(cp, unit, response, extraction['cards'])
+
+
 def saved_case():
     _, _, cp, extraction = fixture()
     card = extraction["cards"][0]

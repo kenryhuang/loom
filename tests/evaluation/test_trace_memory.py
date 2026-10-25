@@ -140,7 +140,7 @@ async def test_memory_extracts_all_four_dimensions_with_scope_evidence_and_share
 async def test_memory_budget_resume_preserves_graph_records_slices_and_accounting():
     store, facts = trace()
     cp, judge = {}, MemoryJudge()
-    with pytest.raises(ValueError, match="Memory evaluation budget reached"):
+    with pytest.raises(ValueError, match=r"\[budget.calls\].*2/2"):
         await run(store, facts, "run", cp, judge, extract_memory=True, max_calls=2)
     partial = project(store, facts, "run", cp)
     assert partial["memory"]["status"] == "partial"

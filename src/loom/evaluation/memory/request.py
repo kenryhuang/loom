@@ -1,7 +1,7 @@
 """Bounded request construction; no validation or checkpoint mutation."""
 
 from loom.evaluation.goal_loops.packing import serialized
-from loom.evaluation.memory.contracts import FIELDS, SYSTEM, protocol_for
+from loom.evaluation.memory.contracts import FIELDS, SYSTEM, pending_stage_ids, protocol_for
 from loom.evaluation.memory.evidence import sanitize
 from loom.llm.api import LlmMessage
 from loom.llm.structured import native_schema
@@ -15,8 +15,7 @@ def focus_repair(unit):
     """Narrow only when the failed candidates identify their source actions."""
     from loom.evaluation.evidence_delivery import manifest
 
-    accepted = {r['stage_id'] for r in unit.get('accepted_records', []) if r['kind'] == 'contributions'}
-    pending = {s['id'] for s in unit['scope']['stages']} - accepted
+    pending = pending_stage_ids(unit)
     owners = {a['id'] for a in unit['scope']['actions'] if any(m['stage_id'] in pending for m in a['memberships'])}
     by_id = {e['id']: e['action_id'] for e in unit['evidence']}
     rejected = unit.get('rejected_records', [])
@@ -92,8 +91,9 @@ def messages_for(unit, mode):
         payload['evidence_pages'] = [{"handle": key, "action_id": page['action_id'],
                                       "field": page['ref'].get('field_path'), "range": [page['ref']['start'], page['ref']['end']]}
                                      for key, page in unit.get('pages', {}).items()] if not unit.get('page_reads') else []
-        accepted = {r['stage_id'] for r in unit.get('accepted_records', []) if r['kind'] == 'contributions'}
-        payload['stages'] = [s for s in payload['stages'] if s['id'] not in accepted]
+        pending = pending_stage_ids(unit)
+        payload['stages'] = [s for s in payload['stages'] if s['id'] in pending]
+        payload['rejudge_stages'] = unit.get('rejudge_stages', [])
         payload['repair_targets'] = unit.get('repair_targets', [])
         payload['actions'] = [{**a,
             'source_fields': {e['id'].rsplit('.', 1)[0]: e['field'] for e in payload['evidence'] if e['action_id'] == a['id']},

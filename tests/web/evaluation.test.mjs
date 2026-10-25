@@ -238,6 +238,11 @@ test("raising a stopped evaluation's time budget sends its checkpoint identity",
   await view.open();
   await view.follow(job.id);
   assert.match(root.textContent, /Adjust the exhausted total budget/);
+  job.error = 'Evaluation time budget reached: 1985/60. Increase Time (max_seconds), then Resume evaluation.';
+  job.error_details = [{code: 'budget.seconds', details: {setting: 'max_seconds', used: 1985, limit: 60}}];
+  await view.follow(job.id);
+  assert.match(view.status.textContent, /1985\/60/);
+  assert.doesNotMatch(view.status.textContent, /Adjust the exhausted total budget/);
   view.fields.max_seconds.value = "7200";
   await view.run();
   assert.equal(starts[0][2].resume_id, "saved");

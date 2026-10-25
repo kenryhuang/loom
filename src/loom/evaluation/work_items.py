@@ -50,9 +50,9 @@ def retry_failed(cp):
     if cp.get('memory'):
         for record in cp['memory']['records'].values():
             unit = cp['memory']['units'].get(record['unit_id'], {})
-            if unit.get('retry_requested') and record.get('rating') == 'unknown':
-                record['publication_state'] = 'stale'
-                unit['accepted_records'] = [r for r in unit.get('accepted_records', [])
-                                            if r.get('stage_id') != record.get('stage_id')]
+            if unit.get('retry_requested') and record.get('rating') == 'unknown' and record.get('publication_state') == 'published':
+                stages = unit.setdefault('rejudge_stages', [])
+                if record['stage_id'] not in stages:
+                    stages.append(record['stage_id'])
         cp['memory'].update(execution_complete=False, complete=False)
     cp['complete'] = False

@@ -10,14 +10,15 @@ from copy import deepcopy
 from loom.evaluation.goal_loops.coverage import window_issues
 from loom.evaluation.goal_loops.graph_normalization import terminal_metadata_records
 from loom.evaluation.goal_loops.graph_updates import VALIDATION_VERSION, commit_updates, parse_updates
+from loom.evaluation.work_items import settle
 from loom.llm.api import LlmResponse
 
-REPLAYABLE_VERSIONS = {"graph-validation.1"}
+REPLAYABLE_VERSIONS = {"graph-validation.1", "graph-validation.2"}
 
 
 def replay_saved_response(cp, unit, response, cards):
     previous = response.get('revalidated_with', response.get('validation_version'))
-    if previous not in REPLAYABLE_VERSIONS or not isinstance(response.get('delivered_ref_ids'), list):
+    if unit.get('retry_requested') or previous not in REPLAYABLE_VERSIONS or not isinstance(response.get('delivered_ref_ids'), list):
         return False
     allowed = response.get('allowed_record_types')
     if allowed is None:
@@ -42,6 +43,7 @@ def replay_saved_response(cp, unit, response, cards):
         from_version=previous, to_version=VALIDATION_VERSION, errors=deepcopy(errors), graph_revision=cp['graph_revision']))
     response['revalidated_with'] = VALIDATION_VERSION
     unit.update(feedback=deepcopy(errors), complete=not errors)
+    settle(unit, errors, accepted=sum(cid in cp['assessments'] for cid in unit['cards']))
     cp['conflicts'] = [e for e in cp['conflicts'] if e['batch_id'] != unit['id']]
     cp['conflicts'] += [dict(batch_id=unit['id'], **deepcopy(e)) for e in errors]
     cp.setdefault('checkpoint_reconciliations', []).append(dict(

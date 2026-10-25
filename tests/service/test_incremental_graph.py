@@ -34,6 +34,15 @@ def test_incremental_service_checkpoint_resume_artifact_and_legacy_scope(evaluat
     assert partial["evaluation"]["source"]["session_id"] == sid
     assert partial["evaluation"]["report"]["text"].count(f"Session: {sid}") == 1
     assert partial["state"] == "budget_exhausted", partial.get("error")
+    assert partial['error_details'][0]['code'] == 'budget.calls'
+    assert partial['error_details'][0]['details'] == dict(setting='max_calls', used=1, limit=1)
+    legacy = deepcopy(manager._load(sid, aid, started['id']))
+    legacy['error_details'][0]['code'] = 'budget.calls_or_time'
+    original = deepcopy(legacy)
+    presented = manager._public(legacy)
+    assert presented['error_details'][0]['code'] == 'budget.calls'
+    assert '1/1' in presented['error'] and 'max_calls' in presented['error']
+    assert legacy == original
     first_revision = partial["evaluation"]["graph_revision"]
     assert first_revision > 0
     assert partial["evaluation"]["coverage"]["pending_cards"] == 1

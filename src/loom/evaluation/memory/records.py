@@ -17,6 +17,8 @@ from loom.evaluation.rules import policy
 from loom.llm.api import LlmResponse
 from loom.llm.structured import ProtocolError, parse_response
 
+VALIDATION_VERSION = 'memory-validation.7'
+
 
 def commit_records(memory, unit, response, *, schema=None, finish_reason=None):
     errors = []
@@ -60,7 +62,8 @@ def commit_records(memory, unit, response, *, schema=None, finish_reason=None):
     if set(value) - (set(FIELDS) | ({'evidence_requests'} if anchored else set())):
         reject(issue("response.fields", "Unknown memory fields; allowed: contributions, facts, lessons, workflows", category="format", phase="decode"))
     accepted_stages = {r["stage_id"] for r in memory["records"].values()
-                       if r["unit_id"] == unit["id"] and r["kind"] == "contributions" and r.get('publication_state') != 'stale'}
+                       if r["unit_id"] == unit["id"] and r["kind"] == "contributions"
+                       and (r.get('publication_state') == 'published' if anchored else r.get('publication_state') != 'stale')}
     if anchored:
         try:
             validate_schema(value.get('evidence_requests', []), schema['properties']['evidence_requests'])
@@ -69,7 +72,25 @@ def commit_records(memory, unit, response, *, schema=None, finish_reason=None):
             reject(exc.issue, 'evidence_requests')
     for kind in FIELDS:
         rows = value.get(kind)
+        original_indices = {}
         try:
+            if anchored and kind == 'contributions' and unit['mode'] == 'extract' and isinstance(rows, list):
+                # Bound the raw response, then admit only new stage identities.
+                # Echoes cannot overwrite a published judgment or consume the
+                # pending-stage quota, even when the model changes its local key.
+                validate_schema(rows, {k: v for k, v in FIELDS[kind].items() if k != 'items'})
+                fresh = []
+                for index, row in enumerate(rows):
+                    sid = row.get('stage_id') if isinstance(row, dict) else None
+                    if isinstance(sid, str) and sid in accepted_stages and sid not in unit.get('rejudge_stages', []):
+                        audit = dict(rule='published_contribution_echo_ignored', stage_id=sid, record_index=index + 1,
+                                     response_digest=identity(response))
+                        if audit not in unit.setdefault('normalizations', []):
+                            unit['normalizations'].append(audit)
+                    else:
+                        original_indices[len(fresh)] = index
+                        fresh.append(row)
+                rows = fresh
             # Enforce mode and pending-stage capacity from the request, without
             # letting a bad item roll back valid siblings in the same array.
             spec = {k: v for k, v in schema["properties"][kind].items() if k != "items"}
@@ -78,8 +99,11 @@ def commit_records(memory, unit, response, *, schema=None, finish_reason=None):
             reject(exc.issue, kind)
             continue
         for index, row in enumerate(rows):
+            index = original_indices.get(index, index)
             cid = candidate(kind, index, row)
-            if anchored and any(r.get('candidate_id') == cid and r.get('publication_state') == 'published' for r in memory['records'].values()):
+            rejudging = kind == 'contributions' and isinstance(row, dict) and row.get('stage_id') in unit.get('rejudge_stages', [])
+            if anchored and not rejudging and any(r.get('candidate_id') == cid and r.get('publication_state') == 'published'
+                                                 for r in memory['records'].values()):
                 continue
             try:
                 materialized, provenance = row, {}
@@ -124,6 +148,16 @@ def commit_records(memory, unit, response, *, schema=None, finish_reason=None):
                 unit.setdefault('resolved_candidates', []).append(quarantine.pop(cid))
             if kind == "contributions":
                 accepted_stages.add(record["stage_id"])
+                if record['stage_id'] in unit.get('rejudge_stages', []):
+                    unit['rejudge_stages'].remove(record['stage_id'])
+                # A contribution's durable identity is its window/stage, not a
+                # model-chosen key. Successful replacement resolves older failed
+                # proposals for that same judgment, retaining them in the audit.
+                for rejected_id, rejected in list(quarantine.items()):
+                    if (rejected['unit_id'] == unit['id'] and rejected['kind'] == kind
+                            and isinstance(rejected.get('record'), dict)
+                            and rejected['record'].get('stage_id') == record['stage_id']):
+                        unit.setdefault('resolved_candidates', []).append(quarantine.pop(rejected_id))
     if unit["mode"] == "extract":
         missing = sorted({s["id"] for s in unit["scope"]["stages"]} - accepted_stages)
         if missing:
@@ -142,6 +176,29 @@ def commit_records(memory, unit, response, *, schema=None, finish_reason=None):
                 errors.append(deepcopy(rejected['issue']))
     unit["issues"] = deepcopy(errors)
     return errors
+
+
+def replay_admission(cp):
+    """Recheck v6 quota failures against the saved manifest; no evidence expansion."""
+    from loom.evaluation.work_items import settle
+
+    memory = cp.get('memory', {})
+    latest = {r['batch_id']: r for r in cp.get('responses', []) if r.get('activity') == 'memory'}
+    for unit in memory.get('units', {}).values():
+        response = latest.get(unit['id'], {})
+        if (response.get('validation_version') != 'memory-validation.6' or unit.get('dependency_changed') or unit.get('retry_requested')
+                or not response.get('manifest') or response['manifest'] != unit.get('manifest')
+                or not response.get('response_schema') or unit.get('protocol_version') != 2
+                or not any(e['code'] == 'schema.maxItems' and e.get('record_type') == 'contributions' for e in unit.get('issues', []))):
+            continue
+        errors = commit_records(memory, unit, response['text'], schema=response['response_schema'], finish_reason=response.get('finish_reason'))
+        published = [r for r in memory['records'].values() if r['unit_id'] == unit['id'] and r.get('publication_state') == 'published']
+        settle(unit, errors, accepted=len(published), unknown=any(r.get('rating') == 'unknown' for r in published))
+        unit.update(validation_version=VALIDATION_VERSION, errors=[e['reason'] for e in errors])
+        response.setdefault('revalidations', []).append(dict(version=VALIDATION_VERSION, issues=deepcopy(errors), model_calls=0))
+        response['validation_version'] = VALIDATION_VERSION
+    if memory:
+        memory['complete'] = bool(memory.get('execution_complete')) and all(u.get('complete') for u in memory['units'].values()) and not memory['quarantine']
 
 
 def commit(memory, unit, response):

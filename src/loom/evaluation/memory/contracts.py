@@ -95,6 +95,11 @@ Keep records concise, in the language of the task. Do not duplicate the same fac
 """
 
 
+def pending_stage_ids(unit):
+    accepted = {r['stage_id'] for r in unit.get('accepted_records', []) if r['kind'] == 'contributions'}
+    return {s['id'] for s in unit['scope']['stages']} - (accepted - set(unit.get('rejudge_stages', [])))
+
+
 def protocol_for(unit):
     schema = deepcopy(PROTOCOL.schema)
     version = PROTOCOL.version
@@ -102,11 +107,23 @@ def protocol_for(unit):
         from loom.evaluation.memory.wire import fields
 
         schema = obj(fields())
+        handles = list(unit.get('manifest', {}).get('handles', {}))
+        if handles:
+            schema['$defs'] = dict(evidence_handle=dict(type='string', enum=handles))
+        for spec in schema['properties'].values():
+            props = spec['items']['properties']
+            arrays = [props['evidence']]
+            if 'steps' in props:
+                arrays.append(props['steps']['items']['properties']['evidence'])
+            for array in arrays:
+                if handles:
+                    array['items'] = {'$ref': '#/$defs/evidence_handle'}
+                else:
+                    array['maxItems'] = 0
         schema['properties']['evidence_requests'] = dict(type='array', items=ID, maxItems=0 if unit.get('page_reads') else 1)
         schema['required'].append('evidence_requests')
         version = 2
-    accepted = {r["stage_id"] for r in unit.get("accepted_records", []) if r["kind"] == "contributions"}
-    pending = {s["id"] for s in unit["scope"]["stages"]} - accepted
+    pending = pending_stage_ids(unit)
     if unit["mode"] == "extract":
         schema["properties"]["contributions"]["maxItems"] = min(FIELDS["contributions"]["maxItems"], len(pending))
         schema["properties"]["workflows"]["maxItems"] = 0

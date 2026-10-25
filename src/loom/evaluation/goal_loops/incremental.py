@@ -21,7 +21,7 @@ from loom.evaluation.goal_loops.judge_metadata import card_metadata, feedback_me
 from loom.evaluation.goal_loops.legacy_reads import read_requests
 from loom.evaluation.goal_loops.packing import REQUEST_CHARS, bounded_state, request_profile, serialized
 from loom.evaluation.goal_loops.structure import pending_structure_units, structure_pending, structure_review_context
-from loom.evaluation.issues import EvaluationFailure, provider_failure, request_failure_event, request_timeout, stopped
+from loom.evaluation.issues import EvaluationFailure, provider_failure, request_budget_failure, request_failure_event, request_timeout, stopped
 from loom.evaluation.provider import evaluator_provider
 from loom.evaluation.repair import begin_cycle, provider_retry, reserve_repair
 from loom.evaluation.work_items import settle, terminal
@@ -273,14 +273,10 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         pending[0] = unit
         # UTF-8 bytes plus protocol allowance is a conservative estimate, not tokenizer usage.
         input_estimate = profile["input_estimate"]
-        if cp["usage"]["calls"] >= settings["max_calls"] or remaining_seconds() <= 0:
+        failure = request_budget_failure(cp['usage'], settings, remaining_seconds(), stage='graph', unit_id=unit['id'])
+        if failure:
             await save()
-            raise stopped("budget.calls_or_time",
-                f"Evaluation budget reached before request reservation: calls {cp['usage']['calls']}/{settings['max_calls']}; "
-                f"reported tokens {cp['usage']['total_tokens']} (accounting only); "
-                "committed graph retained", category="budget", stage="graph", unit_id=unit["id"],
-                details=dict(calls=cp["usage"]["calls"], call_limit=settings["max_calls"], remaining_seconds=remaining_seconds())
-            )
+            raise failure
         reservation = dict(
             id="request:" + str(len(cp["reservations"]) + 1),
             batch_id=unit["id"],

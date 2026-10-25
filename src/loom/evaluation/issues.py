@@ -40,6 +40,23 @@ def stopped(code, reason, *, category, stage, unit_id=None, **context):
                                                          stage=stage, unit_id=unit_id, **context)])
 
 
+def request_budget_failure(usage, settings, remaining_seconds, *, stage, unit_id=None):
+    """Report each exhausted shared budget from counters, never from prose."""
+    exhausted = []
+    for key, used, label, code in (
+        ('max_calls', usage['calls'], 'Calls', 'budget.calls'),
+        ('max_seconds', max(0, settings['max_seconds'] - remaining_seconds), 'Time · seconds', 'budget.seconds'),
+    ):
+        limit = settings[key]
+        if used >= limit:
+            exhausted.append(issue(code, f'Evaluation {label.lower()} budget reached: {used:g}/{limit:g}. '
+                f'Increase {label} ({key}) above {used:g} in Evaluation settings, then Resume evaluation. '
+                'Limits are cumulative across resumes; accepted records are retained.',
+                category='budget', phase='orchestrate', stage=stage, unit_id=unit_id,
+                details=dict(setting=key, used=used, limit=limit)))
+    return EvaluationFailure('Evaluation stopped.', exhausted) if exhausted else None
+
+
 def request_timeout(*, stage, unit_id, timeout_seconds):
     return stopped("request.timeout", f"Evaluator request timed out (call limit {timeout_seconds:g}s); accepted records retained. "
                    "Increase Call timeout in Evaluation settings, then Resume evaluation.",

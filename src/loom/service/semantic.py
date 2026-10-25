@@ -23,7 +23,7 @@ from loom.evaluation.goal_loops.graph_contract import ENGINE as GRAPH_ENGINE
 from loom.evaluation.goal_loops.graph_contract import PROMPT as GRAPH_PROMPT
 from loom.evaluation.goal_loops.graph_contract import RESOURCE_LIMITS as GRAPH_RESOURCE_LIMITS
 from loom.evaluation.goal_loops.graph_contract import UPGRADABLE_VERSIONS as GRAPH_UPGRADABLE_VERSIONS
-from loom.evaluation.issues import EvaluationFailure, describe, failure_state, issue, request_failure_event
+from loom.evaluation.issues import EvaluationFailure, describe, failure_state, issue, request_budget_failure, request_failure_event
 from loom.evaluation.legacy_issues import legacy_job_state
 from loom.evaluation.provider import create_evaluation_provider
 from loom.evolution.diagnoses import proposals_from_diagnoses
@@ -167,6 +167,14 @@ class SessionSemantic:
 
     def _public(self, body):
         public = {k: v for k, v in body.items() if k not in {"checkpoint", "config_digest"}}
+        # Present historical combined errors precisely without rewriting checkpoints.
+        legacy_budget = next((e for e in body.get('error_details', []) if e['code'] == 'budget.calls_or_time'), None)
+        if legacy_budget and body.get('state') == 'budget_exhausted':
+            failure = request_budget_failure(body['usage'], body['settings'],
+                body['settings']['max_seconds'] - body['elapsed_seconds'],
+                stage=legacy_budget.get('stage', 'graph'), unit_id=legacy_budget.get('unit_id'))
+            if failure:
+                public.update(error=str(failure), error_details=failure.issues)
         if body.get('analysis_version') == GRAPH_ENGINE and body.get('checkpoint', {}).get('entities'):
             from loom.evaluation.work_items import status
 

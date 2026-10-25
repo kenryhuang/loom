@@ -8,11 +8,11 @@ from copy import deepcopy
 from loom.evaluation.evidence_delivery import cited_evidence, page_catalog, prepare, read_page
 from loom.evaluation.goal_loops.attribution import action_attributions
 from loom.evaluation.goal_loops.facts import identity
-from loom.evaluation.issues import EvaluationFailure, describe, issue, provider_failure, request_failure_event, request_timeout, stopped
+from loom.evaluation.issues import EvaluationFailure, describe, issue, provider_failure, request_budget_failure, request_failure_event, request_timeout, stopped
 from loom.evaluation.memory.contracts import protocol_for
 from loom.evaluation.memory.evidence import card_evidence, sanitize
 from loom.evaluation.memory.lifecycle import VERSION, dependencies, migrate
-from loom.evaluation.memory.records import commit, commit_records
+from loom.evaluation.memory.records import VALIDATION_VERSION, commit, commit_records, replay_admission
 from loom.evaluation.memory.request import focus_repair, memory_input, messages_for, scope
 from loom.evaluation.memory.validation import validate_record
 from loom.evaluation.provider import evaluator_provider
@@ -21,8 +21,6 @@ from loom.evaluation.rules import fatal
 from loom.evaluation.work_items import settle, terminal
 from loom.llm.api import request_llm_response
 from loom.llm.structured import output_mode, protocol_provider, unsupported_format
-
-VALIDATION_VERSION = "memory-validation.6"
 
 # Compatibility exports; orchestration uses structured issues exclusively.
 __all__ = ["review_memory", "commit", "validate_record", "messages_for", "protocol_for"]
@@ -33,6 +31,7 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
         version=VERSION, source=source.source_sha256, run_id=run_id, graph_revision=cp["graph_revision"], model=getattr(provider, "model", "unknown")
     )
     memory = migrate(cp, expected)
+    replay_admission(cp)
     if memory.get('execution_complete'):
         return
     cards, registry = cp["extraction"]["cards"], cp["extraction"]["registry"]
@@ -75,10 +74,9 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
                     raise stopped("budget.request_chars", "Memory input budget reached; increase Request characters per call and Resume evaluation",
                                   category="budget", stage="memory", unit_id=unit["id"],
                                   details=dict(limit=settings["max_prompt_chars"], actual_count=profile["total_chars"]))
-                if cp["usage"]["calls"] >= settings["max_calls"] or remaining_seconds() <= 0:
-                    raise stopped("budget.calls_or_time", "Memory evaluation budget reached; increase call/time limits and Resume evaluation",
-                                  category="budget", stage="memory", unit_id=unit["id"],
-                                  details=dict(calls=cp["usage"]["calls"], call_limit=settings["max_calls"], remaining_seconds=remaining_seconds()))
+                failure = request_budget_failure(cp['usage'], settings, remaining_seconds(), stage='memory', unit_id=unit['id'])
+                if failure:
+                    raise failure
                 timeout = min(settings["max_call_seconds"], remaining_seconds())
                 reservation = dict(
                     id="request:" + str(len(cp["reservations"]) + 1),

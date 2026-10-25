@@ -11,7 +11,7 @@ from loom.evaluation.goal_loops.structure import commit_structure
 from loom.evaluation.issues import RuleViolation, issue, validate_schema
 
 __all__ = ["parse_updates", "commit_updates"]
-VALIDATION_VERSION = "graph-validation.2"
+VALIDATION_VERSION = "graph-validation.3"
 
 
 def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_ids, allowed_fields=None, visible_ids=None):

@@ -10,6 +10,36 @@ from loom.evaluation.memory.validation import validate_record
 VERSION = 'trace-memory.2'
 
 
+def restore_retry_unknowns(cp):
+    """Repair the old retry policy only when the accepted judgment still validates."""
+    memory = cp['memory']
+    if memory.get('retry_policy_version', 1) >= 2:
+        return
+    for record in memory['records'].values():
+        unit = memory['units'].get(record['unit_id'], {})
+        if (record['kind'] != 'contributions' or record.get('rating') != 'unknown'
+                or record.get('publication_state') != 'stale' or not unit.get('retry_generation')
+                or record.get('provenance_status') != 'validated'
+                or record.get('source_digest') != memory['identity']['source']
+                or record.get('run_id') != memory['identity']['run_id']
+                or record.get('dependencies') != dependencies(record, cp)):
+            continue
+        try:
+            validate_record('contributions', {k: record[k] for k in FIELDS['contributions']['items']['properties']}, unit)
+        except (RuleViolation, KeyError):
+            continue
+        record['publication_state'] = 'published'
+        unit['accepted_records'] = [r for r in unit.get('accepted_records', []) if r.get('stage_id') != record['stage_id']]
+        unit['accepted_records'].append({k: record[k] for k in ('kind', 'stage_id', 'rating')})
+        if unit.get('retry_requested'):
+            stages = unit.setdefault('rejudge_stages', [])
+            if record['stage_id'] not in stages:
+                stages.append(record['stage_id'])
+        memory.setdefault('retry_migrations', []).append(dict(rule='retain_valid_unknown_during_retry', record_id=record['id'],
+                                                              from_state='stale', to_state='published', model_calls=0))
+    memory['retry_policy_version'] = 2
+
+
 def dependencies(record, cp):
     if record['kind'] == 'contributions':
         sid = record['stage_id']
@@ -31,7 +61,7 @@ def migrate(cp, expected):
     memory = cp.get('memory')
     if memory is None:
         memory = cp['memory'] = dict(identity=expected, units={}, records={}, quarantine={}, read_chars=0, cursor=0,
-                                     complete=False, execution_complete=False, epoch=1)
+                                     complete=False, execution_complete=False, epoch=1, retry_policy_version=2)
         return memory
     old = memory['identity']
     if any(old.get(k) != expected.get(k) for k in ('source', 'run_id', 'model')):
@@ -106,6 +136,7 @@ def migrate(cp, expected):
                     unit.pop(key, None)
         memory['execution_complete'] = memory.get('complete', False) and all(u.get('complete') for u in memory['units'].values())
     memory['identity'] = expected
+    restore_retry_unknowns(cp)
     # Invalidate contributions first so downstream workflows see their new state.
     for record in sorted(memory['records'].values(), key=lambda r: r['kind'] == 'workflows'):
         if record.get('publication_state') == 'published' and record.get('dependencies') != dependencies(record, cp):
