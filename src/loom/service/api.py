@@ -100,6 +100,8 @@ class SessionHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
@@ -342,6 +344,10 @@ class SessionHandler(BaseHTTPRequestHandler):
             else:
                 raise ServiceError("Route not found", 404)
         except ServiceError as exc:
+            # A rejected POST may still have an unread body (e.g. an unknown
+            # route). Never parse those bytes as the next keep-alive request.
+            if method == "POST":
+                self.close_connection = True
             self._json(exc.status, {"error": {"code": exc.code, "message": str(exc)}})
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             self.close_connection = True

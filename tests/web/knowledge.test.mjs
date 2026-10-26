@@ -559,6 +559,65 @@ test('local import submits paths and job controls stay inside Import', async () 
   } finally {view.close(); dom.window.close();}
 });
 
+test('file and folder choosers fill editable paths without importing on selection or cancel', async () => {
+  const requests = [];
+  let cancel = false;
+  const {dom, view} = setup({json: async (path, options) => {
+    requests.push([path, options?.body]);
+    if (path.endsWith('/pick-path')) return {path: cancel ? null : options.body.kind === 'folder' ? '/docs' : '/docs/指南.md'};
+    return path.endsWith('/kb') ? base : catalog;
+  }});
+  const click = (root, label) => [...root.querySelectorAll('button')].find(b => b.textContent === label).click();
+  try {
+    await view.open();
+    let form = view.dialog.querySelector('[aria-label="Single file import settings"] form');
+    form.querySelector('input').value = '/docs';
+    click(form, 'Choose file…'); await tick();
+    assert.equal(document.querySelector('.local-path-picker'), null);
+    assert.equal(form.querySelector('input').value, '/docs/指南.md');
+    assert.ok(requests.some(([path, body]) => path.endsWith('/pick-path') && body.kind === 'file' && body.path === '/docs'));
+    assert.equal(requests.some(([path]) => path.endsWith('/imports')), false);
+    form.querySelector('input').value = '/docs/edited.md';
+    form.dispatchEvent(new dom.window.Event('submit', {cancelable: true})); await tick();
+    assert.ok(requests.some(([path, body]) => path.endsWith('/imports') && body.path === '/docs/edited.md' && body.kind === 'file'));
+    click(view.dialog.querySelector('.kb-import-modes'), 'Folder');
+    form = view.dialog.querySelector('[aria-label="Folder import settings"] form');
+    click(form, 'Choose folder…'); await tick();
+    assert.equal(form.querySelector('input').value, '/docs');
+    cancel = true;
+    click(form, 'Choose folder…'); await tick();
+    assert.equal(form.querySelector('input').value, '/docs');
+    assert.equal(document.querySelector('.local-path-picker'), null);
+    form.dispatchEvent(new dom.window.Event('submit', {cancelable: true})); await tick();
+    assert.ok(requests.some(([path, body]) => path.endsWith('/imports') && body.path === '/docs' && body.kind === 'folder'));
+  } finally {view.close(); dom.window.close();}
+});
+
+test('native chooser failures preserve manual paths and late selections do not overwrite edits', async () => {
+  let resolve, fail = false;
+  const {dom, view} = setup({json: async path => {
+    if (path.endsWith('/pick-path')) {
+      if (fail) throw new Error('Native chooser unavailable');
+      return new Promise(done => {resolve = done;});
+    }
+    return path.endsWith('/kb') ? base : catalog;
+  }});
+  try {
+    await view.open();
+    const form = view.dialog.querySelector('[aria-label="Single file import settings"] form');
+    const path = form.querySelector('input'), choose = [...form.querySelectorAll('button')].find(b => b.textContent === 'Choose file…');
+    path.value = '/original.md'; choose.click();
+    assert.equal(choose.disabled, true);
+    path.value = '/manual.md'; resolve({path: '/late.md'}); await tick();
+    assert.equal(path.value, '/manual.md'); assert.equal(choose.disabled, false);
+    fail = true; choose.click(); await tick();
+    assert.match(view.notice.textContent, /Native chooser unavailable/);
+    assert.equal(path.value, '/manual.md'); assert.equal(choose.disabled, false);
+    fail = false; choose.click(); view.close(); resolve({path: '/closed.md'}); await tick();
+    assert.equal(path.value, '/manual.md');
+  } finally {view.close(); dom.window.close();}
+});
+
 test('import activity groups attempts by source, keeps old statuses in History and clears the selected attempt', async () => {
   const requests = [];
   const latest = {id: 'latest', kind: 'website', source_id: 'web', document: 'https://example.com/docs', state: 'failed', stage: 'failed',

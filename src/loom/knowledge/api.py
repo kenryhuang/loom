@@ -23,6 +23,10 @@ def dispatch(handler, method, parts):
     if not tail:
         raise ServiceError("Route not found", 404)
     kb_id = tail[0]
+    if tail[1:] == ['pick-path'] and method == 'POST':
+        from loom.knowledge.local_picker import pick_path
+
+        return 200, pick_path(store, kb_id, handler._body())
     if tail[1:] == ['delete'] and method == 'POST':
         if handler._body() != {}:
             raise ServiceError('Delete requires an empty object')

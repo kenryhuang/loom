@@ -1,3 +1,4 @@
+import http.client
 import json
 import threading
 import time
@@ -32,6 +33,52 @@ def api(tmp_path):
 
 def new(client, path, cid="create"):
     return client.create({"objective": "Maintain", "workspace": str(path)}, command_id=cid)["session_id"]
+
+
+def test_rejected_post_cannot_corrupt_next_keep_alive_request(api):
+    _, server, _, _ = api
+    connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=5)
+    headers = {'Authorization': 'Bearer private-test-token', 'Content-Type': 'application/json'}
+    try:
+        # Browser JSON has no spaces. If left unread, it becomes part of the
+        # next HTTP method and BaseHTTPRequestHandler responds with HTTP 501.
+        connection.request('POST', '/v1/knowledge-bases/missing/unknown-command', body='{"kind":"file","path":""}', headers=headers)
+        response = connection.getresponse()
+        assert response.status == 404
+        assert json.loads(response.read())['error']['message'] == 'Route not found'
+        connection.request('GET', '/v1/knowledge-bases', headers=headers)
+        response = connection.getresponse()
+        assert response.status == 200
+        assert 'knowledge_bases' in json.loads(response.read())
+    finally:
+        connection.close()
+
+
+def test_knowledge_path_picker_requires_auth_and_returns_service_paths(api, monkeypatch):
+    from types import SimpleNamespace
+
+    from loom.knowledge import local_picker
+
+    service, server, client, path = api
+    kb = service.store.knowledge.create({'name': 'Local docs'})['id']
+    source = path / 'docs'
+    source.mkdir()
+    (source / 'guide.md').write_text('Original content')
+    calls = []
+    monkeypatch.setattr(local_picker, '_command', lambda kind, initial: [kind, str(initial)])
+    def selected(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout=str(source / 'guide.md') + '\n')
+    monkeypatch.setattr(local_picker.subprocess, 'run', selected)
+    route = f'/v1/knowledge-bases/{kb}/pick-path'
+    payload = {'kind': 'file', 'path': str(source)}
+    with pytest.raises(ServiceError) as denied:
+        SessionClient(client.url, 'wrong')._json(route, payload)
+    assert denied.value.status == 401
+    assert not calls
+    result = client._json(route, payload)
+    assert result == {'path': str(source / 'guide.md')}
+    assert not service.store.knowledge.get(kb)['documents']
 
 
 def test_browser_assets_are_public_but_session_data_and_catalog_are_private(api):

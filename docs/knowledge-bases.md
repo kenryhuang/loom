@@ -17,7 +17,7 @@ A knowledge base's engine/profile binding is immutable. Settings prevents changi
 1. Open **Settings** at the bottom of the left navigation. Configure **Embedding services** for hybrid search or LightRAG. Other tabs edit models, model selection, task/run defaults and Evaluation / Evolve configuration.
 2. Open **Knowledge**, then **New** in the middle panel. Creation has its own page; select the engine, embedding service and (for LightRAG) indexing model.
 3. Select a knowledge base to open its **Import**, **View** and **Search** tabs.
-4. In **Import**, choose **Single file**, **Folder** or **Web URL**. File/folder paths refer to the machine running Loom service, not a remote browser's machine. Folder imports include supported files recursively, skipping hidden directories, symlinks and dependency folders.
+4. In **Import**, choose **Single file**, **Folder** or **Web URL**. For local sources, click **Choose file…** or **Choose folder…** to open the system's native file/folder selection window, or enter the path manually. Selection fills in the real absolute path, which remains editable; click **Import file** or **Import folder** to start indexing. Cancel leaves the existing path unchanged. The native chooser opens on the machine running Loom service (macOS, or a Linux desktop with Zenity/KDialog); on headless services, enter a path manually. Folder imports include supported files recursively, skipping hidden directories, symlinks and dependency folders.
 5. **View** groups indexed documents by source directory or website, with document/passage counts and engine metadata. LightRAG also provides **Explore knowledge graph / Load graph**. **Search** retrieves indexed passages.
 6. Select bases during session creation or use **Knowledge bases → Configure** between tasks.
 
@@ -47,6 +47,7 @@ All routes use the service's existing bearer authentication.
 | --- | --- | --- |
 | GET / POST | `/v1/settings` | Read masked config / save `{ "revision": "...", "config": {...} }` |
 | GET | `/v1/knowledge-bases` | Catalog, profiles, engines |
+| POST | `/v1/knowledge-bases/{id}/pick-path` | Native selection: `{ "kind": "file", "path": "/absolute/initial/path" }`; kind may be `folder`, omitted/empty path starts at home. Returns `{ "path": "/selected/path" }`, or `{ "path": null }` on cancel. Does not import. |
 | POST | `/v1/knowledge-bases/{id}/imports` | `{ "kind": "file", "path": "/absolute/manual.md" }` or `kind: folder` |
 | POST | `/v1/knowledge-bases/{id}/jobs/{job_id}/{action}` | `{}`; action: `pause`, `resume`, `terminate`, `clear` |
 | POST | `/v1/knowledge-bases/{id}/delete` | `{}`; delete index and metadata, preserve local source files |

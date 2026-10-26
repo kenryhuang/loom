@@ -314,8 +314,18 @@ export class KnowledgeView {
       const form = element('form', 'knowledge-form'), path = input(kind === 'folder' ? '/absolute/path/to/folder' : '/absolute/path/to/document.md');
       path.required = true;
       const submit = element('button', 'primary', kind === 'folder' ? 'Import folder' : 'Import file'); submit.type = 'submit';
+      const choose = button(kind === 'folder' ? 'Choose folder…' : 'Choose file…');
+      choose.onclick = async () => {
+        const abort = this.abort, original = path.value, caption = choose.textContent;
+        choose.disabled = true; choose.textContent = 'Choosing…';
+        try {
+          const result = await this.client.json(`/v1/knowledge-bases/${id}/pick-path`, {body: {kind, path: original.trim()}, signal: abort.signal});
+          if (abort === this.abort && !abort.signal.aborted && path.isConnected && path.value === original && result.path) path.value = result.path;
+        } catch (error) {if (abort === this.abort && !abort.signal.aborted && path.isConnected) this.error(error);}
+        finally {choose.disabled = false; choose.textContent = caption;}
+      };
       form.append(field(kind === 'folder' ? 'Folder path on the Loom service machine' : 'File path on the Loom service machine', path),
-        element('p', 'muted', 'Index in place. The source file stays at its original path.'), submit);
+        choose, element('p', 'muted', 'Choose a local path or enter it manually. Index in place; original files stay at their paths.'), submit);
       form.onsubmit = async event => {
         event.preventDefault(); submit.disabled = true;
         try {await this.request(`/${id}/imports`, {kind, path: path.value.trim()}); await this.renderBase();}
