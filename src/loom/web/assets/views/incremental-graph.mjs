@@ -160,7 +160,11 @@ export class IncrementalGraphView {
         } else detail.append(element('p', 'muted', 'Closure not established'));
         for (const q of closure?.open_questions || goal.open_questions || []) detail.append(element('p', '', `Remaining question / feedback: ${q}`));
         this.refs(detail, goal.evidence_refs);
-        for (const item of goal.requirements) this.renderAction(detail, item, `requirements:${goal.id}`, this.tree.byGoal.get(goal.id).cost, goal.display_id);
+        for (const {card} of goal.requirements) this.details(detail, `requirement:${goal.id}:${card.id}`, `${card.name} · L${card.start_line}–${card.end_line}`, body => {
+          this.featureRows(body, card.features);
+          for (const excerpt of card.excerpts || []) this.featureRows(body, excerpt);
+          this.refs(body, (card.raw_refs || []).map(id => this.data.extraction.registry[id]?.ref));
+        });
         this.findings(detail, goal.id);
       });
       const children = element('div', 'goal-tree-children'); body.append(children);
@@ -221,7 +225,7 @@ export class IncrementalGraphView {
   renderAction(root, item, context, parentCost, parentLabel) {
     const {card, assessment, attribution, shared, root_override, framework_rule} = item;
     const cost = callSummary(card.call_ids, this.tree.atoms);
-    const heading = this.heading(`A${item.ordinal || this.tree.cards.findIndex(c => c.id === card.id) + 1}`, `${card.kind} · ${card.name} · L${card.start_line}–${card.end_line}`, cost,
+    const heading = this.heading(`A${item.ordinal || this.tree.actionOrdinals.get(card.id)}`, `${card.kind} · ${card.name} · L${card.start_line}–${card.end_line}`, cost,
       [card.status, shared ? 'Shared reference' : '', framework_rule ? 'Framework required' : attribution ? 'Default rule' : ''], parentCost, parentLabel);
     const node = this.details(root, `action:${context}:${card.id}`, heading, body => {
       body.dataset.actionDetail = card.id;
@@ -239,7 +243,8 @@ export class IncrementalGraphView {
         if (assessment.uptake_card_ids?.length) {
           table(body, ['Adopted by'], assessment.uptake_card_ids.map(id => {
             const target = this.tree.cards.find(c => c.id === id);
-            return [target ? `A${this.tree.cards.indexOf(target) + 1} · ${target.kind} · ${target.name} · L${target.start_line}–${target.end_line}` : id];
+            const ordinal = this.tree.actionOrdinals.get(id);
+            return [target ? `${ordinal ? `A${ordinal} · ` : ''}${target.kind} · ${target.name} · L${target.start_line}–${target.end_line}` : id];
           }));
         }
       } else body.append(element('p', 'muted', 'Action review pending'));

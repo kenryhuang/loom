@@ -72,7 +72,7 @@ test('shared actions count once per branch; selected goals retain ancestors and 
   assert.ok(unresolved[0].stages.every(s => s.actions.every(a => !a.assessment.stage_ids.length)));
 });
 
-test('root requirements are properties, verification stays on root and explicit unrelated blocks inheritance', () => {
+test('root requirements remain properties, event-only receipts are not actions and unrelated blocks inheritance', () => {
   const data = fixture(), root = data.goals[0], stage = data.stages[0];
   const requirement = {id: 'contract', kind: 'boundary', name: 'acceptance.plan.proposed', start_line: 0, end_line: 0,
     call_ids: [], refs: [], raw_refs: [], features: {}, excerpts: []};
@@ -82,10 +82,71 @@ test('root requirements are properties, verification stays on root and explicit 
   data.record_assessments[1].relation = 'unrelated';
   const tree = goalTree(data), projected = tree.byGoal.get(root.id);
   assert.equal(projected.requirements.length, 1);
-  assert.equal(projected.stages.find(s => s.basis === 'framework_rule').actions[0].root_override, true);
+  assert.equal(projected.stages.some(s => s.card_ids.includes('receipt')), false);
   assert.equal(projected.stages.find(s => s.basis === 'default_rule').actions[0].card.id, data.extraction.cards[1].id);
   assert.equal(projected.stages.flatMap(s => s.card_ids).includes('contract'), false);
   assert.equal(projected.cost.calls, 4);
+});
+
+test('event-only boundaries cannot create stages, split visits or consume action numbers', () => {
+  const data = fixture();
+  // Place all real actions in the same stage to expose artificial visit gaps.
+  data.record_assessments.forEach(row => {row.stage_ids = [data.stages[0].id];});
+  const baseline = goalTree(data);
+  for (const [i, name] of ['verification.started', 'verification.completed', 'acceptance.verifying', 'plan.updated'].entries()) {
+    const card = {id: `boundary-${i}`, kind: 'boundary', name, start_line: 3 + i / 10, end_line: 3 + i / 10,
+      call_ids: [], refs: [], raw_refs: [], features: {}, excerpts: []};
+    data.extraction.cards.push(card);
+    data.stages.push({...data.stages[0], id: `boundary-stage-${i}`});
+    data.record_assessments.push({card_id: card.id, status: 'reviewed', stage_ids: [`boundary-stage-${i}`]});
+  }
+  const original = JSON.stringify(data), tree = goalTree(data);
+  assert.deepEqual(tree.roots[0].cost, baseline.roots[0].cost);
+  assert.equal(tree.stages.length, baseline.stages.length);
+  assert.deepEqual(tree.stages[0].visits, baseline.stages[0].visits);
+  assert.deepEqual(tree.stages.flatMap(s => s.actions.map(a => a.ordinal)), [1, 2, 3, 4]);
+  assert.equal(tree.cards.filter(c => c.kind === 'boundary').length, 4);
+  assert.equal(JSON.stringify(data), original);
+});
+
+test('real verification calls remain root actions even with unknown or zero call costs', () => {
+  const data = fixture(), card = data.extraction.cards[0];
+  card.actor = {role: 'verification'};
+  const atom = data.cost_ledger.atoms.find(a => card.call_ids.includes(a.id));
+  atom.duration_ms = 0;
+  let tree = goalTree(data);
+  let stage = tree.roots[0].stages.find(s => s.source_stage_id === 'recorded:acceptance');
+  assert.equal(stage.actions[0].card.id, card.id);
+  assert.equal(stage.actions[0].root_override, true);
+  data.cost_ledger.atoms = data.cost_ledger.atoms.filter(a => a.id !== atom.id);
+  tree = goalTree(data);
+  stage = tree.roots[0].stages.find(s => s.source_stage_id === 'recorded:acceptance');
+  assert.equal(stage.actions[0].card.id, card.id);
+});
+
+test('Skeleton omits boundary action rows while requirements and Acceptance preserve original evidence', () => {
+  const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
+  const root = document.querySelector('main'), data = fixture(), evidence = [];
+  const ref = {line_number: 373, field_path: 'criteria'};
+  data.extraction.registry['boundary-ref'] = {ref};
+  const boundary = {id: 'boundary', kind: 'boundary', name: 'verification.started', start_line: 373, end_line: 373,
+    call_ids: [], refs: ['boundary-ref'], raw_refs: ['boundary-ref'], features: {}, excerpts: []};
+  data.extraction.cards.push(boundary, {...boundary, id: 'contract', name: 'acceptance.plan.accepted'});
+  data.facts.verification.push({type: 'verification.started', line: 373, value: {status: 'started'}, evidence_refs: [ref]});
+  const view = new IncrementalGraphView(root, {evidence: value => evidence.push(value)}); view.update(data);
+  for (const stage of root.querySelectorAll('.goal-tree-stage')) open(stage, dom);
+  assert.doesNotMatch(root.textContent, /boundary · verification.started/);
+  assert.equal(root.querySelectorAll('.goal-tree-action').length, 4);
+  open(named(root, 'Task requirements'), dom);
+  const requirement = named(root, 'acceptance.plan.accepted · L373–373'); open(requirement, dom);
+  assert.equal(requirement.querySelector('.goal-tree-metrics'), null);
+  requirement.querySelector('button').click();
+  assert.deepEqual(evidence, [ref]);
+  view.mode = 'acceptance'; view.render();
+  const receipt = named(root, 'verification.started · L373'); open(receipt, dom);
+  receipt.querySelector('button').click();
+  assert.deepEqual(evidence, [ref, ref]);
+  dom.window.close();
 });
 
 test('missing timing differs from zero and partial durations; repeated atom IDs never add cost', () => {

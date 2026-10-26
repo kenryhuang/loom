@@ -687,6 +687,12 @@ Continue 阶段；不增加 reviewed 数、不改成本 owner、不补造成果�
 unrelated 阻止继承，Root 验收/宿主记录优先归 Root。验收配置归 Task requirements，
 不制造一个零调用执行 Stage。旧数据中没有保存的 root_relation/closure 保留缺口。
 
+2026-10-26 展示调整：无调用的 `boundary` 事件不再生成 Skeleton Action 或单独的
+执行 Stage，也不占 Action 编号或打断同阶段的连续访问。验收配置作为 Task requirements
+中的证据属性展示，不附带调用统计；验收事件及通过／失败回执继续在 Acceptance 和原始
+证据中查看。实际验收模型、工具调用仍归 Root，零耗时或成本信息缺失不会使真实调用被隐藏。
+该调整只影响展示投影，保留 extraction、已付费评审、checkpoint、验收判断和用量账本。
+
 Action 展示 Expected / Progress / Adoption、调用性能、Tool arguments / Tool result
 元数据和原始记录入口。完整正文通过现有 evidence 阅读器按需读取；归属锚点和
 动作自身 request/response 分开展示。已知完整呈现只显示复用说明及模型请求引用，

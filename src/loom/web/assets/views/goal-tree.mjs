@@ -11,6 +11,10 @@ export function callSummary(ids, atoms) {
 
 export function goalTree(data) {
   const cards = [...(data.extraction?.cards || [])].sort((a, b) => a.start_line - b.start_line || a.end_line - b.end_line || a.id.localeCompare(b.id));
+  // Boundary records carry requirements/receipts, not execution. Keep them in
+  // the source index, but do not give them Action rows or interrupt visits.
+  const eventOnly = card => card.kind === 'boundary' && !card.call_ids.length;
+  const actionOrdinals = new Map(cards.filter(card => !eventOnly(card)).map((card, i) => [card.id, i + 1]));
   const atoms = new Map((data.cost_ledger?.atoms || []).map(a => [a.id, a]));
   const assessments = new Map((data.record_assessments || []).map(a => [a.card_id, a]));
   const stages = new Map((data.stages || []).map(s => [s.id, s]));
@@ -35,7 +39,6 @@ export function goalTree(data) {
   }
   const rootFor = card => roots.find(g => (g.origin_line ?? 0) <= card.start_line && (g.end_line ?? Infinity) >= card.start_line) || roots[0];
   const stageRows = new Map(), unresolved = new Set(), membership = new Map();
-  const ordered = new Map(cards.map((c, i) => [c.id, i]));
   const defaults = new Map((data.action_attributions || []).filter(r => r.basis === 'default_rule').map(r => [r.card_id, r]));
   const history = [];
   const scope = card => JSON.stringify([card.actor?.loop || card.actor?.trace || null, card.actor?.role ?? null]);
@@ -47,7 +50,7 @@ export function goalTree(data) {
       goal.stages.push(row); stageRows.set(key, row);
     }
     const row = stageRows.get(key);
-    row.actions.push({card, assessment, ordinal: ordered.get(card.id) + 1, ...extra});
+    row.actions.push({card, assessment, ordinal: actionOrdinals.get(card.id), ...extra});
     row.first_line = Math.min(row.first_line, card.start_line); row.last_line = Math.max(row.last_line, card.end_line);
     if (spec.attempt_id) row.attempt_ids.add(spec.attempt_id);
     row.card_ids.push(card.id); row.call_ids.push(...card.call_ids);
@@ -55,18 +58,19 @@ export function goalTree(data) {
   }
   for (const card of cards) {
     const root = rootFor(card), assessment = assessments.get(card.id);
+    const requirement = card.kind === 'boundary' && /^(acceptance\.(plan|contract)|task\.(configured|defined))/.test(card.name);
+    if (requirement) {
+      root.requirements.push({card, assessment, framework_rule: true}); root.card_ids.push(card.id); root.call_ids.push(...card.call_ids); continue;
+    }
+    if (eventOnly(card)) continue;
     const previous = history.findLast(row => row.root === root.id && row.card.end_line <= card.start_line && scope(row.card) === scope(card));
     const declared = (assessment?.stage_ids || []).map(id => stages.get(id)).filter(s => s && byGoal.has(s.goal_id));
-    const requirement = card.kind === 'boundary' && /^(acceptance\.(plan|contract)|task\.(configured|defined))/.test(card.name);
     const verification = card.actor?.role === 'verification' || card.call_ids.some(id => atoms.get(id)?.role === 'verification') ||
       /^(verification\.|acceptance\.|task\.(assessed|decision|outcome|completed)|run\.(completed|failed|stopped))/.test(card.name);
     const finish = card.kind === 'tool' && card.name === 'finish';
     const framework = requirement || verification || finish;
     // Framework ownership is established even when utility remains unknown.
     if (!declared.length && !framework) unresolved.add(card.id);
-    if (requirement) {
-      root.requirements.push({card, assessment, framework_rule: true}); root.card_ids.push(card.id); root.call_ids.push(...card.call_ids); continue;
-    }
     if (verification) {
       attach(root, {id: 'recorded:acceptance', title: 'Acceptance & root decision', kind: 'verification', basis: 'framework_rule'},
         card, assessment, {framework_rule: true, root_override: declared.some(s => s.goal_id !== root.id)});
@@ -139,7 +143,7 @@ export function goalTree(data) {
   goals.sort(goalOrder);
   // Root accounts for every invocation, including atoms without a projected card.
   if (roots.length === 1) {roots[0].call_ids = [...atoms.keys()]; roots[0].cost = callSummary(roots[0].call_ids, atoms);}
-  return {roots, goals, byGoal, stages: [...stageRows.values()], cards, assessments, atoms, unresolved, membership};
+  return {roots, goals, byGoal, stages: [...stageRows.values()], cards, actionOrdinals, assessments, atoms, unresolved, membership};
 }
 
 /** Mix child goals and direct stages by first visible activity, not row type.
