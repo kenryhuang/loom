@@ -1,3 +1,4 @@
+import {SkillsView} from './skills.mjs';
 import { renderBaseEvaluation } from "./behavior-evaluation.mjs";
 import { renderBehaviorSequence } from "./behavior-sequence.mjs";
 import { element } from "../markdown.mjs";
@@ -137,8 +138,10 @@ export class TrajectoryView {
     tabs.setAttribute("aria-label", "Evaluation views");
     this.deepPanel = element("section", "trajectory-evaluation");
     this.diagnosisPanel = element("section", "trajectory-diagnosis");
-    const panels = [this.body, this.deepPanel, this.diagnosisPanel];
-    this.tabs = ["Trace analysis", "Deep evaluation", "Session diagnosis"].map((label, index) => {
+    this.skillsPanel = element('section', 'trajectory-skills');
+    this.skillsView = new SkillsView(this.skillsPanel, {api, sessionId, signal});
+    const panels = [this.body, this.deepPanel, this.diagnosisPanel, this.skillsPanel];
+    this.tabs = ["Trace analysis", "Deep evaluation", "Session diagnosis", "Skills"].map((label, index) => {
       const tab = button(label, () => this.selectTab(index));
       tab.id = `evaluation-tab-${index}`;
       tab.setAttribute("role", "tab");
@@ -163,7 +166,8 @@ export class TrajectoryView {
     this.deepPanel.append(
       element("p", "muted", "Preparing snapshot for evaluation…"),
     );
-    this.root.append(element('p', 'analysis-session-id', `Session: ${sessionId}`), tabs, heading, this.body, this.deepPanel, this.diagnosisPanel);
+    this.root.append(element('p', 'analysis-session-id', `Session: ${sessionId}`), tabs, heading,
+      this.body, this.deepPanel, this.diagnosisPanel, this.skillsPanel);
     this.diagnosisView = new DiagnosisView(this.diagnosisPanel);
     void this.diagnosisView.open(api, sessionId);
     this.traceHeading = heading;
@@ -204,6 +208,8 @@ export class TrajectoryView {
     this.body.hidden = index !== 0;
     this.deepPanel.hidden = index !== 1;
     this.diagnosisPanel.hidden = index !== 2;
+    this.skillsPanel.hidden = index !== 3;
+    if (index === 3 && !this.skillsView.data) void this.skillsView.open();
     this.traceHeading.hidden = index !== 0;
     this.status.hidden = index !== 0 || !this.status.textContent;
     this.tabs.forEach((tab, i) => {
@@ -229,6 +235,7 @@ export class TrajectoryView {
         signal: this.abort.signal,
         evidence: (ref) => this.showEvidence(ref),
         onError: this.onError,
+        onInduce: query => {this.selectTab(3); this.skillsView.query = query; void this.skillsView.open(query);},
       });
       this.evaluationView.open();
     } else {

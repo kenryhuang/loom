@@ -201,6 +201,12 @@ class TaskAssembly:
             request.metadata["memory_database"], workspace=self.tool_request.workspace, session_id=session_id,
             allowed_tools=harness.allowed_tools if harness else None,
         ) if request.metadata.get("memory_database") else None
+        from loom.skills.runtime import RuntimeSkills
+
+        self.skills = RuntimeSkills(
+            request.metadata["memory_database"], workspace=self.tool_request.workspace, session_id=session_id,
+            allowed_tools=harness.allowed_tools if harness else None, trial_versions=request.metadata.get('skill_trial_versions', ()),
+        ) if request.metadata.get("memory_database") and not request.metadata.get('disable_skills') else None
         self.report_workspace = Path(workspace.uri) if workspace and workspace.access == "read-write" else None
         self.collections = [
             self.registry.create(
@@ -238,10 +244,13 @@ class TaskAssembly:
                 self.entrypoints[entrypoint] = handler
         if harness and harness.allowed_tools is not None:
             unknown = set(harness.allowed_tools) - self.bindings.keys() - {"read_artifact"} - (
-                self.memory.allowed if self.memory else set())
+                self.memory.allowed if self.memory else set()) - (self.skills.allowed if self.skills else set())
             if unknown:
                 raise ValueError(f"Unknown allowed tools: {sorted(unknown)}")
             self.bindings = {name: binding for name, binding in self.bindings.items() if name in harness.allowed_tools}
+        if self.skills:
+            self.skills.configure(self.bindings, workspace_access='read-write' if workspace and workspace.access == 'read-write' else 'read-only',
+                                  runtime=self.spec['execution_runtime']['plugin'])
         self.required_source_urls = requested_source_urls(request.objective) if request.task_spec is not None and not directories else ()
         if self.required_source_urls and not any(binding.artifact_kind == "source" and binding.evidence_fields for binding in self.bindings.values()):
             raise ValueError("Task requires live URL retrieval, but selected tool collections provide no source reader")
@@ -315,6 +324,8 @@ class TaskAssembly:
             execution.binding_effects["revise_acceptance_plan"] = "service_control"
             if self.memory:
                 execution.binding_effects.update({name: "read_only" for name in self.memory.allowed})
+            if self.skills:
+                execution.binding_effects.update({name: "read_only" for name in self.skills.allowed})
 
     def publish_artifact(self, value, kind):
         if self.execution:
@@ -424,7 +435,7 @@ class TaskAssembly:
             return refs
         from loom.tools.contracts import CatalogTool, ToolLifecycle
 
-        memory_ids = self.memory.allowed if self.memory else set()
+        memory_ids = (self.memory.allowed if self.memory else set()) | (self.skills.allowed if self.skills else set())
         required = tuple(ref.id for ref in refs if ref.id not in memory_ids and (
             ref.id not in self.bindings or self.bindings[ref.id].placement == "control"))
         if self.acceptance_policy:
@@ -567,6 +578,8 @@ class TaskAssembly:
         handlers["revise_acceptance_plan"] = revise_acceptance
         if self.memory:
             handlers.update(self.memory.handlers())
+        if self.skills:
+            handlers.update(self.skills.handlers())
         wrapped = self.workflow.wrap_tools(handlers)
         for name in ("process_execute", "shell_execute"):
             if name in handlers:
@@ -603,6 +616,8 @@ class TaskAssembly:
         refs = (*self.normal_refs, self.artifact_tool_ref()) if self.expose_artifacts else self.normal_refs
         if self.memory:
             refs = (*refs, *self.memory.refs())
+        if self.skills:
+            refs = (*refs, *self.skills.refs())
         return (
             *refs,
             ToolRef(
@@ -733,9 +748,10 @@ class TaskAssembly:
             emitted.unwrap()
 
     async def prepare_memory(self, context, runtime):
-        if not self.memory:
-            return context
-        context = await self.memory.attach(context, runtime)
+        if self.memory:
+            context = await self.memory.attach(context, runtime)
+        if self.skills:
+            context = await self.skills.attach(context, runtime)
         self.workflow.configure_normal_tool_refs(self.context_tools())
         return replace(context, affordances=replace(context.affordances,
             tools=self.workflow.visible_tool_refs(self.context_tools())))
@@ -745,7 +761,7 @@ class TaskAssembly:
 
         async def task_step(context, runtime):
             # Durable workers attach at ManagedStep's new-request boundary, after replaying saved tools.
-            if self.memory and self.execution is None:
+            if (self.memory or self.skills) and self.execution is None:
                 context = await self.prepare_memory(context, runtime)
             self.context, self._task_runtime = context, runtime
             if not self.execution:

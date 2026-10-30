@@ -516,11 +516,12 @@ async def test_memory_provider_timeout_keeps_graph_and_reports_the_call_limit():
 
 
 @pytest.mark.asyncio
-async def test_retrieved_memory_cannot_become_fresh_observed_evidence():
-    store = source(action(1, 'memory_read', {'evaluation_id': 'old', 'record_id': 'm'}, {'text': 'Historical host was Darwin'}))
+@pytest.mark.parametrize('tool', ['memory_read', 'memory_search', 'skill_read', 'skill_select', 'skill_record_step'])
+async def test_retrieved_memory_cannot_become_fresh_observed_evidence(tool):
+    store = source(action(1, tool, {'evaluation_id': 'old', 'record_id': 'm'}, {'text': 'Historical host was Darwin'}))
     cp = {}
     await run(store, build_behavior_facts(store), 'run', cp, GraphJudge())
-    card = next(c for c in cp['extraction']['cards'] if c['name'] == 'memory_read')
+    card = next(c for c in cp['extraction']['cards'] if c['name'] == tool)
     evidence = card_evidence(store, card, cp['extraction']['registry'])
     assert evidence and all(e['basis'] == 'historical_reference' for e in evidence)
     unit = dict(mode='extract', scope=dict(goals=[{'id': 'g'}], stages=[], actions=[{'id': card['id']}]), evidence=evidence)

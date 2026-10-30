@@ -40,7 +40,7 @@ const button = (text, action) => {
 };
 
 export class EvaluationView {
-  constructor(root, { api, sessionId, analysisId, signal, evidence, onError, onResult, onExplore }) {
+  constructor(root, { api, sessionId, analysisId, signal, evidence, onError, onResult, onExplore, onInduce }) {
     Object.assign(this, {
       root,
       api,
@@ -51,6 +51,7 @@ export class EvaluationView {
       onError,
       onResult,
       onExplore,
+      onInduce,
     });
     this.generation = 0;
     this.timer = null;
@@ -726,7 +727,7 @@ export class EvaluationView {
     this.onResult?.(data, this.job);
     if (signature === this.renderedData) return;
     if (data.skeleton?.projection_version) {
-      if (!this.graphView) this.graphView=new IncrementalGraphView(element("section"),{evidence:ref=>this.evidence(ref)});
+      if (!this.graphView) this.graphView=new IncrementalGraphView(element("section"),{evidence:ref=>this.evidence(ref), onInduce: this.onInduce});
       this.results.replaceChildren(this.graphView.root);this.graphView.update({...data, session_id: data.session_id || this.sessionId}, this.job?.id);this.renderedData=signature;return;
     }
     const opened = new Set([...this.results.querySelectorAll("details[open][data-detail]")].map(n => n.dataset.detail));

@@ -329,7 +329,8 @@ def test_complete_preserves_success_and_restart_creates_a_fresh_goal_execution(t
         assert service.submit(sid, restart) == receipt
         second = wait_state(service, sid, 'idle')
         assert second['run']['id'] != old_id
-        assert second['run']['task_episode_id'] != old_episode
+        # Restarting the same goal is a fresh execution of the same task episode, not independent evidence.
+        assert second['run']['task_episode_id'] == old_episode
         assert second['task']['id'] == first['task']['id']
         assert second['run']['restart_from_scratch']
         reports = [m['content'] for m in second['messages'] if m['role'] == 'assistant']

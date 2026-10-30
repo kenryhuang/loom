@@ -19,8 +19,8 @@ const basisLabel = {assessed_stage: 'Assessed stage', inferred_context: 'Default
   operation_grouping: 'Display grouping', unassigned: 'Unassigned'};
 
 export class IncrementalGraphView {
-  constructor(root, {evidence = () => {}} = {}) {
-    Object.assign(this, {root, evidence, mode: 'skeleton', filter: 'all', opened: new Map(), uid: ++viewSequence});
+  constructor(root, {evidence = () => {}, onInduce} = {}) {
+    Object.assign(this, {root, evidence, onInduce, mode: 'skeleton', filter: 'all', opened: new Map(), uid: ++viewSequence});
   }
   update(data, identity = '') {
     const key = JSON.stringify([identity || data.analysis_id, data.source?.digest, data.source?.run_id]);

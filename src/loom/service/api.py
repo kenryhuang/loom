@@ -58,6 +58,9 @@ class ServiceHTTPServer(ThreadingHTTPServer):
         from loom.service.semantic import SessionSemantic
 
         self.semantic = SessionSemantic(self.trajectory, service.config_path)
+        from loom.service.skills import SessionSkills
+
+        self.skills = SessionSkills(self.trajectory, self.semantic)
         from loom.knowledge.jobs import KnowledgeJobs
 
         self.knowledge_jobs = KnowledgeJobs(service.store.knowledge)
@@ -67,6 +70,8 @@ class ServiceHTTPServer(ThreadingHTTPServer):
 
     def server_close(self):
         self.closing.set()
+        if hasattr(self, "skills"):
+            self.skills.close()
         if hasattr(self, "diagnoses"):
             self.diagnoses.close()
         if hasattr(self, "knowledge_jobs"):
@@ -173,6 +178,13 @@ class SessionHandler(BaseHTTPRequestHandler):
                 raise ServiceError("Service credential required", 401, "UNAUTHORIZED")
             parts = parsed.path.strip("/").split("/")
             service = self.server.service
+            if parts[:2] == ["v1", "skills"]:
+                try:
+                    result = self.server.skills.dispatch(method, parts[2:], query, self._body() if method == 'POST' else None)
+                except (ValueError, TypeError) as exc:
+                    raise ServiceError(str(exc), 409) from exc
+                self._json(200, result)
+                return
             if method == "GET" and parts == ["v1", "web", "catalog"] and self.server.web_frontend:
                 self._json(200, self.server.web_frontend.catalog(service))
                 return

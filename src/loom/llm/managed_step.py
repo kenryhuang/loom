@@ -501,14 +501,14 @@ class ManagedStep:
             if suspended is not None:
                 return suspended
             if cp["phase"] == "before_llm":
-                if self.assembly and self.assembly.memory:
+                if self.assembly and (self.assembly.memory or self.assembly.skills):
                     # Refresh only at a new request boundary, never while replaying saved tool decisions.
                     cp["context"] = await self.assembly.prepare_memory(cp["context"], runtime)
                     self.assembly.context = cp["context"]
                     cp["messages"][0] = self.assembly.context_manager.project(cp["context"])[0]
-                    cp["messages"] = [m for m in cp["messages"] if m.name != "deep_eval_memory"]
+                    cp["messages"] = [m for m in cp["messages"] if m.name not in {"deep_eval_memory", "task_skills"}]
                     cp["messages"].extend(m for m in build_messages(cp["context"], include_history=False)
-                                          if m.name == "deep_eval_memory")
+                                          if m.name in {"deep_eval_memory", "task_skills"})
                 reserved = getattr(self.planning, "reserved_tokens", 0)
                 if reserved and cp["usage"].total_tokens + reserved >= self.limits["max_tokens"]:
                     return self._result(cp, runtime, "paused", "Unreported branch usage reserves the remaining token budget")

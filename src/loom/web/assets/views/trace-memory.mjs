@@ -72,6 +72,10 @@ export function renderTraceMemory(view, root) {
       title.append(badge(status));
       view.details(section, `memory:${row.id}`, title, body => {
         body.append(element('p', '', row.summary));
+        if (view.onInduce) {
+          const induce = element('button', 'quiet', '加入跨任务归纳'); induce.type = 'button';
+          induce.addEventListener('click', () => view.onInduce(row.trigger || row.title)); body.append(induce);
+        }
         if (row.category) body.append(badge(row.category));
         table(body, ['Field', 'Memory'], Object.entries(fields).filter(([key]) => row[key]).map(([key, label]) => [label, row[key]]));
         if (row.steps) {const list = element('ol'); for (const step of row.steps) list.append(element('li', '', step)); body.append(list);}

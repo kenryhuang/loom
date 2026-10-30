@@ -30,6 +30,7 @@ class SessionStore:
         with self.transaction() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS skill_dirty_sessions(session_id TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS commands(
                     id TEXT PRIMARY KEY, session_id TEXT NOT NULL, input TEXT NOT NULL, receipt TEXT NOT NULL, state TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS events(session_id TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(session_id,seq));
@@ -68,6 +69,7 @@ class SessionStore:
 
     def _save(self, db, state):
         db.execute("UPDATE sessions SET body=? WHERE id=?", (canonical(state), state["session_id"]))
+        db.execute("INSERT OR IGNORE INTO skill_dirty_sessions VALUES(?)", (state['session_id'],))
 
     def append(self, db, state, kind, payload, *, command_id=None):
         sid = state["session_id"]
@@ -88,6 +90,11 @@ class SessionStore:
             "payload": payload,
         }
         db.execute("INSERT INTO events VALUES(?,?,?)", (sid, seq, canonical(event)))
+        if (kind in {'acceptance.gate.passed', 'acceptance.gate.blocked', 'run.failed', 'run.stopped'}
+                and db.execute("SELECT 1 FROM sqlite_master WHERE name='skill_uses'").fetchone()):
+            from loom.skills.runtime import record_outcome
+
+            record_outcome(db, event)
         state["event_cursor"] = seq
         return event
 
@@ -297,6 +304,8 @@ class SessionStore:
                 task["state"] = "idle"
             elif kind == 'restart_task':
                 previous_run = state['run']
+                state['restart_episode_id'] = ((previous_run or {}).get('task_episode_id')
+                                               if updated_task['objective'] == task['objective'] else None)
                 if updated_task["objective"] != task["objective"]:
                     task["goal_revision"] += 1
                 task.update(updated_task)

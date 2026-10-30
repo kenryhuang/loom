@@ -1,6 +1,10 @@
 # 自主 Agent：数字分身与持续工作设计
 
-日期：2026-10-25。状态：设计提案，尚未实现。基于当前仓库 `20ceb41` 的实现核对；下文新增对象、字段、接口和策略均为拟议契约。
+日期：2026-10-25。状态：设计提案，尚未实现。初版基于仓库 `20ceb41` 核对；下文新增对象、字段、接口和策略均为拟议契约。
+
+详细设计更新：2026-10-30。第 14～22 节细化 Role、AgentRun 编排、Session 复用、每次执行后的自动评估，以及人工指导与持续学习。此次核对基于 `193d52b` 和当前工作区，工作区已有的跨任务 Skill 相关修改仅作为集成参考，不表示自主 Agent 已实现。原实现基线保留在第 3 节；自动评估策略以本次更新为准。
+
+实施入口：[自主 Agent 分阶段实施计划](../plans/2026-10-30-autonomous-agent-implementation.zh-CN.md)，包含阶段依赖、文件落点、任务清单、验证命令和里程碑验收。
 
 ## 1. 产品定位与核心决策
 
@@ -18,11 +22,11 @@
 
 核心决策：
 
-1. **长期 Agent 管目标与工作节奏，Session 承载具体执行。** 一个 Agent 可以拥有多个工作 Session；一次持续协作尽量沿用原 Session，独立交付才新建 Session。
+1. **Role 定义长期目标、工作目录和工作方法，AgentRun 编排，SessionRun 执行。** 一个 Agent 可以拥有多个工作 Session；相近任务优先复用兼容 Session，每个新任务仍保存独立合同、验收和运行关联。
 2. **个人画像、知识、执行经验分别演进。** 用户的偏好具有明确来源；Agent 的成功或失败只直接证明执行经验，不能自动证明人的偏好。
 3. **主动性来自职责、习惯和新证据。** Agent 可以自主提出并推进职责内目标，每次都能解释触发原因、价值、交付物和停止条件。
 4. **统一复用 TaskAssembly。** 自动选工具、模型、workflow 和 subagent 分工，在现有执行内核上工作。
-5. **持续学习形成可追溯的行为变化。** 提取经验、验证适用性、在后续任务使用、观察效果、保留或撤销，构成完整闭环。
+5. **每次 SessionRun 完成后自动 Deep eval。** 提取事实、经验和失败教训，结合人工标注与手工接入的方法论，在后续规划和执行中自动注入适用 context；记录实际使用、反馈和撤销，形成可追溯的学习闭环。
 6. **7×24 是持续服务能力。** 调度状态持久化，事件或时间触发工作，空闲时不循环调用模型；重启后可接续待办和执行。
 
 首期以当前单用户、本地服务为部署基础。建议先做好一个人的一个主要数字分身，数据模型允许同一人拥有多个角色 Agent。
@@ -47,7 +51,7 @@ Agent 完成设计后，保存产物和验证情况。用户补充「以后设�
 
 ## 3. 当前基础与需要新增的能力
 
-以下区分已经存在的实现和本设计需要补齐的部分。
+以下保留初版基线中已经存在的实现和本设计需要补齐的部分；本次核对的具体接入点见第 21.3 节。
 
 | 能力 | 当前实现依据 | 本功能的用法与缺口 |
 | --- | --- | --- |
@@ -92,6 +96,9 @@ flowchart TD
 | --- | --- | --- |
 | PersonalProfile | 本人的沟通偏好、工作偏好、已确认方法论、例外规则 | 跨 Agent 可复用，按版本保存；首期默认只有当前用户 |
 | Agent | profile 引用、角色、性格配置、职责、workspace、工具范围、预算、运行状态 | 长期存在；角色差异通过 Agent 局部覆盖表达 |
+| AgentRoleRevision | role 原文、长期目标、工作目录、数据获取规则和方法引用 | 不可变配置版本；运行引用明确版本，学习不能自行扩大职责 |
+| LongTermObjective | 长期预期结果、衡量方式、复查周期和当前差距 | 属于 Role；用有限 Goal 逐步推进，不要求每个长期目标都有终态 |
+| AgentRun | 一次唤醒后的编排输入、目标修订、派发决策和下次检查时间 | 有界决策周期；派发提交后即可结束，不等待全部 Session 执行完成 |
 | Responsibility | 持续职责、允许主动发现的工作类型、期望结果 | 持续维护，如「维护项目质量」，不伪装成永远无法完成的普通目标 |
 | Goal | 外部或自主产生的可完成目标、来源、优先级、验收条件、截止时间 | 可拆分、暂停、完成、取消或被替代；目标修改保留 revision |
 | Habit | 条件、频率、行为模式、来源、适用范围、例外、启用状态 | 从明确配置或重复观察形成，驱动有界例行工作 |
@@ -320,9 +327,9 @@ RoleTemplate 可以作为可版本化的推荐模板，包含用途、工具需�
 
 ### 9.1 何时分析
 
-每次工作包结束先读取运行事实：验收结果、失败类别、重试、预算、用户修订、使用过的经验和分支情况。失败、有用户纠正、新任务类型、反复返工时优先进入 Deep eval；成功任务按抽样或里程碑分析，避免只有失败经验而丢失有效方法。
+每个归属于 Agent 的 SessionRun 达到 `completed` 后，都自动创建持久 LearningCycle，执行 Deep eval 并启用 memory 提取，不等待整个 Session 关闭或工作包全部结束。`failed / stopped` 的 run 也进入评估，保存失败或未完成的事实；暂停、等待输入和可恢复中断不当作已结束。成功执行同样全部入队，不采用抽样策略。
 
-复用现有 `goal_graph_v1` 与 `extract_memory`，把 `session_id + run_id + source_digest + analyzer_version` 作为学习处理身份。自动学习也显示在 Analysis 中，可查看来源和进度。复盘使用固定 trace 快照，不把持续变化的当前 workspace 当作历史事实。
+复用现有 `goal_graph_v1` 与 `extract_memory: true`，先固定终态事件游标并完成基础轨迹分析，再执行指定 run 的 Deep eval。学习身份和恢复规则见第 18 节，包含源摘要、分析器、模型配置与设置版本。预算不足时保留待处理状态，失败可恢复，不静默跳过。自动学习也显示在 Analysis 中；复盘使用固定 trace 快照，不把持续变化的当前 workspace 当作历史事实。
 
 ### 9.2 产出如何进入后续工作
 
@@ -435,15 +442,15 @@ Agent 创建的 Session 在 Sessions 中可查看和接管，并有来源筛选�
 
 ## 12. 分阶段交付与验收
 
-### 阶段一：持续工作骨架
+### 阶段一：可验证的执行与学习闭环
 
-交付 Agents 一级入口、角色／性格／workspace 配置、显式偏好、职责与外部目标、持久唤醒、工作包派发、统一预算及暂停恢复。支持用户配置的定时职责；执行复用 TaskAssembly 和现有 adaptive_dag。
+交付 Agents 一级入口、Role／workspace 配置、显式偏好、长期目标与工作包、持久唤醒、AgentRun 编排、Session 复用、统一预算及暂停恢复。支持用户配置的定时职责；执行复用 TaskAssembly 和现有 adaptive_dag。同时接通每个 SessionRun 结束后的自动 Deep eval、后续 memory 注入、基本人工标注和手工方法指导，使首个版本具备端到端学习闭环。
 
-验收：用户离开页面后任务继续；重启后不重复创建工作包；暂停后不派发新工作；人工 Session 与 Agent 写任务遵守同一 workspace 互斥；任意产物可以追溯到目标、Session 和装配版本。
+验收：用户离开页面后任务继续；重启后不重复创建工作包或丢失学习待办；暂停后不派发新工作；人工 Session 与 Agent 写任务遵守同一 workspace 互斥；一次执行的经验能进入后续同类任务，人工纠正可在合法边界生效；任意产物可以追溯到目标、Session 和装配版本。
 
 ### 阶段二：能学习的数字分身
 
-交付自动 trace 复盘、RuntimeMemory 复用、个人画像候选与版本、方法试用、知识来源刷新、习惯候选和职责内自主目标。至此覆盖本需求的最小完整闭环：继承人的方式、主动设定目标、组织执行、失败学习、下一次应用。
+在阶段一基础上完善个人画像候选与版本、方法试用与使用反馈、知识来源刷新、习惯候选、多个目标排序和职责内自主发现。扩大持续学习与目标迭代的覆盖，不改变每次执行自动复盘的基本规则。
 
 验收：一次失败生成有证据的经验，后续同类任务能够检索并在具体动作中应用；用户长期纠正生效，而临时指令和 Agent 自述不被误学；来源变化或撤销后停止使用失效知识；习惯触发的目标有依据、受范围与预算约束且不重复生成。
 
@@ -485,3 +492,433 @@ Agent 创建的 Session 在 Sessions 中可查看和接管，并有来源筛选�
 - [Deep eval Memory](../../deep-eval-memory.md)
 - [知识库与来源管理](../../knowledge-bases.md)
 - [运行时验收](2026-10-10-runtime-acceptance-gate-design.zh-CN.md)
+
+## 14. 详细设计总览：Role → 编排 → 执行 → 学习
+
+本次细化采用以下明确语义：
+
+| 名称 | 回答的问题 | 一次结束意味着什么 |
+| --- | --- | --- |
+| Agent / Role | 长期负责什么，在哪里工作，按什么方法工作？ | Agent 通常长期存在；配置按 revision 演进 |
+| AgentRun | 现在离长期目标还有哪些差距，这一轮安排什么？ | 本轮目标调整、工作派发或等待决策已经持久提交 |
+| Goal / WorkPackage | 这次交付什么，怎样判断完成？ | Goal 满足验收；WorkPackage 交付一个有界子任务 |
+| Session | 哪些相关任务适合共享对话、调查和上下文？ | 可以长期保留；不以关闭 Session 作为学习触发条件 |
+| SessionRun | 在这个 Session 中执行一次具体任务或续作 | 执行到达终态；提交结果并产生学习待办 |
+| LearningCycle | 这次执行学到了什么，下次如何利用？ | 分析处理结束；另外记录提取完整度和有效记忆数量 |
+
+持久字段使用 `agent_run_id` 与 `session_run_id` 区分；现有执行协议的 `run_id` 继续表示 SessionRun，不改名。UI 中分别显示「编排轮次」和「执行轮次」。一次 AgentRun 可以安排多个工作包，一个工作包可以跨多次 SessionRun；执行结果由后续 AgentRun 汇总，不能假设一轮编排必须等到所有子任务结束。
+
+```mermaid
+flowchart TD
+    U[用户配置 Role / 长期指导] --> R[版本化 Role 与方法绑定]
+    R --> AR[AgentRun：检查差距与编排]
+    T[定时 / 执行结束 / 新证据] --> AR
+    AR --> G[修订 Goal 与 WorkPackage]
+    G --> ROUTE[选择兼容 Session 或新建]
+    ROUTE --> SR[SessionRun 执行与验收]
+    SR --> RESULT[结果、产物、固定 trace 游标]
+    RESULT --> AR
+    RESULT --> LC[自动 Deep eval + extract memory]
+    LC --> M[有证据的事实 / 经验 / 失败教训]
+    H[人工标注 / 偏好 / 方法论] --> VIEW[有效记忆与指导视图]
+    M --> VIEW
+    VIEW --> CTX[按范围和相关性生成 ContextSnapshot]
+    CTX --> AR
+    CTX --> SR
+    SR --> USE[使用动作与后续效果]
+    USE --> LC
+```
+
+执行和学习是两条独立状态线。执行已经成功、学习仍排队是合法状态；Deep eval 不能回写执行结果来假装任务完成，也不能因自身失败把已验收交付改成失败。它发现新的缺口时，提交带证据的复核建议，由下一轮编排决定是否创建后续 Goal。
+
+## 15. Role 合同：长期目标、工作目录与工作方法
+
+### 15.1 原文与结构化合同
+
+用户可以直接写一段 Role 描述。保存 `role_text` 原文，同时整理成 Host 可校验的 `AgentRoleRevision`。描述明确的字段直接使用；模型推导的默认项标记 `derived`，不能把推导内容变成额外权限。缺少执行所必需的目录或来源绑定时，仅阻塞依赖该信息的工作。
+
+示例合同如下，ID、路径和周期仅用于说明，不是产品强制默认值：
+
+```yaml
+role_id: research_partner
+revision: 3
+role_text: >-
+  持续跟踪 Loom 自主 Agent 的设计与实现，保持设计有依据且可落地。
+  在 /path/to/loom_py 工作。实现事实查 src 与测试，设计背景查 docs，
+  外部需求查绑定知识库。中文输出，结论附依据，每次修改后核对验收。
+long_term_objectives:
+  - id: design_quality
+    desired_outcome: 设计与实际能力一致，已确认的关键设计缺口持续减少
+    mode: ongoing
+    indicators: [未解决关键缺口, 已完成里程碑, 证据覆盖情况]
+    review_schedule: {every: 1d, timezone: Asia/Shanghai}
+workspace_binding_ref: workspace_loom@2
+working_directory: /path/to/loom_py
+artifact_directory: docs/superpowers/specs
+source_routes:
+  - id: implementation_evidence
+    topic: 实现能力与接口约束
+    sources: [{kind: workspace, paths: [src, tests]}]
+    freshness: revalidate_before_use
+    on_unavailable: block_dependent_work
+  - id: product_requirements
+    topic: 外部需求与背景
+    sources: [{kind: knowledge_base, binding_ref: requirements_kb@1}]
+    freshness: binding_policy
+    on_unavailable: mark_unknown_and_continue_independent_work
+method_bindings:
+  - {ref: evidence_first@2, applicability: 设计与实现分析}
+profile_ref: personal_profile@5
+autonomy_policy_ref: configured_scope@1
+budget_policy_ref: configured_budget@1
+```
+
+Role 中的方法分成两种：`source_routes` 描述「什么问题去哪取数据」；`method_bindings` 描述「拿到数据后按什么步骤处理和验证」。来源路由指向真实资源绑定，不只保存一句提示词；连接凭据仍保存在现有连接配置中。
+
+每条来源路由还可配置优先顺序、查询模板、适用目录或主题、更新频率、来源冲突处理和允许的替代来源。两份来源矛盾时，保留各自版本和来源角色，例如代码证明当前实现、设计文档说明拟议行为。缺数据时标记未知，不能因为 Role 说「去某处查」就假定已经查到。
+
+`working_directory` 必须落在绑定 workspace 的可用范围内，相对产物目录基于该目录解析；Host 规范化路径并校验。该校验不改变第 3 节关于 native_os 隔离能力的边界。
+
+### 15.2 长期目标与短期交付
+
+`Responsibility` 描述职责范围；`LongTermObjective` 描述期望持续达到的结果；`Goal` 描述可以验收的一次改善。例如：
+
+- 职责：维护 Loom 设计质量。
+- 长期目标：保持设计与实现一致，并减少关键缺口。
+- 本期 Goal：完成自主 Agent 编排和记忆闭环的详细设计。
+- 工作包：核对执行边界、设计 Session 复用、设计学习流程、合并并检查全文。
+
+长期目标支持 `ongoing / finite`：前者在每个复查窗口生成有界改善任务，后者在必要里程碑和验收齐全时完成。指标保存观测值、采集时间、证据与 `unknown`，不能用子任务完成数量替代长期效果。
+
+子 Goal 保存 `long_term_objective_id`、`parent_goal_id?`、`depends_on[]`、`expected_contribution`、`acceptance` 和 `stop_conditions`。Host 校验父子与依赖无环。工作包是 Goal 的执行单元；任务内部 DAG 不再次复制成一套必须同步的长期目标树。
+
+### 15.3 配置变化如何影响已有工作
+
+Role 修改生成不可变 revision，并产生 `role.changed`。下一轮 AgentRun 先比较差异：
+
+| 变化 | 已有工作处理 |
+| --- | --- |
+| 表达偏好、补充方法或来源说明 | 在下一合法请求边界更新适用指导，并记录实际生效版本 |
+| 长期目标或交付范围改变 | 重新检查相关 Goal；取消、替代或保留必须显式记录，不覆盖原合同 |
+| workspace、执行环境或不兼容能力变化 | 新建 Session；原执行保留原环境，不能借复用原地换绑 |
+| 撤销范围或资源访问 | 准入立即使用新限制；相关工作在安全边界停止或转为阻塞 |
+
+已经发出的调用按原请求记录；后续结果不能追认成使用了新版本。现有工作包如需更改验收条件，单独提交合同修订，不通过更新 Role 隐式变更。
+
+## 16. AgentRun：周期编排与目标持续迭代
+
+### 16.1 输入、输出与状态
+
+每次 AgentRun 固定输入快照：Role revision、长期目标观测、Goal/WorkPackage revision、待消费结果事件、可用 Session 摘要、适用 memory 与方法版本、预算和资源状态。规划模型只提出决策；Host 负责提交和派发。
+
+```text
+AgentRun
+  id, agent_id, wakeup_ids[], generation, input_snapshot_ref
+  role_revision, goal_revision_set, result_cursor, guidance_version
+  state: queued / planning / committed / no_action / superseded / failed / cancelled
+  decisions_ref, dispatch_refs[], budget_reservation_id
+  lease_owner, lease_expires_at, next_wake_at, error?, timestamps
+
+PlanDecision
+  action: create_goal / revise_goal / complete_goal / cancel_goal /
+          dispatch_work / wait
+  target_ref, expected_revision, source_refs[], reason
+  expected_contribution, acceptance_refs[], stop_conditions
+```
+
+`committed` 表示编排提交，不表示派发已经执行成功；派发 outbox 和工作包状态单独显示。`superseded` 表示规划期间输入发生了影响决策的变化，旧提案不再适用；重试从新快照开始，旧调用用量仍保留。无模型调用的确定性等待也保存轻量 AgentRun，便于解释为什么没有工作。
+
+### 16.2 一轮编排的步骤
+
+1. 合并同一 Agent 已到期的唤醒事件，认领编排租约；首期同一 Agent 只允许一个规划提交者。
+2. 消费已提交的执行结果、用户指令、来源变化和学习更新，先完成确定性状态归并。
+3. 检查长期目标复查时间、现有 Goal 差距与阻塞解除条件。有就绪工作且合同未变时可以直接派发，不重复拆解。
+4. 需要规划时生成有限提案：新 Goal、Goal 修订、下一个工作包、验收复核或等待。每个提案必须说明如何推进长期目标。
+5. Host 检查来源、目标依赖、范围、预算、重复工作、合同版本和 Session 可用性。模型不得通过删掉必要验收项来完成目标。
+6. 在同一事务内提交决策、Goal/WorkPackage 变更、预算预留和 dispatch outbox，并推进本轮消费游标；模型调用不占数据库事务。
+7. 保存下一次唤醒。下个周期由结果、新信息、解除阻塞或复查到期触发，不维持空转模型循环。
+
+建议首期策略上限为每轮最多提出 5 个新 Goal、向前细化 3 个就绪工作包、目标树深度最多 3 层；均为可配置的设计初值，不代表现有配置。只展开近期可执行工作，远期保留里程碑与依赖，避免为尚不确定的长期目标生成庞大任务队列。
+
+定期检查并不要求每次重写计划。周期到达但没有目标差距变化、来源变化或可解除阻塞时，记录 `no_action` 和下一检查时间。长期目标没有可度量变化时，允许生成有界调查任务；同一证据缺口调查失败后必须等待解除条件，不能每次周期重新调查。
+
+### 16.3 结果汇总与重新规划
+
+工作包结果保存 `delivery_status`、必要验收项结果、产物与证据、未解决问题、实际成本和后续建议。Session 的 completed 仅表明本次执行结束；Host 根据合同验收决定工作包是否 succeeded，再汇总 Goal。
+
+后续 AgentRun 对失败选择重试、改变方法、拆分、等待或取消，并记录新 attempt 的条件差异。同一方法、输入和环境未变的重复失败触发退避。已完成工作包保留终态；返工生成关联的新工作包，不能把历史成功记录改成另一份任务。
+
+长期目标调整只在用户给定方向内优化路径和优先级。Agent 可以提出目标方向修订建议，但不能用「持续迭代」把用户的长期目标替换成另一个目标。无剩余差距的有限长期目标结束；持续目标等待下个复查窗口。
+
+## 17. Session 复用：保留上下文，同时保留任务边界
+
+### 17.1 先检查兼容，再判断相近
+
+新增 `SessionRouter`。候选来自当前 Agent 的 Session 关联；人工 Session 只有显式绑定后才进入候选，首期不自动接管其他 Agent 的 Session。复用不是只算文本相似度。
+
+| 硬条件 | 不满足时的处理 |
+| --- | --- |
+| workspace 绑定、执行环境、工具及知识范围兼容 | 新建 Session；不自动放宽能力 |
+| Session 未归档、未被人工独占接管 | 排除候选 |
+| 没有正在执行、待处理人工输入或其他未结束工作包的占用 | 等待该候选或选择其他兼容 Session，不混入新合同；同一工作包续作检查自己的恢复状态 |
+| 无 uncertain operation、恢复待办或未退出进程 | 先恢复，不能绕过恢复继续派发 |
+| 当前任务可以获得清晰的新合同和验收边界 | 无法界定时新建 Session 并携带明确交接摘要 |
+
+硬条件通过后，按「同一工作包续作 → 同一 Goal 和对象 → 相同项目模块与任务类型 → 最近相关工作」排序。比较可复用调查、相关产物和未决问题，以及过时背景、上下文长度和冲突指导带来的成本。关键词匹配可以缩小候选，语义比较用于判断相关性；Host 决定候选是否可派发。
+
+没有足够相关上下文时新建 Session；相近任务优先复用，通过已有压缩能力维护有界摘要。上下文过长且无法保留必要证据时，生成交接摘要再新建 Session，不无限堆叠历史。
+
+每次保存 `SessionRouteDecision`：候选 ID、兼容检查、选中理由、排除理由、上下文摘要版本和 `reuse / create / wait`。初期使用规则排序，不把未经校准的相似度分数包装成概率。
+
+### 17.2 一个 Session 承载多个任务的约束
+
+`agent_session_links` 保存 Agent 与 Session 的归属及接管状态；新增 `agent_work_package_runs` 保存每个工作包的 `session_id / run_id / task_episode_id / attempt_id` 关联。一个工作包固定绑定一个 Session；需要迁移时创建后继工作包并保存 `continues_work_package_id`。
+
+复用 Session 只保留可用上下文，不继承上一个任务的完成结论：
+
+- 新子任务使用新的任务合同、Goal revision、验收和预算，执行事件记录其真实来源 `agent_planner`。
+- 已完成 run 后派发新的子任务，产生新 run 和新任务 episode；暂停后继续同一任务沿用现有恢复语义，不人为创建新任务。
+- 单次 run 失败但工作包仍允许重试时，可以产生新 run，并保留工作包及任务血缘；工作包自身已经 failed 则创建后继工作包，不能重开其终态。Deep eval 多次评估同一执行不增加独立案例数。
+- 人工消息优先进入已有控制流程；若改变当前合同，则记录合同修订并通知编排器。人工明确接管后停止自动向该 Session 派发，其他工作仍可推进。
+
+派发消息使用可检查的 envelope，包含任务正文、工作包引用、验收、source route 引用、ContextSnapshot 和 `producer=agent_planner`；不能仅把这些内容拼成一条无法追溯的 user 消息。当前协议需要扩展可信 descriptor/关系表来承载这些字段。
+
+### 17.3 派发竞态与交接
+
+选择 Session 时保存其 revision；提交 outbox 时申请独占任务槽，发送命令时再次校验 revision、人工输入游标和占用。若期间发生人工接管或新任务，派发返回冲突并重新路由，不能将消息悄悄排到新任务之后。
+
+命令 ID 从 `work_package_id + dispatch_revision` 稳定生成。只有确认原命令未被接受，才能生成新的路由派发；结果未知时先对账 receipt，防止同一个任务在两个 Session 同时执行。任务槽是业务串行约束，不替代现有 workspace 资源锁。
+
+新 Session 的交接摘要包含已确认事实及核验时间、当前假设、产物引用、未决问题和不能重复的失败；不复制整段历史对话。旧 Session 的秘密、失效来源或其他 scope 内容不因交接获得新范围。
+
+## 18. 每次 SessionRun 结束后的自动 Deep eval
+
+### 18.1 可靠触发与冻结输入
+
+在 Session run 终态提交的同一事务内，记录持久学习事件：`agent_id / work_package_id / session_id / run_id / terminal_event_cursor / outcome_ref`。事务后异步消费；服务启动时通过终态 run 与学习记录对账补漏。这里需要新增可靠终态接入，不能依赖 UI 在线或仅在 worker 内调用一次回调。
+
+消费者按以下顺序处理：
+
+1. 创建或取得该终态 run 的 LearningCycle，固定 `terminal_event_cursor`、任务合同、输入与使用版本引用。
+2. 从截至该游标的 Session 事件构建不可变轨迹快照，完成基础 factual/trajectory analysis；允许保留解释当前 run 所必需的前序背景。
+3. 对明确的目标 `run_id` 调用 `goal_graph_v1`，设置 `extract_memory: true`，保存 analysis/evaluation ID；其他 run 的背景不计入本次独立结果。
+4. 按已有检查点机制提取和校验 facts、lessons、workflows；贡献分析保留在 Analysis，不直接作为执行记忆注入。
+5. 发布可用记录，更新有效记忆视图版本，通知相关 Agent 与 Session；提取用户反馈候选和方法候选，分别保留来源。
+
+当前 `trajectory.start(sid)` 读取调用时的最新 Session 游标；需扩展受信任的 `source_cursor` 参数和边界校验，确保 Session 已开始下一 run 时仍能评估上一 run 的固定快照。当前 Deep eval 要求基础分析 completed 且 `run_id` 存在于快照；编排适配必须尊重该前置条件，不能直接跳到 memory 提取。
+
+恢复中的 run 不触发终态评估；最终 `failed / stopped` 会触发，结果标记未完成。尚未派发就取消的工作包没有 SessionRun，不制造空执行案例；已有 run 但无可分析证据时保留 `not_applicable` 与原因，不生成虚构经验。
+
+### 18.2 身份、状态与重试
+
+同一终态消费唯一键为 `(session_id, run_id, terminal_event_cursor)`。LearningCycle 的分析版本身份包含：
+
+```text
+source_digest + run_id + analyzer_version + prompt_version
+  + memory_schema_version + evaluation_model_config_digest + settings_digest
+```
+
+重复通知、重启或恢复返回同一记录。模型或设置升级需要显式派生新的 analysis revision，并关联旧 cycle；普通重试沿用原身份。兼容的人工 evaluation 可以直接关联，条件是源快照、run、模型配置及分析设置一致，不因入口不同重复支付同一分析。
+
+LearningCycle 将处理状态与结果分开：
+
+| 字段 | 值与含义 |
+| --- | --- |
+| `state` | `pending / running / deferred / completed / failed / cancelled` |
+| `phase` | `snapshot / factual_analysis / deep_eval / publish / feedback`，恢复从已提交阶段继续 |
+| `coverage` | `full / partial / none / not_applicable`，描述证据处理覆盖 |
+| `memory_result` | 接受、隔离、撤销记录数及缺口；零条记忆也可能是完整分析 |
+| `blocked_reason / retry_after` | 预算、依赖、配置缺失、服务故障等可检查原因 |
+
+`completed + partial` 是已结束但不完整的分析，不能显示为「全部学会」；可恢复缺口通过显式重试继续。已经通过校验并发布的记录可以先使用，不等待其他提取窗口完成。
+
+### 18.3 调度、预算与下一任务
+
+每个终态 run 都入队；失败和人工纠正优先，普通成功按等待时长处理，不能一直被高优先级任务挤占。学习预算独立预留并计入 Agent 总预算；不足时 `deferred`，下个有效额度窗口再准入，不退回成功抽样。队列上限和最老积压阈值触发执行背压：先减缓自主新任务派发，并显示积压，不丢弃学习事件。
+
+默认执行完成即可触发下一轮编排，不全局等待 Deep eval。新工作使用当时已发布的 memory，并记录 `pending_learning_cycle_ids`。若后续工作明确依赖刚完成任务的复盘，则工作包声明 `learning_dependency` 和所需产物；预算或分析失败时显示 `blocked: learning_dependency`，不能超时后当作满足。无新信息的失败重试也不能靠绕过该依赖持续执行。
+
+Agent 暂停时停止新的自动学习模型调用，已在途请求结束后保存结果；恢复后继续待办。用户在 Analysis 显式启动的独立评估按自己的控制状态运行。学习错误不重新执行源任务；发布失败只重试发布事务，不重新调用已经完成的分析模型。
+
+## 19. Memory 人工标注、纠正与方法论接入
+
+### 19.1 保留原始证据，叠加可编辑视图
+
+Deep eval checkpoint 继续是提取记忆的唯一原始事实源。人工操作新增 `MemoryAnnotation`，通过有效视图合并，不原地改写模型当时提取的记录：
+
+```text
+MemoryAnnotation
+  id, target_ref: {evaluation_id, record_id, source_digest, record_digest}
+  agent_id?, workspace_scope, kind, payload, reason, source_refs[]
+  actor: human, command_id, revision, supersedes?, created_at
+  kind: confirm / reject / correct / scope / tag / pin / retire / restore
+```
+
+`confirm` 表示人工认可该表述，不把 `inferred` 改成系统已观察事实；`correct` 保存更正文本及来源，形成 `human_asserted` 的覆盖版本；`reject / retire` 停止后续自动注入；`scope` 默认只缩小适用范围，扩大到其他项目需另建有来源的推广记录；`pin` 只提高同范围相关记录的优先级，不突破上下文预算。
+
+更正历史事实不能改写原 trace。若用户补充了新事实，应另存人工来源记录并保留观测时间；它不伪装成 Deep eval 在旧运行中提取到的事实。个人偏好写入 ProfileEntry，方法写入方法版本，避免所有长期信息都塞进 facts。
+
+标注针对精确记录版本。Deep eval 产生新的内容版本时，旧 confirm/correct 不盲目迁移；同来源、同内容可复用标注，内容变化则保存继承候选。拒绝或删除创建包含原始血缘和范围的抑制记录，后续重复提取先检查，不能把被拒内容换 ID 重新注入。
+
+所有使用入口共享有效视图：规划检索、执行摘要、`memory_search`、`memory_read` 和 UI。不能只从自动摘要隐藏记录，却仍通过工具读出旧的有效状态；历史证据页面可以展示原文，并明确已撤销或被纠正。原始来源删除后，标注不使原证据继续有效；如需保留人工独立知识，必须显式建立新的人工来源记录。
+
+### 19.2 运行中直接加入指导
+
+用户可以在 Agent 页面或所属 Session 中输入指导、粘贴方法文本，或绑定可读取的方法文档。入口保存原始内容、作者来源、文档版本/摘要、适用范围和生效策略：
+
+| 表达或操作 | 处理 |
+| --- | --- |
+| 「这次先看测试」或选择「仅当前任务」 | 当前工作包指导，不自动沉淀为长期偏好 |
+| 「以后设计都先核对实现」 | 保存明确长期方法或偏好，并通知适用运行 |
+| 在 Role 设置中绑定方法文档 | 生成持久方法绑定；按文档固定版本读取，更新需生成新版本 |
+| 从 Session 指定「当前 Agent 默认使用」 | Agent 级持久指导，不自动推广到所有角色 |
+| 范围不明确的聊天建议 | 先按当前任务生效，保留可提升为长期指导的候选 |
+
+上传或绑定一个文档表示导入方法内容，不表示其中的任何指令都具有配置权限。方法提取保留可追溯段落，并校验其工具需求、范围与当前合同。方法要求无法满足时说明具体缺失条件，不能自行增加工具权限。
+
+### 19.3 方法版本与持续学习
+
+统一采用第 9.4 节及跨任务 Skill 设计的方法版本模型，`MethodCandidate` 是候选入口；`agent_method_versions` 落地为绑定与采用策略，不另建一套同内容方法库。方法至少包含：目标问题、适用条件、数据来源规则、步骤、必要验证、例外、来源、版本和采用状态。
+
+区分两条独立轴：
+
+- **采用策略**：用户已指定、显式试用、自动推荐、停用。用户手工指定的方法可以直接作为工作指导生效。
+- **证据状态**：人工声明、单次观察、待验证归纳、经过执行验证。用户指定使用不等于证明方法有效，人工标注不绕过 Skill 的验证发布条件。
+
+当前工作区 Skill 实现支持候选、显式下一 run 试用、执行验证和 active 检索，尚无通用手工导入/编辑包。新增导入接口需保持以上双轴；不能为让用户方法生效直接伪造 active 或通过验证状态。手工方法作为明确指导加载，自动归纳方法继续按既有试用和验证规则采用。
+
+每次实际使用关联方法版本、决策、步骤动作和验收。后续 Deep eval 可提出条件缩小、步骤调整、失败分支或退休建议；自动形成后继候选，不覆盖用户锁定的原方法。用户明确纠正可直接形成新指定版本。重复采用、无反馈、模型自评满意都不足以推断用户偏好或方法有效。
+
+## 20. 自动 Context 注入与运行中更新
+
+### 20.1 规划和执行使用不同投影
+
+`AgentContextBuilder` 从同一有效视图构造两种有界 ContextSnapshot：
+
+| 内容 | AgentRun 规划上下文 | SessionRun 执行上下文 |
+| --- | --- | --- |
+| Role 与长期目标 | 目标差距、周期、职责和来源策略 | 当前任务相关的职责与工作目录 |
+| 任务状态 | 未完成目标、依赖、阻塞和产物摘要 | 当前合同、验收、前置工作交接 |
+| 偏好与方法 | 拆分、排序、选择来源的方法 | 具体步骤、前置条件和必要验证 |
+| memory | 有助于目标选择与避免重复工作的经验 | 与对象、环境、任务类型相关的事实和失败经验 |
+| 来源和版本 | 指向可按需读取的原始证据 | 同样保留证据指针，重要当前事实重新核验 |
+
+检索顺序为：范围及有效性过滤 → 显式适用指导 → 相关性与前置条件 → 去重及冲突保留 → 预算裁剪。优先级仍受当前明确任务要求和更具体 scope 约束；历史推断不能覆盖当前指导，参考数据不能扩大执行范围。
+
+无 workspace 时，执行 memory 仍限定在同一 Session；规划器不能仅凭 Agent 归属跨 Session 汇集项目经验。它可以读取自己 Goal/WorkPackage 的交付摘要作为工作状态；如需将某条经验用于其他 Session，必须另行建立有明确来源和适用范围的方法或人工知识记录。
+
+继承现有 memory 每次最多 6 条、总摘要最多 6000 字符的起始限制；规划与执行分别分配预算，Role/方法/Profile 另设有界额度并服从模型总窗口。必要合同与验收不能为腾出记忆空间而被截断；可选材料不足时降为来源指针。显式指导本身超限时，先生成带来源的可检查摘要；不能丢掉关键约束后继续执行。
+
+Snapshot 保存 `role_revision / goal_revision / profile_revision / method_version_ids / memory_refs / annotation_version / effective_memory_version / source_binding_revisions`，以及选用原因、冲突、裁剪和缺失项。执行上下文是本次实际版本清单，不是一份永远随数据库变化的引用。
+
+### 20.2 刷新与失效传播
+
+当前 RuntimeMemory 主要在 worker 启动或查询变化时重新检索。新增刷新键：
+
+```text
+query_digest + workspace_binding_revision + guidance_version
+  + effective_memory_version + method_selection_version
+```
+
+相关范围发布新 memory、人工标注、方法修改、删除或撤销都会递增对应版本并发出持久 dirty 通知。通知用于及时唤醒，合法模型请求边界仍需核验版本，防止漏通知后一直使用缓存；无需每个 step 全量扫描 memory。
+
+用户运行中加入方法后，先记录「已接收，待下一请求边界生效」。Host 在 `before_llm` 安全边界构建新快照，替换受管理的指导和参考块，记录 `context.updated` 与 `effective_from_event`，再显示「已应用」。不能只向旧摘要末尾追加更正，导致旧方法仍作为当前指导存在。
+
+已经发出的 LLM/tool 协议交换按原版本完成；不修改保存的调用参数或追溯重写历史。权限撤销仍在工具准入生效；普通方法变更不伪装成撤回一个已经执行的动作。指导改变验收或使既有步骤不再成立时，转入合同修订/重新规划，不仅更换 prompt。
+
+旧对话中的经验无法从历史中抹除，但撤销版本不再成为有效指导，并显式提供取代关系；无法可靠消解冲突时，使用干净交接的新 Session。memory 查询工具也重新检查有效视图，不能靠旧 ID 绕过撤销。
+
+### 20.3 使用反馈
+
+记录四个不同事实：检索到了、被选用、关联了哪些真实动作、结果如何。模型报告的「我用了这个方法」仅是 `model_reported`；动作引用由 Host 核验，验收结果来自执行事实。没有采用就没有采用反馈，成功验收也不自动证明记忆导致了成功。
+
+无可用 memory、评估尚未完成或 memory 数据源暂不可用时，普通任务可继续并显示缺口；显式声明为必要依赖的方法/事实缺失时只阻塞相关任务。后续 Deep eval 将历史 memory 与 Skill 工具输出标记为历史参考，不能把引用旧结论当作新的独立证据。
+
+## 21. 持久化、接口和现有模块接入
+
+### 21.1 在第 10 节基础上补充的记录
+
+| 记录组 | 主要字段或唯一性约束 |
+| --- | --- |
+| `agent_role_revisions`、`agent_long_term_objectives` | Role 不可变版本、长期目标 ID、模式、指标观测和复查时间 |
+| `agent_runs` | Agent、generation、输入快照、决策、状态、消费游标；同 Agent 只允许一个有效编排租约 |
+| `agent_work_package_runs` | 工作包到 SessionRun 的实际绑定；一个执行 run 不能被两个不同工作包认领 |
+| `agent_session_reservations`、`agent_route_decisions` | Session 任务槽、持有工作包、revision、路由理由；占用与派发原子提交 |
+| `agent_learning_cycles` | 终态 run 唯一键、分析版本身份、阶段、coverage、analysis/evaluation 引用与重试信息 |
+| `memory_annotations`、`memory_suppressions` | 记录版本、人工操作、有效 scope、抑制血缘和 revision |
+| `agent_guidance_events`、`agent_context_snapshots` | 指导来源、作用范围、待生效/已生效、快照版本和实际生效事件 |
+| `agent_memory_uses`、方法绑定 | memory/Skill 版本到工作包、决策、动作、结果的关联 |
+
+所有创建与编辑带幂等 command ID；需要读改写的操作带 expected revision，冲突返回当前 revision 而非覆盖。批量事件消费游标只随对应业务变更成功提交而推进。任务槽租约过期仅表示需要对账，不证明旧执行已经停止；确认原 receipt、worker 和 run 状态前不能重复派发。
+
+### 21.2 新增 API 契约
+
+以下是在第 10.2 节接口之外的拟议能力，尚未实现：
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `GET /v1/agents/{id}/runs`、`GET /v1/agents/{id}/runs/{run_id}` | 编排轮次、决策、使用版本与下次唤醒 |
+| `POST /v1/agents/{id}/role/revisions` | 保存 Role 原文与结构化合同，校验绑定并创建 revision |
+| `GET /v1/agents/{id}/sessions` | 可复用 Session、占用、接管状态和路由原因 |
+| `POST /v1/agents/{id}/sessions/{sid}/commands` | 显式绑定、接管、释放；操作前检查该 Session 的现有归属 |
+| `POST /v1/agents/{id}/guidance` | 文本/文档引用、scope、`current_task / persistent`、`next_boundary / next_run` |
+| `GET /v1/agents/{id}/memory` | 有效记忆、人工标注、来源和使用记录 |
+| `POST /v1/agents/{id}/memory/annotations` | confirm、reject、correct、scope、pin、retire、restore |
+| `POST /v1/agents/{id}/methods/import` | 导入方法并创建用户指导版本与绑定，返回条件缺口及采用策略 |
+| `POST /v1/agents/{id}/learning/{cycle_id}/commands` | retry、cancel；沿用原分析快照和预算账本 |
+| `GET /v1/agents/{id}/context/{snapshot_id}` | 查看某轮实际使用的指导与参考版本 |
+
+Agent API 从真实 workspace 和归属推导 scope，不能信任请求里的任意 Session/evaluation ID 来读取其他范围。memory 写操作作用于标注层；现有 Analysis API 继续负责原始评估和证据读取。方法 API 通过共用方法注册与版本服务实现，不产生第二种 Skill 身份。
+
+### 21.3 接入顺序与已核对的缺口
+
+| 当前模块 | 本次需要的扩展 |
+| --- | --- |
+| `service/controller.py`、`store.py` | 终态学习事件、可信 producer 与任务合同关联、派发 revision/占用校验；保留现有 run/episode 恢复规则 |
+| `service/trajectory.py` | 按固定终态游标构建快照、去重和失败恢复；不能用最新游标代替原分析输入 |
+| `service/semantic.py` | 接入持久自动学习调度与统一预算，复用现有 run 选择、extract_memory 和 checkpoint |
+| `memory/store.py`、`runtime.py` | 原始记录之上的有效视图、标注与抑制过滤、版本失效刷新；保留已有 workspace 隔离 |
+| `tasks/assembly.py`、`llm/managed_step.py` | 可信 AgentContextSnapshot、指导块和边界刷新；保留已发出协议的恢复一致性 |
+| 当前工作区 `skills/`、`service/skills.py` | 复用方法身份、来源、采用和使用回流，补充人工导入/编辑与指导采用轴 |
+| 新增 `autonomy/` | Role 编译、AgentSupervisor、AgentRun planner、SessionRouter、LearningCoordinator、context 与预算适配 |
+
+先交付一条完整纵向链路：手工创建 Role 与长期目标 → 一轮编排 → Session 执行 → 每次 run 自动评估 → 下一 run 注入 memory → 人工纠正后刷新。之后增加多 Goal 排序、周期迭代和跨任务方法归纳。这样首个可用闭环已经满足自动学习，而非只交付任务调度后把学习留作不可验证的接口占位。
+
+## 22. 端到端示例与详细验收
+
+### 22.1 连续两次执行与运行中指导
+
+1. 用户创建研发搭档，Role 写明长期维护设计质量、工作目录、实现事实查询位置和中文证据表达方式。
+2. 定时触发 AgentRun A1，发现自主 Agent 方案缺少 Session 复用规则，创建 Goal G1 和工作包 W1；没有兼容 Session，创建 S1，提交后 A1 结束。
+3. S1/R1 核对代码并交付边界说明，验收通过。终态提交同时产生 L1 学习待办；无需关闭 S1。
+4. L1 对 R1 固定快照执行 Deep eval，提取「现有 workspace 不能原地换绑」的带版本事实，以及一条避免错误复用的经验；有效 memory 版本增加。
+5. 下一轮 A2 生成相近工作包 W2「设计路由规则」，选择兼容且空闲的 S1。S1/R2 使用新合同并保留相关调查上下文，自动注入 L1 产出的适用记忆。
+6. R2 运行时，用户补充「以后所有设计必须区分已实现与拟议能力」，保存 Agent 级长期指导。下一合法请求边界刷新快照，并显示已应用；不用等待 R2 完成后再猜测用户偏好。
+7. 用户将 L1 的事实限定为「当前执行后端」，annotation 产生新版本；后续查询和注入使用限定范围，原提取证据仍可查看。
+8. R2 完成后自动产生 L2，检查实际动作与交付是否采用指导，记录使用结果。A3 根据必要验收决定 G1 完成，再回到长期目标复查周期。
+
+若第 4 步因预算延迟，W2 可使用已有调查产物与当前已发布记忆继续，但不能声称已经使用 L1；如果 W2 明确需要 L1 的分析产物，则等待该依赖，Agent 可先安排其他独立工作。
+
+### 22.2 必须补充的验证场景
+
+| 场景 | 验收标准 |
+| --- | --- |
+| Role 原文包含目标、目录和「某类数据去哪找」 | 生成可追溯的目标、workspace 与 source route；缺失绑定只阻塞依赖任务 |
+| 同一周期重复唤醒，规划中 Role/Goal 被修改 | 每个有效触发只提交一次决策；旧 revision 不能派发工作 |
+| 同类任务连续执行 | 兼容时复用 Session，但 run、合同、验收与学习归属可区分 |
+| 文本相近但 workspace 或执行能力不兼容 | 不复用；路由记录明确原因 |
+| 选择 Session 后用户接管，或派发响应丢失 | 冲突后重路由；未知 receipt 先对账，不能重复执行 |
+| 每个 completed run，包括同 Session 的第二个 run | 均有学习记录并启用 extract_memory，不等待 Session 关闭、不抽样 |
+| failed/stopped、暂停、等待输入、恢复中的 run | 终态失败可复盘；非终态不误建完成评估；未执行取消不制造案例 |
+| R1 结束后 R2 已运行，L1 才开始 | L1 固定在 R1 终态游标；R2 事件不混入 R1 的新证据 |
+| 终态提交后崩溃、评估提交后回执丢失 | 重启补漏，关联同一 learning/evaluation，已提交阶段不重复付费 |
+| 学习预算耗尽或某提取窗口失败 | 显示 deferred/partial；有效记录可用，未处理范围不被标为完成 |
+| 新增方法时已有 LLM/tool 调用在途 | 原协议完成，下个合法边界应用新版本；记录生效事件 |
+| 人工 reject/correct/pin 与 scope 标注 | 自动摘要、规划和 memory 工具一致；不回写原 trace，不突破范围 |
+| 相同查询下新增记忆或撤销旧记忆 | 版本键使缓存失效，下一边界得到新有效视图 |
+| 删除来源后再次扫描或重复提取 | 不恢复被抑制的内容；历史页面明确来源已不可用 |
+| 手工方法指定使用但未经过执行验证 | 可以作为用户指导使用，不能伪造已验证 Skill 状态 |
+| 同一 Session 的多次评估、方法重复自述 | 不增加独立支持案例，不据此提升用户偏好或事实可信等级 |
+| 有限长期目标已达成，持续目标无新增差距 | 前者结束，后者等待复查，不为了保持运行而制造任务 |
+
+产品页面至少能沿同一条链查看：长期目标 → 编排原因 → 子任务合同 → Session/run → 验收产物 → Deep eval → memory/人工标注 → 下一次注入及实际使用。评价学习效果时同时报告未采用、失败、未知和成本，不以记忆条数或连续运行时长替代实际交付改善。

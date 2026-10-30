@@ -195,14 +195,21 @@ class LoomService:
                 if old and not restarting and old.get('acceptance_budget_request'):
                     state['run']['acceptance_budget_request'] = old['acceptance_budget_request']
             if not state["run"].get("task_episode_id"):
-                state["run"]["task_episode_id"] = (old.get("task_episode_id") if old and old["state"] != "completed"
+                state["run"]["task_episode_id"] = state.pop('restart_episode_id', None) or (old.get("task_episode_id") if old and old["state"] != "completed"
                                                    and not state["run"].get("reset_planning") else None) or new_id("episode")
             state["epoch"] += 1
             state["run"].update(state="running", attempt_id=new_id("attempt"), process=None)
             state["run"].pop("reason", None)
             state["task"]["state"] = "running"
             state["task"]["revision"] += 1
+            task_contract = {k: state['task'].get(k) for k in ('objective', 'task_spec', 'goal_revision')}
+            fresh_goal = (not state['run']['checkpoint'] and not state['run']['steps']
+                          and (not state.get('context') or state['run'].get('reset_planning', False)))
+            pending_goals = [m['content'] for m in state['messages'] if m['role'] == 'user' and m['seq'] > state['input_cursor']]
+            if fresh_goal and pending_goals:
+                task_contract['objective'] = '\n\n'.join(pending_goals)
             emit("run.started", {"epoch": state["epoch"], "task_episode_id": state["run"]["task_episode_id"],
+                                 "task_contract": task_contract,
                                  "attempt_id": state["run"]["attempt_id"]})
             emit("task.state.changed", {"state": "running", "revision": state["task"]["revision"]})
             descriptor = json.loads(canonical(state))

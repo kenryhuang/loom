@@ -143,6 +143,7 @@ class SessionSemantic:
     def _save(self, body):
         with self.store.transaction() as db:
             db.execute("UPDATE semantic_jobs SET body=? WHERE id=?", (canonical(body), body["id"]))
+            db.execute("INSERT OR IGNORE INTO skill_dirty_sessions VALUES(?)", (body['session_id'],))
 
     def _load(self, sid, aid, identifier):
         self.trajectory._load(sid, aid)
@@ -504,6 +505,7 @@ class SessionSemantic:
                     if body["state"] in {"queued", "running"} or (future and not future.done()):
                         raise ServiceError("Cancel the evaluation and wait for it to stop before deleting", 409)
                     self.outputs.prepare(db, body)
+                    db.execute('INSERT OR IGNORE INTO skill_dirty_sessions VALUES(?)', (sid,))
                 elif not db.execute(
                     "SELECT 1 FROM evaluation_deletions WHERE id=? AND session_id=? AND analysis_id=?", (identifier, sid, aid)
                 ).fetchone():
