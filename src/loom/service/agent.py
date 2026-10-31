@@ -26,6 +26,10 @@ async def execute(state, bridge, config_path, provider_factory, plugin_registry_
         if provider_factory
         else _create_provider(load_task_config(config_path).unwrap() if config_path else None, model_name=state["task"]["model"]).unwrap()
     )
+    if state.get('autonomy'):
+        from loom.autonomy.budget import BudgetLedger, BudgetProvider
+
+        provider = BudgetProvider(provider, BudgetLedger(state['memory_database']), state['autonomy'])
     task = state["task"]
     request = TaskRequest(
         task["objective"],
@@ -34,7 +38,7 @@ async def execute(state, bridge, config_path, provider_factory, plugin_registry_
         metadata={"knowledge_base_ids": task.get("knowledge_base_ids", []), "knowledge_directory": state.get("knowledge_directory"),
                   "knowledge_config_path": config_path, "external_tool_bindings": task.get("external_tool_bindings", []),
                   "external_tools_directory": state.get("external_tools_directory"),
-                  "memory_database": state.get("memory_database")},
+                  "memory_database": state.get("memory_database"), "autonomy": state.get('autonomy')},
     )
     assembly = TaskAssembly(
         request,
@@ -60,6 +64,14 @@ async def _execute_assembled(state, bridge, provider, request, assembly):
             verification_provider = _create_provider(config, model_name=config.verification_model).unwrap()
         if config.visual_verification_model:
             visual_provider = _create_provider(config, model_name=config.visual_verification_model).unwrap()
+    if state.get('autonomy'):
+        from loom.autonomy.budget import BudgetLedger, BudgetProvider
+
+        ledger = BudgetLedger(state['memory_database'])
+        if verification_provider:
+            verification_provider = BudgetProvider(verification_provider, ledger, state['autonomy'], category='acceptance')
+        if visual_provider:
+            visual_provider = BudgetProvider(visual_provider, ledger, state['autonomy'], category='acceptance')
     assembly.configure_acceptance(provider, limits=state["task"]["limits"], verification_provider=verification_provider, visual_provider=visual_provider)
     assembly.acceptance_resume_request = state['run'].get('acceptance_budget_request')
     planning = assembly.workflow
@@ -109,7 +121,9 @@ async def _execute_assembled(state, bridge, provider, request, assembly):
     elif bridge.checkpoint and bridge.checkpoint.get("planning"):
         planning.restore(bridge.checkpoint["planning"]).unwrap()
         context = planning.project_state(context)
-    elif same_run and not state["run"].get("reset_planning"):
+    elif not bridge.fresh_turn and not state["run"].get("reset_planning"):
+        # Resume after a failed run gets a new run ID, but still belongs to the
+        # same task. Its tool evidence and workflow must travel with its context.
         snapshot = (context.state.scratch or {}).get("execution_plugins")
         if snapshot:
             assembly.restore(snapshot, rebind_tools=rebind)

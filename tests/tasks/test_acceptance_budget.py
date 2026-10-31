@@ -22,6 +22,38 @@ def setup_gate(tmp_path):
     return assembly, context, runtime
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('completed', [False, True])
+async def test_resume_opens_repair_step_when_all_legacy_plan_items_are_done(tmp_path, completed):
+    assembly, context, runtime = setup_gate(tmp_path)
+    from loom.workflows.legacy import LegacyPlanningWorkflow
+    workflow = LegacyPlanningWorkflow({'mode': 'force'})
+    assembly.workflow = workflow
+    workflow.controller.submit('Inspect source', ['Read source']).unwrap()
+    item = workflow.controller.state.items[0]
+    workflow.controller.update('Read source', [{'id': item.id, 'content': item.content, 'status': 'completed'}]).unwrap()
+    if completed:
+        workflow.controller.complete().unwrap()
+    prior = workflow.controller.state.items
+    assembly.acceptance.data.update(state='blocked', candidate='report', reason='Missing source evidence', model_calls=1)
+    assembly.acceptance_resume_request = 'resume-repair'
+    (tmp_path / 'source.txt').write_text('fresh evidence')
+    try:
+        await assembly.acceptance.prepare(context, runtime)
+        assert workflow.controller.state.items[:-1] == prior
+        assert workflow.controller.state.items[-1].status.value == 'in_progress'
+        handlers = assembly.handlers()
+        result = await handlers['read_file']({'path': 'source.txt'})
+        assert result.ok and 'fresh evidence' in str(result.value)
+        assert assembly._acceptance_calls[-1]['tool'] == 'read_file'
+        count = len(workflow.controller.state.items)
+        await assembly.acceptance.prepare(context, runtime)
+        assert len(workflow.controller.state.items) == count
+        assert assembly.acceptance.data['state'] != 'passed'
+    finally:
+        await assembly.close()
+
+
 @pytest.mark.parametrize('status', ['blocked', 'failed'])
 @pytest.mark.asyncio
 async def test_only_conclusive_failures_consume_repair_allowance(tmp_path, status):
@@ -119,5 +151,72 @@ async def test_explicit_resume_archives_allocation_and_is_idempotent_after_check
         with pytest.raises(AcceptanceBlocked, match='Task model budget exhausted'):
             await gate.model(runtime, 'verify', 'Prompt', {})
         assert assembly._local_calls == 9
+    finally:
+        await assembly.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('configured,elapsed,expected', [({}, 0, 120), ({'model_timeout_seconds': 45}, 0, 45), ({}, 150, 30)])
+async def test_model_timeout_respects_request_limit_and_remaining_allocation(tmp_path, configured, elapsed, expected):
+    from loom.llm import LlmResponse
+
+    assembly, _, runtime = setup_gate(tmp_path)
+    controller = assembly.acceptance
+    controller._configured_limits.update(configured)
+    controller.data['elapsed_seconds'] = elapsed
+    observed = []
+
+    async def request(_runtime, _stage, _prompt, _content, timeout, **_kwargs):
+        observed.append(timeout)
+        return LlmResponse('{"ok":true}')
+
+    assembly.acceptance_model_request = request
+    try:
+        assert await controller.model(runtime, 'plan', 'Return JSON', {}) == {'ok': True}
+        assert observed == [expected]
+        assert controller.data['model_calls'] == 1
+    finally:
+        await assembly.close()
+
+
+@pytest.mark.parametrize('model,options,expected', [
+    ('qwen3.8-max', {'enable_thinking': True}, 4096),
+    ('qwen3.8-max-0902', {'enable_thinking': True}, 4096),
+    ('qwen3.8-max', {'enable_thinking': True, 'thinking_budget': 2000}, 2000),
+    ('qwen3.8-max', {'enable_thinking': True, 'reasoning_effort': 'high'}, None),
+    ('qwen3.8-max', {'enable_thinking': False}, None),
+    ('another-model', {'enable_thinking': True}, None),
+])
+def test_acceptance_thinking_budget_preserves_explicit_options(model, options, expected):
+    from loom.llm.api import OpenAIProvider
+    from loom.tasks.acceptance_budget import reserve_answer_budget
+
+    original = OpenAIProvider(api_key='fixture', model=model, max_completion_tokens=8192, request_options=options)
+    bounded = reserve_answer_budget(original)
+    assert bounded.request_options.get('thinking_budget') == expected
+    assert dict(original.request_options) == options
+    assert bounded.max_completion_tokens == 8192
+
+
+@pytest.mark.asyncio
+async def test_acceptance_timeout_records_nonempty_failure_and_effective_request_limit(tmp_path):
+    import asyncio
+
+    assembly, _, runtime = setup_gate(tmp_path)
+    class SlowJudge:
+        model = 'slow-judge'
+
+        async def chat(self, *args, **kwargs):
+            await asyncio.Event().wait()
+
+    assembly.configure_acceptance(SlowJudge())
+    try:
+        with pytest.raises(AcceptanceBlocked, match=r'Acceptance verify request timed out after 0.0s'):
+            await assembly.acceptance_model_request(runtime, 'verify', 'Return JSON', '{}', 0.01)
+        failed = next(e for e in runtime.trace_sink.events if e['type'] == 'llm.failed')
+        assert failed['error']['code'] == 'TIMEOUT'
+        assert failed['error']['timeout_seconds'] == 0.01
+        assert 'model=slow-judge' in failed['error']['message']
+        assert 'output_limit=4096 tokens' in failed['error']['message']
     finally:
         await assembly.close()

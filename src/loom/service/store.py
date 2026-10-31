@@ -68,6 +68,16 @@ class SessionStore:
         return state
 
     def _save(self, db, state):
+        if state['task']['state'] == 'queued':
+            state.setdefault('queued_since', now_iso())
+        else:
+            state.pop('queued_since', None)
+        if state.get('autonomy'):
+            from loom.autonomy.results import record_session_state
+
+            record_session_state(db, state)
+        if state.get('deleted_at') and db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_versions'").fetchone():
+            db.execute("UPDATE memory_versions SET value=value+1 WHERE id='effective'")
         db.execute("UPDATE sessions SET body=? WHERE id=?", (canonical(state), state["session_id"]))
         db.execute("INSERT OR IGNORE INTO skill_dirty_sessions VALUES(?)", (state['session_id'],))
 
@@ -111,7 +121,7 @@ class SessionStore:
             return json.loads(row[1])
         return None
 
-    def create(self, command_id, payload):
+    def create(self, command_id, payload, *, after=None, producer='human'):
         text(command_id, "command_id", max_length=200)
         bindings = self.external_tools.resolve(object_value(payload).get("external_tool_ids", []))
         payload = validate_create(payload, plugin_registry=self.plugin_registry_factory() if self.plugin_registry_factory else None, external_bindings=bindings)
@@ -150,16 +160,19 @@ class SessionStore:
             db.execute("INSERT INTO sessions VALUES(?,?)", (sid, canonical(state)))
             self.append(db, state, "command.accepted", {"type": "create"}, command_id=command_id)
             if payload["objective"]:
-                self._message(db, state, command_id, payload["objective"])
+                self._message(db, state, command_id, payload["objective"], producer=producer)
             receipt = {"session_id": sid, "command_id": command_id, "state": "accepted", "input": payload}
             db.execute("INSERT INTO commands VALUES(?,?,?,?,?)", (command_id, sid, canonical(normalized), canonical(receipt), "accepted"))
             if not payload["objective"]:
                 self.applied(db, state, command_id)
+            if after is not None:
+                after(state, lambda kind, value: self.append(db, state, kind, value), db)
             self._save(db, state)
             return receipt
 
-    def _message(self, db, state, cid, content, *, role="user", status="accepted"):
-        message = {"id": new_id("msg"), "role": role, "content": content, "command_id": cid, "state": status}
+    def _message(self, db, state, cid, content, *, role="user", status="accepted", producer=None):
+        message = {"id": new_id("msg"), "role": role, "content": content, "command_id": cid, "state": status,
+                   "producer": producer or ('human' if role == 'user' else 'solver')}
         event = self.append(db, state, "message.created", message, command_id=cid)
         message["seq"] = event["seq"]
         state["messages"].append(message)
@@ -189,7 +202,7 @@ class SessionStore:
             raise ServiceError("Workspace is fixed for this session. Create a new session to use another directory.")
         return updated
 
-    def submit(self, sid, command, *, after=None):
+    def submit(self, sid, command, *, after=None, producer='human'):
         command = validate_command(command)
         cid = command["command_id"]
         normalized = {"session_id": sid, **command}
@@ -212,6 +225,12 @@ class SessionStore:
             if kind == "submit_message":
                 if task["state"] == "completed":
                     raise ServiceError("Reopen the completed task first", 409)
+                if (producer == 'human' and state.get('autonomy') and state.get('run')
+                        and state['run']['state'] in {'completed', 'failed', 'stopped'}):
+                    # An unrelated human delivery must not reopen the last Agent contract.
+                    binding = state.pop('autonomy')
+                    db.execute('UPDATE agent_sessions SET work_package_id=NULL WHERE session_id=? AND work_package_id=?',
+                               (sid, binding['work_package_id']))
             elif kind in {"set_knowledge_bases", "set_external_tools"}:
                 if task["state"] not in {"idle", "completed", "paused"} or (
                     state["run"] and state["run"]["state"] not in {"completed", "stopped", "suspended"}
@@ -255,7 +274,7 @@ class SessionStore:
                 raise ServiceError("Task is completed", 409)
             self.append(db, state, "command.accepted", {"type": kind}, command_id=cid)
             if kind == "submit_message":
-                self._message(db, state, cid, payload["content"])
+                self._message(db, state, cid, payload["content"], producer=producer)
                 if not task["objective"]:
                     task["objective"] = payload["content"]
                     task["goal_revision"] += 1

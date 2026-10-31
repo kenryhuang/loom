@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 
 from loom.service.contracts import ServiceError
-from loom.tasks.config import _parse_task_config, parse_yaml_document, provider_config_document
+from loom.tasks.config import _parse_task_config, discover_default_config_path, parse_yaml_document, provider_config_document
 
 LOCK = threading.RLock()
 MASK = '••••••••'
@@ -55,7 +55,7 @@ def yaml_text(value, indent=0):
 class Settings:
     def __init__(self, service):
         self.service = service
-        self.path = Path(service.config_path or Path.cwd() / 'config.yaml').resolve()
+        self.path = Path(service.config_path or discover_default_config_path() or Path.cwd() / 'config.yaml').resolve()
 
     def read(self):
         raw = self.path.read_text() if self.path.exists() else ''

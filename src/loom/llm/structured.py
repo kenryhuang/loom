@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from jsonschema import Draft202012Validator
 
 from loom.llm.api import OpenAIProvider
+from loom.llm.provider_wrappers import map_provider, unwrap_provider
 from loom.llm.request_options import materialize_request_options
 
 
@@ -104,6 +105,7 @@ def parse_response(response, max_chars=1_000_000):
 
 
 def output_mode(provider):
+    provider = unwrap_provider(provider)
     if not isinstance(provider, OpenAIProvider):
         return "text"
     if provider.model == "qwen3.8-omni-flash":
@@ -122,6 +124,10 @@ def output_mode(provider):
 
 def protocol_provider(provider, protocol, mode):
     """A private request copy: never mutate a provider shared with another stage."""
+    return map_provider(provider, lambda base: _protocol_provider(base, protocol, mode))
+
+
+def _protocol_provider(provider, protocol, mode):
     if not isinstance(provider, OpenAIProvider):
         return provider
     options = materialize_request_options(provider.request_options)

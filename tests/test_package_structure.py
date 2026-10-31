@@ -37,6 +37,7 @@ def test_top_level_package_api_is_intentionally_thin():
 
     public_names = {name for name in dir(loom) if not name.startswith("_")}
     submodule_names = {
+        "autonomy",
         "browser",
         "composition",
         "campaigns",
@@ -48,6 +49,8 @@ def test_top_level_package_api_is_intentionally_thin():
         "diagnostics",
         "examples",
         "llm",
+        "host_environment",
+        "memory",
         "governance",
         "knowledge",
         "observability",
@@ -58,6 +61,7 @@ def test_top_level_package_api_is_intentionally_thin():
         "trace_analysis",
         "tui",
         "service",
+        "skills",
         "client",
         "contexts",
         "execution",

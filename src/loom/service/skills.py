@@ -87,7 +87,8 @@ class SessionSkills:
         with self.store.transaction() as db:
             jobs = [self.public_job(json.loads(r[0])) for r in db.execute(
                 'SELECT body FROM skill_jobs WHERE workspace=? ORDER BY rowid DESC LIMIT 100', (workspace,))]
-            ids = [r[0] for r in db.execute('SELECT id FROM skill_versions WHERE workspace=? ORDER BY rowid DESC LIMIT 100', (workspace,))]
+            ids = [r[0] for r in db.execute(
+                "SELECT id FROM skill_versions WHERE workspace=? AND state<>'user_guidance' ORDER BY rowid DESC LIMIT 100", (workspace,))]
         return dict(workspace=workspace, catalog=stats, index_error=self.index_error, jobs=jobs, versions=[self.public_version(i) for i in ids],
                     defaults=DEFAULTS, bounds=BOUNDS, models=self.semantic.options()['models'],
                     default_model=self.semantic.options()['default_model'])

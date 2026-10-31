@@ -5,6 +5,30 @@ from copy import deepcopy
 from loom.core import now_iso
 
 
+def reserve_answer_budget(provider):
+    """Give bounded Qwen 3.8 Max acceptance calls room to return their verdict."""
+    from dataclasses import replace
+
+    from loom.llm.api import OpenAIProvider
+    from loom.llm.provider_wrappers import map_provider
+    from loom.llm.request_options import materialize_request_options
+
+    def adapt(base):
+        if not isinstance(base, OpenAIProvider) or not (base.model == 'qwen3.8-max' or base.model.startswith('qwen3.8-max-')):
+            return base
+        options = materialize_request_options(base.request_options)
+        cap = base.max_completion_tokens
+        # Qwen supports thinking_budget; never inject it for other providers or
+        # combine it with an explicitly selected effort/budget. Preserve explicit
+        # settings and the original solver provider.
+        if options.get('enable_thinking') is not True or 'thinking_budget' in options or 'reasoning_effort' in options or not cap or cap < 2:
+            return base
+        options['thinking_budget'] = cap // 2
+        return replace(base, request_options=options)
+
+    return map_provider(provider, adapt)
+
+
 def effective_limits(defaults, configured, plan):
     limits = {**defaults, **configured}
     visual = sum(c['verifier'] == 'visual' for c in (plan or {}).get('criteria', []))
@@ -46,6 +70,8 @@ async def renew_on_resume(controller, request_id, runtime):
     has_usage = data['model_calls'] or data['attempts'] or data['elapsed_seconds']
     if data['state'] == 'passed' or not needs_renewal or not has_usage:
         return
+    if data.get('candidate') and hasattr(controller.assembly.workflow, 'reopen_for_acceptance'):
+        controller.assembly.workflow.reopen_for_acceptance()
     previous = controller.assembly.publish_artifact({
         'budget': public_budget(controller), 'reason': data['reason'], 'results': deepcopy(data['results']),
         'limits_basis': 'Effective configuration at Resume; older allocations may have used earlier defaults.',

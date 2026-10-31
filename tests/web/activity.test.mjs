@@ -40,6 +40,82 @@ const observation = (value) => ({
   value,
 });
 
+test('paused run reasons stay inside Processing with full details available after snapshot restore', () => {
+  const {dom, root, feed} = setup();
+  const reason = 'Acceptance blocked: ' + 'Missing package.json evidence. '.repeat(30);
+  try {
+    feed.restore({snapshot: {session_id: 's', event_cursor: 10, task: {workspace: '/workspace'},
+      run: {id: 'run', state: 'suspended', reason}}, events: []});
+    const row = root.querySelector('.process-group [data-key="run-status"]');
+    assert.ok(row);
+    assert.ok(row.querySelector('summary').textContent.length < reason.length);
+    row.open = true;
+    row.dispatchEvent(new dom.window.Event('toggle'));
+    assert.ok(row.textContent.includes(reason));
+    feed.syncRunStatus({event_cursor: 10, run: {id: 'run', state: 'suspended', reason}});
+    assert.equal(root.querySelectorAll('[data-key="run-status"]').length, 1);
+  } finally {feed.destroy(); dom.window.close();}
+});
+
+test('Working and Processing show live character progress across SSE channels without counting replay twice', () => {
+  const {dom, root, feed} = setup();
+  const append = (seq, type, payload = {}) => feed.append(event(seq, type, {llm_call_id: 'call', ...payload}));
+  try {
+    append(1, 'llm.requested');
+    const row = root.querySelector('[data-key="thought:call"]');
+    const outcome = () => row.querySelector('.activity-outcome').textContent;
+    assert.equal(outcome(), 'Waiting for response');
+    append(2, 'llm.reasoning.delta', {offset: 0, delta: '思考😀'});
+    assert.equal(outcome(), '3 chars received');
+    append(3, 'llm.reasoning.delta', {offset: 1, delta: '考😀中'});
+    assert.equal(outcome(), '4 chars received');
+    append(4, 'llm.content.delta', {offset: 0, delta: '答'});
+    append(5, 'llm.reasoning_context.delta', {offset: 0, delta: '摘要'});
+    append(6, 'llm.tool_call.arguments.delta', {tool_call_id: 'tool1', offset: 0, delta: '{"x":'});
+    append(7, 'llm.tool_call.arguments.delta', {tool_call_id: 'tool2', offset: 0, delta: '{}'});
+    assert.equal(outcome(), '14 chars received');
+    append(6, 'llm.tool_call.arguments.delta', {tool_call_id: 'tool1', offset: 0, delta: '{"x":'});
+    assert.equal(outcome(), '14 chars received');
+    assert.equal(root.querySelector('[data-key="thought:call"]'), row);
+    assert.equal(root.querySelectorAll('.event-row').length, 1);
+    assert.equal(row.open, false);
+    assert.match(root.querySelector('.process-group > summary').textContent, /14 chars received/);
+    assert.doesNotMatch(outcome(), /tokens/);
+    append(8, 'llm.completed', {response: {usage: {prompt_tokens: 100, completion_tokens: 12, total_tokens: 112}}});
+    assert.equal(outcome(), 'Done · 12 output tokens');
+    assert.equal(row.classList.contains('running'), false);
+    feed.append(event(9, 'llm.requested', {llm_call_id: 'next'}));
+    const next = root.querySelector('[data-key="thought:next"] .activity-outcome');
+    assert.equal(next.textContent, 'Waiting for response');
+    feed.append(event(10, 'llm.content.delta', {llm_call_id: 'next', offset: 0, delta: 'hello'}));
+    feed.append(event(11, 'llm.completed', {llm_call_id: 'next', response: {usage: {completion_tokens: 0, total_tokens: 0}}}));
+    assert.equal(next.textContent, 'Done · 5 chars received');
+  } finally {feed.destroy(); dom.window.close();}
+});
+
+test('stream progress restores truncated snapshot offsets and survives replay and failure', () => {
+  const {dom, root, feed} = setup();
+  const id = 'run:step:call';
+  const delta = event(10, 'llm.content.delta', {llm_call_id: id, offset: 100, delta: '文😀'});
+  try {
+    feed.restore({snapshot: {
+      run: {id: 'run'}, task: {workspace: '/workspace'},
+      streams: {[`${id}:content`]: '文😀', [`${id}:tool_call.arguments:tool`]: '{}'},
+      stream_origins: {[`${id}:content`]: 100, [`${id}:tool_call.arguments:tool`]: 20},
+    }, events: [delta]});
+    const row = root.querySelector('[data-key="thought:run:step:call"]');
+    const outcome = () => row.querySelector('.activity-outcome').textContent;
+    assert.equal(root.querySelectorAll('.event-row').length, 1);
+    assert.equal(outcome(), '124 chars received');
+    feed.append(delta);
+    assert.equal(outcome(), '124 chars received');
+    feed.append(event(11, 'llm.content.delta', {llm_call_id: id, offset: 102, delta: '新'}));
+    assert.equal(outcome(), '125 chars received');
+    feed.append(event(12, 'llm.failed', {llm_call_id: id, error: {message: 'Connection lost'}}));
+    assert.equal(outcome(), 'Connection lost · 125 chars received');
+  } finally {feed.destroy(); dom.window.close();}
+});
+
 const evidenceArtifact = () => ({
   goal: {objective: "Check planetary orbital speeds", requirements: [{description: "Explain deviations"}]},
   plan: {criteria: [{id: "speed", description: "Compare orbital speeds with real values", verifier: "semantic", scope: ["src/data/planets.ts"]}]},
@@ -572,6 +648,16 @@ test("completed process elapsed time uses lifecycle timestamps, not later detail
     /0m 5s elapsed/,
   );
   dom.window.close();
+});
+
+test('model failures retain string errors and give legacy empty errors a visible fallback', () => {
+  const presenters = builtinPresenters();
+  for (const error of ['Acceptance request timed out', {message: 'Request timed out after 75.0s'}]) {
+    const result = presenters.present({kind: 'model', status: 'failed', details: {error}});
+    assert.match(result.outcome, /timed out/);
+  }
+  const result = presenters.present({kind: 'model', status: 'failed', details: {error: ''}});
+  assert.match(result.outcome, /Request failed; see process status/);
 });
 
 test("model summaries use explicit summary or action intent rather than truncating the detail", () => {

@@ -50,6 +50,32 @@ export class IncrementalGraphView {
     node.addEventListener('toggle', () => {if (!node.isConnected) return; this.opened.set(key, node.open); if (node.open) fill();});
     return node;
   }
+  nodeInfo(node, key, title, render) {
+    const content = node.querySelector(':scope > .goal-tree-content');
+    const block = element('section', 'goal-tree-info');
+    block.id = `goal-tree-info-${this.uid}-${encodeURIComponent(key)}`;
+    block.setAttribute('aria-label', title);
+    block.hidden = !this.opened.get(key);
+    let rendered = false;
+    const fill = () => {
+      if (rendered) return;
+      rendered = true; block.append(element('h4', '', title)); render(block);
+    };
+    const toggle = button(title, event => {
+      // This control belongs to the status row, not to the tree disclosure.
+      event.preventDefault(); event.stopPropagation();
+      block.hidden = !block.hidden;
+      this.opened.set(key, !block.hidden);
+      toggle.setAttribute('aria-expanded', String(!block.hidden));
+      if (!block.hidden) {fill(); node.open = true;}
+    });
+    toggle.classList.add('goal-tree-info-toggle');
+    toggle.setAttribute('aria-controls', block.id);
+    toggle.setAttribute('aria-expanded', String(!block.hidden));
+    node.querySelector(':scope > summary .goal-tree-tags').append(toggle);
+    content.prepend(block);
+    if (!block.hidden) fill();
+  }
   render() {
     const viewport = this.root.closest('.trajectory-page') || this.root;
     const scroll = viewport.scrollTop;
@@ -143,30 +169,6 @@ export class IncrementalGraphView {
     const parentCost = parent?.cost || callSummary([...this.tree.atoms.keys()], this.tree.atoms);
     const node = this.details(root, `goal:${goal.id}`, this.heading(goal.display_id, goal.objective, goal.cost, tags,
       parentCost, parent?.display_id || 'run'), body => {
-      this.details(body, `goal-info:${goal.id}`, goal.parent_goal_id ? 'Goal details' : 'Task requirements', detail => {
-        if (goal.parent_goal_id) {
-          const parent = this.tree.byGoal.get(goal.parent_goal_id);
-          table(detail, ['Parent goal', 'Decomposition basis', 'Judgment'], [[
-            `${parent?.display_id || ''} · ${parent?.objective || goal.parent_goal_id}`,
-            goal.root_relation || 'Not recorded; saved nesting is unreviewed',
-            goal.parent_relation_basis === 'inferred' ? 'Inferred from cited intent' : 'Unreviewed',
-          ]]);
-        }
-        if (goal.conditions?.length) table(detail, ['Condition', 'Required'], goal.conditions.map(c => [conditionText(c), typeof c === 'object' ? c.required ?? 'Unknown' : 'Unknown']));
-        if (closure) {
-          table(detail, ['Completion claim', 'Closure evidence', 'Disposition'], [[closure.claim, closure.evidence_state, closure.disposition]]);
-          if (closure.reason) detail.append(element('p', '', closure.reason));
-          this.refs(detail, closure.evidence_refs);
-        } else detail.append(element('p', 'muted', 'Closure not established'));
-        for (const q of closure?.open_questions || goal.open_questions || []) detail.append(element('p', '', `Remaining question / feedback: ${q}`));
-        this.refs(detail, goal.evidence_refs);
-        for (const {card} of goal.requirements) this.details(detail, `requirement:${goal.id}:${card.id}`, `${card.name} · L${card.start_line}–${card.end_line}`, body => {
-          this.featureRows(body, card.features);
-          for (const excerpt of card.excerpts || []) this.featureRows(body, excerpt);
-          this.refs(body, (card.raw_refs || []).map(id => this.data.extraction.registry[id]?.ref));
-        });
-        this.findings(detail, goal.id);
-      });
       const children = element('div', 'goal-tree-children'); body.append(children);
       for (const entry of goalEntries(goal)) {
         if (entry.kind === 'goal') this.renderGoal(children, entry.value);
@@ -174,6 +176,30 @@ export class IncrementalGraphView {
       }
     }, true, 'goal-tree-goal');
     node.dataset.goalId = goal.id;
+    this.nodeInfo(node, `goal-info:${goal.id}`, goal.parent_goal_id ? 'Goal details' : 'Task requirements', detail => {
+      if (goal.parent_goal_id) {
+        const parent = this.tree.byGoal.get(goal.parent_goal_id);
+        table(detail, ['Parent goal', 'Decomposition basis', 'Judgment'], [[
+          `${parent?.display_id || ''} · ${parent?.objective || goal.parent_goal_id}`,
+          goal.root_relation || 'Not recorded; saved nesting is unreviewed',
+          goal.parent_relation_basis === 'inferred' ? 'Inferred from cited intent' : 'Unreviewed',
+        ]]);
+      }
+      if (goal.conditions?.length) table(detail, ['Condition', 'Required'], goal.conditions.map(c => [conditionText(c), typeof c === 'object' ? c.required ?? 'Unknown' : 'Unknown']));
+      if (closure) {
+        table(detail, ['Completion claim', 'Closure evidence', 'Disposition'], [[closure.claim, closure.evidence_state, closure.disposition]]);
+        if (closure.reason) detail.append(element('p', '', closure.reason));
+        this.refs(detail, closure.evidence_refs);
+      } else detail.append(element('p', 'muted', 'Closure not established'));
+      for (const q of closure?.open_questions || goal.open_questions || []) detail.append(element('p', '', `Remaining question / feedback: ${q}`));
+      this.refs(detail, goal.evidence_refs);
+      for (const {card} of goal.requirements) this.details(detail, `requirement:${goal.id}:${card.id}`, `${card.name} · L${card.start_line}–${card.end_line}`, body => {
+        this.featureRows(body, card.features);
+        for (const excerpt of card.excerpts || []) this.featureRows(body, excerpt);
+        this.refs(body, (card.raw_refs || []).map(id => this.data.extraction.registry[id]?.ref));
+      });
+      this.findings(detail, goal.id);
+    });
   }
   renderStage(root, stage) {
     const ids = [...new Set(stage.actions.flatMap(a => a.card.call_ids))], cost = callSummary(ids, this.tree.atoms);
@@ -181,33 +207,33 @@ export class IncrementalGraphView {
     if (stage.visits?.length > 1) tags.push(`${stage.visits.length} visits`);
     const node = this.details(root, `stage:${stage.id}`, this.heading(stage.display_id, stage.title, cost,
       tags, this.tree.byGoal.get(stage.goal_id).cost, this.tree.byGoal.get(stage.goal_id).display_id), body => {
-      const models = [...new Set(ids.map(id => this.tree.atoms.get(id)).filter(a => a?.kind === 'model').map(a => a.model || 'Unknown'))];
-      const meta = element('div', 'goal-tree-stage-meta', `L${stage.first_line}–${stage.last_line}${models.length ? ' · Models: ' + models.join(', ') : ''}`); body.append(meta);
-      this.details(body, `stage-info:${stage.id}`, 'Stage details & dependencies', detail => {
-        if (stage.visits?.length > 1) table(detail, ['Visit', 'Action range'], stage.visits.map((visit, i) =>
-          [i + 1, `L${visit.first_line}–${visit.last_line}`]));
-        const changes = [...new Set(stage.actions.map(a => a.assessment?.delta).filter(Boolean))];
-        for (const change of changes) detail.append(element('p', '', change));
-        if (!changes.length) detail.append(element('p', 'muted', 'Progress not assessed'));
-        const attempts = (this.data.attempts || []).filter(a => stage.attempt_ids.includes(a.id) && a.basis !== 'unknown');
-        if (attempts.length) table(detail, ['Approach', 'Outcome'], attempts.map(a => [a.approach, a.outcome]));
-        const nodes = this.data.skeleton?.nodes || [], edges = this.data.skeleton?.edges || [];
-        const members = new Set(nodes.filter(n => n.stage_id === stage.source_stage_id && n.goal_id === stage.goal_id).map(n => n.id));
-        const related = edges.filter(e => members.has(e.source_id) || members.has(e.target_id));
-        if (related.length) table(detail, ['Dependency', 'Result / feedback'], related.map(e => {
-          const incoming = members.has(e.target_id), other = nodes.find(n => n.id === (incoming ? e.source_id : e.target_id));
-          const target = this.tree.stages.find(s => s.source_stage_id === other?.stage_id && s.goal_id === other?.goal_id);
-          const value = element('div', '', e.result || e.kind); this.refs(value, e.evidence_refs);
-          return [`${incoming ? 'From' : 'To'} ${target?.display_id || ''} · ${other?.objective || 'Unknown stage'}`, value];
-        }));
-        this.refs(detail, stage.evidence_refs);
-        this.findings(detail, stage.goal_id, stage.card_ids);
-      });
       const actions = element('div', 'goal-tree-actions'); body.append(actions);
       const fullStage = this.tree.stages.find(s => s.id === stage.id);
       for (const item of stage.actions) this.renderAction(actions, item, stage.id, fullStage.cost, stage.display_id || 'stage');
     }, false, 'goal-tree-stage');
     node.dataset.stageId = stage.source_stage_id;
+    this.nodeInfo(node, `stage-info:${stage.id}`, 'Stage details & dependencies', detail => {
+      const models = [...new Set(ids.map(id => this.tree.atoms.get(id)).filter(a => a?.kind === 'model').map(a => a.model || 'Unknown'))];
+      const meta = element('div', 'goal-tree-stage-meta', `L${stage.first_line}–${stage.last_line}${models.length ? ' · Models: ' + models.join(', ') : ''}`); detail.append(meta);
+      if (stage.visits?.length > 1) table(detail, ['Visit', 'Action range'], stage.visits.map((visit, i) =>
+        [i + 1, `L${visit.first_line}–${visit.last_line}`]));
+      const changes = [...new Set(stage.actions.map(a => a.assessment?.delta).filter(Boolean))];
+      for (const change of changes) detail.append(element('p', '', change));
+      if (!changes.length) detail.append(element('p', 'muted', 'Progress not assessed'));
+      const attempts = (this.data.attempts || []).filter(a => stage.attempt_ids.includes(a.id) && a.basis !== 'unknown');
+      if (attempts.length) table(detail, ['Approach', 'Outcome'], attempts.map(a => [a.approach, a.outcome]));
+      const nodes = this.data.skeleton?.nodes || [], edges = this.data.skeleton?.edges || [];
+      const members = new Set(nodes.filter(n => n.stage_id === stage.source_stage_id && n.goal_id === stage.goal_id).map(n => n.id));
+      const related = edges.filter(e => members.has(e.source_id) || members.has(e.target_id));
+      if (related.length) table(detail, ['Dependency', 'Result / feedback'], related.map(e => {
+        const incoming = members.has(e.target_id), other = nodes.find(n => n.id === (incoming ? e.source_id : e.target_id));
+        const target = this.tree.stages.find(s => s.source_stage_id === other?.stage_id && s.goal_id === other?.goal_id);
+        const value = element('div', '', e.result || e.kind); this.refs(value, e.evidence_refs);
+        return [`${incoming ? 'From' : 'To'} ${target?.display_id || ''} · ${other?.objective || 'Unknown stage'}`, value];
+      }));
+      this.refs(detail, stage.evidence_refs);
+      this.findings(detail, stage.goal_id, stage.card_ids);
+    });
   }
   featureRows(root, values) {
     const walk = (value, name = '') => {

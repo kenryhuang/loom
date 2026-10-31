@@ -201,6 +201,11 @@ class TaskAssembly:
             request.metadata["memory_database"], workspace=self.tool_request.workspace, session_id=session_id,
             allowed_tools=harness.allowed_tools if harness else None,
         ) if request.metadata.get("memory_database") else None
+        self.agent_context = None
+        if request.metadata.get('autonomy') and execution:
+            from loom.autonomy.context import RuntimeAgentContext
+
+            self.agent_context = RuntimeAgentContext(execution)
         from loom.skills.runtime import RuntimeSkills
 
         self.skills = RuntimeSkills(
@@ -326,6 +331,8 @@ class TaskAssembly:
                 execution.binding_effects.update({name: "read_only" for name in self.memory.allowed})
             if self.skills:
                 execution.binding_effects.update({name: "read_only" for name in self.skills.allowed})
+            if self.agent_context:
+                execution.binding_effects["agent_record_use"] = "read_only"
 
     def publish_artifact(self, value, kind):
         if self.execution:
@@ -580,6 +587,8 @@ class TaskAssembly:
             handlers.update(self.memory.handlers())
         if self.skills:
             handlers.update(self.skills.handlers())
+        if self.agent_context:
+            handlers.update(self.agent_context.handlers())
         wrapped = self.workflow.wrap_tools(handlers)
         for name in ("process_execute", "shell_execute"):
             if name in handlers:
@@ -618,6 +627,8 @@ class TaskAssembly:
             refs = (*refs, *self.memory.refs())
         if self.skills:
             refs = (*refs, *self.skills.refs())
+        if self.agent_context:
+            refs = (*refs, *self.agent_context.refs())
         return (
             *refs,
             ToolRef(
@@ -748,6 +759,8 @@ class TaskAssembly:
             emitted.unwrap()
 
     async def prepare_memory(self, context, runtime):
+        if self.agent_context:
+            context = await self.agent_context.attach(context, runtime)
         if self.memory:
             context = await self.memory.attach(context, runtime)
         if self.skills:
@@ -887,8 +900,10 @@ class TaskAssembly:
     async def acceptance_model_request(self, runtime, stage, prompt, content, timeout, *, protocol=None, mode="text", provider=None, images=()):
         from loom.evaluation.provider import evaluator_provider
         from loom.llm import LlmMessage, OpenAIProvider, TokenUsage, request_llm_response
+        from loom.llm.provider_wrappers import map_provider, unwrap_provider
         from loom.llm.structured import UnsupportedFormat, protocol_provider, unsupported_format
         from loom.tasks.acceptance import AcceptanceBlocked
+        from loom.tasks.acceptance_budget import reserve_answer_budget
 
         selected_provider = provider or self.acceptance_provider
         if selected_provider is None:
@@ -936,15 +951,16 @@ class TaskAssembly:
         if token_limit:
             cap = min(cap, max(1, token_limit - usage.total_tokens - image_input))
         stream = not hasattr(selected_provider, "chat")
-        if stage == "visual_observe" and protocol is None and isinstance(selected_provider, OpenAIProvider):
+        if stage == "visual_observe" and protocol is None and isinstance(unwrap_provider(selected_provider), OpenAIProvider):
             from loom.llm.request_options import materialize_request_options
 
             options = materialize_request_options(selected_provider.request_options)
             options.pop("response_format", None)
-            selected_provider = replace(selected_provider, request_options=options)
+            selected_provider = map_provider(selected_provider, lambda base: replace(base, request_options=options))
         if images and hasattr(selected_provider, "image_reader"):
-            selected_provider = replace(selected_provider, image_reader=self.read_image)
+            selected_provider = map_provider(selected_provider, lambda base: replace(base, image_reader=self.read_image))
         provider = evaluator_provider(selected_provider, output_tokens=cap, timeout_seconds=timeout, install_http=not stream)
+        provider = reserve_answer_budget(provider)
         if protocol:
             provider = protocol_provider(provider, protocol, mode)
         timer = asyncio.timeout(timeout)
@@ -977,8 +993,13 @@ class TaskAssembly:
             (await runtime.trace_sink.emit({"type": "llm.failed", **metadata, "error": str(exc), "at": now_iso()})).unwrap()
             raise
         except (ValueError, TimeoutError) as exc:
-            (await runtime.trace_sink.emit({"type": "llm.failed", **metadata, "error": str(exc), "at": now_iso()})).unwrap()
-            raise AcceptanceBlocked(str(exc) or "Acceptance request timed out") from exc
+            timed_out = isinstance(exc, TimeoutError) or timer.expired()
+            message = (f"Acceptance {stage} request timed out after {timeout:.1f}s "
+                       f"(model={selected_provider.model}, output_limit={cap} tokens)" if timed_out else str(exc) or type(exc).__name__)
+            error = {"code": "TIMEOUT" if timed_out else "ACCEPTANCE_FAILED", "message": message,
+                     "model": selected_provider.model, "stage": stage, "timeout_seconds": timeout, "output_tokens": cap}
+            (await runtime.trace_sink.emit({"type": "llm.failed", **metadata, "error": error, "at": now_iso()})).unwrap()
+            raise AcceptanceBlocked(message) from exc
         finally:
             if cp:
                 cp["plugin_states"] = self.snapshot()

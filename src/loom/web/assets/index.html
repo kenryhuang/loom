@@ -72,6 +72,7 @@
             />
           </svg>
         </button>
+        <button id="nav-agents" class="activity-button" data-component="agents" aria-label="Agents" title="Agents" aria-pressed="false" aria-controls="agents-panel">A</button>
         <button id="nav-external-tools" class="activity-button" data-component="external-tools" aria-label="External tools" title="External tools" aria-pressed="false" aria-controls="external-tools-panel">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 3v5m8-5v5M5 8h14v4a7 7 0 0 1-14 0V8Zm7 11v3"/></svg>
         </button>
@@ -84,6 +85,7 @@
           <span class="brand-mark">L</span>
           <div><strong>Loom</strong><small>Session workspace</small></div>
         </header>
+        <section id="agents-panel" class="component-panel" aria-label="Agents" hidden><h2>Agents</h2><div id="agents-list"></div></section>
         <section id="settings-panel" class="component-panel" aria-label="Settings panel" hidden><h2>Settings</h2><p class="muted">Models, embedding services and execution defaults.</p><p class="muted">Changes are saved to the service configuration file.</p></section>
         <section
           id="sessions-panel"
@@ -290,6 +292,10 @@
         hidden
       >
         <section id="knowledge-page" class="knowledge-page"></section>
+      </main>
+      <main id="agents-workspace" class="workspace evaluation-workspace" aria-label="Autonomous agents" hidden>
+        <header id="agents-heading" class="workspace-header"></header>
+        <section id="agents-page" class="trajectory-page" aria-label="Agent details"></section>
       </main>
       <main id="settings-workspace" class="workspace knowledge-workspace" aria-label="Application settings" hidden><section id="settings-page" class="knowledge-page"></section></main>
       <main id="external-tools-workspace" class="workspace knowledge-workspace" aria-label="External tool management" hidden>

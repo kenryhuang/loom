@@ -143,12 +143,14 @@ test("browser app connects to real service, answers input, creates sessions, con
     await until(
       () =>
         $("session-title").textContent === "Failed route" &&
-        !$("run-failure").hidden,
+        /WORKFLOW_ROUTE_FAILED.*Model did not select/.test($("event-feed").textContent),
     );
     assert.match(
-      $("run-failure").textContent,
+      $("event-feed").textContent,
       /WORKFLOW_ROUTE_FAILED.*Model did not select/,
     );
+    assert.equal($("run-failure").hidden, true);
+    assert.doesNotMatch($("notice").textContent, /WORKFLOW_ROUTE_FAILED/);
     $("new-session").click();
     assert.equal($("create-title"), null);
     $("create-objective").value = "Created in browser";

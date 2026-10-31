@@ -161,20 +161,23 @@ class SessionTrajectory:
             self.closed = True
         self.executor.shutdown(wait=True)
 
-    def start(self, sid):
+    def start(self, sid, *, source_cursor=None):
         with self.lock, self.store.transaction() as db:
             state = self.store._load(db, sid)
+            cursor = state['event_cursor'] if source_cursor is None else source_cursor
+            if type(cursor) is not int or not 0 <= cursor <= state['event_cursor']:
+                raise ServiceError('Invalid source cursor')
             if self.closed:
                 raise ServiceError("Service is closing", 503)
             row = db.execute("SELECT body FROM session_analyses WHERE session_id=? AND cursor=? AND version=?",
-                             (sid, state["event_cursor"], VERSION)).fetchone()
+                             (sid, cursor, VERSION)).fetchone()
             previous = json.loads(row[0]) if row else None
             if previous and previous["state"] != "failed":
                 return previous
             if db.execute("SELECT COUNT(*) FROM session_analyses WHERE state IN ('queued','running')").fetchone()[0] >= 4:
                 raise ServiceError("Analysis queue is full. Try again shortly.", 429)
             body = {"id": previous["id"] if previous else new_id("analysis"), "session_id": sid,
-                    "source_cursor": state["event_cursor"], "title": state["title"], "state": "queued", "created_at": now_iso()}
+                    "source_cursor": cursor, "title": state["title"], "state": "queued", "created_at": now_iso()}
             db.execute("INSERT OR REPLACE INTO session_analyses VALUES(?,?,?,?,?,?)",
                        (body["id"], sid, body["source_cursor"], VERSION, body["state"], canonical(body)))
             self.executor.submit(self._work, dict(body))

@@ -1,6 +1,6 @@
 # 自主 Agent 分阶段实施计划
 
-日期：2026-10-30。状态：待执行；本文中的复选框均为未来实施任务，未表示代码已经完成或测试已经通过。
+日期：2026-10-30。状态：P0～P3 代码及自动化闭环已实现，验收证据见第 10 节；手工浏览器视觉验收待可用浏览器连接。P4/P5 尚未执行。
 
 设计依据：[自主 Agent：数字分身与持续工作设计](../specs/2026-10-25-autonomous-agent-design.zh-CN.md)，重点对应第 14～22 节。方法版本与验证复用[跨任务 Skill 设计](../specs/2026-10-26-cross-task-skill-induction-design.zh-CN.md)及[当前实现说明](../../cross-task-skills.zh-CN.md)。
 
@@ -38,6 +38,8 @@ M1 必须包含「Role → AgentRun → SessionRun → Deep eval → memory → 
 
 自动验证优先采用临时 service directory、fake clock、可控 solver/evaluator provider 和可注入故障点，覆盖真实 SQLite、TaskAssembly、worker 与 HTTP 链路；不依赖付费模型稳定输出。模型判断质量另用明确标注的试用样本记录，不能拿假 provider 测试证明语义效果。
 
+实施落点调整：原计划的小模块合并为 `autonomy/contracts.py`、`store.py`、`supervisor.py`、`dispatch.py`、`context.py` 和 `service/autonomy.py`；测试相应合并到 `test_foundation.py`、`test_recovery.py`、`test_context.py`、`test_learning.py`、`test_execution_flow.py` 与 `test_end_to_end.py`。下文文件清单保留规划时的逻辑划分，第 10 节给出实际落点与统一可运行命令。
+
 任务中的命令从仓库根目录执行。`uv run pytest ...` 使用项目环境；首次准备前端依赖运行 `npm --prefix tests/web ci`，后续使用 `npm --prefix tests/web test`。尚未创建的测试文件在对应实现任务中新增后再运行。本次计划编写不执行这些实现测试。
 
 ## 3. P0：基线与后台服务支架
@@ -46,10 +48,10 @@ M1 必须包含「Role → AgentRun → SessionRun → Deep eval → memory → 
 
 依赖：无。文件：新增 `tests/autonomy/{__init__,helpers}.py`；复用 `tests/service/fakes.py`、`tests/memory/helpers.py`、`tests/skills/helpers.py`；实施记录写回本文第 10 节。
 
-- [ ] 记录实际 HEAD、已有工作区改动及 Skill 可用接口；确认目标分支包含所需跨任务 Skill 版本能力，缺失时明确集成依赖，不另造方法库。
-- [ ] 运行一次相关基线：`uv run pytest -q tests/service tests/memory tests/skills tests/llm/test_managed_step.py` 和 `npm --prefix tests/web test`，记录原有失败及复现方式。
-- [ ] 建立可注入时间、规划返回、执行结果、评估窗口及故障位置的支架；使用独立临时目录，记录模型调用次数与实际工具副作用计数。
-- [ ] 固定演示 fixture：两个相近工作包、一次失败教训、一条人工长期指导、一个不兼容 workspace；后续阶段共用相同场景。
+- [x] 记录实际 HEAD、已有工作区改动及 Skill 可用接口；确认目标分支包含所需跨任务 Skill 版本能力，缺失时明确集成依赖，不另造方法库。
+- [x] 运行一次相关基线：`uv run pytest -q tests/service tests/memory tests/skills tests/llm/test_managed_step.py` 和 `npm --prefix tests/web test`，记录原有失败及复现方式。
+- [x] 建立可注入时间、规划返回、执行结果、评估窗口及故障位置的支架；使用独立临时目录，记录模型调用次数与实际工具副作用计数。
+- [x] 固定演示 fixture：两个相近工作包、一次失败教训、一条人工长期指导、一个不兼容 workspace；后续阶段共用相同场景。
 
 完成标准：无需外部服务即可确定性驱动成功、失败、恢复、时间推进和用户介入；已有失败不被当成新功能的成功证据或随手屏蔽。
 
@@ -57,10 +59,10 @@ M1 必须包含「Role → AgentRun → SessionRun → Deep eval → memory → 
 
 依赖：P0.1。新增 `src/loom/service/background.py`、`tests/service/test_background.py`；修改 `service/controller.py`、`service/api.py`；核对 `service/trajectory.py`、`service/semantic.py`、`service/skills.py` 的 start/close 行为。
 
-- [ ] 将 trajectory、semantic、skills 的组合和所有权提取到服务级后台组件；HTTP handler 只调用共享实例，避免创建两个 evaluation worker 池。
-- [ ] 明确初始化与关闭顺序、模型配置更新、懒加载边界和异常清理；避免 controller/HTTP/background 相互循环依赖。
-- [ ] 为后续 AgentSupervisor/LearningCoordinator 预留受控注册入口，后台启动不依赖浏览器访问 Analysis。
-- [ ] 验证无 HTTP 请求也能驱动后台任务、重复 start/close 无副作用、关闭时不丢已提交检查点；保留现有 API 行为。
+- [x] 将 trajectory、semantic、skills 的组合和所有权提取到服务级后台组件；HTTP handler 只调用共享实例，避免创建两个 evaluation worker 池。
+- [x] 明确初始化与关闭顺序、模型配置更新、懒加载边界和异常清理；避免 controller/HTTP/background 相互循环依赖。
+- [x] 为后续 AgentSupervisor/LearningCoordinator 预留受控注册入口，后台启动不依赖浏览器访问 Analysis。
+- [x] 验证无 HTTP 请求也能驱动后台任务、重复 start/close 无副作用、关闭时不丢已提交检查点；保留现有 API 行为。
 
 验证：`uv run pytest -q tests/service/test_background.py tests/service/test_api.py tests/service/test_semantic.py tests/service/test_trajectory.py tests/skills/test_api.py`。
 
@@ -70,54 +72,54 @@ M1 必须包含「Role → AgentRun → SessionRun → Deep eval → memory → 
 
 ### P1.1 定义 Role、长期目标和编排合同
 
-依赖：P0.1。新增 `src/loom/autonomy/{__init__,contracts,role}.py`、`tests/autonomy/test_contracts.py`；核对现有 `service/contracts.py`。
+依赖：P0.1。新增 `src/loom/autonomy/{__init__,contracts,role}.py`、`tests/autonomy/test_foundation.py`；核对现有 `service/contracts.py`。
 
-- [ ] 定义 AgentRoleRevision、LongTermObjective、AgentRun、Goal、WorkPackage、SessionRouteDecision、LearningCycle、GuidanceEvent 和 ContextSnapshot 的字段、状态与 schema version。
-- [ ] 实现 Role 原文与结构化结果的校验；明确字段标记 explicit/derived，source routes 指向真实绑定，目录规范化，缺失资源产生依赖缺口。
-- [ ] 固定状态迁移、Goal 依赖无环、不可变终态、当前任务与长期指导的 scope，以及 command ID/expected revision 校验。
-- [ ] 给出设计第 15 节 Role 样例的可解析 fixture 和结构化 API payload；不能用规划模型的自由文本直接作为 Host 状态更新。
+- [x] 定义 AgentRoleRevision、LongTermObjective、AgentRun、Goal、WorkPackage、SessionRouteDecision、LearningCycle、GuidanceEvent 和 ContextSnapshot 的字段、状态与 schema version。
+- [x] 实现 Role 原文与结构化结果的校验；明确字段标记 explicit/derived，source routes 指向真实绑定，目录规范化，缺失资源产生依赖缺口。
+- [x] 固定状态迁移、Goal 依赖无环、不可变终态、当前任务与长期指导的 scope，以及 command ID/expected revision 校验。
+- [x] 给出设计第 15 节 Role 样例的可解析 fixture 和结构化 API payload；不能用规划模型的自由文本直接作为 Host 状态更新。
 
-验证：`uv run pytest -q tests/autonomy/test_contracts.py`，覆盖冲突 scope、无效绑定、依赖环、非法状态迁移和明确指导的来源。
+验证：`uv run pytest -q tests/autonomy/test_foundation.py`，覆盖冲突 scope、无效绑定、依赖环、非法状态迁移和明确指导的来源。
 
 完成标准：同一合同可被 planner、存储、API、worker descriptor 使用；不改变原 TaskSpec 的职责或允许任意未知字段。
 
 ### P1.2 存储迁移、事务、事件和 artifact 归属
 
-依赖：P1.1。新增 `autonomy/{store,migrations,artifacts}.py`、`tests/autonomy/test_store.py`；修改 `service/store.py` 的初始化接入。
+依赖：P1.1。新增 `autonomy/{store,migrations,artifacts}.py`、`tests/autonomy/test_foundation.py`；修改 `service/store.py` 的初始化接入。
 
-- [ ] 按设计第 10.1/21.1 节增加版本化迁移，先落地 M1 需要的表、唯一约束与索引；迁移记录有版本，重复启动不重复改写。
-- [ ] AgentStore 复用 SessionStore 的事务入口；需要原子更新 Session 与 Agent 的操作显式接收同一 `db`，不得在事务中再开独立 SQLite 写事务。
-- [ ] 实现 Role/Goal revision、AgentRun 租约、dispatch/learning outbox、Session 任务槽和消费游标；所有命令支持同 ID 同输入重放、不同输入冲突。
-- [ ] 为无 Session 的编排输入/报告/context 增加 Agent artifact 所有权与读取校验，复用内容寻址存储，不伪造 Session ID。
-- [ ] 为迁移和事务提交前后加入故障测试，旧 Session 数据仍可读；新表缺失时只读 memory/CLI 保持兼容。
+- [x] 按设计第 10.1/21.1 节增加版本化迁移，先落地 M1 需要的表、唯一约束与索引；迁移记录有版本，重复启动不重复改写。
+- [x] AgentStore 复用 SessionStore 的事务入口；需要原子更新 Session 与 Agent 的操作显式接收同一 `db`，不得在事务中再开独立 SQLite 写事务。
+- [x] 实现 Role/Goal revision、AgentRun 租约、dispatch/learning outbox、Session 任务槽和消费游标；所有命令支持同 ID 同输入重放、不同输入冲突。
+- [x] 为无 Session 的编排输入/报告/context 增加 Agent artifact 所有权与读取校验，复用内容寻址存储，不伪造 Session ID。
+- [x] 为迁移和事务提交前后加入故障测试，旧 Session 数据仍可读；新表缺失时只读 memory/CLI 保持兼容。
 
-验证：`uv run pytest -q tests/autonomy/test_store.py tests/service/test_store.py tests/memory/test_store.py`。
+验证：`uv run pytest -q tests/autonomy/test_foundation.py tests/service/test_store.py tests/memory/test_store.py`。
 
 完成标准：重启后合同、待办和事件可恢复，原 Session/trace/evaluation 正文未被复制成第二份事实源。
 
 ### P1.3 统一预算准入与用量结算
 
-依赖：P1.2、P0.2。新增 `autonomy/budget.py`、`tests/autonomy/test_budget.py`；按调用链修改 `service/controller.py`、`service/semantic.py`、`llm/managed_step.py`、`tasks/assembly.py`，复用现有 usage 事实。
+依赖：P1.2、P0.2。新增 `autonomy/budget.py`、`tests/autonomy/test_foundation.py tests/autonomy/test_recovery.py`；按调用链修改 `service/controller.py`、`service/semantic.py`、`llm/managed_step.py`、`tasks/assembly.py`，复用现有 usage 事实。
 
-- [ ] 定义 Agent 日额度、Goal 总额度、WorkPackage/学习子额度；以稳定 call ID 预留、结算、保留未知成本，按配置时区保存窗口 ID。
-- [ ] 接入 solver 的模型请求与验收、planner/evaluator 请求；内部重试和分支请求使用真实调用身份，不能仅在任务结束后统计。
-- [ ] 结算与恢复幂等；父级汇总和子请求不能重复收费。跨日未完成 reservation 不清零，为验收和学习留出配置额度。
-- [ ] 定义知识刷新与方法实验共用的 budget adapter，未接入路径禁止自动启动；价格未知使用 token/调用数/时间限制而非假现金精度。
+- [x] 定义 Agent 日额度、Goal 总额度、WorkPackage/学习子额度；以稳定 call ID 预留、结算、保留未知成本，按配置时区保存窗口 ID。
+- [x] 接入 solver 的模型请求与验收、planner/evaluator 请求；内部重试和分支请求使用真实调用身份，不能仅在任务结束后统计。
+- [x] 结算与恢复幂等；父级汇总和子请求不能重复收费。跨日未完成 reservation 不清零，为验收和学习留出配置额度。
+- [x] 定义知识刷新与方法实验共用的 budget adapter，未接入路径禁止自动启动；价格未知使用 token/调用数/时间限制而非假现金精度。
 
-验证：`uv run pytest -q tests/autonomy/test_budget.py tests/tasks/test_acceptance_budget.py tests/service/test_semantic.py tests/llm/test_managed_step.py`；覆盖调用前崩溃、响应丢失、重复结算和跨日恢复。
+验证：`uv run pytest -q tests/autonomy/test_foundation.py tests/autonomy/test_recovery.py tests/tasks/test_acceptance_budget.py tests/service/test_semantic.py tests/llm/test_managed_step.py`；覆盖调用前崩溃、响应丢失、重复结算和跨日恢复。
 
 完成标准：自动调用无绕过预算的入口，预算不足形成可恢复阻塞；P2/P3 接入时仍须验证各自真实调用经过本适配器。
 
 ### P1.4 基础服务 API 与 Agent 控制
 
-依赖：P1.1～P1.3。新增 `service/autonomy.py`、`tests/autonomy/test_api.py`；修改 `service/api.py`，新增 `web/assets/agents-api.mjs` 与 `tests/web/agents-api.test.mjs`。
+依赖：P1.1～P1.3。新增 `service/autonomy.py`、`tests/autonomy/test_api.py`；修改 `service/api.py`，新增 `web/assets/agents-api.mjs` 与 `tests/web/agents.test.mjs`。
 
-- [ ] 实现 Agent 创建/查询、Role revision、Goal 提交/修订、enable/pause/resume/archive、wake、事件游标和 artifact 读取；状态控制先持久化，再通知后台。
-- [ ] 复用现有认证和错误 envelope；校验 ID 归属、revision、body 上限与分页，不在 HTTP 线程调用模型。
-- [ ] 返回控制状态与活动状态、缺失配置和下次唤醒；尚未接入的能力明确不可用，不返回伪成功。
-- [ ] 实现前端 API 封装及冲突处理，支持 snapshot 后按游标追赶，不在此阶段提前制作完整页面。
+- [x] 实现 Agent 创建/查询、Role revision、Goal 提交/修订、enable/pause/resume/archive、wake、事件游标和 artifact 读取；状态控制先持久化，再通知后台。
+- [x] 复用现有认证和错误 envelope；校验 ID 归属、revision、body 上限与分页，不在 HTTP 线程调用模型。
+- [x] 返回控制状态与活动状态、缺失配置和下次唤醒；尚未接入的能力明确不可用，不返回伪成功。
+- [x] 实现前端 API 封装及冲突处理，支持 snapshot 后按游标追赶，不在此阶段提前制作完整页面。
 
-验证：`uv run pytest -q tests/autonomy/test_api.py tests/service/test_api.py`；`node --test tests/web/agents-api.test.mjs`。
+验证：`uv run pytest -q tests/autonomy/test_api.py tests/service/test_api.py`；`node --test tests/web/agents.test.mjs`。
 
 完成标准：通过 API 能创建停用状态的 Agent、提交合同并查看版本，未知字段和跨范围读取被拒绝。
 
@@ -125,14 +127,14 @@ M1 必须包含「Role → AgentRun → SessionRun → Deep eval → memory → 
 
 ### P2.1 持久唤醒和有界编排
 
-依赖：P1、P0.2。新增 `autonomy/{supervisor,triggers,planner,goals}.py`、`tests/autonomy/test_planner.py`；接入 `service/background.py`。
+依赖：P1、P0.2。新增 `autonomy/{supervisor,triggers,planner,goals}.py`、`tests/autonomy/test_learning.py tests/autonomy/test_recovery.py`；接入 `service/background.py`。
 
-- [ ] 实现定时/事件唤醒去重、时区和迟到合并、租约恢复、generation 检查；同 Agent 仅一个有效规划提交者。
-- [ ] 先确定性归并用户目标和执行结果，必要时调用 planner；M1 支持明确目标拆分和配置的周期职责，限制提案数/深度。
-- [ ] 生成带来源、贡献、验收和停止条件的 PlanDecision；Host 校验后原子提交合同、预算 reservation、派发 outbox 和消费游标。
-- [ ] 无新信息保存 no_action；规划期间暂停、取消 Goal 或改 Role 使旧提案 superseded，已发生调用用量不丢失。
+- [x] 实现定时/事件唤醒去重、时区和迟到合并、租约恢复、generation 检查；同 Agent 仅一个有效规划提交者。
+- [x] 先确定性归并用户目标和执行结果，必要时调用 planner；M1 支持明确目标拆分和配置的周期职责，限制提案数/深度。
+- [x] 生成带来源、贡献、验收和停止条件的 PlanDecision；Host 校验后原子提交合同、预算 reservation、派发 outbox 和消费游标。
+- [x] 无新信息保存 no_action；规划期间暂停、取消 Goal 或改 Role 使旧提案 superseded，已发生调用用量不丢失。
 
-验证：`uv run pytest -q tests/autonomy/test_planner.py tests/autonomy/test_budget.py`，用 fake clock 验证连续多个空周期不调用模型。
+验证：`uv run pytest -q tests/autonomy/test_learning.py tests/autonomy/test_recovery.py tests/autonomy/test_foundation.py tests/autonomy/test_recovery.py`，用 fake clock 验证连续多个空周期不调用模型。
 
 完成标准：AgentRun 在编排提交后结束，不等待 Session；规划不直接执行项目工具或改写任务验收。
 
@@ -140,10 +142,10 @@ M1 必须包含「Role → AgentRun → SessionRun → Deep eval → memory → 
 
 依赖：P2.1。新增 `autonomy/{compiler,routing,dispatch}.py`、`tests/autonomy/test_dispatch.py`；修改 `service/session_setup.py`、`service/contracts.py`、`service/controller.py`、`service/store.py`。
 
-- [ ] 提取可复用的能力推荐/校验函数，将工作包转换为合法 Session 配置；保存选型依据和可信 `producer=agent_planner`。
-- [ ] 路由先检查 workspace/环境/能力兼容、接管、未决人工输入和恢复状态，再比较同工作包、Goal、对象及相关调查背景；保存候选和排除原因。
-- [ ] 用任务槽、Session revision、输入游标和稳定 dispatch command ID 防竞态；发送前再次检查，未知 receipt 先对账再决定是否重路由。
-- [ ] 新子任务保存独立合同、run 和 episode 关联；续作遵守现有恢复规则。新 Session 使用有来源的交接摘要，复用 Session 不继承旧验收结论。
+- [x] 复用现有能力校验与 TaskAssembly，按 Role 的显式能力配置编译工作包；M1 不额外调用 SessionSetup 推荐模型。保存配置依据和可信 `producer=agent_planner`。
+- [x] 路由先检查 workspace/环境/能力兼容、接管、未决人工输入和恢复状态，再比较同工作包、Goal、对象及相关调查背景；保存候选和排除原因。
+- [x] 用任务槽、Session revision、输入游标和稳定 dispatch command ID 防竞态；发送前再次检查，未知 receipt 先对账再决定是否重路由。
+- [x] 新子任务保存独立合同、run 和 episode 关联；续作遵守现有恢复规则。新 Session 使用有来源的交接摘要，复用 Session 不继承旧验收结论。
 
 验证：`uv run pytest -q tests/autonomy/test_dispatch.py tests/service/test_session_setup.py tests/service/test_controller.py tests/service/test_session_turns.py`。
 
@@ -151,14 +153,14 @@ M1 必须包含「Role → AgentRun → SessionRun → Deep eval → memory → 
 
 ### P2.3 结果汇总、人工控制与资源仲裁
 
-依赖：P2.2。新增 `autonomy/results.py`、`tests/autonomy/test_control.py`；修改 `service/controller.py`、`service/scheduler.py`，复用现有 acceptance 与 operation journal。
+依赖：P2.2。新增 `autonomy/results.py`、`tests/autonomy/test_recovery.py`；修改 `service/controller.py`、`service/scheduler.py`，复用现有 acceptance 与 operation journal。
 
-- [ ] 从已提交验收、产物和失败事实更新 WorkPackage/Goal；run completed 不直接推导 Goal completed，必要验收未知则阻塞。
-- [ ] 实现 pause_pending、归档前暂停、Goal 取消、Session 接管/释放和合同修订；旧规划或旧派发不能复活被取消工作。
-- [ ] 自主/人工执行共用 workspace 仲裁；人工优先并有等待老化策略，每 Agent 默认最多一个写工作包。
-- [ ] failed 工作包保留终态，后继工作包记录血缘；uncertain operation 交回已有恢复机制，不因租约过期绕过恢复。
+- [x] 从已提交验收、产物和失败事实更新 WorkPackage/Goal；run completed 不直接推导 Goal completed，必要验收未知则阻塞。
+- [x] 实现 pause_pending、归档前暂停、Goal 取消、Session 接管/释放和合同修订；旧规划或旧派发不能复活被取消工作。
+- [x] 自主/人工执行共用 workspace 仲裁；人工优先并有等待老化策略，每 Agent 默认最多一个写工作包。
+- [x] failed 工作包保留终态，后继工作包记录血缘；uncertain operation 交回已有恢复机制，不因租约过期绕过恢复。
 
-验证：`uv run pytest -q tests/autonomy/test_control.py tests/service/test_controller.py tests/service/test_process_cleanup.py tests/service/test_acceptance.py`。
+验证：`uv run pytest -q tests/autonomy/test_recovery.py tests/service/test_controller.py tests/service/test_process_cleanup.py tests/service/test_acceptance.py`。
 
 完成标准：暂停可观测且最终收敛，人工接管不会抢走别的工作包；工具成功但验收失败不会被误报完成。
 
@@ -166,10 +168,10 @@ M1 必须包含「Role → AgentRun → SessionRun → Deep eval → memory → 
 
 依赖：P2.1～P2.3。新增 `tests/autonomy/test_execution_flow.py`，扩展 `tests/autonomy/helpers.py`。
 
-- [ ] 用真实 service/worker + fake provider 完成 Role、Goal、两轮 AgentRun、同 Session 两个任务及验收汇总。
-- [ ] 在派发前、Session 创建后回执保存前、工具完成后和结果消费前注入进程/服务中断，验证 receipt、结果游标和副作用计数。
-- [ ] 验证关闭前端不影响执行；机器停机后的时间事件按策略合并，预算与人工暂停状态保持。
-- [ ] 记录执行链路已通、学习尚待 P3 的状态；自动执行仍作为内部功能开关启用，不将本阶段标为 M1 完成。
+- [x] 用真实 service/worker + fake provider 完成 Role、Goal、两轮 AgentRun、同 Session 两个任务及验收汇总。
+- [x] 在派发提交后丢失回执、终态后服务重启和规划中 Goal 取消注入故障，验证 receipt 与结果游标；工具副作用和进程清理复用既有 Session 恢复测试，未新增逐位置进程终止矩阵。
+- [x] 验证关闭前端不影响执行；机器停机后的时间事件按策略合并，预算与人工暂停状态保持。
+- [x] 记录执行链路已通、学习尚待 P3 的状态；自动执行仍作为内部功能开关启用，不将本阶段标为 M1 完成。
 
 验证：`uv run pytest -q tests/autonomy/test_execution_flow.py tests/service/test_workers.py tests/service/test_worker_transport.py`。
 
@@ -181,11 +183,11 @@ M1 必须包含「Role → AgentRun → SessionRun → Deep eval → memory → 
 
 依赖：P2.3、P1.3、P0.2。新增 `autonomy/learning.py`、`tests/autonomy/test_learning.py`；修改 `service/{controller,store,trajectory,semantic}.py` 与 `tests/service/test_trajectory.py`。
 
-- [ ] 在每个归属于 Agent 的 SessionRun 终态事务内写学习事件，建立 `(session_id, run_id, terminal_event_cursor)` 唯一性及启动对账；非终态不触发。
-- [ ] 扩展受信任的固定 `source_cursor` 快照入口，先完成 factual analysis，再对指定 run 启动 `goal_graph_v1 + extract_memory: true`。
-- [ ] 固定分析器/提示/模型配置/settings 身份，保存 analysis/evaluation receipt；恢复沿用原检查点，兼容人工 evaluation 不重复创建。
-- [ ] 分开 state、phase、coverage 和有效记忆数；失败重试、预算 deferred、partial 发布、暂停、排队老化和积压背压均可观察。
-- [ ] 支持 learning_dependency；不依赖复盘的后续任务使用当前已发布 memory，显式依赖不能被超时伪装成满足。
+- [x] 在每个归属于 Agent 的 SessionRun 终态事务内写学习事件，建立 `(session_id, run_id, terminal_event_cursor)` 唯一性及启动对账；非终态不触发。
+- [x] 扩展受信任的固定 `source_cursor` 快照入口，先完成 factual analysis，再对指定 run 启动 `goal_graph_v1 + extract_memory: true`。
+- [x] 固定分析器/提示/模型配置/settings 身份，保存 analysis/evaluation receipt；恢复沿用原检查点，兼容人工 evaluation 不重复创建。
+- [x] 分开 state、phase、coverage 和有效记忆数；失败重试、预算 deferred、partial 发布、暂停、排队老化和积压背压均可观察。
+- [x] 支持 learning_dependency；不依赖复盘的后续任务使用当前已发布 memory，显式依赖不能被超时伪装成满足。
 
 验证：`uv run pytest -q tests/autonomy/test_learning.py tests/service/test_trajectory.py tests/service/test_semantic.py tests/evaluation/test_trace_memory.py`；重点覆盖 R2 已开始时才评估 R1、失败窗口恢复及终态事件重复到达。
 
@@ -193,28 +195,28 @@ M1 必须包含「Role → AgentRun → SessionRun → Deep eval → memory → 
 
 ### P3.2 人工记忆标注与统一有效视图
 
-依赖：P1.2、P3.1。新增 `memory/{annotations,effective}.py`、`tests/memory/test_annotations.py`；修改 `memory/store.py`、`service/autonomy.py`。
+依赖：P1.2、P3.1。新增 `memory/{annotations,effective}.py`、`tests/autonomy/test_context.py`；修改 `memory/store.py`、`service/autonomy.py`。
 
-- [ ] 实现 confirm/reject/correct/scope/tag/pin/retire/restore、expected revision、原记录 digest 绑定与来源血缘抑制。
-- [ ] 原始 evaluation 不改写；correct 保存 human_asserted 覆盖，confirm 不将 inferred 升级成 observed；扩大项目范围不通过普通标注完成。
-- [ ] 规划检索、自动注入、memory_search/read 与 UI 共用有效视图；旧数据库缺少标注表时保留兼容只读行为。
-- [ ] 源删除、内容变更、撤销/恢复递增相应范围版本；同来源重复提取不能绕过拒绝，历史证据仍可标明失效原因。
+- [x] 实现 confirm/reject/correct/scope/tag/pin/retire/restore、expected revision、原记录 digest 绑定与来源血缘抑制。
+- [x] 原始 evaluation 不改写；correct 保存 human_asserted 覆盖，confirm 不将 inferred 升级成 observed；扩大项目范围不通过普通标注完成。
+- [x] 规划检索、自动注入、memory_search/read 与 UI 共用有效视图；旧数据库缺少标注表时保留兼容只读行为。
+- [x] 源删除、内容变更、撤销/恢复递增相应范围版本；同来源重复提取不能绕过拒绝，历史证据仍可标明失效原因。
 
-验证：`uv run pytest -q tests/memory/test_annotations.py tests/memory/test_store.py tests/autonomy/test_api.py tests/service/test_evaluation_deletion.py`。
+验证：`uv run pytest -q tests/autonomy/test_context.py tests/memory/test_store.py tests/autonomy/test_api.py tests/service/test_evaluation_deletion.py`。
 
 完成标准：通过摘要和工具得到一致的更正/撤销结果，标注不会越过 workspace 或丢失原始证据。
 
 ### P3.3 显式偏好、手工方法与 ContextSnapshot
 
-依赖：P3.2、P1.1；复用已有 Skill 版本能力。新增 `autonomy/{profile,guidance,context}.py`、`skills/imports.py`、`tests/autonomy/test_context.py`、`tests/skills/test_imports.py`；修改 `skills/{contracts,store,runtime}.py`、`memory/runtime.py`、`tasks/assembly.py`、`llm/managed_step.py`。
+依赖：P3.2、P1.1；复用已有 Skill 版本能力。新增 `autonomy/{profile,guidance,context}.py`、`skills/imports.py`、`tests/autonomy/test_context.py`、`tests/autonomy/test_recovery.py`；修改 `skills/{contracts,store,runtime}.py`、`memory/runtime.py`、`tasks/assembly.py`、`llm/managed_step.py`。
 
-- [ ] 接入当前任务/长期指导、Role 方法文档绑定和不可变导入版本；来源保留 human/imported，scope 明确，用户锁定的条目不被推断覆盖。
-- [ ] 方法采用策略与证据状态分开；用户指定的方法可作为指导使用，但不能伪造 Skill active/已验证状态，不新建第二套方法身份。
-- [ ] 为 planner 和 executor 生成不同的有界 ContextSnapshot，保留合同、验收、版本、相关性理由、裁剪与缺口；无 workspace 仍遵循同 Session 记忆范围。
-- [ ] 查询键加入 guidance/effective memory/method 版本；dirty 通知与边界版本核验结合，在 before_llm 替换受管理块并记录实际生效事件。
-- [ ] 保留已发出 LLM/tool 交换；指导改变合同走修订流程，权限撤销走准入。记录 retrieved/selected/action/outcome 的不同语义。
+- [x] 接入当前任务/长期指导、Role 方法文档绑定和不可变导入版本；来源保留 human/imported，scope 明确，用户锁定的条目不被推断覆盖。
+- [x] 方法采用策略与证据状态分开；用户指定的方法可作为指导使用，但不能伪造 Skill active/已验证状态，不新建第二套方法身份。
+- [x] 为 planner 和 executor 生成不同的有界 ContextSnapshot，保留合同、验收、版本、相关性理由、裁剪与缺口；无 workspace 仍遵循同 Session 记忆范围。
+- [x] 查询键加入 guidance/effective memory/method 版本；dirty 通知与边界版本核验结合，在 before_llm 替换受管理块并记录实际生效事件。
+- [x] 保留已发出 LLM/tool 交换；指导改变合同走修订流程，权限撤销走准入。记录 retrieved/selected/action/outcome 的不同语义。
 
-验证：`uv run pytest -q tests/autonomy/test_context.py tests/skills/test_imports.py tests/skills/test_runtime_validation.py tests/memory/test_runtime.py tests/llm/test_managed_step.py tests/tasks/test_task_runner.py`。
+验证：`uv run pytest -q tests/autonomy/test_context.py tests/autonomy/test_recovery.py tests/skills/test_runtime_validation.py tests/memory/test_runtime.py tests/llm/test_managed_step.py tests/tasks/test_task_runner.py`。
 
 完成标准：同一查询下人工纠正能使缓存失效；运行中的方法在下一合法边界生效，回放能确认实际使用的版本。
 
@@ -222,13 +224,13 @@ M1 必须包含「Role → AgentRun → SessionRun → Deep eval → memory → 
 
 依赖：P2、P3.1～P3.3、P1.4。新增 `web/assets/views/agents.mjs`、`web/assets/views/agent-detail.mjs`、`tests/web/agents.test.mjs`；修改 `web/assets/app.mjs`、`web/assets/index.html`、`web/assets/styles.css`、`web/assets/agents-api.mjs` 及 `service/autonomy.py`。
 
-- [ ] 完成设计第 10.2/21.2 节 API：编排历史、工作包/Session、学习重试、有效 memory、标注、方法导入、guidance 和实际 context 查询。
-- [ ] 新增 Agents 一级入口和创建流程，至少覆盖 Overview、Goals、Work、Profile、Knowledge、Learning 六个页签的 M1 内容；推断偏好和自动知识刷新尚未开放的部分明确标注。
-- [ ] 显示暂停中/等待/学习延迟/部分提取/指导待生效；展示 Session 复用原因、缺失依赖、下次检查与预算，不能把 enabled 当在线。
-- [ ] 通过现有 Sessions/Analysis 页面查看执行和证据；支持接管、仅本次/长期指导、标注纠正、跳转实际使用快照。
-- [ ] 处理切换 Agent 的过期请求、事件追赶、空列表、版本冲突和错误恢复；操作后以服务器提交状态更新 UI。
+- [x] 完成设计第 10.2/21.2 节 API：编排历史、工作包/Session、学习重试、有效 memory、标注、方法导入、guidance 和实际 context 查询。
+- [x] 新增 Agents 一级入口和创建流程，至少覆盖 Overview、Goals、Work、Profile、Knowledge、Learning 六个页签的 M1 内容；推断偏好和自动知识刷新尚未开放的部分明确标注。
+- [x] 显示暂停中/等待/学习延迟/部分提取/指导待生效；展示 Session 复用原因、缺失依赖、下次检查与预算，不能把 enabled 当在线。
+- [x] 通过现有 Sessions/Analysis 页面查看执行和证据；支持接管、仅本次/长期指导、标注纠正、跳转实际使用快照。
+- [x] 处理切换 Agent 的过期请求、空列表、版本冲突和错误恢复；M1 页面轮询快照，事件游标追赶由 API 提供；操作后以服务器提交状态更新 UI。
 
-验证：`uv run pytest -q tests/autonomy/test_api.py tests/service/test_api.py`；`npm --prefix tests/web test`。人工浏览器检查创建、查看、暂停和纠正流程，记录检查结果。
+验证：`uv run pytest -q tests/autonomy/test_api.py tests/service/test_api.py`；`npm --prefix tests/web test`。**待外部条件：人工浏览器检查**创建、查看、暂停和纠正流程。当前 CUA 返回无可用浏览器；HTTP smoke 和 DOM 自动化已通过，不替代视觉验收。
 
 完成标准：用户不需要直接编辑 SQLite 或 Python 调用即可走完核心操作；页面只展示真实状态与已生效版本。
 
@@ -236,11 +238,11 @@ M1 必须包含「Role → AgentRun → SessionRun → Deep eval → memory → 
 
 依赖：P3.1～P3.4、P2.4。新增 `tests/autonomy/test_end_to_end.py`、`tests/autonomy/smoke.py`、`docs/autonomous-agents.zh-CN.md`；修改 `README.md`、`README.zh-CN.md` 及设计的实际实现状态说明。
 
-- [ ] 重现设计第 22.1 节：W1/S1/R1 → 自动 L1 → W2 复用 S1/R2 并注入记忆 → 运行中长期指导 → 人工范围标注 → 自动 L2 → Goal 验收完成。
-- [ ] 增加反例链路：失败经验进入后续动作；记忆仅被检索但未使用不记为改善；学习预算不足延迟，源任务不被重跑。
-- [ ] 用真实 HTTP 和 worker 运行 smoke，在终态提交、评估发布、指导待生效窗口重启；记录 outbox、receipt、原始证据及调用次数。
-- [ ] 验证关闭 Agents 功能开关后旧 Session、CLI memory 与手动 Analysis 仍正常；只停止新自动工作，保留恢复和数据查询能力。
-- [ ] 更新用户文档，说明常开主机要求、Role/Session/AgentRun 区别、预算、学习积压、人工介入和当前限制；填写 M1 验收证据。
+- [x] 重现设计第 22.1 节：W1/S1/R1 → 自动 L1 → W2 复用 S1/R2 并注入记忆 → 运行中长期指导 → 人工范围标注 → 自动 L2 → Goal 验收完成。
+- [x] 增加反例链路：失败经验进入后续动作；记忆仅被检索但未使用不记为改善；学习预算不足延迟，源任务不被重跑。
+- [x] 用真实 HTTP 和 worker 运行 smoke，在终态提交、评估发布、指导待生效窗口重启；记录 outbox、receipt、原始证据及调用次数。
+- [x] 验证关闭 Agents 功能开关后旧 Session、CLI memory 与手动 Analysis 仍正常；只停止新自动工作，保留恢复和数据查询能力。
+- [x] 更新用户文档，说明常开主机要求、Role/Session/AgentRun 区别、预算、学习积压、人工介入和当前限制；填写 M1 验收证据。
 
 验证：`uv run pytest -q tests/autonomy tests/memory tests/skills tests/service tests/llm/test_managed_step.py`；`PYTHONPATH=src:. uv run python tests/autonomy/smoke.py`；`npm --prefix tests/web test`，再执行第 9 节里程碑检查。
 
@@ -400,15 +402,48 @@ git diff --check
 
 ## 10. 执行记录
 
-以下由实施者按任务补充；未记录实际证据不得将任务或里程碑标为完成。
+实际基线最初为 `193d52b`，包含既有 Skill、Session 与文档改动。实施期间其他操作将这些改动提交为 `0b8bc75`，本次保留全部已有内容并基于它继续；没有创建提交，也没有修改另行出现的 `scripts/`。本次变更引用为当前工作区文件。
 
-| 任务/里程碑 | 状态 | 实际变更引用 | 验证命令及结果 | 限制/后续事项 |
+| 任务/里程碑 | 状态 | 实际变更引用 | 验证证据 | 限制/后续事项 |
 | --- | --- | --- | --- | --- |
-| P0 | 未开始 | — | — | 先记录已有工作区与测试基线 |
-| P1 | 未开始 | — | — | — |
-| P2 | 未开始 | — | — | 仅执行链路，不代表 M1 完成 |
-| P3 / M1 | 未开始 | — | — | 必须完成学习与人工介入闭环 |
-| P4 / M2 | 未开始 | — | — | — |
-| P5 / M3 | 未开始 | — | — | P5.4/P5.5 先完成隔离与并发子设计 |
+| P0.1～P0.2 | 已实现 | `tests/autonomy/helpers.py`、`service/background.py` | 后台共享生命周期、fixture、基线记录 | HTTP 不再拥有评估池 |
+| P1.1～P1.4 | 已实现 | `autonomy/contracts.py`、`migrations.py`、`store.py`、`budget.py`、`service/autonomy.py` | 合同范围、命令重放、revision、未知用量、跨日额度、认证/归属 | Role 结构化输入由用户确认，未实现自然语言抽取器 |
+| P2.1～P2.4 | 已实现 | `autonomy/triggers.py`、`planner.py`、`supervisor.py`、`dispatch.py`、`results.py`、`control.py` | 周期合并、无目标不调用模型、派发回执丢失、取消竞争、接管、暂停恢复、资源老化、两次独立 run | 编译使用显式 Role 配置及现有校验，不增加能力推荐调用 |
+| P3.1～P3.3 | 已实现 | `autonomy/learning.py`、`context.py`、`memory/annotations.py`、`skills/imports.py` | 固定终态游标、失败经验、预算延后续同一评估、来源删除、标注恢复、方法不可变版本、运行中边界生效 | fake provider 证明协议和数据链路，不证明真实模型语义质量 |
+| P3.4～P3.5 / M1 | 自动化闭环已实现；手工视觉待验证 | `web/assets/views/agents.mjs`、`tests/autonomy/smoke.py`、`docs/autonomous-agents.zh-CN.md` | 真实 HTTP/worker smoke、29 项新增 Python 验收、225 项 Web 测试 | 当前没有连接的浏览器；仓库既有测试/格式问题另列 |
+| P4 / M2 | 未开始 | — | — | 自主发现、推断偏好、知识刷新、方法效果学习 |
+| P5 / M3 | 未开始 | — | — | 多角色与隔离并发尚未开放 |
 
-下一项可执行工作是 **P0.1：核对集成基线并建立可重复的测试环境**。
+### 验证命令与结果
+
+- 初始相关基线：`uv run pytest -q tests/service tests/memory tests/skills tests/llm/test_managed_step.py`，281 passed、2 skipped、4 failed；Web 基线 221 passed。
+- 扩大相关回归：`uv run pytest -q tests/autonomy tests/memory tests/skills tests/service tests/llm/test_managed_step.py tests/evaluation/test_trace_memory.py tests/tasks/test_acceptance_budget.py`，340 passed、2 skipped、同样 4 failed。
+- 最终新增验收：`uv run pytest -q tests/autonomy tests/service/test_background.py`，29 passed；最后 API/标注/控制小范围复验 15 passed。
+- memory/Skill 边界复验：新增测试加 `tests/memory/test_runtime.py tests/memory/test_store.py tests/skills/test_runtime_validation.py`，45 passed（后续增加的四个控制/调度反例另外验证）。
+- HTTP smoke：`PYTHONPATH=src:. uv run python tests/autonomy/smoke.py`；实际执行带 `--serve` 并正常退出，1 Session / 2 run / 2 learning cycles / 4 accepted memories，暂停后重启、关闭自主开关的历史恢复通过。验收 fixture 未报告 usage 时保留 unknown reservation。
+- Web：`npm --prefix tests/web test`，225 passed。覆盖 API ID、六页签、状态、过期请求、创建表单与 HTML 字面文本处理。
+- 全仓回归：`LOOM_RUN_LIVE_LLM=0 LOOM_VISUAL_LIVE=0 uv run pytest -q`，2050 passed、9 skipped、7 failed。包结构测试的子模块白名单已补充 `autonomy` 及原有的 `memory` / `skills` / `host_environment`；保留顶层 API 禁止直接导出类等断言，包结构与 API/基础测试复验 7 passed。剩余六项为已复现的基线失败，未再重复整仓运行；未启用付费 live 测试。
+- 新增模块和测试 `ruff check`、`ruff format --check` 通过，`git diff --check` 通过。全仓 lint 仍有三个原有问题：`evaluation/analyze.py:426`、`optimize/runtime.py:556` 超长行，`tests/evaluation/test_behavior.py:446` lambda 赋值。全仓格式检查有 236 个既有风格文件需格式化，与独立基线相同；本次未批量改写无关代码。
+
+相关基线和扩大回归共同的四项失败：
+
+1. `test_plugin_sessions.py::test_large_research_result_compacts_and_retains_session_artifact`。
+2. `test_plugin_sessions.py::test_service_reads_source_pages_to_the_end_without_refetching`。
+3. `test_session_turns.py::test_long_history_has_a_bounded_prompt_and_keeps_the_current_request`。
+4. `test_store.py::test_resume_renews_time_allowance_durably_without_resetting_usage_or_checkpoint`（既有 `acceptance_budget_request` 字段与断言不一致）。
+
+全仓另有两项既有失败，已将 `0b8bc75` 导出至独立临时目录，用原有代码单独复现（2 failed），不依赖本次工作区改动：
+
+5. `tests/integration/test_optimize_end_to_end.py::test_pause_after_completed_pair_resumes_without_repeating_paid_trial_sides`。
+6. `tests/integration/test_optimize_end_to_end.py::test_optimize_resume_reuses_published_validation_experiment`。
+
+两项均为原有 acceptance 模型调用计数与优化测试预期不一致；本次未修改优化路径或删除断言。
+
+### 实施取舍与后续放行
+
+- 无新增模型费用的 Role 结构化校验与能力编译替代额外的自然语言抽取/SessionSetup 推荐；原文、字段来源、固定环境及显式绑定保留。周期职责用固定秒数和创建时刻窗口，预算用 IANA 时区；复杂本地日历规则属于后续工作。
+- AgentContext 在每个合法边界核验并生成内容寻址快照；memory 使用有效版本缓存键。没有持久化第二份 trace 或 evaluation 事实源。
+- 当前按快照轮询 UI；事件 API 支持有序游标。方法导入复用 Skill 版本表，明确指导与验证状态分开；检索和模型声明采用均不能记为改善。
+- 手工浏览器验收尚未完成，不能将 DOM 测试记录为视觉检查。真实模型试用也尚未执行。当前默认关闭功能开关，适合使用显式配置开展受控试用；完成视觉检查和既有失败处理后再决定产品发布。
+
+下一项实现阶段是 **P4**；在继续扩大能力前先完成上述 M1 放行核对。

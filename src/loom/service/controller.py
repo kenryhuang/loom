@@ -28,7 +28,8 @@ def _time_budget_exceeded(state):
 
 
 class LoomService:
-    def __init__(self, directory, *, config_path=None, max_active_runs=2, provider_factory=None, plugin_registry_factory=None):
+    def __init__(self, directory, *, config_path=None, max_active_runs=2, provider_factory=None, plugin_registry_factory=None,
+                 autonomy_enabled=False, agent_planner=None, evaluation_provider_factory=None):
         if isinstance(max_active_runs, bool) or not isinstance(max_active_runs, int) or max_active_runs < 1:
             raise ServiceError("max_active_runs must be positive")
         self.store = SessionStore(directory, plugin_registry_factory=plugin_registry_factory)
@@ -51,12 +52,29 @@ class LoomService:
         self.stopping = threading.Event()
         self.thread = None
         self.closed = False
+        self._background = None
+        self.autonomy_enabled = autonomy_enabled
+        self.agent_planner = agent_planner
+        self.evaluation_provider_factory = evaluation_provider_factory
         self.cleanup_checked = 0
         for state in self.store.list_sessions():
             if state["run"] and state["run"]["state"] == "running":
                 self.recover(state["session_id"], "Supervisor restarted")
 
+    @property
+    def background(self):
+        with self.lock:
+            if self.closed:
+                raise ServiceError("Service is closed", 409)
+            if self._background is None:
+                from loom.service.background import ServiceBackground
+
+                self._background = ServiceBackground(self)
+            return self._background
+
     def start(self):
+        if self.autonomy_enabled:
+            self.background.autonomy.start()
         if self.thread is None:
             self.thread = threading.Thread(target=self._schedule, daemon=True, name="loom-supervisor")
             self.thread.start()
@@ -182,6 +200,20 @@ class LoomService:
                 raise ServiceError("Previous processes have not exited", 409)
             old = state["run"]
             restarting = state.pop('restart_pending', False)
+            if old and old['state'] == 'failed' and not restarting:
+                # A failed Agent run is replaced on Resume. Preserve the last
+                # committed checkpoint's observations and plugin evidence before
+                # replacing its run record; never replay pending model actions.
+                checkpoint = self._checkpoint_value(state)
+                if checkpoint:
+                    context = checkpoint['context']
+                    observations = {o.id: o for o in (*context.state.observations, *checkpoint.get('observations', []))}
+                    scratch = dict(context.state.scratch or {})
+                    if checkpoint.get('plugin_states'):
+                        scratch['execution_plugins'] = checkpoint['plugin_states']
+                    state['context'] = encode(replace(context, state=replace(
+                        context.state, observations=tuple(observations.values()), scratch=scratch,
+                    )))
             if not old or old["state"] in {"completed", "stopped", "failed"}:
                 state["run"] = {"id": new_id("run"), "state": "queued", "steps": 0, "checkpoint": None, "active_seconds": 0, "counters": encode({})}
                 state["run"]["reset_planning"] = bool(
@@ -225,6 +257,12 @@ class LoomService:
         call = plain(call)
         oid = f"{state['run']['id']}:{call['id']}"
         row = db.execute("SELECT body FROM operations WHERE id=?", (oid,)).fetchone()
+        if state.get('autonomy') and not row:
+            agent_row = db.execute('SELECT body FROM agents WHERE id=?', (state['autonomy']['agent_id'],)).fetchone()
+            role = json.loads(agent_row[0])['role'] if agent_row else {}
+            if (not agent_row or not set(state['task'].get('knowledge_base_ids', [])) <= set(role.get('knowledge_base_ids', []))
+                    or not set(state['task'].get('external_tool_ids', [])) <= set(role.get('external_tool_ids', []))):
+                raise ServiceError('Agent source access was revoked; replan before starting a new tool operation', 409)
         return oid, json.loads(row[0]) if row else None
 
     def _save_operation(self, db, sid, oid, op):
@@ -233,6 +271,25 @@ class LoomService:
     def _worker_event(self, state, emit, db, value):
         run, sid = state["run"], state["session_id"]
         event = plain(value)
+        if state.get('autonomy') and event['type'] == 'context.updated':
+            binding = state['autonomy']
+            row = db.execute('SELECT body FROM agent_contexts WHERE id=? AND agent_id=?',
+                             (event.get('snapshot_id'), binding['agent_id'])).fetchone()
+            if not row or json.loads(row[0])['run_id'] != run['id']:
+                raise ServiceError('Context snapshot does not belong to this run', 409)
+            for gid in json.loads(row[0]).get('guidance_ids', []):
+                guidance = db.execute('SELECT body FROM agent_guidance WHERE id=? AND agent_id=?', (gid, binding['agent_id'])).fetchone()
+                if guidance:
+                    item = json.loads(guidance[0])
+                    item['applied_run_ids'] = list(dict.fromkeys([*item.get('applied_run_ids', []), run['id']]))
+                    db.execute('UPDATE agent_guidance SET body=? WHERE id=?', (canonical(item), gid))
+        if state.get('autonomy') and event['type'] == 'memory.retrieved':
+            from loom.autonomy.store import digest
+
+            usage = dict(kind='retrieved', sources=event.get('sources', []), run_id=run['id'],
+                         work_package_id=state['autonomy']['work_package_id'])
+            db.execute('INSERT OR IGNORE INTO agent_memory_uses VALUES(?,?,?,?)',
+                       ('use_' + digest(usage), state['autonomy']['agent_id'], run['id'], canonical(usage)))
         if event["type"].endswith(".delta") and isinstance(event.get("delta"), str):
             offsets = run.setdefault("stream_offsets", {})
             key = stream_key(event)
@@ -307,6 +364,19 @@ class LoomService:
         emit(event["type"], event)
 
     def worker_record(self, sid, record):
+        if record.get('type') in {'agent_context', 'agent_record_use'}:
+            from loom.autonomy.context import build_snapshot, record_use
+
+            state = self.store.snapshot(sid)
+            run = state.get('run')
+            if (not state.get('autonomy') or not run or record['epoch'] != state['epoch']
+                    or record['attempt_id'] != run['attempt_id']):
+                raise ServiceError('Stale executor or missing Agent binding', 409)
+            if record['type'] == 'agent_record_use':
+                return record_use(self.background.autonomy.store, state['autonomy'], run['id'], decode(record['payload']))
+            return build_snapshot(self.background.autonomy.store, state['autonomy']['agent_id'], binding=state['autonomy'],
+                                  session_id=sid, run_id=run['id'])
+
         def handle(state, emit, db):
             run = state["run"]
             if not run or record["epoch"] != state["epoch"] or record["attempt_id"] != run["attempt_id"]:
@@ -580,6 +650,8 @@ class LoomService:
                 self.store.queue_resume(db, state, retry_requested)
             else:
                 state["task"]["state"] = "paused" if state["control"] else "failed"
+                if state.get('autonomy') and not state['control'] and run.get('failure') and not state.get('workspace_blocked'):
+                    run['state'] = 'failed'
             emit("run.recovery.required", {"reason": reason, "operations": operations})
             state["task"]["revision"] += 1
             emit("task.state.changed", {"state": state["task"]["state"], "revision": state["task"]["revision"]})
@@ -664,7 +736,10 @@ class LoomService:
                 shared = self.shared_active()
                 available = min(self.capacity - len(self.active), self.shared_capacity - len(self.active) - len(shared))
                 occupied = {**shared, **self.active}
-                for sid in ready_sessions(self.store.list_sessions(), occupied, len(occupied) + max(0, available)):
+                candidates = self.store.list_sessions()
+                if not self.autonomy_enabled:
+                    candidates = [state for state in candidates if not state.get('autonomy')]
+                for sid in ready_sessions(candidates, occupied, len(occupied) + max(0, available)):
                     try:
                         descriptor = self.prepare_attempt(sid)
                         attempt = spawn_attempt(descriptor, self.config_path, self.provider_factory, self.plugin_registry_factory)
@@ -678,6 +753,8 @@ class LoomService:
         if self.closed:
             return
         self.closed = True
+        if self._background is not None:
+            self._background.close()
         if self.thread:
             with self.lock:
                 for sid in self.active:

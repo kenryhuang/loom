@@ -258,10 +258,9 @@ def _load_cli_config(config_path: Path | None, parser: argparse.ArgumentParser) 
 
 
 def _discover_default_config_path() -> Path | None:
-    for candidate in (Path("config.yaml"), Path("config.yml")):
-        if candidate.exists():
-            return candidate
-    return None
+    from loom.tasks.config import discover_default_config_path
+
+    return discover_default_config_path()
 
 
 def _coalesce(value, fallback, default):

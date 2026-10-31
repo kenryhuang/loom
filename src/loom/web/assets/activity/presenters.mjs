@@ -111,6 +111,12 @@ function generic(args) {
 }
 export function builtinPresenters() {
   return new ActivityPresenters()
+    .register(({descriptor}) => descriptor.kind === "run-status", args => ({
+      ...base(args), title: args.descriptor.status === "failed" ? "Execution failed" : "Execution paused",
+      subject: args.data.error?.code || args.data.code || "",
+      outcome: compact(args.data.reason || args.data.error?.message || args.data.message) || "Expand for details",
+      sections: usefulFields(args.data),
+    }))
     .register(({descriptor}) => descriptor.kind === "acceptance", presentAcceptance)
     .register(
       ({ descriptor }) => ["model", "thought"].includes(descriptor.kind),
@@ -120,12 +126,20 @@ export function builtinPresenters() {
         const prose = typeof data === "string" ? data : modelText(data);
         result.title = result.state === "failed" ? "Model failed" : "Working";
         result.subject = modelHeadline(data, result.state === "running");
+        const chars = Object.values(descriptor.streamCounts || {}).reduce(
+          (sum, count) => sum + count, 0,
+        );
+        const usage = data.response?.usage || data.usage;
+        const tokens = usage?.completion_tokens;
+        const progress = Number.isFinite(tokens) && tokens >= 0 && (tokens > 0 || usage.total_tokens > 0)
+          ? `${tokens.toLocaleString()} output tokens`
+          : chars > 0 ? `${chars.toLocaleString()} chars received` : "";
         result.outcome =
           result.state === "failed"
-            ? compact(data.error?.message)
+            ? [compact(text(data.error) || data.error?.message) || "Request failed; see process status for details", progress].filter(Boolean).join(" · ")
             : result.state === "running"
-              ? ""
-              : "Done";
+              ? progress || "Waiting for response"
+              : ["Done", progress].filter(Boolean).join(" · ");
         result.sections = prose
           ? [section("", prose, "markdown")]
           : [

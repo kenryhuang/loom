@@ -149,6 +149,24 @@ def test_auth_validation_conflicts_and_private_snapshot(api):
     assert (path / "credential").stat().st_mode & 0o777 == 0o600
 
 
+def test_no_auth_mode_skips_credential_check_for_local_development(tmp_path):
+    service = LoomService(tmp_path / "data")
+    server = ServiceHTTPServer(("127.0.0.1", 0), service, "private-test-token", require_auth=False)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for headers in ({}, {"Authorization": "Bearer wrong"}):
+            request = urllib.request.Request(f"http://127.0.0.1:{server.server_port}/v1/sessions", headers=headers)
+            with urllib.request.urlopen(request) as response:
+                assert response.status == 200
+                assert "sessions" in json.loads(response.read())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        service.close()
+
+
 def test_snapshot_subscribe_race_two_readers_and_resume_cursor(api):
     service, server, client, path = api
     sid = new(client, path)

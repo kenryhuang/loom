@@ -134,6 +134,8 @@ class SkillStore:
     def check_version(self, identifier):
         with self.transaction() as db:
             version = self.version(identifier, db=db)
+            if version.get('source', {}).get('kind') == 'human_import':
+                raise ValueError('Imported methods are explicit Agent guidance; manage adoption through the Agent profile')
             valid = self.dependencies_valid(identifier, db=db)
             if not valid and version['state'] in {'active', 'trial', 'candidate'}:
                 db.execute("UPDATE skill_versions SET state='suspended',revision=revision+1 WHERE id=?", (identifier,))
@@ -175,6 +177,8 @@ class SkillStore:
             version = self.version(identifier, db=db)
             if version['revision'] != revision:
                 raise ValueError('Skill revision conflict')
+            if version.get('source', {}).get('kind') == 'human_import':
+                raise ValueError('Imported methods are explicit Agent guidance; manage adoption through the Agent profile')
             if version['state'] == 'retired':
                 raise ValueError('Retired versions are immutable; induce a new candidate')
             if state in {'active', 'trial'}:

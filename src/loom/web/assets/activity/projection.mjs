@@ -1,6 +1,6 @@
 /** Order-independent lifecycle projection, scoped by the owning process. */
 export function activityKey(descriptor, event) {
-  if (["plan", "acceptance"].includes(descriptor.kind)) return descriptor.key;
+  if (["plan", "acceptance", "run-status"].includes(descriptor.kind)) return descriptor.key;
   const scope = event?.payload?.trace_id || event?.trace_id;
   return scope ? `${scope}:${descriptor.key}` : descriptor.key;
 }
@@ -10,6 +10,10 @@ export function mergeActivity(previous, incoming) {
   const newer = (incoming.seq || 0) >= (previous.seq || 0);
   const latest = newer ? incoming : previous;
   const older = newer ? previous : incoming;
+  // Absolute stream ends survive overlapping deltas and snapshot/history replay.
+  const streamCounts = { ...(previous.streamCounts || {}) };
+  for (const [key, count] of Object.entries(incoming.streamCounts || {}))
+    streamCounts[key] = Math.max(streamCounts[key] || 0, count);
   const merge = ["tool", "model", "thought", "plan"].includes(latest.kind);
   const sources = [...(previous.sources || [])];
   if (
@@ -33,6 +37,7 @@ export function mergeActivity(previous, incoming) {
   return {
     ...older,
     ...latest,
+    streamCounts,
     artifact: latest.artifact || older.artifact,
     details:
       merge &&

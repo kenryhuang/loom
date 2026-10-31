@@ -36,11 +36,12 @@ def installation_token(path):
 class ServiceHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, service, token, *, web_frontend=True):
+    def __init__(self, address, service, token, *, web_frontend=True, require_auth=True):
         if not token or not all(ipaddress.ip_address(info[4][0]).is_loopback for info in socket.getaddrinfo(address[0], address[1])):
             raise ServiceError("Service requires a token and loopback address")
         self.service = service
         self.token = token
+        self.require_auth = require_auth
         if web_frontend is True:
             from loom.web.frontend import WebFrontend
 
@@ -52,15 +53,10 @@ class ServiceHTTPServer(ThreadingHTTPServer):
         self.session_setup = SessionSetup(service, self.web_frontend or WebFrontend())
         self.closing = threading.Event()
         super().__init__(address, SessionHandler)
-        from loom.service.trajectory import SessionTrajectory
-
-        self.trajectory = SessionTrajectory(service.store)
-        from loom.service.semantic import SessionSemantic
-
-        self.semantic = SessionSemantic(self.trajectory, service.config_path)
-        from loom.service.skills import SessionSkills
-
-        self.skills = SessionSkills(self.trajectory, self.semantic)
+        background = service.background
+        self.trajectory = background.trajectory
+        self.semantic = background.semantic
+        self.skills = background.skills
         from loom.knowledge.jobs import KnowledgeJobs
 
         self.knowledge_jobs = KnowledgeJobs(service.store.knowledge)
@@ -70,16 +66,10 @@ class ServiceHTTPServer(ThreadingHTTPServer):
 
     def server_close(self):
         self.closing.set()
-        if hasattr(self, "skills"):
-            self.skills.close()
         if hasattr(self, "diagnoses"):
             self.diagnoses.close()
         if hasattr(self, "knowledge_jobs"):
             self.knowledge_jobs.close()
-        if hasattr(self, "semantic"):
-            self.semantic.close()
-        if hasattr(self, "trajectory"):
-            self.trajectory.close()
         super().server_close()
 
 
@@ -173,11 +163,17 @@ class SessionHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(body)
                     return
-            if not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + self.server.token):
+            if self.server.require_auth and not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + self.server.token):
                 self.close_connection = True
                 raise ServiceError("Service credential required", 401, "UNAUTHORIZED")
             parts = parsed.path.strip("/").split("/")
             service = self.server.service
+            if parts[:2] == ['v1', 'agents']:
+                try:
+                    result = service.background.autonomy.dispatch(method, parts[2:], query, self._body() if method == 'POST' else None)
+                except (ValueError, TypeError, KeyError) as exc:
+                    raise ServiceError(str(exc)) from exc
+                return self._json(200, result)
             if parts[:2] == ["v1", "skills"]:
                 try:
                     result = self.server.skills.dispatch(method, parts[2:], query, self._body() if method == 'POST' else None)

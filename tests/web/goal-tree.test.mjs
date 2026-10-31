@@ -9,6 +9,66 @@ const fixture = () => JSON.parse(readFileSync(new URL('./fixtures/incremental-gr
 const open = (node, dom) => {node.open = true; node.dispatchEvent(new dom.window.Event('toggle'));};
 const named = (root, title) => [...root.querySelectorAll('details')].find(d => d.querySelector('summary').textContent === title);
 
+test('requirements and stage metadata toggle within their nodes without adding tree levels', async () => {
+  const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
+  const root = document.querySelector('main'), data = fixture();
+  // A root-owned stage must be visible independently of the requirements block.
+  data.stages[0].goal_id = data.goals[0].id;
+  const view = new IncrementalGraphView(root); view.update(data, 'job');
+  const info = node => node.querySelector(':scope > .goal-tree-content > .goal-tree-info');
+  const toggle = node => node.querySelector(':scope > summary .goal-tree-tags > button');
+  let goal = root.querySelector('.goal-tree-goal');
+  assert.equal(toggle(goal).textContent, 'Task requirements');
+  assert.equal(toggle(goal).previousElementSibling.textContent, 'L1–8');
+  assert.equal(toggle(goal).getAttribute('aria-controls'), info(goal).id);
+  assert.equal(toggle(goal).getAttribute('aria-expanded'), 'false');
+  assert.equal(info(goal).hidden, true);
+  assert.equal(info(goal).childNodes.length, 0);
+  let stage = goal.querySelector(':scope > .goal-tree-content > .goal-tree-children > .goal-tree-stage');
+  assert.ok(stage);
+  assert.equal(stage.closest('.goal-tree-info'), null);
+  toggle(goal).click();
+  assert.equal(goal.open, true);
+  assert.equal(info(goal).hidden, false);
+  assert.match(info(goal).textContent, /ConditionRequired/);
+  toggle(goal).click();
+  assert.equal(goal.open, true);
+  assert.equal(info(goal).hidden, true);
+  assert.equal(stage.isConnected, true);
+
+  assert.equal(toggle(stage).textContent, 'Stage details & dependencies');
+  assert.equal(info(stage).hidden, true);
+  assert.equal(stage.open, false);
+  toggle(stage).click();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(stage.open, true);
+  assert.equal(info(stage).hidden, false);
+  assert.equal(toggle(stage).getAttribute('aria-expanded'), 'true');
+  const action = stage.querySelector(':scope > .goal-tree-content > .goal-tree-actions > .goal-tree-action');
+  assert.ok(action);
+  assert.equal(action.closest('.goal-tree-info'), null);
+  assert.equal(named(root, 'Task requirements'), undefined);
+  assert.equal(named(root, 'Stage details & dependencies'), undefined);
+
+  view.update({...data, graph_revision: 2}, 'job');
+  stage = root.querySelector(`[data-stage-id="${data.stages[0].id}"]`);
+  assert.equal(info(stage).hidden, false);
+  toggle(stage).click();
+  assert.equal(stage.open, true);
+  assert.equal(info(stage).hidden, true);
+  view.mode = 'report'; view.render(); view.mode = 'skeleton'; view.render();
+  stage = root.querySelector(`[data-stage-id="${data.stages[0].id}"]`);
+  assert.equal(info(stage).hidden, true);
+  toggle(stage).click();
+  view.update(data, 'another-job');
+  goal = root.querySelector('.goal-tree-goal');
+  stage = root.querySelector(`[data-stage-id="${data.stages[0].id}"]`);
+  assert.equal(info(goal).hidden, true);
+  assert.equal(info(stage).hidden, true);
+  assert.equal(stage.open, false);
+  dom.window.close();
+});
+
 test('goal nesting exposes its basis separately from chronological spans, including old reports', () => {
   const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
   const data = fixture(), parent = data.goals[1], child = {...parent, id: 'nested', parent_goal_id: parent.id,
@@ -21,7 +81,7 @@ test('goal nesting exposes its basis separately from chronological spans, includ
   let branch = root.querySelector('[data-goal-id="nested"]');
   assert.doesNotMatch(branch.querySelector('summary').textContent, /Nesting unreviewed/);
   assert.match(branch.querySelector('summary').textContent, /L\d+–\d+/);
-  open(named(branch, 'Goal details'), dom);
+  branch.querySelector(':scope > summary .goal-tree-info-toggle').click();
   assert.match(branch.textContent, /Resolve the update ordering.*Inferred from cited intent/s);
   delete child.root_relation;
   view.update(data, 'legacy');
@@ -137,7 +197,7 @@ test('Skeleton omits boundary action rows while requirements and Acceptance pres
   for (const stage of root.querySelectorAll('.goal-tree-stage')) open(stage, dom);
   assert.doesNotMatch(root.textContent, /boundary · verification.started/);
   assert.equal(root.querySelectorAll('.goal-tree-action').length, 4);
-  open(named(root, 'Task requirements'), dom);
+  root.querySelector('.goal-tree-info-toggle').click();
   const requirement = named(root, 'acceptance.plan.accepted · L373–373'); open(requirement, dom);
   assert.equal(requirement.querySelector('.goal-tree-metrics'), null);
   requirement.querySelector('button').click();

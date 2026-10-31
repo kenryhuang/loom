@@ -9,6 +9,51 @@ from tests.service.test_controller import command, wait_state
 from tests.tasks.test_acceptance import Judge
 
 
+def evidence_resume_provider(state):
+    from pathlib import Path
+    from loom.core import err, make_loom_error, ok
+    from loom.llm import LlmResponse, LlmToolCall
+
+    class Provider:
+        model = 'evidence-resume-fixture'
+        verification_provider = Judge([{'id': 'source-read', 'description': 'Read the source file',
+            'verifier': 'tool_call', 'scope': ['source.txt'], 'check': {'tool_id': 'read_file'}}])
+
+        async def chat(self, messages, tools=None, cancellation=None, **kwargs):
+            if (Path(state['task']['workspace']) / 'resume-ready').exists():
+                return ok(LlmResponse('', (LlmToolCall('finish', 'finish', '{"report":"Read source evidence"}'),)))
+            if any(m.role == 'tool' for m in messages):
+                return err(make_loom_error('FIXTURE_FAILURE', 'Fail after reading source', retryable=False))
+            return ok(LlmResponse('', (LlmToolCall('read', 'read_file', '{"path":"source.txt"}'),)))
+
+    return Provider()
+
+
+def test_failed_run_resume_preserves_tool_evidence_for_same_goal(tmp_path):
+    (tmp_path / 'source.txt').write_text('Observed source facts')
+    service = LoomService(tmp_path / 'data', provider_factory=evidence_resume_provider).start()
+    try:
+        sid = service.create('evidence', {'objective': 'Read source and report', 'workspace': str(tmp_path), 'plan_mode': 'off'})['session_id']
+        first = wait_state(service, sid, 'failed')
+        import time
+        deadline = time.monotonic() + 5
+        while service.store.snapshot(sid)['run']['state'] == 'running' and time.monotonic() < deadline:
+            time.sleep(0.02)
+        # Agent failures become terminal and get a new run on Resume, unlike
+        # ordinary sessions which retain the suspended run's checkpoint.
+        service.store.update(sid, lambda state, emit, db: state['run'].update(state='failed'))
+        (tmp_path / 'resume-ready').touch()
+        command(service, sid, 'resume')
+        result = wait_state(service, sid, 'idle')
+        assert result['run']['id'] != first['run']['id']
+        assert result['acceptance']['state'] == 'passed'
+        events = service.events(sid, limit=1000)
+        assert sum(e['type'] == 'tool.completed' and e['payload'].get('tool_id') == 'read_file' for e in events) == 1
+        assert sum(e['type'] == 'acceptance.plan.accepted' for e in events) == 1
+    finally:
+        service.close()
+
+
 def provider_factory(state):
     provider = FakeProvider(state)
     criterion = {

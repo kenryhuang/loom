@@ -63,7 +63,16 @@ class MemoryStore:
             return canonical_path(workspace) == self.workspace
         return bool(self.session_id and session_id == self.session_id and not workspace)
 
-    def _records(self, reference=None):
+    def epoch(self):
+        try:
+            with closing(sqlite3.connect(self.database.as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_versions'").fetchone():
+                    return db.execute("SELECT value FROM memory_versions WHERE id='effective'").fetchone()[0]
+        except (sqlite3.Error, OSError):
+            pass  # Normal retrieval reports the source error with its existing contract.
+        return 0
+
+    def _records(self, reference=None, *, apply_annotations=True):
         # Scope is applied before the candidate budget and before loading record text.
         query = """
             SELECT j.id, j.session_id, json_extract(j.body, '$.run_id'),
@@ -95,6 +104,15 @@ class MemoryStore:
                 if 'semantic_jobs' not in tables:
                     return [], False, []  # Valid service with no evaluations yet.
                 rows = db.execute(query, parameters).fetchall()
+                digests = list({r[5] for r in rows})
+                placeholders = ','.join('?' for _ in digests)
+                annotations, suppressions = [], set()
+                if digests and 'memory_annotations' in tables:
+                    annotations = [json.loads(r[0]) for r in db.execute(
+                        f"SELECT body FROM memory_annotations WHERE json_extract(body,'$.source.source_digest') IN ({placeholders}) ORDER BY rowid", digests)]
+                if digests and 'memory_suppressions' in tables:
+                    suppressions = {r[0] for r in db.execute(
+                        f"SELECT lineage FROM memory_suppressions WHERE json_extract(body,'$.source.source_digest') IN ({placeholders})", digests)}
         except (sqlite3.Error, OSError) as exc:
             raise MemoryError("memory.store_unavailable", f"Cannot read memory source: {exc}") from exc
         results, issues = [], []
@@ -114,6 +132,10 @@ class MemoryStore:
                 session_id=session, run_id=run, evaluation_id=evaluation, record_id=key,
                 source_digest=digest, content_digest=content_digest, created_at=created, evaluation_state=state,
             )))
+        if apply_annotations and (annotations or suppressions):
+            from loom.memory.annotations import effective
+
+            results = effective(results, annotations, suppressions)
         return results, len(rows) > SCAN_LIMIT, issues
 
     def search(self, query, *, limit=6):
@@ -133,7 +155,7 @@ class MemoryStore:
                 continue
             score = len(overlap) + 2 * len(terms & tokens(record['title']))
             observed = record.get('basis') == 'observed' or record.get('validation') in {'observed', 'observed_recovery'}
-            ranked.append(((row['source']['session_id'] == self.session_id, score, observed), row))
+            ranked.append(((record.get('pinned', False), row['source']['session_id'] == self.session_id, score, observed), row))
         # _records is newest-first with stable ID ties; stable sort preserves that order.
         ranked.sort(key=lambda item: item[0], reverse=True)
         selected, seen = [], set()

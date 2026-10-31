@@ -1,3 +1,4 @@
+import {AgentsView} from "./views/agents.mjs";
 import {SettingsView} from "./views/settings.mjs";
 import {ExternalToolsView} from "./views/external-tools.mjs";
 import {canRestartTask} from "./state.mjs";
@@ -93,6 +94,8 @@ function openExternalTools() {
   activateComponent('external-tools'); setWorkspaceMode('external-tools');
   history.replaceState(null, '', '#/external-tools'); return externalTools.open();
 }
+const agents = new AgentsView($("agents-page"), $("agents-list"), {api: () => controller?.api, error: showError});
+function openAgents() { activateComponent("agents"); setWorkspaceMode("agents"); history.replaceState(null, "", "#/agents"); return agents.open(); }
 let activeComponent = "sessions";
 function activateComponent(component) {
   activeComponent = component;
@@ -106,7 +109,8 @@ for (const button of document.querySelectorAll("[data-component]")) {
   button.addEventListener("click", () => {
     const component = button.dataset.component;
     activateComponent(component);
-    if (component === "settings") openSettings();
+    if (component === "agents") openAgents();
+    else if (component === "settings") openSettings();
     else if (component === "external-tools") openExternalTools();
     else if (component === "knowledge") openKnowledge();
     else if (component === "evaluation")
@@ -229,6 +233,9 @@ function openKnowledge(options = {}) {
   return knowledge.open(false, options);
 }
 function setWorkspaceMode(mode) {
+  const agentsMode = mode === "agents";
+  $("agents-workspace").hidden = !agentsMode;
+  if (!agentsMode) agents.close();
   const settingsMode = mode === 'settings';
   $('settings-workspace').hidden = !settingsMode;
   if (!settingsMode) settings.close();
@@ -242,11 +249,11 @@ function setWorkspaceMode(mode) {
   const analysis = mode === true;
   $("knowledge-workspace").hidden = !knowledgeMode;
   if (!knowledgeMode) knowledge.close();
-  $("conversation-workspace").hidden = analysis || knowledgeMode || externalMode || creating || settingsMode;
+  $("conversation-workspace").hidden = analysis || knowledgeMode || externalMode || creating || settingsMode || agentsMode;
   $("conversation-page").hidden = analysis;
   $("evaluation-workspace").hidden = !analysis;
   document.querySelector(".session-details").hidden =
-    analysis || knowledgeMode || externalMode || creating || settingsMode;
+    analysis || knowledgeMode || externalMode || creating || settingsMode || agentsMode;
   if (!analysis) trajectory.close();
 }
 async function openEvaluation(id, { fromHistory = false } = {}) {
@@ -292,16 +299,11 @@ function renderState(state) {
   $("session-title").textContent = state.title || "New session";
   $("task-status").textContent = state.task.state;
   $("task-status").className = `status ${state.task.state}`;
-  const failure = state.run?.failure;
-  $("run-failure").hidden = state.task.state !== "failed";
-  $("run-failure").textContent = failure
-    ? `${failure.code || failure.type || "Execution failed"}: ${failure.message}`
-    : state.run?.reason ||
-      "Task execution failed. Resume or send new guidance to retry.";
   panels.update(state);
 
   trajectory.updateState(state);
   feed.snapshot = state;
+  feed.syncRunStatus(state);
   feed.syncMessages(state.messages || []);
   $("history").disabled = !controller.nextBefore;
   const request = state.input_request,
@@ -320,11 +322,6 @@ function renderState(state) {
   $("message").disabled = state.task.state === "completed";
   $("send").disabled = sending || $("message").disabled;
   updateTaskControls(state);
-  if (
-    state.run?.reason &&
-    ["paused", "recovering", "failed"].includes(state.task.state)
-  )
-    notice(state.run.reason);
 }
 
 function updateTaskControls(state) {
@@ -406,9 +403,10 @@ async function login(token) {
   $("refresh-knowledge").disabled = false;
   if (activeComponent === "knowledge") knowledgeList.refresh();
   populateCreate();
-  $("auth-dialog").close();
+  if ($("auth-dialog").open) $("auth-dialog").close();
   $("credential").value = "";
   $("credential-file").value = "";
+  if (location.hash === "#/agents") {await openAgents(); return;}
   if (location.hash === "#/settings") {await openSettings(); return;}
   if (location.hash === "#/external-tools") {await openExternalTools(); return;}
   const requested = currentId(),
@@ -424,6 +422,7 @@ async function login(token) {
 }
 
 function disconnect() {
+  agents.close();
   sessionSetup.abort?.abort();
   editingTask = null; editorMode(false);
   externalTools.close();
@@ -690,14 +689,22 @@ $("history").addEventListener("click", async () => {
   }
 });
 window.addEventListener("hashchange", () => {
+  if (location.hash === "#/agents") {openAgents(); return;}
   if (location.hash === "#/settings") {openSettings(); return;}
   if (location.hash === "#/external-tools") {openExternalTools(); return;}
   if (evaluationRoute()) openEvaluation(currentId(), { fromHistory: true });
   else select(currentId(), { fromHistory: true });
 });
 window.addEventListener("pagehide", () => {
+  agents.close();
   trajectory.close();
   controller?.disconnect();
 });
-$("auth-dialog").showModal();
+// Try connecting without a credential first: a service started with --no-auth
+// accepts it; a 401 falls back to the credential dialog as before.
+login("").catch((error) => {
+  if (controller) return; // A concurrent manual login already succeeded.
+  if (error.status !== 401) $("auth-error").textContent = error.message;
+  if (!$("auth-dialog").open) $("auth-dialog").showModal();
+});
 import { renderVerificationArtifact } from "./views/activity-row.mjs";

@@ -14,6 +14,8 @@ Loom 是一个运行在本地的 AI Agent 任务执行框架，用于编程、�
 
 ## 主要特点
 
+- **自主 Agent（P0～P3）**：长期 Role、显式目标和周期职责编排、相关 Session 复用、终态自动 Deep eval、人工记忆标注与方法指导。使用 `loom serve --enable-agents` 启用，见[运行与人工介入](docs/autonomous-agents.zh-CN.md)。
+
 - **Deep eval 经验记忆**：从 trace 提取 stage 对目标的贡献、环境与配置事实、失败经验和更有效的工作流。
   每条记录保留 goal / stage / action 与原始证据引用，区分观察、推断和待验证建议；支持预算恢复。
   Session 可检索同一 workspace 的相关记忆，CLI 通过 `--memory-store` 显式接入。

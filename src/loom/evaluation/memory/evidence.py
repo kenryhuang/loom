@@ -68,7 +68,7 @@ def card_evidence(source, card, registry):
             event_type = source.event(ref).event_type
             basis = (
                 "historical_reference"
-                if card.get("name") in {"memory_search", "memory_read", "skill_read", "skill_select", "skill_record_step"}
+                if card.get("name") in {"memory_search", "memory_read", "skill_read", "skill_select", "skill_record_step", "agent_record_use"}
                 else "model_claim"
                 if card["kind"] == "model"
                 else "observed_output"

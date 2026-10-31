@@ -1490,14 +1490,14 @@ dialog h1 {
   overflow: auto;
   overscroll-behavior: contain;
 }
-#create-form {
+#create-form, .setup-form {
   display: grid;
   gap: 14px;
   width: 100%;
   max-width: 820px;
   margin: 0 auto;
 }
-#create-form > .dialog-heading { margin-bottom: 4px; }
+#create-form > .dialog-heading, .setup-form > .dialog-heading { margin-bottom: 4px; }
 .setup-block { min-width: 0; margin: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
 section.setup-block { padding: 20px; }
 .setup-block h3 { margin: 0 0 16px; font-size: 14px; font-weight: 600; }
@@ -2263,6 +2263,11 @@ section.setup-block { padding: 20px; }
 .goal-tree-id { display:inline-block; margin-right:10px; color:var(--accent); font-size:12px; }
 .goal-tree-tags { display:flex; flex-wrap:wrap; gap:4px; font-size:11px; grid-column:1; }
 .goal-tree-tags:empty { display:none; }
+.goal-tree-tags { align-items:center; }
+.goal-tree-info-toggle { padding:3px 8px; font-size:11px; font-weight:400; }
+.goal-tree-info-toggle[aria-expanded=true] { color:var(--accent); border-color:var(--accent); }
+.goal-tree-info { margin:12px 0; padding:12px; border:1px solid var(--line); border-radius:6px; background:var(--bg); }
+.goal-tree-info > h4 { margin:0 0 12px; font-size:13px; }
 .goal-tree-metrics { display:grid; gap:5px; grid-column:2; grid-row:1 / span 2; min-width:0; font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums; white-space:normal; }
 .goal-tree-time-values { display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:3px 8px; }
 .goal-tree-duration { color:var(--text); font-size:12px; font-weight:600; }
@@ -2314,3 +2319,38 @@ section.setup-block { padding: 20px; }
 .memory-rating-mixed { border-inline-start-color: #c89437; }
 .memory-quote { margin: 12px 0; padding-inline-start: 12px; border-inline-start: 2px solid var(--line); white-space: pre-wrap; }
 @media (max-width: 600px) { .skeleton-toolbar [role=tab] { padding: 10px; } }
+
+/* Agent details reuse the Evaluation / Evolve shell and dashboard primitives. */
+#agents-list { display: grid; gap: 6px; }
+#agents-heading { flex-wrap: wrap; flex-shrink: 0; }
+#agents-heading > div:first-child { min-width: 0; flex: 1; }
+#agents-heading h1 { overflow-wrap: anywhere; }
+.agent-actions { justify-content: flex-end; padding-top: 9px; }
+.agent-tabs { overflow-x: auto; scrollbar-width: thin; flex-shrink: 0; }
+.agent-tabs [role="tab"] { white-space: nowrap; flex-shrink: 0; }
+.agent-content { padding-bottom: 20px; }
+.agent-schedule { display:grid; gap:6px; margin-bottom:16px; padding-bottom:16px; border-bottom:1px solid var(--line); }
+.agent-schedule > strong { font-size:clamp(18px,2vw,25px); font-weight:550; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.agent-schedule > p { margin:0; }
+.agent-card { overflow-wrap: anywhere; }
+.agent-card > h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+.agent-card > button, .agent-card > a { display: inline-block; margin: 10px 8px 0 0; }
+.agent-card > .dashboard-badge { margin-bottom: 12px; }
+.dashboard-panel .agent-card { margin-top: 12px; background: var(--bg); }
+.agent-form { display: grid; gap: 12px; max-width: 760px; }
+.agent-form > button { justify-self: start; }
+.agent-field { display: grid; gap: 6px; margin: 0; }
+.agent-field input, .agent-field textarea, .agent-card textarea { width: 100%; box-sizing: border-box; }
+.agent-error { color: var(--danger); white-space: pre-wrap; }
+.agent-notice { border-left: 3px solid var(--line); padding-left: 12px; color: var(--muted); }
+@media (max-width: 600px) {
+  .agent-actions { width: 100%; justify-content: flex-start; padding-top: 0; }
+  .agent-tabs { gap: 18px; }
+}
+
+.agent-setup-page { max-width: none; }
+.agent-setup-field { min-width: 0; }
+.agent-setup-field > label { display: block; }
+.agent-setup-form > .error:empty { display: none; }
+.agent-setup-form .setup-form-actions .primary { min-width: 170px; min-height: 40px; margin: 0; }
+@media (max-width: 560px) { .agent-setup-form .setup-form-actions .primary { width: 100%; } }

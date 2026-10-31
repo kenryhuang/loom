@@ -84,6 +84,11 @@ class TaskRunnerConfig:
         object.__setattr__(self, "evaluation_request_options", normalize_request_options(self.evaluation_request_options))
 
 
+def discover_default_config_path() -> Path | None:
+    """Use the same project configuration for task, service and settings entry points."""
+    return next((path for path in (Path("config.yaml"), Path("config.yml")) if path.is_file()), None)
+
+
 def load_task_config(path: str | os.PathLike[str]) -> Result:
     config_path = Path(path)
     try:

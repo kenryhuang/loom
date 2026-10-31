@@ -189,6 +189,28 @@ def test_large_evidence_is_sampled_with_explicit_coverage_within_context(request
     asyncio.run(exercise())
 
 
+@pytest.mark.asyncio
+async def test_scoped_architecture_review_keeps_early_configuration_evidence(tmp_path):
+    request = TaskRequest('Review architecture', workspace=tmp_path)
+    assembly = TaskAssembly(request, plan_mode='off')
+    paths = ['package.json', *[f'module-{i}.txt' for i in range(20)]]
+    assembly.configure_acceptance(Judge())
+    assembly.acceptance.goal(make_task_context(request, assembly=assembly, plan_mode='off').unwrap())
+    assembly.acceptance.data['plan'] = assembly.acceptance.validate_plan({'criteria': [
+        {'id': 'architecture', 'description': 'Verify dependency versions and modules', 'verifier': 'semantic', 'scope': paths, 'check': {}},
+    ]})
+    try:
+        for path in paths:
+            (tmp_path / path).write_text(f'Observed content for {path}')
+            assert (await assembly.handlers()['read_file']({'path': path})).ok
+        evidence = assembly.acceptance_evidence()
+        assert evidence[0]['reviewed_calls'] == len(paths)
+        assert evidence[0]['omitted_calls'] == 0
+        assert 'Observed content for package.json' in evidence[1]['output']
+    finally:
+        await assembly.close()
+
+
 def test_new_evidence_artifact_is_reused_on_journal_replay(tmp_path):
     class Bridge:
         saved = None

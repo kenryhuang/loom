@@ -86,7 +86,10 @@ def evidence(assembly):
         for path in row.get("paths", []):
             if any(path == scope or path.startswith(scope.rstrip("/") + "/") for scope in scopes):
                 scoped[(row["tool"], path)] = row
-    for row in list(scoped.values())[-16:]:
+    # Keep the latest observation for every referenced path within the shared
+    # evidence cap. A recent-only slice drops early configuration files from
+    # broad architecture reviews even when the verifier has ample input budget.
+    for row in scoped.values():
         include(row)
     for row in rows[-8:]:
         include(row)

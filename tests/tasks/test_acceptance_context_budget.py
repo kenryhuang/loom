@@ -74,3 +74,21 @@ def test_unknown_capacity_is_labeled_and_configured_value_overrides_known_model(
 def test_invalid_context_percent_is_rejected(percent):
     with pytest.raises(ValueError, match="context_window_percent"):
         controller(SimpleNamespace(model="unknown"), {"context_window_percent": percent})
+
+
+def test_reasoning_defaults_leave_room_for_answer_without_overriding_explicit_caps():
+    provider = SimpleNamespace(model='qwen3.8-max', request_options={'enable_thinking': True}, max_completion_tokens=8192)
+    gate, _ = controller(provider)
+    assert gate.input_budget()['max_output_tokens'] == 8192
+    assert gate.config['model_timeout_seconds'] == 180
+    assert gate.config['max_seconds'] == 360
+    # Explicit task caps stay authoritative even when they may be insufficient.
+    limited, _ = controller(provider, {'max_output_tokens': 1000, 'max_seconds': 90, 'model_timeout_seconds': 30})
+    assert limited.input_budget()['max_output_tokens'] == 1000
+    assert limited.config['max_seconds'] == 90
+    assert limited.config['model_timeout_seconds'] == 30
+    provider.max_completion_tokens = 2000
+    assert gate.input_budget()['max_output_tokens'] == 2000
+    provider.request_options = {'enable_thinking': False}
+    assert gate.config['max_seconds'] == 180
+    assert gate.config['max_output_tokens'] == 4096

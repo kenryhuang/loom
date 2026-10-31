@@ -144,6 +144,8 @@ class SessionSemantic:
         with self.store.transaction() as db:
             db.execute("UPDATE semantic_jobs SET body=? WHERE id=?", (canonical(body), body["id"]))
             db.execute("INSERT OR IGNORE INTO skill_dirty_sessions VALUES(?)", (body['session_id'],))
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_versions'").fetchone():
+                db.execute("UPDATE memory_versions SET value=value+1 WHERE id='effective'")
 
     def _load(self, sid, aid, identifier):
         self.trajectory._load(sid, aid)
@@ -328,7 +330,7 @@ class SessionSemantic:
             "source_sha256": source.source_sha256,
         }
 
-    def start(self, sid, aid, options):
+    def start(self, sid, aid, options, *, budget_context=None):
         allowed = {"model", "resume_id", "retry_failed", "new_evaluation", "analysis_version", "run_id", "extract_memory", *DEFAULTS}
         if not isinstance(options, dict) or set(options) - allowed:
             raise ServiceError("Invalid evaluation options")
@@ -477,6 +479,7 @@ class SessionSemantic:
                 "checkpoint": {},
                 "usage": {"calls": 0, "total_tokens": 0, "unreported_calls": 0},
                 "elapsed_seconds": 0,
+                **({'autonomy_budget': budget_context} if budget_context else {}),
             }
             consumed = {"max_calls": body["usage"]["calls"], "max_tokens": body["usage"]["total_tokens"], "max_seconds": body["elapsed_seconds"]}
             exhausted = [k for k, value in consumed.items() if value >= settings[k] and (k != "max_tokens" or version != GRAPH_ENGINE)]
@@ -505,6 +508,8 @@ class SessionSemantic:
                     if body["state"] in {"queued", "running"} or (future and not future.done()):
                         raise ServiceError("Cancel the evaluation and wait for it to stop before deleting", 409)
                     self.outputs.prepare(db, body)
+                    if db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_versions'").fetchone():
+                        db.execute("UPDATE memory_versions SET value=value+1 WHERE id='effective'")
                     db.execute('INSERT OR IGNORE INTO skill_dirty_sessions VALUES(?)', (sid,))
                 elif not db.execute(
                     "SELECT 1 FROM evaluation_deletions WHERE id=? AND session_id=? AND analysis_id=?", (identifier, sid, aid)
@@ -770,6 +775,11 @@ class SessionSemantic:
                 if not created.ok:
                     raise ValueError(created.error.message)
                 provider = created.value
+            if body.get('autonomy_budget'):
+                from loom.autonomy.budget import BudgetLedger, BudgetProvider
+
+                provider = BudgetProvider(provider, BudgetLedger(self.store.path), body['autonomy_budget'], category='learning',
+                                          output_tokens=body['autonomy_budget'].get('output_tokens', 8192))
             if body.get("analysis_version") in {"v3", *GOAL_ENGINES}:
                 behavior = _behavior_facts(source, result, body)
                 result = {**result, "behavior": behavior}

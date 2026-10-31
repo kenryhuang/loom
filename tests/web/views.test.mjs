@@ -862,7 +862,8 @@ test("session synchronization updates sidebar fields while live and restored str
     sidebar.querySelector('[data-panel="outputs"]').textContent,
     /report/,
   );
-  assert.equal(root.querySelectorAll(".event-row").length, 0);
+  assert.equal(root.querySelectorAll(".event-row").length, 1);
+  assert.match(root.textContent, /Time budget exhausted/);
   apply("run.failed", { code: "LLM_FAILED", message: "Connection dropped" });
   assert.equal(info("State"), "failed");
   assert.equal(info("Error"), "Connection dropped");
@@ -872,13 +873,13 @@ test("session synchronization updates sidebar fields while live and restored str
   assert.equal(info("State"), "recovering");
   apply("run.started");
   assert.equal(info("Error"), undefined);
-  assert.equal(root.querySelectorAll(".event-row").length, 2);
+  assert.equal(root.querySelectorAll(".event-row").length, 3);
   feed.restore({
     snapshot: projection.snapshot,
     processes: feed.processes,
     events: feed.events,
   });
-  assert.equal(root.querySelectorAll(".event-row").length, 2);
+  assert.equal(root.querySelectorAll(".event-row").length, 3);
   assert.match(root.textContent, /Connection dropped/);
   assert.match(root.textContent, /Verify operation effects/);
   assert.doesNotMatch(

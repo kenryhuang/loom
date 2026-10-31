@@ -1,5 +1,7 @@
 """FIFO admission with shared reads and exclusive resource writes."""
 
+from datetime import UTC, datetime
+
 
 def resource_claims(task):
     if "resource_claims" in task:
@@ -27,7 +29,20 @@ def ready_sessions(states, active, capacity):
         if state.get("workspace_blocked"):
             occupied.extend({**claim, "access_mode": "exclusive_write"} for claim in resource_claims(state["task"]))
     slots = capacity - len(active)
-    for state in reversed(states):
+    now = datetime.now(UTC)
+
+    def priority(state):
+        if not state.get("autonomy"):
+            return 1
+        try:
+            queued = datetime.fromisoformat(state.get("queued_since") or state["created_at"])
+            if queued.tzinfo is None:
+                queued = queued.replace(tzinfo=UTC)
+            return 0 if (now - queued).total_seconds() >= 300 else 2
+        except (ValueError, KeyError):
+            return 2
+
+    for state in sorted(reversed(states), key=priority):
         claims = resource_claims(state["task"])
         if slots and state["task"]["state"] == "queued" and state["session_id"] not in active and not conflicts(claims, occupied):
             yield state["session_id"]

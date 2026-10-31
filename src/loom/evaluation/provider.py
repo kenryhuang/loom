@@ -10,6 +10,7 @@ from dataclasses import is_dataclass, replace
 
 from loom.core import ok
 from loom.llm.api import OpenAIProvider
+from loom.llm.provider_wrappers import map_provider
 from loom.llm.request_options import materialize_request_options
 from loom.tasks.config import create_provider_from_task_config
 
@@ -28,6 +29,12 @@ def create_evaluation_provider(config, *, model_name=None, env=None, http_client
 
 
 def evaluator_provider(provider, *, output_tokens, timeout_seconds, install_http=True):
+    return map_provider(provider, lambda base: _evaluator_provider(
+        base, output_tokens=output_tokens, timeout_seconds=timeout_seconds, install_http=install_http,
+    ))
+
+
+def _evaluator_provider(provider, *, output_tokens, timeout_seconds, install_http):
     if not is_dataclass(provider) or not hasattr(provider, "max_completion_tokens"):
         return provider
     options = materialize_request_options(getattr(provider, "request_options", {}))

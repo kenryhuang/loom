@@ -17,6 +17,7 @@ class RuntimeMemory:
         self.query = None
         self.summary = None
         self.available = False
+        self.epoch = None
 
     def refs(self, *, include_unavailable=False):
         if not include_unavailable and not self.available:
@@ -55,8 +56,10 @@ class RuntimeMemory:
         # Short continuation replies (e.g. "continue") retain the interrupted goal's retrieval context.
         prior = (context.metadata or {}).get('prior_requests', ())
         query = "\n".join([context.goal.objective, *list(prior)[-2:]])[:20000]
-        if self.query != query:
+        epoch = await asyncio.to_thread(self.store.epoch)
+        if self.query != query or self.epoch != epoch:
             self.query = query
+            self.epoch = epoch
             try:
                 self.summary = await asyncio.to_thread(self.store.search, query)
                 self.available = self.summary['available_records'] > 0

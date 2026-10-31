@@ -16,6 +16,7 @@ DEFAULTS = {
     "max_checks": 8,
     "max_model_calls": 6,
     "max_seconds": 180,
+    "model_timeout_seconds": 120,
     "max_repairs": 2,
     "max_prompt_chars": None,  # Legacy explicit cap; automatic context budget by default.
     "context_window_percent": 60,
@@ -132,7 +133,15 @@ class AcceptanceController:
     def config(self):
         from loom.tasks.acceptance_budget import effective_limits
 
-        return effective_limits(DEFAULTS, self._configured_limits, self.data.get('plan'))
+        provider = getattr(self.assembly, "acceptance_provider", None)
+        options = materialize_request_options(getattr(provider, "request_options", {}))
+        thinking = options.get("enable_thinking") is True or (
+            options.get("enable_thinking") is not False and options.get("reasoning_effort") not in {None, "none"}
+        )
+        # Reasoning tokens share the completion cap. Leave room for the actual
+        # acceptance JSON; explicit task limits and provider/Agent caps still win.
+        defaults = {**DEFAULTS, "max_output_tokens": 8192, "model_timeout_seconds": 180, "max_seconds": 360} if thinking else DEFAULTS
+        return effective_limits(defaults, self._configured_limits, self.data.get('plan'))
 
     def can_repair(self):
         return self.data['failed_attempts'] <= self.config['max_repairs']
@@ -294,7 +303,9 @@ class AcceptanceController:
                 options["provider"] = provider
             if images:
                 options["images"] = images
-            response = await self.assembly.acceptance_model_request(runtime, stage, prompt, text, min(remaining, 60), **options)
+            response = await self.assembly.acceptance_model_request(
+                runtime, stage, prompt, text, min(remaining, self.config["model_timeout_seconds"]), **options,
+            )
             if raw_response:
                 return response
             value, _ = parse_response(response)

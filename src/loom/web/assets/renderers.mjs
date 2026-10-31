@@ -1,4 +1,5 @@
 import { isAcceptanceRound, acceptanceDescriptor } from "./activity/acceptance.mjs";
+import { codePoints, streamKey } from "./state.mjs";
 
 /** Rendering descriptors are data; register new event types without changing the feed. */
 export class RendererRegistry {
@@ -84,6 +85,10 @@ export function modelSummary(details, status, stage) {
 }
 export function builtinRenderers() {
   return new RendererRegistry()
+    .register("run-status", event => event.type === "run.state.changed" &&
+      ["suspended", "paused", "failed", "stopped"].includes(event.payload.state) && event.payload.reason,
+      event => ({key: "run-status", kind: "run-status", status: event.payload.state === "failed" ? "failed" : "paused",
+        details: event.payload}))
     .register("internal-tool-evidence", event => event.type === "artifact.created" &&
       event.payload.artifact?.kind === "acceptance_tool_evidence", () => ({hidden: true}))
     .register("acceptance-round", isAcceptanceRound, acceptanceDescriptor)
@@ -101,7 +106,7 @@ export function builtinRenderers() {
           "workflow.routing.requested",
           "workflow.route.selected",
         ].includes(event.type) ||
-        event.type.startsWith("llm.tool_call.") ||
+        (event.type.startsWith("llm.tool_call.") && event.type !== "llm.tool_call.arguments.delta") ||
         (["task.", "run.", "session.", "budget.", "command.", "step."].some(
           (prefix) => event.type.startsWith(prefix),
         ) &&
@@ -149,10 +154,13 @@ export function builtinRenderers() {
           "llm.reasoning.delta",
           "llm.reasoning_context.delta",
           "llm.content.delta",
+          "llm.tool_call.arguments.delta",
         ].includes(event.type),
       (event, context) => {
         const data = event.payload,
           details = {};
+        const streamCounts = {};
+        if (data.usage) details.usage = data.usage;
         let stage = "Streaming",
           status = "running";
         if (event.type === "llm.requested") {
@@ -170,13 +178,17 @@ export function builtinRenderers() {
           status = "failed";
         } else if (event.type === "llm.stream.completed")
           stage = "Response received";
-        else if (event.type.endsWith(".delta"))
+        else if (event.type.endsWith(".delta")) {
           details[event.type.slice(4, -6)] =
             context.streamText ?? data.delta ?? "";
+          streamCounts[context.streamKey || streamKey(event)] =
+            context.streamEnd ?? (data.offset || 0) + codePoints(data.delta).length;
+        }
         return {
           key: `thought:${data.llm_call_id || event.seq}`,
           kind: "model",
           details,
+          streamCounts,
           stage,
           status,
           summary: modelSummary(details, status, stage),

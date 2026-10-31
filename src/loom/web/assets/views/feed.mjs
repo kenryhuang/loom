@@ -83,6 +83,7 @@ export class FeedView {
     this.seedProcesses();
     for (const event of this.events) this.present(event);
     this.seedStreams(snapshot);
+    this.syncRunStatus(snapshot);
     this.orderRecords();
     this.syncMessages(snapshot.messages || []);
     this.reopen(opened);
@@ -102,6 +103,15 @@ export class FeedView {
         node.open,
       ]),
     );
+  }
+  syncRunStatus(snapshot) {
+    const run = snapshot.run;
+    if (!run || !["failed", "suspended", "paused"].includes(run.state)) return;
+    const event = {seq: snapshot.event_cursor || 0, run_id: run.id, type: "run.state.changed",
+      payload: {state: run.state, reason: run.reason || run.failure?.message || "Execution paused", ...(run.failure ? {error: run.failure} : {})}};
+    const group = this.group(event);
+    if ([...group.records.values()].some(record => record.descriptor.eventType === "run.failed") && run.state === "failed") return;
+    if (!group.records.has("run-status")) this.present(event);
   }
   reopen(keys) {
     for (const node of this.root.querySelectorAll("details"))
@@ -504,15 +514,18 @@ export class FeedView {
     ) {
       const key = streamKey(event),
         old = codePoints(this.streams[key]),
+        chunk = codePoints(event.payload.delta),
         origin = this.origins[key] || 0;
       const offset = event.payload.offset ?? origin + old.length;
       this.streams[key] = [
         ...old,
-        ...codePoints(event.payload.delta).slice(
-          Math.max(0, origin + old.length - offset),
-        ),
+        ...chunk.slice(Math.max(0, origin + old.length - offset)),
       ].join("");
-      context = { streamKey: key, streamText: this.streams[key] };
+      context = {
+        streamKey: key,
+        streamText: this.streams[key],
+        streamEnd: Math.max(origin + old.length, offset + chunk.length),
+      };
     }
     const descriptor = this.renderers.describe(event, context);
     const group = this.group(event);
@@ -709,13 +722,14 @@ export class FeedView {
     Object.assign(this.streams, snapshot.streams || {});
     Object.assign(this.origins, snapshot.stream_origins || {});
     for (const [key, text] of Object.entries(snapshot.streams || {})) {
-      if (!key.endsWith(":reasoning")) continue;
-      const id = key.slice(0, -10),
+      const parts = /^(.*):(reasoning_context|reasoning|content|tool_call\.arguments)(?::(.*))?$/.exec(key);
+      if (!parts) continue;
+      const [, id, channel, toolId] = parts,
         event = {
           seq: 0,
           run_id: snapshot.run?.id,
-          type: "llm.reasoning.delta",
-          payload: { llm_call_id: id },
+          type: `llm.${channel}.delta`,
+          payload: { llm_call_id: id, ...(toolId ? { tool_call_id: toolId } : {}) },
         };
       const group = this.group(event);
       const existing = [...group.records.entries()].find(
@@ -725,6 +739,7 @@ export class FeedView {
       const descriptor = this.renderers.describe(event, {
         streamText: text,
         streamKey: key,
+        streamEnd: (this.origins[key] || 0) + codePoints(text).length,
       });
       if (existing) descriptor.key = existing[0];
       this.record(group, descriptor);

@@ -29,3 +29,6 @@ class LegacyPlanningWorkflow(PlanningRuntime):
 
     def unfinished(self):
         return self.controller.state.phase.value in {"planning", "executing"}
+
+    def reopen_for_acceptance(self):
+        self.controller.reopen_for_acceptance()
