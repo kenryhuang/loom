@@ -109,6 +109,13 @@ export class AgentSetupView {
     budget.addEventListener('input',summarizeBudget); budget.addEventListener('change',summarizeBudget); summarizeBudget();
     budget.append(budgetSummary,element('p', 'muted small', '每日总量包含规划、执行、验收与学习。按比例选项在保存时计算为具体额度；已有 Session 的 token 上限需在暂停后同步调整。'));
     budget.append(element('p', 'muted small', '一个目标可拆成多个工作包。单目标额度累计计算规划、所有工作包的执行与验收，以及学习；单工作包额度只计算该工作包的执行与验收。两者均跨日累计，不会每日重置。'));
+    const learning = block(form, '学习与 Deep Eval 预算').body;
+    this.learning = preset(learning, 'learning', '每日初始学习额度', budgets, r.budget?.learning_tokens ?? 250000);
+    this.learningAuto = selectField(learning, 'learning_auto', '预算不足时', [['true','自动扩容并续跑'],['false','等待下一预算窗口']], String(r.learning_policy?.auto_expand ?? true));
+    this.learningMax = preset(learning, 'learning_max', '学习额度扩容上限', [['auto','初始学习额度的 4 倍（受每日总额限制）'],...budgets], r.learning_policy?.max_learning_tokens ?? 'auto');
+    this.learningExpansions = preset(learning, 'learning_expansions', '每天最多扩容次数', [['0','0 次'],['1','1 次'],['2','2 次'],['3','3 次'],['5','5 次']], r.learning_policy?.max_expansions ?? 2, {min:0,max:10});
+    this.learningResumes = preset(learning, 'learning_resumes', '每个评估每天最多自动续跑次数', [['0','0 次'],['1','1 次'],['2','2 次'],['3','3 次'],['5','5 次']], r.learning_policy?.max_resumes ?? 3, {min:0,max:10});
+    learning.append(element('p','muted small','每次扩容最多翻倍，仅对当天有效。每日总额、目标累计额度和调用次数上限保持有效；无进展时停止自动续跑，已完成分析与记忆会保留。'));
     this.tools = block(form, '外部工具', {folded:true,summary:true});
     this.toolList = element('div', 'external-choices'); this.toolList.setAttribute('role','group'); this.toolList.setAttribute('aria-label','外部工具');
     this.tools.body.append(this.toolList);
@@ -171,7 +178,11 @@ export class AgentSetupView {
       source_routes:structuredClone(prior.source_routes || []), methods:lines(f.methods.value),
       interval_seconds:this.interval.value(), timezone:f.timezone.value, model:f.model.value || null, evaluation_model:f.evaluation_model.value || null,
       knowledge_base_ids:selectedTools(this.knowledgeList), external_tool_ids:selectedTools(this.toolList),
-      budget:{...prior.budget,daily_tokens:this.daily.value(),work_tokens:this.workTokens(),goal_tokens:this.goalBudget.value(),max_calls:this.maxCalls.value()}};
+      learning_policy:{auto_expand:this.learningAuto.value === 'true',
+        max_learning_tokens:this.learningMax.choice.value === 'auto' ? Math.min(this.daily.value(),this.learning.value()*4) : this.learningMax.value(),
+        max_expansions:this.learningExpansions.value(),max_resumes:this.learningResumes.value()},
+      budget:{...prior.budget,daily_tokens:this.daily.value(),work_tokens:this.workTokens(),goal_tokens:this.goalBudget.value(),max_calls:this.maxCalls.value(),
+        ...(prior.budget?.learning_tokens != null || !this.edit || this.learning.value() !== 250000 ? {learning_tokens:this.learning.value()} : {})}};
     delete role.schema_version;
     const paths = lines(f.sources.value);
     if (role.source_routes.length) role.source_routes[0].paths = paths;

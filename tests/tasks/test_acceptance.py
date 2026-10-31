@@ -277,10 +277,13 @@ def test_terminal_checkpoint_revalidates_current_files_without_replaying_solver(
 
     class Journal(Execution):
         def rpc(self, kind, payload):
-            assert kind == "publish_artifact"
             from loom.tasks.workspace_probe import digest
 
-            return {"sha256": digest(payload), "kind": payload["kind"]}
+            if kind == "publish_artifact":
+                self.artifacts = {**getattr(self, "artifacts", {}), digest(payload): payload["value"]}
+                return {"sha256": digest(payload), "kind": payload["kind"]}
+            assert kind == "read_artifact"
+            return self.artifacts[payload["digest"]]
 
     async def scenario():
         (tmp_path / "answer.md").write_text("answer")
@@ -311,7 +314,8 @@ def test_terminal_checkpoint_revalidates_current_files_without_replaying_solver(
         count = len(provider.calls)
         (tmp_path / "answer.md").unlink()
         resumed = await execute()
-        assert resumed.control.kind == "paused"
+        assert resumed.control.kind == "continue"
+        assert resumed.context.state.scratch["acceptance"]["feedback"]["state"] == "applied"
         assert len(provider.calls) == count  # Deterministic failure needs neither solver replay nor a judge call.
         assert "terminal" not in journal.checkpoint
 

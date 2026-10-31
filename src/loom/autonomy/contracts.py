@@ -23,6 +23,7 @@ ROLE_FIELDS = {
     "interval_seconds",
     "timezone",
     "budget",
+    "learning_policy",
     "task_spec",
 }
 
@@ -43,6 +44,21 @@ def strings(value, name, maximum=30):
 def integer(value, name, low=1, high=100000000):
     if type(value) is not int or not low <= value <= high:
         raise ServiceError(f"{name} must be between {low} and {high}")
+    return value
+
+
+def learning_policy(role):
+    """Old roles receive the same bounded host policy as newly created roles."""
+    raw = strict(role.get("learning_policy", {}), {"auto_expand", "max_learning_tokens", "max_expansions", "max_resumes"})
+    budget = role["budget"]
+    value = dict(auto_expand=True, max_learning_tokens=min(budget["daily_tokens"], budget["learning_tokens"] * 4),
+                 max_expansions=2, max_resumes=3)
+    value.update(raw)
+    if type(value["auto_expand"]) is not bool:
+        raise ServiceError("auto_expand must be boolean")
+    integer(value["max_learning_tokens"], "max_learning_tokens")
+    integer(value["max_expansions"], "max_expansions", 0, 10)
+    integer(value["max_resumes"], "max_resumes", 0, 10)
     return value
 
 
@@ -123,6 +139,7 @@ def role_contract(value):
         methods=strings(value.get("methods", []), "methods"),
         timezone=timezone,
         budget=budget,
+        learning_policy=learning_policy({**value, "budget": budget}),
         interval_seconds=integer(value.get("interval_seconds", 86400), "interval_seconds", 10, 31536000),
         knowledge_base_ids=strings(value.get("knowledge_base_ids", []), "knowledge_base_ids", 20),
         external_tool_ids=strings(value.get("external_tool_ids", []), "external_tool_ids", 64),

@@ -105,13 +105,36 @@ def plan_protocol(assembly):
 
 
 def verification_protocol(criteria, evidence):
+    gap = obj({"kind": {"type": "string", "enum": GAP_KINDS},
+               "targets": {"type": "array", "maxItems": 32, "items": obj({
+                   "kind": {"type": "string", "enum": ["workspace_path", "tool", "source"]}, "value": STRING})},
+               "required_fact": STRING, "suggested_action": STRING})
     row = obj({"criterion_id": {"type": "string", "enum": [c["id"] for c in criteria]},
                "status": {"type": "string", "enum": ["passed", "failed", "blocked"]}, "reason": STRING,
-               "evidence_ids": {"type": "array", "items": {"type": "string", "enum": [e["id"] for e in evidence]}}})
-    return StructuredProtocol("acceptance_verification", 1, obj({"results": {"type": "array", "items": row}}))
+               "evidence_ids": {"type": "array", "items": {"type": "string", "enum": [e["id"] for e in evidence]}},
+               "gap": {"anyOf": [gap, {"type": "null"}]}})
+    return StructuredProtocol("acceptance_verification", 2, obj({"results": {"type": "array", "items": row}}), normalize_verification)
 
 
-def validate_verification(value, criteria, evidence):
+GAP_KINDS = ["missing_evidence", "stale_evidence", "insufficient_evidence_view", "deliverable_mismatch",
+             "verification_method", "external_dependency", "unknown"]
+
+
+def normalize_verification(value):
+    """Read v1 responses conservatively; never infer a blocked cause from prose."""
+    changes = []
+    if isinstance(value, dict) and isinstance(value.get("results"), list):
+        for i, row in enumerate(value["results"]):
+            if isinstance(row, dict) and "gap" not in row:
+                row["gap"] = None if row.get("status") == "passed" else {
+                    "kind": "deliverable_mismatch" if row.get("status") == "failed" else "unknown",
+                    "targets": [], "required_fact": row.get("reason", ""), "suggested_action": "",
+                }
+                changes.append({"path": f"/results/{i}/gap", "rule": "legacy_verdict"})
+    return value, changes
+
+
+def validate_verification(value, criteria, evidence, assembly=None):
     rows = value.get("results")
     expected = {c["id"] for c in criteria}
     if not isinstance(rows, list) or len(rows) != len(expected) or any(not isinstance(r, dict) for r in rows):
@@ -126,4 +149,26 @@ def validate_verification(value, criteria, evidence):
         if (not isinstance(refs, list) or any(not isinstance(r, str) or r not in available for r in refs)
                 or (row["status"] == "passed" and not refs)):
             raise ValueError("Semantic verification requires registered evidence")
+        gap = row.get("gap")
+        if row["status"] == "passed":
+            if gap is not None:
+                raise ValueError("Passed criteria cannot have gaps")
+            continue
+        if not isinstance(gap, dict) or gap.get("kind") not in GAP_KINDS:
+            raise ValueError("Non-passing criteria require a structured gap")
+        if any(not isinstance(gap.get(k), str) or len(gap[k]) > 4000 for k in ("required_fact", "suggested_action")):
+            raise ValueError("Gap descriptions must be bounded strings")
+        targets = gap.get("targets")
+        if not isinstance(targets, list) or len(targets) > 32:
+            raise ValueError("Gap targets must be a bounded list")
+        for target in targets:
+            if (not isinstance(target, dict) or target.get("kind") not in {"workspace_path", "tool", "source"}
+                    or not isinstance(target.get("value"), str) or not 0 < len(target["value"]) <= 2000):
+                raise ValueError("Invalid gap target")
+            if assembly and target["kind"] == "workspace_path":
+                from loom.tasks.workspace_probe import bound_path
+
+                if not assembly.tool_request.workspace:
+                    raise ValueError("Gap path requires a workspace")
+                bound_path(assembly.tool_request.workspace, target["value"])
     return rows

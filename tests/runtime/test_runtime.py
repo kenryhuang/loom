@@ -39,6 +39,28 @@ from loom.runtime import (
 NOW = "2026-06-04T00:00:00.000Z"
 
 
+def test_completion_guard_prevents_budget_and_criteria_shortcuts():
+    async def scenario():
+        context = make_context(max_steps=0)
+        definition = replace(make_one_step_definition(), completion_guard=lambda context, runtime: ok(False))
+        handle = create(definition).unwrap()
+        result = await done(handle, context)
+        assert not result.ok and result.error.code == 'BUDGET_EXCEEDED'
+        # Required criteria and user done predicates cannot bypass a false guard.
+        context = make_context(max_steps=10)
+        definition = replace(definition, done=lambda context, runtime: ok(True))
+        assert await done(create(definition).unwrap(), context) == ok(False)
+        assert await done(create(replace(definition, completion_guard=None)).unwrap(), context) == ok(True)
+        context = replace(context, goal=replace(context.goal, criteria=(SuccessCriterion(
+            id="required", description="Always passes", evaluator="always-pass", required=True),)))
+        registry = create_runtime_registry(evaluators={"always-pass": lambda context, criterion: ok(True)})
+        definition = replace(definition, done=lambda context, runtime: ok(False))
+        assert await done(create(definition, registry=registry).unwrap(), context) == ok(False)
+        assert await done(create(replace(definition, completion_guard=None), registry=registry).unwrap(), context) == ok(True)
+
+    asyncio.run(scenario())
+
+
 def test_create_step_done_and_run_one_step_loop():
     async def scenario():
         context = make_context(max_steps=1)

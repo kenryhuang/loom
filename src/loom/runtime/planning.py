@@ -257,17 +257,17 @@ class PlanController:
         self._events.append(PlanEvent("plan.completed", trigger, self._state.explanation, self._state))
         return ok(self._state)
 
-    def reopen_for_acceptance(self):
+    def reopen_for_acceptance(self, reason=None, identifier=None):
         """Host-only repair transition; completed work remains immutable."""
         if self._state.phase not in {PlanPhase.EXECUTING, PlanPhase.COMPLETED}:
             return
         if any(item.status not in {PlanItemStatus.COMPLETED, PlanItemStatus.SKIPPED} for item in self._state.items):
             return
-        reason = "Collect missing evidence and resolve the recorded acceptance conditions before finishing"
+        reason = reason or "Collect missing evidence and resolve the recorded acceptance conditions before finishing"
         self._state = replace(
             self._state, phase=PlanPhase.EXECUTING, revision=self._state.revision + 1,
             explanation=reason, updated_at=self._now(),
-            items=(*self._state.items, PlanItem(self._id_factory("step_"), reason, PlanItemStatus.IN_PROGRESS)),
+            items=(*self._state.items, PlanItem(identifier or self._id_factory("step_"), reason, PlanItemStatus.IN_PROGRESS)),
         )
         self._events.append(PlanEvent("plan.updated", "acceptance", reason, self._state))
 

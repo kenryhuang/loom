@@ -118,6 +118,7 @@ class AgentStore:
                 ("goals", "agent_goals"),
                 ("work_packages", "agent_work_packages"),
                 ("learning", "agent_learning_cycles"),
+                ("learning_allocations", "agent_learning_allocations"),
                 ("guidance", "agent_guidance"),
             ]:
                 agent[key] = self.rows(db, table, aid)
@@ -181,7 +182,10 @@ class AgentStore:
                 return replay
             agent = self.get(db, "agents", aid)
             self.expect(agent, revision)
-            budget_only = {k: v for k, v in agent["role"].items() if k != "budget"} == {k: v for k, v in role.items() if k != "budget"}
+            resource_fields = {"budget", "learning_policy"}
+            budget_only = {k: v for k, v in agent["role"].items() if k not in resource_fields} == {
+                k: v for k, v in role.items() if k not in resource_fields
+            }
             previous_role_revision = agent["role_revision"]
             # Running contracts stay pinned; semantic role changes invalidate queued work.
             agent.update(

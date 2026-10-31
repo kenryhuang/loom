@@ -110,9 +110,12 @@ class ManagedStep:
             if suspended is not None:
                 return suspended
             self.assembly.context = cp["context"]
-            if not await self.assembly.prepare_completion(value.get("report", ""), reuse_current=True):
+            if not await self.assembly.prepare_completion(value.get("report", ""), reuse_current=True, origin="finish_recovery"):
                 cp.pop("terminal", None)
-                return self._result(cp, runtime, "paused", self.assembly.acceptance.data["reason"])
+                result = self._result(cp, runtime, "continue")
+                return ok(replace(result.value, trace=replace(result.value.trace, metadata={
+                    **(result.value.trace.metadata or {}), "acceptanceCompletionPending": True,
+                })))
         await self._interrupt_batch(cp, runtime, "Task completed")
         cp["phase"] = "step_done"
         parsed = _parse_decision(cp["response"].content if cp.get("response") else "", cp["trace_id"])
@@ -420,12 +423,15 @@ class ManagedStep:
                 self.assembly._acceptance_cp = restored
                 self.assembly.context = restored["context"]
                 candidate = restored["terminal"]["parsed"].get("output", "")
-                if not await self.assembly.prepare_completion(candidate):
+                if not await self.assembly.prepare_completion(candidate, origin="resume_completion"):
                     restored.pop("terminal", None)
-                    restored.update(phase="before_llm", response=None, observations=[], calls=[], tool_index=0)
+                    restored.update(phase="before_llm", response=None, calls=[], tool_index=0)
                     restored["messages"].append(LlmMessage("user", "Completion could not be revalidated. " + self.assembly.acceptance.data["reason"]))
                     self._checkpoint(restored)
-                    return self._result(restored, runtime, "paused", self.assembly.acceptance.data["reason"])
+                    result = self._result(restored, runtime, "continue")
+                    return ok(replace(result.value, trace=replace(result.value.trace, metadata={
+                        **(result.value.trace.metadata or {}), "acceptanceCompletionPending": True,
+                    })))
             return await self._terminal(restored, runtime)
         if restored and restored.get("phase") != "step_done":
             cp = restored
@@ -471,6 +477,8 @@ class ManagedStep:
                 await self.assembly.acceptance.emit(runtime, "acceptance.gate.blocked")
                 self._checkpoint(cp)
                 return self._result(cp, runtime, "paused", str(exc))
+            if self.assembly.acceptance.data.get("resume_feedback_pending"):
+                return await self.assembly.resume_feedback_result(self._context(cp), runtime)
             cp["context"] = self.assembly.project_acceptance(cp["context"])
             cp["messages"][0] = self.assembly.context_manager.project(cp["context"])[0]
             self._checkpoint(cp)
@@ -660,22 +668,14 @@ class ManagedStep:
                     if cp["phase"] != "after_llm":
                         continue
                     self.assembly.context = cp["context"]
-                    await self.assembly.prepare_completion(parsed["output"])
+                    await self.assembly.prepare_completion(parsed["output"], origin="direct_answer")
                 if finished and completion_due and self.assembly and self.assembly.completion_error():
-                    cp["messages"].extend(
-                        [
-                            LlmMessage("assistant", response.content or ""),
-                            LlmMessage(
-                                "user",
-                                self.assembly.completion_error() + ". Repair the failed acceptance conditions: " + canonical(self.assembly.acceptance.public()),
-                            ),
-                        ]
-                    )
-                    cp["phase"] = "before_llm"
-                    cp["output_retries"] = cp.get("output_retries", 0) + 1
-                    if self.assembly.acceptance.data["state"] == "blocked" or cp["output_retries"] > self.assembly.acceptance.config["max_repairs"]:
-                        return self._result(cp, runtime, "paused", self.assembly.completion_error())
-                    continue
+                    # Return to the owning Task Loop; it applies feedback and commits
+                    # the workflow transition before the next solver step.
+                    result = self._result(cp, runtime, "continue")
+                    return ok(replace(result.value, trace=replace(result.value.trace, metadata={
+                        **(result.value.trace.metadata or {}), "acceptanceCompletionPending": True,
+                    })))
                 if finished and completion_due and self.assembly:
                     suspended = await self._boundary(cp, runtime)
                     if suspended is not None:

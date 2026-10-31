@@ -7,6 +7,8 @@ TABLES = {
     "agent_runs",
     "agent_work_packages",
     "agent_learning_cycles",
+    "agent_learning_allocations",
+    "agent_budget_blocks",
     "agent_guidance",
     "agent_contexts",
     "agent_routes",

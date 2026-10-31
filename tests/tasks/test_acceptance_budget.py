@@ -24,7 +24,7 @@ def setup_gate(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('completed', [False, True])
-async def test_resume_opens_repair_step_when_all_legacy_plan_items_are_done(tmp_path, completed):
+async def test_resume_budget_does_not_schedule_workflow_and_feedback_does(tmp_path, completed):
     assembly, context, runtime = setup_gate(tmp_path)
     from loom.workflows.legacy import LegacyPlanningWorkflow
     workflow = LegacyPlanningWorkflow({'mode': 'force'})
@@ -40,6 +40,14 @@ async def test_resume_opens_repair_step_when_all_legacy_plan_items_are_done(tmp_
     (tmp_path / 'source.txt').write_text('fresh evidence')
     try:
         await assembly.acceptance.prepare(context, runtime)
+        # Budget renewal has no workflow side effects. TaskAssembly admits and
+        # applies structured feedback using the existing step/control boundary.
+        assert workflow.controller.state.items == prior
+        assembly.acceptance.data['results'] = [{'criterion_id': 'output', 'status': 'blocked', 'reason': 'Missing source',
+            'gap': {'kind': 'missing_evidence', 'targets': [{'kind': 'workspace_path', 'value': 'source.txt'}],
+                    'required_fact': 'Read source content', 'suggested_action': 'Read source.txt'}}]
+        result = (await assembly.acceptance_blocked_result(context, runtime, 'Missing source')).unwrap()
+        assert result.control.kind == 'continue'
         assert workflow.controller.state.items[:-1] == prior
         assert workflow.controller.state.items[-1].status.value == 'in_progress'
         handlers = assembly.handlers()
@@ -56,7 +64,7 @@ async def test_resume_opens_repair_step_when_all_legacy_plan_items_are_done(tmp_
 
 @pytest.mark.parametrize('status', ['blocked', 'failed'])
 @pytest.mark.asyncio
-async def test_only_conclusive_failures_consume_repair_allowance(tmp_path, status):
+async def test_repeated_assessment_is_cached_and_verdict_does_not_consume_repair_allowance(tmp_path, status):
     assembly, context, runtime = setup_gate(tmp_path)
     gate = assembly.acceptance
 
@@ -67,14 +75,10 @@ async def test_only_conclusive_failures_consume_repair_allowance(tmp_path, statu
     try:
         for _ in range(3):
             assert not await gate.verify(context, runtime, 'candidate')
-        assert gate.data['attempts'] == 3
-        assert gate.data['failed_attempts'] == (3 if status == 'failed' else 0)
-        if status == 'failed':
-            with pytest.raises(AcceptanceBlocked, match='3/3 failed attempts'):
-                await gate.verify(context, runtime, 'candidate')
-        else:
-            assert not await gate.verify(context, runtime, 'candidate')
-            assert gate.can_repair()
+        assert gate.data['attempts'] == 1
+        assert gate.data['failed_attempts'] == (1 if status == 'failed' else 0)
+        assert gate.data['repair_rounds'] == 0
+        assert gate.can_repair()
     finally:
         await assembly.close()
 
@@ -132,7 +136,7 @@ async def test_explicit_resume_archives_allocation_and_is_idempotent_after_check
     try:
         await gate.prepare(context, runtime)
         assert gate.data['plan'] == plan and gate.data['goal_digest'] == goal
-        assert gate.data['results'] == [] and gate.data['state'] == 'not_ready'
+        assert gate.data['results'] == previous and gate.data['state'] == 'not_ready'
         assert gate.data['model_calls'] == gate.data['attempts'] == gate.data['failed_attempts'] == 0
         assert assembly._local_calls == 9  # Task-wide paid usage is not reset.
         assert gate.data['pending_operations'] == {'output': 'uncertain-op'}

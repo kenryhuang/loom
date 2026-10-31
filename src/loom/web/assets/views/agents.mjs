@@ -160,6 +160,13 @@ export class AgentsView {
       ['单目标累计上限',number(d.role.budget.goal_tokens)],['每日调用次数上限',number(d.role.budget.max_calls)],['累计模型调用',number(d.budget.reduce((sum,r) => sum+r.calls,0))],
       ['未知用量调用',number(d.budget.reduce((sum,r) => sum+(r.unknown_calls || 0),0))]]);
     table(budget,['预算窗口','用途','调用数','Token（含预留）','未知用量调用'],d.budget.map(r => [r.window,r.category,number(r.calls),number(r.tokens),number(r.unknown_calls)]));
+    if (d.learning_budget) {
+      const learning = d.learning_budget;
+      cards(budget,[['每日初始学习额度',number(learning.initial_tokens)],['今日学习额度',number(learning.effective_tokens)],
+        ['学习自动扩容',learning.policy.auto_expand ? `开启，最多 ${number(learning.policy.max_learning_tokens)} token` : '关闭']]);
+      const grants = (d.learning_allocations || []).flatMap(a => a.grants.map(g => [a.window,number(g.before),number(g.after),g.reason]));
+      if (grants.length) table(budget,['预算窗口','扩容前','扩容后','原因'],grants);
+    }
     const history = panel(root,'编排记录',true);
     history.firstChild.append(button('查看最近编排原因',()=>this.act(async()=>{const {runs}=await this.api.get(d.id,'runs');
       output.replaceChildren();table(output,['状态','编排原因','时间'],runs.map(r=>[badge(label(r.state)),r.reason,r.created_at]));})));

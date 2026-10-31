@@ -15,6 +15,29 @@ class LegacyPlanningWorkflow(PlanningRuntime):
             raise ValueError("Unknown legacy workflow configuration")
         self.config = dict(config)
         super().__init__(config.get("mode", "auto"), route_policy=WorkflowRoutePolicy(**config.get("progress_review", {})))
+        self._feedback_applications = {}
+
+    def snapshot(self):
+        return {**super().snapshot(), "feedback_applications": dict(self._feedback_applications)}
+
+    def restore(self, value):
+        result = super().restore(value)
+        if result.ok:
+            self._feedback_applications = dict(value.get("feedback_applications", {}))
+        return result
+
+    def apply_task_feedback(self, feedback):
+        from loom.tasks.acceptance_feedback import feedback_objective
+
+        identifier = feedback["id"]
+        if identifier in self._feedback_applications:
+            return self._feedback_applications[identifier]
+        self.controller.reopen_for_acceptance(feedback_objective(feedback), "repair-" + identifier.split(":")[-1][:20])
+        state = self.controller.state
+        application = {"feedback_id": identifier, "revision": state.revision,
+                       "step_ids": [i.id for i in state.items if i.status.value in {"pending", "in_progress"}]}
+        self._feedback_applications[identifier] = application
+        return application
 
     def plugin_snapshot(self):
         return self.manifest.state(self.config, self.snapshot())

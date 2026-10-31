@@ -238,11 +238,22 @@ async def done(
     if token.cancelled:
         return err(make_loom_error("ABORTED", "Operation aborted", retryable=False))
     max_steps = context.goal.budget.max_steps
-    if max_steps is not None and len(context.state.observations) >= max_steps:
-        return ok(True)
-
     state = _RUNTIME_STATE.get(id(loop))
     registry = state.registry if state else default_runtime_registry
+    if loop.definition.completion_guard is not None:
+        try:
+            allowed = await _maybe_await(loop.definition.completion_guard(context, DoneRuntime(token, now_iso, registry)), timeout_ms)
+            allowed = allowed if isinstance(allowed, Result) else ok(bool(allowed))
+        except BaseException as exc:
+            return err(to_loom_error(exc))
+        if not allowed.ok:
+            return allowed
+        if not allowed.value:
+            if max_steps is not None and len(context.state.observations) >= max_steps:
+                return err(make_loom_error("BUDGET_EXCEEDED", "Step budget exhausted before completion was permitted", retryable=False))
+            return ok(False)
+    if max_steps is not None and len(context.state.observations) >= max_steps:
+        return ok(True)
     criteria_result = await _evaluate_required_criteria(context, registry)
     if not criteria_result.ok or criteria_result.value:
         return criteria_result

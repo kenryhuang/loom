@@ -69,6 +69,7 @@ def test_budget_only_revision_preserves_pending_work_contract(agent_service, bud
     agent = facade.snapshot(aid)
     role = {k: v for k, v in agent['role'].items() if k != 'schema_version'}
     role['budget'] = {**role['budget'], 'work_tokens': 1000000, 'max_calls': 2000}
+    role['learning_policy'] = {**role['learning_policy'], 'max_learning_tokens': 2000000}
     if not budget_only:
         role['methods'] = [*role['methods'], 'Changed execution method']
     updated = facade.store.revise_role(aid, 'budget-revision', agent['revision'], role)

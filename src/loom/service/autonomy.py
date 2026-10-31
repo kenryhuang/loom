@@ -34,6 +34,7 @@ class AutonomyService:
         result["service_enabled"] = self.service.autonomy_enabled
         result["service_error"] = self.supervisor.last_error
         result["budget"] = BudgetLedger(self.store.sessions.path).summary(aid)
+        result["learning_budget"] = BudgetLedger(self.store.sessions.path, clock=self.store.clock).learning_summary(aid)
         result["pause_pending"] = result["state"] in {"paused", "archived"} and any(s["session_id"] in self.service.active for s in result["sessions"])
         return result
 

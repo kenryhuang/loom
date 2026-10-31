@@ -22,7 +22,7 @@ test('Agent setup shares Session blocks and loads named model/resource choices',
     assert.equal(f.view.submit.disabled,true);
     await f.view.load();
     assert.deepEqual(f.calls,['/v1/web/catalog','/v1/knowledge-bases']);
-    assert.equal(f.view.form.querySelectorAll('.setup-block').length,7);
+    assert.equal(f.view.form.querySelectorAll('.setup-block').length,8);
     assert.ok(f.view.form.matches('.setup-form'));
     for(const name of ['model','evaluation_model','mode','interval','schedule','daily','timezone'])
       assert.equal(f.view.form.elements[name].tagName,'SELECT');
@@ -132,4 +132,23 @@ test('Work budget defaults to a tenth of daily allowance with selectable overrid
   f.view.form.elements.daily_custom.dispatchEvent(new f.dom.window.Event('input',{bubbles:true}));
   assert.equal(f.view.payload().budget.work_tokens,123456);
  }finally{f.close();}
+});
+
+test('Learning policy uses selectable bounds and preserves explicit settings on edit',async()=>{
+  const f=fixture();
+  try {
+    await f.view.load();
+    assert.equal(f.view.payload().budget.learning_tokens,250000);
+    assert.deepEqual(f.view.payload().learning_policy,{auto_expand:true,max_learning_tokens:1000000,max_expansions:2,max_resumes:3});
+    f.view.daily.choice.value='250000';f.change(f.view.daily.choice);
+    assert.equal(f.view.payload().learning_policy.max_learning_tokens,250000);
+    f.view.learningAuto.value='false';
+    f.view.learningExpansions.choice.value='0';f.change(f.view.learningExpansions.choice);
+    assert.equal(f.view.payload().learning_policy.auto_expand,false);
+    assert.equal(f.view.payload().learning_policy.max_expansions,0);
+    const saved=f.view.payload();
+    const edit=fixture({edit:{role:saved}});
+    try {await edit.view.load();assert.deepEqual(edit.view.payload().learning_policy,saved.learning_policy);}
+    finally {edit.close();}
+  } finally {f.close();}
 });

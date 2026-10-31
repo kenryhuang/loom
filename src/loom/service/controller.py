@@ -200,35 +200,28 @@ class LoomService:
                 raise ServiceError("Previous processes have not exited", 409)
             old = state["run"]
             restarting = state.pop('restart_pending', False)
-            if old and old['state'] == 'failed' and not restarting:
-                # A failed Agent run is replaced on Resume. Preserve the last
-                # committed checkpoint's observations and plugin evidence before
-                # replacing its run record; never replay pending model actions.
-                checkpoint = self._checkpoint_value(state)
-                if checkpoint:
-                    context = checkpoint['context']
-                    observations = {o.id: o for o in (*context.state.observations, *checkpoint.get('observations', []))}
-                    scratch = dict(context.state.scratch or {})
-                    if checkpoint.get('plugin_states'):
-                        scratch['execution_plugins'] = checkpoint['plugin_states']
-                    state['context'] = encode(replace(context, state=replace(
-                        context.state, observations=tuple(observations.values()), scratch=scratch,
-                    )))
+            from loom.service.restoration import prepare_restore
+
+            if old and old["state"] == "failed" and not restarting:
+                for row in db.execute("SELECT body FROM operations WHERE session_id=?", (sid,)):
+                    operation = json.loads(row[0])
+                    if operation["status"] == "started" and operation["effect_kind"] == "side_effecting":
+                        raise ServiceError("Uncertain operation requires recovery before replacing the run", 409)
+            intent = prepare_restore(state, self._checkpoint_value(state), restarting=restarting)
             if not old or old["state"] in {"completed", "stopped", "failed"}:
                 state["run"] = {"id": new_id("run"), "state": "queued", "steps": 0, "checkpoint": None, "active_seconds": 0, "counters": encode({})}
-                state["run"]["reset_planning"] = bool(
-                    restarting or old
-                    and (
-                        old["state"] == "completed"
-                        or (old["state"] == "stopped" and any(m["role"] == "user" and m["seq"] > state["input_cursor"] for m in state["messages"]))
-                    )
-                )
+                state["run"]["reset_planning"] = intent.mode in {"new_task", "restart"}
+                if old and intent.mode == "same_task":
+                    for key in ("steps", "active_seconds", "counters", "time_budget_start_seconds", "task_event_ids"):
+                        if key in old:
+                            state["run"][key] = old[key]
                 state['run']['restart_from_scratch'] = restarting
                 if old and not restarting and old.get('acceptance_budget_request'):
                     state['run']['acceptance_budget_request'] = old['acceptance_budget_request']
             if not state["run"].get("task_episode_id"):
                 state["run"]["task_episode_id"] = state.pop('restart_episode_id', None) or (old.get("task_episode_id") if old and old["state"] != "completed"
                                                    and not state["run"].get("reset_planning") else None) or new_id("episode")
+            state["run"]["restore_intent"] = intent.snapshot()
             state["epoch"] += 1
             state["run"].update(state="running", attempt_id=new_id("attempt"), process=None)
             state["run"].pop("reason", None)
@@ -271,6 +264,11 @@ class LoomService:
     def _worker_event(self, state, emit, db, value):
         run, sid = state["run"], state["session_id"]
         event = plain(value)
+        if event.get("event_id"):
+            delivered = run.setdefault("task_event_ids", [])
+            if event["event_id"] in delivered:
+                return
+            delivered.append(event["event_id"])
         if state.get('autonomy') and event['type'] == 'context.updated':
             binding = state['autonomy']
             row = db.execute('SELECT body FROM agent_contexts WHERE id=? AND agent_id=?',
@@ -413,6 +411,8 @@ class LoomService:
                 previous = decode(run.get("counters", encode({})))
                 used = getattr(previous.get("usage"), "total_tokens", 0)
                 run["checkpoint"] = self.store.artifact_in_transaction(db, sid, encode(value), "execution_checkpoint")
+                for event in value.get("task_events", []):
+                    self._worker_event(state, emit, db, event)
                 if run.get("assembly_update_pending") == value.get("assembly_revision"):
                     run.pop("assembly_update_pending", None)
                 run["counters"] = encode({"llm_calls": value["llm_calls"], "usage": value["usage"]})

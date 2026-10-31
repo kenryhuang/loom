@@ -1,6 +1,6 @@
 # Task Loop：验收反馈闭环与完整恢复设计
 
-日期：2026-10-31。状态：设计草案，待评审；本文不表示以下机制已经实现。
+日期：2026-10-31。状态：已实施；实现入口、兼容边界与验证记录见第 13 节。
 
 ## 1. 设计结论
 
@@ -12,7 +12,7 @@
 
 ## 2. 事实依据与当前边界
 
-本设计基于当前工作区实现，包括前几轮已经完成的故障修复。
+本节记录实施前的代码行为，包括前几轮已经完成的故障修复；实施后的入口见第 13 节。
 
 | 位置 | 当前行为 | 本设计处理的边界 |
 |---|---|---|
@@ -345,3 +345,30 @@ Service 路径复用 `boundary` / `worker_records` 的事务与去重机制。�
 4. 实现旧快照迁移及 Processing 投影，执行崩溃与全链路回归。
 
 评审通过后的实现完成标准：**上述证据缺失场景由 Task Loop 自行闭环，且外部阻塞、预算上限、权限与原验收要求仍然有效。**
+
+## 13. 实施记录（2026-10-31）
+
+### 实现入口
+
+- [`service/restoration.py`](../../../src/loom/service/restoration.py)：`RestoreIntent` 和恢复清单；在替换 run 的事务内保留上下文、插件状态、原操作来源和累计用量，worker 校验 episode/work package 与快照一致性。跨 run 从已提交上下文重建模型消息，不重放尚未执行的旧工具决定。
+- [`tasks/acceptance_feedback.py`](../../../src/loom/tasks/acceptance_feedback.py)：`CompletionDecision`、结构化反馈与宿主修复准入；验收结论、控制动作和修复轮次分别记录。相同候选与相同有效证据复用评估；一轮执行没有进展时暂停并保留具体缺口。
+- [`tasks/assembly.py`](../../../src/loom/tasks/assembly.py)：统一 `request_completion`，将反馈与 workflow 应用映射为现有 `StepResult / StepControl`。完成门禁同时覆盖 Service 和通用 Runtime。
+- [`workflows/feedback.py`](../../../src/loom/workflows/feedback.py)：显式反馈能力接口。legacy、dynamic、adaptive DAG 保存反馈与步骤的幂等关联；原终态条目保持不变，容量和工具限制仍生效。
+- [`tasks/acceptance_protocols.py`](../../../src/loom/tasks/acceptance_protocols.py)：验收协议 v2；路径、证据 ID、缺口类型与长度由宿主校验。v1 的 blocked 缺口保守迁移为 unknown，不通过原因文本推断可执行动作。
+- [`tasks/acceptance_evidence.py`](../../../src/loom/tasks/acceptance_evidence.py)：保留原始证据索引和 artifact；文件内容变化会使读取证据过期。每次评估最多进行一次有界证据视图扩展，仍不足时保留缺口并暂停。
+- Service 的 boundary 事务一起提交反馈转换检查点和展示事件，按稳定事件 ID 去重。恢复已提交的转换时不重验、不新增修复节点、不重复扣轮次。
+- Processing 聚合同一反馈的修复链，区分修复中、复验、通过和暂停；详细原因可沿用活动行展开查看。
+
+### 验证与运行边界
+
+新增测试覆盖三个 workflow 的直接回答与 finish 自动补证据、全部计划完成后的反馈应用、无进展与零修复额度、外部阻塞、证据视图截断、文件变化，以及评估已保存、workflow 未提交、转换已提交三个恢复边界。持久化 Service 测试确认无需 Resume 即可补读并通过，原证据跨 run 后无需重复读取。
+
+测试入口：[`test_acceptance_feedback.py`](../../../tests/tasks/test_acceptance_feedback.py)、[`test_restoration.py`](../../../tests/service/test_restoration.py)、[`test_acceptance.py`](../../../tests/service/test_acceptance.py)、[`test_runtime.py`](../../../tests/runtime/test_runtime.py)、[`activity.test.mjs`](../../../tests/web/activity.test.mjs)。
+
+验证结果：tasks/runtime、Service 验收与恢复、ManagedStep 合计 412 项通过；前端 244 项通过。最终反馈/预算边界补测 37 项通过，活动行补测 26 项通过；修改文件的 Ruff F 检查及 `git diff --check` 通过。
+
+外部条件没有真实 InputRequest 时保持 paused，不伪造 waiting_input。验证模型请求在响应持久化前中断时，仍不能保证物理请求恰好一次。未知副作用继续走现有 operation recovery；自动修复不会续期预算。
+
+较大范围回归中有 4 个既有失败，已在未修改的 HEAD 独立副本中复现：研究结果压缩/分页的两个 Service 场景、长历史压缩场景，以及旧的 Resume 预算字段断言；本次未修改这些既有行为。
+
+运行中的服务需要重启以加载新的 controller 恢复与事务逻辑。本次实施未重启现有服务或主动恢复线上 Session。

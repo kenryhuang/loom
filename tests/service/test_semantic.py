@@ -464,3 +464,23 @@ def test_explicit_new_evaluation_options_are_validated(evaluation, options, mess
     with pytest.raises(ServiceError, match=message):
         semantic.start(sid, aid, options)
     assert provider.calls == 0
+
+
+def test_host_resume_intent_is_idempotent_after_completion_and_restart(evaluation):
+    _, trajectory, semantic, provider, sid, aid = evaluation
+    job = semantic.start(sid, aid, {"analysis_version": "v2", "batch_rounds": 1, "max_calls": 1})
+    assert wait_job(semantic, sid, aid, job["id"])["state"] == "budget_exhausted"
+    options = {"resume_id": job["id"], "max_calls": 10}
+    semantic.start(sid, aid, options, resume_request_id="allocation-1")
+    assert wait_job(semantic, sid, aid, job["id"])["state"] == "completed"
+    assert provider.calls == 3
+    semantic.close()
+    restored = SessionSemantic(trajectory, provider_factory=lambda model: provider)
+    try:
+        replay = restored.start(sid, aid, options, resume_request_id="allocation-1")
+        assert replay["id"] == job["id"] and replay["state"] == "completed"
+        assert provider.calls == 3
+        with pytest.raises(ServiceError, match="Only stopped"):
+            restored.start(sid, aid, options, resume_request_id="different-intent")
+    finally:
+        restored.close()

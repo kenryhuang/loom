@@ -185,3 +185,11 @@ test('Overview distinguishes paused, disabled, unscheduled and invalid schedulin
   assert.match(schedule.textContent,/调度时间暂不可用/);assert.doesNotMatch(schedule.textContent,/Invalid|NaN/);
  }finally{view.close();dom.window.close();}
 });
+
+test('Overview shows effective learning allowance and audited expansion',async()=>{
+ const data=fixture();data.learning_budget={initial_tokens:250000,effective_tokens:500000,policy:{auto_expand:true,max_learning_tokens:1000000}};
+ data.learning_allocations=[{window:'2026-10-31',grants:[{before:250000,after:500000,reason:'Learning request exceeded allowance by 1509'}]}];
+ const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{await view.open();await view.select('a');assert.match(view.root.textContent,/今日学习额度/);assert.match(view.root.textContent,/500,000/);assert.match(view.root.textContent,/exceeded allowance by 1509/);}
+ finally{view.close();dom.window.close();}
+});

@@ -40,6 +40,13 @@ def record_call(assembly, run_id, call_id, tool, value, result):
            "artifact": artifact, "artifact_format": artifact_format, "input": inputs[:2000], "input_truncated": len(inputs) > 2000,
            "error": error, "external": bool((binding.ref.metadata or {}).get("external_tool_id")),
            "paths": [v for k, v in value.items() if k in {"path", "file_path", "cwd"} and isinstance(v, str)]}
+    if success and tool == "read_file" and row["paths"]:
+        from loom.tasks.workspace_probe import manifest, ManifestUnavailable
+
+        try:
+            row["dependencies"] = manifest(assembly.tool_request.workspace, row["paths"])
+        except (ValueError, OSError, ManifestUnavailable):
+            row["dependencies"] = None
     # Journal replay must not count the same invocation twice.
     assembly._acceptance_calls = [r for r in assembly._acceptance_calls if r["id"] != identifier] + [row]
     return result
@@ -53,7 +60,29 @@ def matching_calls(assembly, tool):
     return [r for r in current_calls(assembly) if r["tool"] == tool]
 
 
-def evidence(assembly):
+def binding(assembly):
+    """Content and current source validity, independent of run/call identities."""
+    from loom.tasks.workspace_probe import digest, manifest, ManifestUnavailable
+
+    facts = set()
+    excluded = {"finish", "update_plan", "plan", "complete_node", "revise_workflow", "revise_acceptance_plan"}
+    for row in current_calls(assembly):
+        if row["tool"] in excluded:
+            continue
+        current = None
+        if row.get("dependencies") is not None:
+            try:
+                current = manifest(assembly.tool_request.workspace, row["paths"])
+            except (ValueError, OSError, ManifestUnavailable):
+                current = "unavailable"
+        facts.add(digest({"tool": row["tool"], "input": row["input"], "ok": row["ok"],
+                          "content": (row.get("artifact") or {}).get("sha256"), "current": current}))
+    required_counts = {c["id"]: min(c["check"].get("min_calls", 1), sum(r["ok"] for r in matching_calls(assembly, c["check"]["tool_id"])))
+                       for c in (assembly.acceptance.data.get("plan") or {}).get("criteria", []) if c["verifier"] == "tool_call"}
+    return digest({"facts": sorted(facts), "required_counts": required_counts})
+
+
+def evidence(assembly, *, targets=(), expanded=False):
     rows = current_calls(assembly)
     if not rows:
         # Legacy checkpoints only contain a rolling preview, not a complete call index.
@@ -63,6 +92,12 @@ def evidence(assembly):
 
     def include(row):
         selected[row["id"]] = row
+
+    # A structured gap can select already-acquired evidence that the default
+    # view omitted. This changes the view, never re-executes the acquisition.
+    for row in reversed(rows):
+        if any(path == target or path.startswith(target.rstrip("/") + "/") for path in row.get("paths", []) for target in targets):
+            include(row)
 
     # Pin research/explicit-tool evidence before filling with recent unrelated work.
     tools = {r["tool"] for r in rows if r.get("external")}
@@ -100,6 +135,9 @@ def evidence(assembly):
                "note": "Call success proves execution only. Assess source relevance and deliverable correctness separately; "
                        "missing or truncated supporting content cannot establish a claim."}]
     for row in chosen:
+        # Dependency fingerprints are host validity metadata, not model evidence.
+        dependencies = row.get("dependencies")
+        row = {k: v for k, v in row.items() if k != "dependencies"}
         if not row.get("artifact"):
             result.append({**row, "output": None})
             continue
@@ -108,8 +146,19 @@ def evidence(assembly):
         except (OSError, ValueError, KeyError, ServiceError):
             result.append({**row, "unavailable": True})
             continue
+        if dependencies is not None:
+            from loom.tasks.workspace_probe import manifest, ManifestUnavailable
+
+            try:
+                fresh = manifest(assembly.tool_request.workspace, row["paths"]) == dependencies
+            except (ValueError, OSError, ManifestUnavailable):
+                fresh = False
+            if not fresh:
+                result.append({**row, "stale": True, "output": None})
+                continue
         raw = json.dumps(full["output"] if row["artifact_format"] == "call" else full, ensure_ascii=False)
-        result.append({**row, "output": raw[:6000], "truncated": len(raw) > 6000})
+        cap = assembly.acceptance.input_budget()["max_input_tokens"] if expanded else 6000
+        result.append({**row, "output": raw[:cap], "truncated": len(raw) > cap})
     # Leave half of the verification context for the goal, criteria, candidate and
     # deterministic checks. The full artifacts remain available outside this prompt.
     token_budget = assembly.acceptance.input_budget()["max_input_tokens"] // 2

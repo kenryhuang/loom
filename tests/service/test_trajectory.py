@@ -165,3 +165,45 @@ def test_analysis_samples_first_output_per_run_and_exposes_model_performance(tmp
         assert stats["models"]["tps"]["average"] == 15
     finally:
         manager.close()
+
+
+@pytest.mark.parametrize('kind', ['tool', 'llm'])
+@pytest.mark.parametrize('ending,status', [('interrupted', 'unknown'), ('cancelled', 'cancelled')])
+@pytest.mark.parametrize('has_start', [False, True])
+def test_interrupted_and_cancelled_calls_keep_evidence_without_start(tmp_path, kind, ending, status, has_start):
+    store = SessionStore(tmp_path / 'data')
+    sid = session(store, tmp_path)
+    initial_cursor = store.snapshot(sid)['event_cursor']
+
+    def append(state, emit, db):
+        state['run'] = {'id': 'run', 'state': 'running'}
+        scope = dict(trace_id='trace', loop_id='loop', step_number=4)
+        if kind == 'tool':
+            scope.update(tool_id='read_file', tool_call_id='read-1')
+        else:
+            scope.update(llm_call_id='model-1')
+        if has_start:
+            emit(f'{kind}.started' if kind == 'tool' else 'llm.requested',
+                 {**scope, 'at': '2026-10-31T00:00:00Z'})
+        emit(f'{kind}.{ending}', {**scope, 'reason': 'Workflow phase changed', 'at': '2026-10-31T00:00:02Z'})
+
+    store.update(sid, append)
+    manager = SessionTrajectory(store)
+    try:
+        job = manager.start(sid)
+        result = finished(manager, sid, job['id'])
+        row = result['analysis']['tools' if kind == 'tool' else 'rounds'][0]
+        assert row['status'] == status
+        assert row['duration_ms'] == (2000 if has_start else None)
+        assert row['seq'] == initial_cursor + (2 if has_start and kind == 'tool' else 1)
+        _, data = manager._data(manager._load(sid, job['id']))
+        fact = data['facts']['tool_uses' if kind == 'tool' else 'trajectory'][0]
+        ref = fact['evidence_refs'][-1]
+        evidence = manager.evidence(sid, job['id'], ref['line_number'], ref['field_path'], 0, 2000)
+        assert evidence['event_type'] == f'{kind}.{ending}'
+        assert 'Workflow phase changed' in evidence['content']
+        if kind == 'tool':
+            assert fact['raw_output_ref'] is None
+            assert fact['output_excerpt'] == ''
+    finally:
+        manager.close()

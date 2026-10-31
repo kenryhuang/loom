@@ -10,6 +10,23 @@ import {
   modelText,
 } from "../../src/loom/web/assets/activity/content.mjs";
 const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+test("acceptance feedback displays repair progress and groups replay by feedback identity", async () => {
+  const {presentAcceptance, acceptanceDescriptor, isAcceptanceRound} = await import("../../src/loom/web/assets/activity/acceptance.mjs");
+  const acceptance = {state: "needs_repair", attempts: 1, reason: "Source evidence missing",
+    plan: {criteria: [{id: "source", description: "Verify source"}]},
+    results: [{criterion_id: "source", status: "blocked", reason: "Read source"}],
+    decision: {outcome: "repair", reason_code: "ACCEPTANCE_REPAIR_REQUIRED"},
+    feedback: {id: "feedback-1", state: "applied", repair_round: 1, repair_limit: 2}};
+  const row = presentAcceptance({data: {acceptance}});
+  assert.equal(row.title, "Repairing acceptance gaps");
+  assert.equal(row.state, "running");
+  const initial = {type: "acceptance.feedback.applied", run_id: "old", payload: {acceptance}};
+  const replay = {...initial, run_id: "new"};
+  assert.ok(isAcceptanceRound(initial));
+  assert.equal(acceptanceDescriptor(initial).key, acceptanceDescriptor(replay).key);
+  assert.equal(presentAcceptance({data: {acceptance: {...acceptance, state: "passed", feedback: {...acceptance.feedback, state: "resolved"}}}}).state, "completed");
+});
+
 test("context compaction exposes the effective cap and retained evidence", () => {
   const view = eventPresentation("context.compacted", {before_chars: 30000, after_chars: 10000,
     effective_limit_chars: 24000, task_limit_chars: 2400000, plugin_limit_chars: 24000,

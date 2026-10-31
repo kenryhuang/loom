@@ -1,9 +1,11 @@
 """Persistent per-terminal-run coordination of fixed-source Deep evaluations."""
 
 import json
+from copy import deepcopy
 from datetime import timedelta
 
 from loom.autonomy.budget import BudgetLedger
+from loom.autonomy.learning_budget import admit_resume, current_block
 from loom.service.contracts import ServiceError
 
 
@@ -24,13 +26,18 @@ class LearningCoordinator:
             cycles = self.store.rows(db, "agent_learning_cycles", aid)
         for cycle in cycles:
             action = cycle.get("requested_action")
+            # Reconsider legacy next-window deferrals once when the structured
+            # budget policy is first installed, without requiring manual Resume.
+            migrate_budget = cycle.get("auto_resume") and not cycle.get("budget_policy_seen")
             if not action and (
-                agent["state"] != "enabled" or cycle["state"] in {"completed", "cancelled", "failed"} or cycle.get("retry_after", "") > self.store.now()
+                agent["state"] != "enabled" or cycle["state"] in {"completed", "cancelled", "failed"}
+                or cycle.get("retry_after", "") > self.store.now() and not migrate_budget
             ):
                 continue
             if action == "retry" and agent["state"] != "enabled":
                 continue
-            before = dict(cycle)
+            before = deepcopy(cycle)
+            cycle["budget_policy_seen"] = 1
             try:
                 if action == "cancel":
                     if cycle.get("evaluation_id"):
@@ -62,7 +69,7 @@ class LearningCoordinator:
             if cycle != before:
                 return
 
-    def _resume(self, cycle):
+    def _resume(self, cycle, *, retry_failed=True):
         if not cycle.get("evaluation_id"):
             return
         job = self.background.semantic._load(cycle["session_id"], cycle["analysis_id"], cycle["evaluation_id"])
@@ -70,9 +77,17 @@ class LearningCoordinator:
             return  # A lost acknowledgement is reconciled from the same evaluation.
         public = self.background.semantic._public(job)
         options = {"resume_id": cycle["evaluation_id"], **cycle.get("retry_options", {})}
-        if public.get("retryable_work"):
+        if retry_failed and public.get("retryable_work"):
             options["retry_failed"] = True
-        self.background.semantic.start(cycle["session_id"], cycle["analysis_id"], options)
+        kwargs = {}
+        if pending := cycle.get("budget_resume_pending"):
+            with self.store.sessions.transaction() as db:
+                current = self.store.get(db, "agent_learning_cycles", cycle["id"], cycle["agent_id"])
+                agent = self.store.get(db, "agents", cycle["agent_id"])
+            if agent["state"] != "enabled" or current.get("command_generation", 0) != cycle.get("command_generation", 0):
+                raise ServiceError("Learning control changed before budget resume", 409)
+            kwargs["resume_request_id"] = pending["id"]
+        self.background.semantic.start(cycle["session_id"], cycle["analysis_id"], options, **kwargs)
 
     def _advance(self, agent, cycle):
         sid = cycle["session_id"]
@@ -103,9 +118,41 @@ class LearningCoordinator:
         published = [r for r in records.values() if r.get("publication_state", "published") == "published" and r["kind"] in {"facts", "lessons", "workflows"}]
         cycle["memory_result"] = dict(accepted=len(published), evaluation_state=job["state"])
         if job["state"] in {"queued", "running"}:
+            if cycle.get("budget_resume_pending"):
+                cycle.update(state="running", budget_resume_pending=None, retry_after="")
             return
-        failures = json.dumps({k: job.get(k) for k in ("error", "error_details", "checkpoint")})
-        budget_reason = " | ".join(_budget_messages({k: job.get(k) for k in ("error", "error_details", "checkpoint")}))
+        pending = cycle.get("budget_resume_pending")
+        if pending and (job["state"] == "completed" or pending["id"] in job.get("host_resume_requests", [])):
+            cycle["budget_resume_pending"] = None
+        if cycle.get("budget_resume_pending"):
+            self._resume(cycle, retry_failed=False)
+            cycle.update(state="running", auto_resume=False, blocked_reason=None, retry_after="", budget_resume_pending=None)
+            return
+        block = current_block(self.store, job)
+        if block and job["state"] != "completed":
+            cycle["budget_policy_seen"] = 1
+            decision = admit_resume(self.store, agent["id"], cycle, job, block)
+            cycle["budget_decision"] = decision
+            cycle["coverage"] = "partial" if published else "none"
+            if decision["outcome"] == "resume":
+                self._resume(cycle, retry_failed=False)
+                cycle.update(state="running", auto_resume=False, blocked_reason=None, retry_after="", budget_resume_pending=None)
+            elif decision["outcome"] == "wait":
+                cycle.update(state="deferred", auto_resume=True, blocked_reason=decision["reason"],
+                             retry_after=BudgetLedger(self.store.sessions.path, clock=self.store.clock).next_window(agent["id"]))
+            else:
+                cycle.update(state="failed" if decision["outcome"] == "stop" else "deferred", auto_resume=False,
+                             blocked_reason=decision["reason"], retry_after=(self.store.clock() + timedelta(seconds=60)).isoformat())
+            return
+        if cycle.get("auto_resume") and cycle.get("retry_after", "") > self.store.now():
+            return  # Unsupported legacy errors retain their existing deferral.
+        errors = {k: job.get(k) for k in ("error", "error_details")}
+        if not job.get("host_resume_requests") and not cycle.get("budget_resumes") and job["state"] == "incomplete":
+            # Pre-policy jobs sometimes stored their only failure in a stage.
+            # Once a host resume is recorded these are historical evidence.
+            errors["checkpoint"] = job.get("checkpoint")
+        failures = json.dumps(errors)
+        budget_reason = " | ".join(_budget_messages(errors))
         if job["state"] == "completed" and not self.background.semantic._public(job).get("retryable_work"):
             failures = ""  # Historical errors in a resumed checkpoint are not current blockers.
         # Cumulative limits still block after midnight, even if a daily limit is
@@ -133,7 +180,7 @@ class LearningCoordinator:
             coverage = "partial" if job["state"] == "incomplete" or public.get("retryable_work") else "full"
             cycle.update(state="completed", phase="feedback", coverage=coverage)
         elif job["state"] == "interrupted":
-            self._resume(cycle)
+            self._resume(cycle, retry_failed=False)
             cycle.update(state="running")
         else:
             cycle.update(state="failed", coverage="partial" if published else "none", blocked_reason=job.get("error", job["state"]))

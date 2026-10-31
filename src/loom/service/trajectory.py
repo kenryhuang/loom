@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from loom.core import now_iso
+from loom.evaluation.base_metrics import terminal_event
 from loom.evaluation.evidence_store import EvidenceStore, text_value
 from loom.evaluation.trajectory import build_fact_analysis
 from loom.service.contracts import ServiceError, canonical, new_id
@@ -79,7 +80,7 @@ def analyze_session_trace(source, coverage):
     contexts = {row["round_id"]: row for row in facts.context_deltas}
     tools = []
     for episode, row in zip(graph.tool_calls, facts.tool_uses, strict=True):
-        terminal = episode.completed_event or episode.failed_event
+        terminal = terminal_event(episode, graph.events)
         output, _ = tool_output(terminal) if terminal else (None, None)
         output = output if isinstance(output, Mapping) else {}
         tools.append({key: row[key] for key in ("id", "round_id", "run_id", "tool_id", "tool_call_id", "input_ref", "raw_output_ref")} |
@@ -89,7 +90,7 @@ def analyze_session_trace(source, coverage):
     rounds = []
     for episode in graph.llm_rounds:
         request, response = episode.requested_event, episode.completed_event
-        end = response or episode.failed_event
+        end = terminal_event(episode, graph.events, "llm")
         data = response.payload.get("response", {}) if response else {}
         data = data if isinstance(data, Mapping) else {}
         content = data.get("content") or ""

@@ -14,7 +14,9 @@ from loom.tasks.runner import _create_provider, make_task_context, make_task_loo
 async def execute(state, bridge, config_path, provider_factory, plugin_registry_factory=None):
     # Consume the initial input before assembling capabilities and workflow.
     # A completed run's follow-up is a new goal, not more text on its old goal.
-    fresh_turn = not bridge.checkpoint and not state["run"]["steps"] and (not state.get("context") or state["run"].get("reset_planning", False))
+    intent = state["run"].get("restore_intent")
+    fresh_turn = ((intent["mode"] in {"new_task", "restart"} or not bridge.checkpoint and not state.get("context")) if intent else
+                  not bridge.checkpoint and not state["run"]["steps"] and (not state.get("context") or state["run"].get("reset_planning", False)))
     inputs = [m for m in state["messages"] if m["role"] == "user" and m["seq"] > state["input_cursor"]] if fresh_turn else []
     if inputs:
         state = {**state, "task": {**state["task"], "objective": "\n\n".join(m["content"] for m in inputs)}}
@@ -38,7 +40,8 @@ async def execute(state, bridge, config_path, provider_factory, plugin_registry_
         metadata={"knowledge_base_ids": task.get("knowledge_base_ids", []), "knowledge_directory": state.get("knowledge_directory"),
                   "knowledge_config_path": config_path, "external_tool_bindings": task.get("external_tool_bindings", []),
                   "external_tools_directory": state.get("external_tools_directory"),
-                  "memory_database": state.get("memory_database"), "autonomy": state.get('autonomy')},
+                  "memory_database": state.get("memory_database"), "autonomy": state.get('autonomy'),
+                  "task_episode_id": state["run"].get("task_episode_id") },
     )
     assembly = TaskAssembly(
         request,
@@ -90,6 +93,9 @@ async def _execute_assembled(state, bridge, provider, request, assembly):
         )
     else:
         context = previous or initial
+    from loom.service.restoration import validate_restore
+
+    validate_restore(state, context)
     same_run = context.run_id == state["run"]["id"]
     if not bridge.checkpoint and not same_run:
         context = replace(
@@ -121,12 +127,15 @@ async def _execute_assembled(state, bridge, provider, request, assembly):
     elif bridge.checkpoint and bridge.checkpoint.get("planning"):
         planning.restore(bridge.checkpoint["planning"]).unwrap()
         context = planning.project_state(context)
-    elif not bridge.fresh_turn and not state["run"].get("reset_planning"):
+    elif not bridge.fresh_turn:
         # Resume after a failed run gets a new run ID, but still belongs to the
         # same task. Its tool evidence and workflow must travel with its context.
         snapshot = (context.state.scratch or {}).get("execution_plugins")
         if snapshot:
             assembly.restore(snapshot, rebind_tools=rebind)
+            context = planning.project_state(context)
+        elif (context.state.scratch or {}).get("restore_planning"):
+            planning.restore(context.state.scratch["restore_planning"]).unwrap()
             context = planning.project_state(context)
     if rebind:
         planning.configure_normal_tool_refs(assembly.context_tools())

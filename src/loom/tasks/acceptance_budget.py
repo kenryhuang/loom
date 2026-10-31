@@ -51,6 +51,7 @@ def public_budget(controller):
         'elapsed_seconds': data['elapsed_seconds'], 'max_seconds': limits['max_seconds'],
         'failed_attempts': data.get('failed_attempts', data['attempts']), 'max_failed_attempts': limits['max_repairs'] + 1,
         'attempts': data['attempts'],
+        'repair_rounds': data.get('repair_rounds', 0), 'max_repairs': limits['max_repairs'],
         'total_model_calls': data.get('archived_model_calls', 0) + data['model_calls'],
         'total_elapsed_seconds': data.get('archived_elapsed_seconds', 0) + data['elapsed_seconds'],
         'previous': (data.get('budget_history') or [None])[-1],
@@ -70,8 +71,6 @@ async def renew_on_resume(controller, request_id, runtime):
     has_usage = data['model_calls'] or data['attempts'] or data['elapsed_seconds']
     if data['state'] == 'passed' or not needs_renewal or not has_usage:
         return
-    if data.get('candidate') and hasattr(controller.assembly.workflow, 'reopen_for_acceptance'):
-        controller.assembly.workflow.reopen_for_acceptance()
     previous = controller.assembly.publish_artifact({
         'budget': public_budget(controller), 'reason': data['reason'], 'results': deepcopy(data['results']),
         'limits_basis': 'Effective configuration at Resume; older allocations may have used earlier defaults.',
@@ -82,8 +81,13 @@ async def renew_on_resume(controller, request_id, runtime):
     data['archived_model_calls'] = data.get('archived_model_calls', 0) + data['model_calls']
     data['archived_elapsed_seconds'] = data.get('archived_elapsed_seconds', 0) + data['elapsed_seconds']
     data['budget_generation'] = data.get('budget_generation', 0) + 1
-    data.update(model_calls=0, elapsed_seconds=0, attempts=0, failed_attempts=0, results=[], state='not_ready',
+    data.update(model_calls=0, elapsed_seconds=0, attempts=0, failed_attempts=0, repair_rounds=0, state='not_ready',
                 reason='Acceptance budget renewed by explicit Resume; fresh verification is required')
+    if data.get('feedback'):
+        data['feedback']['state'] = 'pending'
+        data['resume_feedback_pending'] = True
+    for key in ('cause_code', 'decision', 'assessed_progress'):
+        data.pop(key, None)
     controller._completion_receipt = None
     data.pop('blocked_signature', None)
     await controller.emit(runtime, 'acceptance.budget.renewed', previous_budget=previous, resume_request=request_id)

@@ -9,6 +9,31 @@ from tests.service.test_controller import command, wait_state
 from tests.tasks.test_acceptance import Judge
 
 
+def feedback_provider(state):
+    from tests.tasks.test_acceptance_feedback import EvidenceJudge
+
+    return EvidenceJudge(finish=state['task']['objective'] != 'Direct answer')
+
+
+def test_durable_task_loop_repairs_missing_evidence_without_resume(tmp_path):
+    (tmp_path / 'source.txt').write_text('verifiable source fact')
+    service = LoomService(tmp_path / 'data', provider_factory=feedback_provider).start()
+    try:
+        for objective in ('Finish tool', 'Direct answer'):
+            sid = service.create(objective, {'objective': objective, 'workspace': str(tmp_path), 'plan_mode': 'off'})['session_id']
+            state = wait_state(service, sid, 'idle')
+            assert state['acceptance']['state'] == 'passed'
+            assert state['acceptance']['feedback']['state'] == 'resolved'
+            assert state['acceptance']['budget']['repair_rounds'] == 1
+            events = service.events(sid, limit=1000)
+            assert sum(e['type'] == 'acceptance.feedback.applied' for e in events) == 1
+            assert sum(e['type'] == 'acceptance.feedback.resolved' for e in events) == 1
+            assert sum(e['type'] == 'run.started' for e in events) == 1
+            assert sum(e['type'] == 'tool.completed' and e['payload'].get('tool_id') == 'read_file' for e in events) == 1
+    finally:
+        service.close()
+
+
 def evidence_resume_provider(state):
     from pathlib import Path
     from loom.core import err, make_loom_error, ok
@@ -135,7 +160,8 @@ def test_durable_failed_check_suspends_and_never_commits_success(tmp_path):
         sid = service.create("failed", {"objective": "Maintain", "workspace": str(tmp_path), "plan_mode": "off"})["session_id"]
         state = wait_state(service, sid, "paused")
         assert state["run"]["state"] == "suspended"
-        assert state["acceptance"]["attempts"] == 3
+        assert state["acceptance"]["attempts"] == 1
+        assert state["acceptance"]["decision"]["reason_code"] == "ACCEPTANCE_NO_PROGRESS"
         assert any(row["status"] == "failed" for row in state["acceptance"]["results"])
         assert not any(e["type"] == "run.completed" for e in service.events(sid, limit=1000))
     finally:

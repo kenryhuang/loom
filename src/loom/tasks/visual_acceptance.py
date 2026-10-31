@@ -72,9 +72,12 @@ async def verify_visual(controller, criterion, runtime):
     assembly = controller.assembly
     provider = assembly.visual_provider
     if provider is None or "image" not in getattr(provider, "input_modalities", ()):
-        return {"status": "blocked", "reason": "vision_model_unavailable: configure an image-capable visual_verification_model"}, {}
+        return {"status": "blocked", "reason": "vision_model_unavailable: configure an image-capable visual_verification_model",
+                "reason_code": "VISION_MODEL_UNAVAILABLE", "gap": {"kind": "external_dependency", "targets": [],
+                    "required_fact": "Independent visual verification", "suggested_action": "Configure an image-capable verification model"}}, {}
     if not assembly.browser:
-        return {"status": "blocked", "reason": "browser_unavailable: bind the browser collection"}, {}
+        return {"status": "blocked", "reason": "browser_unavailable: bind the browser collection", "reason_code": "BROWSER_UNAVAILABLE",
+                "gap": {"kind": "external_dependency", "targets": [], "required_fact": "Browser capture", "suggested_action": "Bind browser collection"}}, {}
     scenario = criterion["check"]["scenario"]
     history = []
     for attempt in range(2):

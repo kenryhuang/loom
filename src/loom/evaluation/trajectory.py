@@ -134,12 +134,15 @@ def _task_contracts(store: EvidenceStore, graph: EpisodeGraph, task: str | None)
 
 
 def build_fact_analysis(store: EvidenceStore, graph: EpisodeGraph, task: str | None = None) -> FactAnalysis:
-    from loom.evaluation.base_metrics import tool_result
+    from loom.evaluation.base_metrics import terminal_event, tool_result
 
     trajectory, tool_uses, owners, bases = [], [], {}, {}
     for item in graph.llm_rounds:
         request, response = item.requested_event, item.completed_event
         events = [e for e in (request, response, item.failed_event) if e is not None]
+        end = terminal_event(item, graph.events, "llm")
+        if end is not None and end not in events:
+            events.append(end)
         trajectory.append({"id": item.id, "run_id": item.run_id, "loop_id": item.loop_id,
                            "trace_id": item.trace_id, "step_number": item.step_number, "llm_call_id": item.llm_call_id,
                            "status": item.status, "request_ref": asdict(store.ref(request)) if request else None,
@@ -152,13 +155,16 @@ def build_fact_analysis(store: EvidenceStore, graph: EpisodeGraph, task: str | N
             elif owners[tool.id] != item.id:
                 owners[tool.id], bases[tool.id] = None, "ambiguous"
     for tool in graph.tool_calls:
-        event = tool.completed_event or tool.failed_event
+        event = terminal_event(tool, graph.events)
         output, path = tool_output(event) if event else (None, None)
         input_event = tool.started_event or event
         input_ref = asdict(store.ref(input_event, "input")) if input_event and "input" in input_event.payload else None
         output_ref = asdict(store.ref(event, path)) if event and path else None
         text = text_value(output) if path else ""
         status = tool_result(tool, graph.events)[0]
+        events = [e for e in (tool.started_event, tool.completed_event, tool.failed_event) if e is not None]
+        if event is not None and event not in events:
+            events.append(event)
         tool_uses.append({"id": tool.id, "round_id": owners.get(tool.id), "run_id": tool.run_id, "loop_id": tool.loop_id,
                           "trace_id": tool.trace_id, "step_number": tool.step_number, "tool_id": tool.tool_id,
                           "tool_call_id": tool.tool_call_id, "status": {"success": "complete", "incomplete": "partial"}.get(status, status),
@@ -168,7 +174,7 @@ def build_fact_analysis(store: EvidenceStore, graph: EpisodeGraph, task: str | N
                           "source_truncated": output.get("truncated") if isinstance(output, Mapping) else None,
                           "injections": observed_injections(store, graph, tool, output),
                           "semantic_consumption": "unknown", "task_effect": "not_assessed",
-                          "evidence_refs": [asdict(store.ref(e)) for e in (tool.started_event, tool.completed_event, tool.failed_event) if e]})
+                          "evidence_refs": [asdict(store.ref(e)) for e in events]})
     ledger, tokens = build_token_ledger(store, graph)
     contexts = build_context_deltas(store, graph)
     return FactAnalysis(task_contracts=_task_contracts(store, graph, task), trajectory=tuple(trajectory),

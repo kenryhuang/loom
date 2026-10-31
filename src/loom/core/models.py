@@ -602,6 +602,7 @@ class MinimalLoopDefinition:
     step: Callable[..., Any]
     done: Callable[..., Any]
     metadata: Metadata | None = None
+    completion_guard: Callable[..., Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metadata", _optional_metadata(self.metadata))

@@ -59,7 +59,7 @@ API 中的 Role 示例（替换为真实目录）：
 
 每个绑定执行的 `completed`、`failed`、`stopped` 终态与学习待办在同一事务中提交。暂停、等待输入和恢复不触发终态评估。学习固定终态事件游标，先完成 factual analysis，再针对原 run 执行 `goal_graph_v1 + extract_memory`；即使 Session 已开始下一轮，也不把后来的事件加入旧快照。
 
-评估保留已有 Deep eval 检查点。状态与质量分开：`completed + partial` 表示处理完成但仍有缺口；无可分析证据为 `not_applicable`。每日学习预算耗尽会延后至所配置时区的下一日，续跑同一 evaluation，不重跑源任务。Goal 累计预算、配置冲突、评估自身资源上限等需要人工处理后重试。API 重试可带 `limits: {max_calls, max_seconds, max_tokens}`，仅允许现有评估协议支持的资源额度变更。
+评估保留已有 Deep eval 检查点。状态与质量分开：`completed + partial` 表示处理完成但仍有缺口；无可分析证据为 `not_applicable`。学习额度不足时，LearningCoordinator 根据结构化预算拒绝事件自动申请当天额度并续跑同一 evaluation，不重跑源任务，也不自动重试已结算的质量缺口。达到自动扩容上限或每日总量／调用次数上限后，延后至所配置时区的下一日。Goal 累计预算、配置冲突、评估自身资源上限等需要人工处理后重试。API 重试可带 `limits: {max_calls, max_seconds, max_tokens}`，仅允许现有评估协议支持的资源额度变更。
 
 记忆仍限制在同 workspace；没有 workspace 时只允许同 Session。人工可认可、拒绝、更正、限定范围、打标签、置顶、停用和恢复。标注为覆盖层，保留原始提取和 trace；更正标为 `human_asserted`，认可不会将推断改成观察。相同来源再次提取不能绕过拒绝。摘要注入、memory_search/read 和页面共用有效视图；源删除后失效。
 
@@ -68,6 +68,22 @@ API 中的 Role 示例（替换为真实目录）：
 实际生效的 ContextSnapshot 可在「学习」查看。运行中的指导不会改写已经发送的模型请求或尚未完成的工具交换，而是在 `before_llm` 替换管理块并记录 `context.updated`。记忆检索只表示看到了参考；模型通过 `agent_record_use` 关联真实已完成动作时，记录模型声明的采用，仍不声称因果改善。
 
 ## 预算与恢复
+
+「学习与 Deep Eval 预算」Block 可以设置初始学习额度及 `learning_policy`：
+
+| 字段 | 默认值 | 作用 |
+| --- | --- | --- |
+| `budget.learning_tokens` | 250,000 | 每天初始学习子额度 |
+| `learning_policy.auto_expand` | `true` | 允许宿主自动扩容 |
+| `learning_policy.max_learning_tokens` | 初始额度的 4 倍，上限为每日总额 | 当天学习额度上限 |
+| `learning_policy.max_expansions` | 2 | 同 Agent 每天最多扩容次数 |
+| `learning_policy.max_resumes` | 3 | 每个 evaluation 每天最多自动预算续跑次数 |
+
+每次扩容最多翻倍，仍受每日总额、Goal 累计额度和调用次数约束。只有允许的新额度足以容纳当前请求才提交扩容；未知用量的请求继续按预留额度计费。扩容记录保存在当天 allocation，不修改 Role 合同；跨日重新从初始额度开始。已有 Role 未提供策略时采用上述默认值；保存配置后按显式值执行。
+
+额度、续跑意图和审计事件原子保存，Deep Eval 按意图 ID 去重，重启或回执丢失不会重复提交。恢复沿用快照、evaluation ID、检查点和已发布 memory；后续调用仍逐次经过 BudgetLedger 准入。如果续跑后再次预算失败且没有新的已完成工作，则停止自动续跑并显示 `LEARNING_NO_PROGRESS`；达到当天续跑次数上限显示 `LEARNING_RETRY_LIMIT`。暂停、取消及角色配置变更会在准入时重新检查。
+
+概览显示当天实际学习额度和扩容历史；事件流记录 `learning.budget.expanded`、`learning.resume.scheduled` 与学习状态变更。旧版因学习额度延期的任务会在加载新策略后重新评估一次，识别到受支持的宿主预算错误后自动恢复。
 
 概览的「调整预算」或「工作方式 → 修订角色与预算」可设置每日总量、单工作包、单目标累计额度及每日调用次数。新 Agent 的工作包默认额度为每日总量的 1/10（向下取整，至少 1 token），每日调用次数默认 2000；显式填写的额度优先，已有配置不会被默认值覆盖。选择「每日总量的 1/10」时，保存为按当前每日额度计算出的具体数值；以后调整每日额度可再次选择按比例计算。
 

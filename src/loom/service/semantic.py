@@ -330,7 +330,7 @@ class SessionSemantic:
             "source_sha256": source.source_sha256,
         }
 
-    def start(self, sid, aid, options, *, budget_context=None):
+    def start(self, sid, aid, options, *, budget_context=None, resume_request_id=None):
         allowed = {"model", "resume_id", "retry_failed", "new_evaluation", "analysis_version", "run_id", "extract_memory", *DEFAULTS}
         if not isinstance(options, dict) or set(options) - allowed:
             raise ServiceError("Invalid evaluation options")
@@ -425,6 +425,8 @@ class SessionSemantic:
                 if not saved:
                     raise ServiceError("Evaluation not found", 404)
                 resumed = json.loads(saved[0])
+                if resume_request_id and resume_request_id in resumed.get("host_resume_requests", []):
+                    return self._public(resumed)
                 if resumed["state"] in {"queued", "running", "completed"}:
                     raise ServiceError("Only stopped evaluations can be resumed", 409)
                 protocol_upgrade = version == GOAL_ENGINE and (resumed["analyzer_version"], resumed["prompt_version"]) in UPGRADABLE_VERSIONS
@@ -490,6 +492,8 @@ class SessionSemantic:
                 self.outputs.track(db, body, body["result"])
             body.pop("result", None)
             body.update(state="queued", error=None, error_details=[], settings=settings, analyzer_version=analyzer_version, prompt_version=prompt_version)
+            if resume_request_id:
+                body.setdefault("host_resume_requests", []).append(resume_request_id)
             db.execute("INSERT OR REPLACE INTO semantic_jobs VALUES(?,?,?,?)", (body["id"], sid, key, canonical(body)))
             self.cancels[body["id"]] = threading.Event()
             self.futures[body["id"]] = self.pool.submit(self._work, body)
@@ -778,8 +782,9 @@ class SessionSemantic:
             if body.get('autonomy_budget'):
                 from loom.autonomy.budget import BudgetLedger, BudgetProvider
 
-                provider = BudgetProvider(provider, BudgetLedger(self.store.path), body['autonomy_budget'], category='learning',
-                                          output_tokens=body['autonomy_budget'].get('output_tokens', 8192))
+                provider = BudgetProvider(
+                    provider, BudgetLedger(self.store.path), {**body['autonomy_budget'], 'evaluation_id': body['id']}, category='learning',
+                    output_tokens=body['autonomy_budget'].get('output_tokens', 8192))
             if body.get("analysis_version") in {"v3", *GOAL_ENGINES}:
                 behavior = _behavior_facts(source, result, body)
                 result = {**result, "behavior": behavior}

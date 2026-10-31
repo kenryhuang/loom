@@ -289,7 +289,7 @@ class TaskAssembly:
             self.workflow.assembly = self
             self.context_manager = ConversationContext(self.context_manager, self.workflow)
         self.workflow.completion_check = self.completion_error
-        self.workflow.completion_prepare = lambda candidate: self.prepare_completion(candidate, reuse_current=True)
+        self.workflow.completion_prepare = lambda candidate: self.prepare_completion(candidate, reuse_current=True, origin="workflow")
         self.workflow.prepare_acceptance = self.prepare_acceptance
         self.workflow.publish_artifact = self.publish_artifact
         self.normal_refs = tuple(binding.ref for binding in self.bindings.values())
@@ -480,7 +480,7 @@ class TaskAssembly:
                     report = value.get("report") or value.get("content")
                     if not isinstance(report, str) or not report.strip():
                         return ok(Observation(new_trace_id(), name, {"accepted": False, "reason": "Final report is required"}, now_iso()))
-                    if self.context is not None and self._task_runtime is not None and not await self.prepare_completion(report):
+                    if self.context is not None and self._task_runtime is not None and not await self.prepare_completion(report, origin="finish"):
                         return ok(
                             Observation(
                                 new_trace_id(),
@@ -777,12 +777,19 @@ class TaskAssembly:
             if (self.memory or self.skills) and self.execution is None:
                 context = await self.prepare_memory(context, runtime)
             self.context, self._task_runtime = context, runtime
+            checkpoint = getattr(self.execution, "checkpoint", None)
+            if checkpoint and checkpoint.get("task_feedback_transition"):
+                return ok(checkpoint["task_feedback_transition"])
             if not self.execution:
                 try:
                     await self.acceptance.prepare(context, runtime)
                 except (ValueError, RuntimeError) as exc:
+                    self.acceptance.data.update(state="blocked", reason=str(exc), cause_code=getattr(exc, "code", "ACCEPTANCE_PLAN_ERROR"))
+                    self.acceptance.data.pop("decision", None)
                     return await self.acceptance_blocked_result(context, runtime, str(exc))
                 context = self.project_acceptance(context)
+                if self.acceptance.data.get("resume_feedback_pending"):
+                    return await self.resume_feedback_result(context, runtime)
             result = await wrapped.step(context, runtime)
             if not result.ok and result.error.code == "OUTPUT_CONTRACT_FAILED" and self.acceptance.data["state"] != "passed":
                 return await self.acceptance_blocked_result(context, runtime, self.acceptance.data["reason"])
@@ -800,6 +807,9 @@ class TaskAssembly:
                 )
             if result.ok:
                 control = result.value.control
+                if ((result.value.trace.metadata or {}).get("acceptanceCompletionPending")
+                        and control and control.kind == "continue"):
+                    return await self.acceptance_blocked_result(result.value.context, runtime, self.acceptance.data["reason"], result.value)
                 new_observations = result.value.context.state.observations[len(context.state.observations) :]
                 rejected_finish = any(o.source == "finish" and thaw_json(o.value).get("accepted") is False for o in new_observations)
                 if rejected_finish and self.acceptance.data["state"] in {"needs_repair", "blocked"}:
@@ -813,10 +823,15 @@ class TaskAssembly:
                 if completed:
                     from loom.tasks.runner import _report_from_run_result
 
-                    if not await self.prepare_completion(_report_from_run_result(result.value), reuse_current=True):
+                    if not await self.prepare_completion(_report_from_run_result(result.value), reuse_current=True, origin="loop_completion"):
                         return await self.acceptance_blocked_result(result.value.context, runtime, self.acceptance.data["reason"], result.value)
                     if reason := self.output_error():
                         return await self.acceptance_blocked_result(result.value.context, runtime, reason, result.value)
+                    if not completion_guard(result.value.context, runtime).unwrap():
+                        self.acceptance.data.update(state="blocked", reason="Completion binding changed before commit; fresh verification required",
+                                                    cause_code="COMPLETION_BINDING_CHANGED")
+                        self.acceptance.data.pop("decision", None)
+                        return await self.acceptance_blocked_result(result.value.context, runtime, self.acceptance.data["reason"], result.value)
                 if completed:
                     await self.record_report_verification(runtime)
                 updated = result.value.context
@@ -851,7 +866,20 @@ class TaskAssembly:
             result = wrapped.done(context, runtime)
             return await result if inspect.isawaitable(result) else result
 
-        return replace(wrapped, step=task_step, done=task_done)
+        def completion_guard(context, runtime):
+            from loom.tasks.workspace_probe import digest
+
+            if digest(self.acceptance.goal_value(context)) != self.acceptance.data.get("goal_digest"):
+                return ok(False)
+            feedback = self.acceptance.data.get("feedback")
+            if feedback and feedback["state"] in {"pending", "applied"}:
+                return ok(False)
+            candidate = self.acceptance.data.get("candidate") or ""
+            return ok(self.acceptance.applicable(candidate) or (
+                self.acceptance.data["state"] == "passed"
+                and self.acceptance._completion_receipt == self.acceptance.fingerprint(candidate)))
+
+        return replace(wrapped, step=task_step, done=task_done, completion_guard=completion_guard)
 
     def configure_acceptance(self, provider, *, limits=None, verification_provider=None, visual_provider=None):
         if isinstance(self.workflow, AdaptiveDagWorkflow):
@@ -875,7 +903,10 @@ class TaskAssembly:
             "acceptance",
             "Task acceptance contract: "
             + json.dumps(plan, ensure_ascii=False)
-            + ". Complete these conditions before finish. The host will verify actual results; failure returns acceptance feedback.",
+            + ". Complete these conditions before finish. The host will verify actual results; failure returns acceptance feedback."
+            + (" Current host feedback (resolve within original requirements and permissions): "
+               + json.dumps({k: self.acceptance.data["feedback"][k] for k in ("id", "gaps", "repair_round", "repair_limit", "prior_attempts_ref")}, ensure_ascii=False)
+               if (self.acceptance.data.get("feedback") or {}).get("state") in {"pending", "applied"} else ""),
         )
         scratch = {**(context.state.scratch or {}), "acceptance": self.acceptance.public()}
         return replace(
@@ -1028,53 +1059,108 @@ class TaskAssembly:
         await self.acceptance.prepare(context, runtime)
         return self.project_acceptance(context)
 
-    async def prepare_completion(self, candidate, *, reuse_current=False):
+    async def prepare_completion(self, candidate, *, reuse_current=False, origin="completion"):
+        decision = await self.request_completion(candidate, origin=origin, reuse_current=reuse_current)
+        return decision.outcome == "accept"
+
+    async def resume_feedback_result(self, context, runtime):
+        from loom.tasks.acceptance_feedback import decide
+
+        self.acceptance.data.pop("resume_feedback_pending", None)
+        decision = decide(self.acceptance, origin="resume_feedback")
+        return await self.acceptance_blocked_result(context, runtime, decision.reason)
+
+    async def request_completion(self, candidate, origin="completion", completion_id=None, *, reuse_current=False):
         from loom.observability.result_format import format_result_text
+        from loom.tasks.acceptance_feedback import decide
         from loom.tasks.runner import _report_from_decision_output
 
         candidate = _report_from_decision_output(thaw_json(candidate)) or format_result_text(thaw_json(candidate))
         try:
             if reason := self.output_error():
-                self.acceptance.data["attempts"] += 1
-                self.acceptance.data['failed_attempts'] += 1
-                state = "needs_repair" if self.acceptance.can_repair() else "blocked"
-                self.acceptance.data.update(state=state, reason=reason, candidate=str(candidate or ""))
-                await self.acceptance.emit(self._task_runtime, "acceptance.gate.blocked")
-                return False
-            return await self.acceptance.verify(self.context, self._task_runtime, str(candidate or ""), reuse_current=reuse_current)
+                self.acceptance.data.update(state="needs_repair", reason=reason, candidate=str(candidate or ""), results=[{
+                    "criterion_id": "output-contract", "status": "failed", "reason": reason,
+                    "gap": {"kind": "deliverable_mismatch", "targets": [], "required_fact": reason, "suggested_action": ""},
+                }])
+            else:
+                await self.acceptance.verify(self.context, self._task_runtime, str(candidate or ""), reuse_current=reuse_current)
         except (ValueError, TypeError, RuntimeError, OSError) as exc:
-            self.acceptance.data.update(state="blocked", reason=str(exc))
-            if self._task_runtime:
-                await self.acceptance.emit(self._task_runtime, "acceptance.gate.blocked")
-            return False
+            self.acceptance.data.update(state="blocked", reason=str(exc), cause_code=getattr(exc, "code", "ACCEPTANCE_VERIFICATION_ERROR"))
+        self.acceptance.data["candidate"] = str(candidate or "")
+        decision = decide(self.acceptance, origin=origin, completion_id=completion_id)
+        feedback = self.acceptance.data.get("feedback")
+        if decision.outcome == "accept" and feedback and feedback["state"] != "resolved":
+            feedback["state"] = "resolved"
+            await self.acceptance.emit(self._task_runtime, "acceptance.feedback.resolved", feedback_id=feedback["id"],
+                                       disposition="accept", reason_code=decision.reason_code)
+        self.persist_acceptance()
+        return decision
 
     async def acceptance_blocked_result(self, context, runtime, reason, previous=None):
-        from loom.runtime.control import StepControl
+        from copy import deepcopy
 
-        if self.acceptance.data['state'] == 'needs_repair' and not self.acceptance.can_repair():
-            reason = self.acceptance.repair_limit_reason()
-        repair = self.acceptance.data["state"] == "needs_repair" and self.acceptance.can_repair()
-        self.acceptance.data.update(state="needs_repair" if repair else "blocked", reason=reason)
-        if repair and hasattr(self.workflow, "reopen_for_acceptance"):
-            self.workflow.reopen_for_acceptance()
-        await self.acceptance.emit(runtime, "acceptance.gate.blocked")
-        observation = Observation(new_trace_id(), "acceptance", self.acceptance.public(), now_iso())
-        scratch = {**(context.state.scratch or {}), "acceptance": self.acceptance.public(), "execution_plugins": self.snapshot()}
-        updated = replace(context, state=replace(context.state, observations=(*context.state.observations, observation), scratch=scratch))
-        trace = (
-            previous.trace
-            if previous
-            else Trace(runtime.trace_id, context.run_id, runtime.loop_id, "v1", 0, runtime.trace_id, now_iso(), now_iso(), 0, context.id, context.id, "paused")
-        )
-        return ok(
-            StepResult(
-                updated,
-                trace,
-                observation=observation,
-                output=self.acceptance.data.get("candidate"),
-                control=StepControl("continue" if repair else "paused", reason),
-            )
-        )
+        from loom.runtime.control import StepControl
+        from loom.tasks.acceptance_budget import public_budget
+        from loom.tasks.acceptance_feedback import CompletionDecision, decide
+        from loom.workflows.feedback import TaskFeedbackWorkflow
+
+        saved = self.acceptance.data.get("decision")
+        decision = CompletionDecision(**saved) if saved else decide(self.acceptance)
+        repair = decision.outcome == "repair"
+        feedback = self.acceptance.data.get("feedback")
+        if repair and feedback["state"] == "applied" and feedback.get("applied_trace_id") != runtime.trace_id:
+            decision = decide(self.acceptance)
+            repair = decision.outcome == "repair"
+            feedback = self.acceptance.data.get("feedback")
+        if repair:
+            workflow_before = self.workflow.snapshot()
+            feedback_before = deepcopy(feedback)
+            rounds_before = self.acceptance.data.get("repair_rounds", 0)
+            try:
+                if not isinstance(self.workflow, TaskFeedbackWorkflow):
+                    raise ValueError("Workflow does not support task feedback")
+                application = self.workflow.apply_task_feedback(feedback)
+                if feedback["state"] == "pending":
+                    self.acceptance.data["repair_rounds"] = self.acceptance.data.get("repair_rounds", 0) + 1
+                feedback.update(state="applied", application=application, applied_trace_id=runtime.trace_id)
+                context = self.workflow.project_state(context)
+            except ValueError as exc:
+                self.workflow.restore(workflow_before).unwrap()
+                self.acceptance.data.update(feedback=feedback_before, repair_rounds=rounds_before)
+                feedback = feedback_before
+                repair = False
+                decision = replace(decision, outcome="pause", reason_code="WORKFLOW_FEEDBACK_UNAVAILABLE", reason=str(exc))
+        decision = replace(decision, budget=public_budget(self.acceptance))
+        reason = decision.reason
+        self.acceptance.data.update(state="needs_repair" if repair else "blocked", reason=reason, decision=decision.snapshot())
+        public = self.acceptance.public()
+        identifier = feedback["id"] if feedback else decision.assessment_id
+        observation = Observation(identifier + ":observation", "acceptance", public, now_iso())
+        observations = tuple(o for o in context.state.observations if o.id != observation.id) + (observation,)
+        scratch = {**(context.state.scratch or {}), "acceptance": public, "execution_plugins": self.snapshot()}
+        updated = self.project_acceptance(replace(context, state=replace(context.state, observations=observations, scratch=scratch)))
+        trace = previous.trace if previous else Trace(
+            runtime.trace_id, context.run_id, runtime.loop_id, "v1", 0, runtime.trace_id, now_iso(), now_iso(), 0, context.id, context.id, "paused")
+        result = StepResult(updated, trace, observation=observation, control=StepControl("continue" if repair else "paused", reason))
+        event = {"type": "acceptance.feedback.applied" if repair else "acceptance.feedback.stalled",
+                 "event_id": identifier + (":applied" if repair else ":stalled:" + decision.reason_code),
+                 "run_id": runtime.run_id, "loop_id": runtime.loop_id, "trace_id": runtime.trace_id, "at": now_iso(),
+                 "acceptance": public, "feedback_id": decision.feedback_id, "assessment_id": decision.assessment_id,
+                 "disposition": decision.outcome, "reason_code": decision.reason_code}
+        if self.execution and self._acceptance_cp:
+            cp = self._acceptance_cp
+            cp.update(context=updated, observations=[], planning=self.workflow.snapshot(), plugin_states=self.snapshot(),
+                      phase="step_done" if repair else "before_llm", response=None, calls=[], tool_index=0,
+                      task_events=[event])
+            cp.pop("terminal", None)
+            if repair:
+                cp["task_feedback_transition"] = result
+            directive = self.execution.boundary(cp)
+            if directive.get("control"):
+                control = directive["control"]
+                result = replace(result, control=StepControl(control["kind"], control.get("reason", "")))
+        (await runtime.trace_sink.emit(event)).unwrap()
+        return ok(result)
 
     async def close(self):
         for collection in self.collections:

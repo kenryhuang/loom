@@ -33,13 +33,15 @@ class DynamicWorkflowPolicy:
         self._runtime = None
         self._context = None
         self._active = None
+        self._feedback_applications = {}
         if config.get("nodes"):
             self.controller.nodes = self.controller.validate(config["nodes"])
             if any(node["status"] != "pending" for node in self.controller.nodes):
                 raise ValueError("Initial workflow nodes must start pending")
 
     def snapshot(self):
-        return {"schema_version": 1, "workflow": self.controller.snapshot(), "active": self._active}
+        return {"schema_version": 1, "workflow": self.controller.snapshot(), "active": self._active,
+                "feedback_applications": dict(self._feedback_applications)}
 
     def restore(self, state):
         try:
@@ -47,6 +49,7 @@ class DynamicWorkflowPolicy:
                 raise ValueError("Incompatible workflow checkpoint")
             self.controller.restore(state["workflow"])
             self._active = state["active"]
+            self._feedback_applications = dict(state.get("feedback_applications", {}))
             if self._active is not None and self._active not in {node["id"] for node in self.controller.nodes}:
                 raise ValueError("Invalid active workflow node")
             return ok(None)
@@ -106,7 +109,27 @@ class DynamicWorkflowPolicy:
     def unfinished(self):
         return any(node["status"] not in TERMINAL for node in self.controller.nodes)
 
-    def reopen_for_acceptance(self):
+    def apply_task_feedback(self, feedback):
+        from loom.tasks.acceptance_feedback import feedback_objective
+
+        identifier = feedback["id"]
+        if identifier in self._feedback_applications:
+            return self._feedback_applications[identifier]
+        active = next((n for n in self.controller.nodes if n["id"] == self._active and n["status"] == "running"), None)
+        if active and active["executor_kind"] == "llm" and "allowed_tools" in active["executor_config"]:
+            allowed = set(active["executor_config"]["allowed_tools"])
+            for gap in feedback["gaps"]:
+                for target in gap.get("targets", []):
+                    if (target["kind"] == "tool" and target["value"] not in allowed or
+                            target["kind"] == "workspace_path" and not allowed.intersection({"read_file", "process_execute", "shell_execute"})):
+                        raise ValueError("Current workflow node cannot collect the required evidence with its allowed tools")
+        self.reopen_for_acceptance(feedback_objective(feedback), "acceptance-repair-" + identifier.split(":")[-1][:20])
+        application = {"feedback_id": identifier, "revision": self.controller.revision,
+                       "step_ids": [n["id"] for n in self.controller.nodes if n["status"] not in TERMINAL]}
+        self._feedback_applications[identifier] = application
+        return application
+
+    def reopen_for_acceptance(self, objective=None, identifier=None):
         active = next((node for node in self.controller.nodes if node["id"] == self._active), None)
         if active and active["status"] == "running" and active["executor_kind"] != "llm" and self.is_final_node():
             active.update(status="succeeded", provenance="Executor returned; task acceptance requires repair")
@@ -117,8 +140,8 @@ class DynamicWorkflowPolicy:
         nodes = [
             *self.controller.nodes,
             {
-                "id": f"acceptance-repair-{self.controller.revision + 1}",
-                "objective": "Resolve the recorded failed task acceptance conditions and submit the final deliverable",
+                "id": identifier or f"acceptance-repair-{self.controller.revision + 1}",
+                "objective": objective or "Resolve the recorded failed task acceptance conditions and submit the final deliverable",
             },
         ]
         self.controller.propose({"base_revision": self.controller.revision, "reason": "Task acceptance requires repair", "nodes": nodes})
@@ -277,6 +300,13 @@ class DynamicWorkflowPolicy:
                         control = result.value.control
                         decision = result.value.context.state.decisions[-1] if result.value.context.state.decisions else None
                         final_answer = control.kind == "completed" if control else decision and not (decision.metadata or {}).get("parseFallback")
+                        observations = result.value.context.state.observations[len(context.state.observations):]
+                        completion_pending = (result.value.trace.metadata or {}).get("acceptanceCompletionPending") or any(
+                            (o.metadata or {}).get("controlFlow", {}).get("reason") == "acceptance_failed" for o in observations)
+                        if completion_pending:
+                            # TaskAssembly owns this already-assessed candidate.
+                            # Its rejected tool result is not a new final answer.
+                            final_answer = False
                         if node["status"] == "running" and final_answer:
                             try:
                                 await self.complete_active(thaw_json(result.value.output) or "")
