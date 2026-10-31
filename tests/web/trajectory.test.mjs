@@ -71,6 +71,16 @@ function setup() {
   return { dom, root, view: new TrajectoryView(root, { onBack: () => {} }) };
 }
 
+test('linked analysis loads its pinned snapshot without starting a new analysis',async()=>{
+ const {dom,view}=setup(),reads=[];
+ const api={startTrajectory:async()=>assert.fail('Must not replace a linked snapshot'),trajectory:async(sid,aid)=>{reads.push([sid,aid]);return fixture('saved');}};
+ try{
+  await view.open(api,'one',999,{analysisId:'analysis-saved',runId:'run',evaluationId:'evaluation-saved'});
+  assert.deepEqual(reads,[['one','analysis-saved']]);assert.equal(view.job.id,'analysis-saved');
+  assert.equal(view.selectedTab,1);assert.equal(view.runFilter.value,'run');
+ }finally{view.close();dom.window.close();}
+});
+
 test("trajectory renders measured facts, filters calls and reads paginated evidence on demand", async () => {
   const { dom, root, view } = setup(),
     reads = [];

@@ -7,7 +7,7 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 const selectedRecord = view => view.historyList.querySelector('[aria-current="true"]');
 const ids = view => [...view.historyList.querySelectorAll('[data-evaluation-id]')].map(node => node.dataset.evaluationId);
 const select = (view, id) => [...view.historyList.querySelectorAll('button')].find(node => node.dataset.evaluationId === id).click();
-async function fixture(t) {
+async function fixture(t, evaluationId) {
   const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
   const abort = new AbortController(); t.after(() => {abort.abort(); dom.window.close();});
   const settings = {max_calls: 10, max_seconds: 1800, max_tokens: 10000, max_call_seconds: 180};
@@ -33,11 +33,16 @@ async function fixture(t) {
       jobs.push(job); return job;
     },
   };
-  const view = new EvaluationView(document.querySelector('main'), {api, sessionId: 's', analysisId: 'a', signal: abort.signal});
+  const view = new EvaluationView(document.querySelector('main'), {api, sessionId: 's', analysisId: 'a', evaluationId, signal: abort.signal});
   await view.open(); await tick();
   const scope = id => {view.runSelect.value = id; view.runSelect.dispatchEvent(new dom.window.Event('change'));};
   return {view, jobs, api, starts, scope};
 }
+
+test('linked evaluation selects the exact saved record and its run scope',async t=>{
+ const {view,starts}=await fixture(t,'evaluation-one');
+ assert.equal(view.job.id,'evaluation-one');assert.equal(view.runSelect.value,'run-one');assert.equal(starts.length,0);
+});
 
 test('scope filters history before selection; clicking a record shows its detail', async t => {
   const {view, scope} = await fixture(t);

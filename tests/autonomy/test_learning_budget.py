@@ -15,12 +15,30 @@ from tests.autonomy.helpers import Clock, role
 def setup(tmp_path, *, policy=None, budget=None):
     clock = Clock()
     store = AgentStore(SessionStore(tmp_path / "data"), clock=clock)
-    agent = store.create("create", {**role(tmp_path), "budget": {"daily_tokens":1000, "goal_tokens":1000, "learning_tokens":100, **(budget or {})},
-                                    **({"learning_policy": policy} if policy else {})})
+    agent = store.create(
+        "create",
+        {
+            **role(tmp_path),
+            "budget": {"daily_tokens": 1000, "goal_tokens": 1000, "learning_tokens": 100, **(budget or {})},
+            **({"learning_policy": policy} if policy else {}),
+        },
+    )
     aid = agent["id"]
     store.command(aid, "enable", "enable", 1)
-    cycle = dict(id="cycle", agent_id=aid, goal_id="goal", work_package_id="work", evaluation_id="evaluation", session_id="session",
-                 analysis_id="analysis", run_id="run", state="running", coverage="none", memory_result={}, attempts=1)
+    cycle = dict(
+        id="cycle",
+        agent_id=aid,
+        goal_id="goal",
+        work_package_id="work",
+        evaluation_id="evaluation",
+        session_id="session",
+        analysis_id="analysis",
+        run_id="run",
+        state="running",
+        coverage="none",
+        memory_result={},
+        attempts=1,
+    )
     with store.sessions.transaction() as db:
         store.put(db, "agent_learning_cycles", cycle)
     binding = {k: cycle[k] for k in ("agent_id", "goal_id", "work_package_id", "evaluation_id")}
@@ -67,8 +85,23 @@ def test_hard_parent_limits_are_not_expanded(tmp_path, scope, outcome):
     assert not store.snapshot(cycle["agent_id"])["learning_allocations"]
 
 
-@pytest.mark.parametrize("policy,outcome", [({"auto_expand": False}, "wait"), ({"max_expansions": 0}, "wait"),
-                                           ({"max_learning_tokens": 100}, "wait"), ({"max_resumes": 0}, "stop")])
+def test_objective_limit_stops_before_granting_learning_expansion(tmp_path):
+    store, _, ledger, cycle, job = setup(tmp_path)
+    with store.sessions.transaction() as db:
+        agent = store.get(db, "agents", cycle["agent_id"])
+        agent["role"]["long_term_objectives"][0]["stage_planning"] = dict(mode="autonomous", objective_tokens=100)
+        store.put(db, "agents", agent)
+        store.put(db, "agent_goals", dict(id="goal", agent_id=agent["id"], long_term_objective_id="quality", state="active"))
+    decision = admit_resume(store, cycle["agent_id"], cycle, job, deny(store, ledger, job))
+    assert decision["outcome"] == "stop"
+    assert "Objective budget insufficient" in decision["reason"]
+    assert "used=80" in decision["reason"]
+    assert not store.snapshot(cycle["agent_id"])["learning_allocations"]
+
+
+@pytest.mark.parametrize(
+    "policy,outcome", [({"auto_expand": False}, "wait"), ({"max_expansions": 0}, "wait"), ({"max_learning_tokens": 100}, "wait"), ({"max_resumes": 0}, "stop")]
+)
 def test_configured_expansion_and_resume_limits_are_enforced(tmp_path, policy, outcome):
     store, _, ledger, cycle, job = setup(tmp_path, policy=policy)
     decision = admit_resume(store, cycle["agent_id"], cycle, job, deny(store, ledger, job))
@@ -115,8 +148,10 @@ def test_coordinator_resumes_existing_evaluation_without_retrying_settled_qualit
         starts.append((sid, analysis_id, options, kwargs))
         job.update(state="queued", host_resume_requests=[kwargs["resume_request_id"]])
 
-    background = SimpleNamespace(trajectory=SimpleNamespace(get=lambda *args: {"state": "completed"}),
-        semantic=SimpleNamespace(_load=lambda *args: job, _public=lambda job: {"retryable_work": True}, start=start))
+    background = SimpleNamespace(
+        trajectory=SimpleNamespace(get=lambda *args: {"state": "completed"}),
+        semantic=SimpleNamespace(_load=lambda *args: job, _public=lambda job: {"retryable_work": True}, start=start),
+    )
     coordinator = LearningCoordinator(store, background)
     coordinator.advance(cycle["agent_id"])
     coordinator.advance(cycle["agent_id"])
@@ -129,9 +164,14 @@ def test_resume_intent_survives_lost_acknowledgement_after_evaluation_finishes(t
     store, _, ledger, cycle, job = setup(tmp_path)
     admitted = admit_resume(store, cycle["agent_id"], cycle, job, deny(store, ledger, job))
     job.update(state="completed", host_resume_requests=[admitted["resume"]["id"]])
-    background = SimpleNamespace(trajectory=SimpleNamespace(get=lambda *args: {"state": "completed"}),
-        semantic=SimpleNamespace(_load=lambda *args: job, _public=lambda job: {"retryable_work": False},
-                                 start=lambda *args, **kwargs: pytest.fail("Completed evaluation must not be restarted")))
+    background = SimpleNamespace(
+        trajectory=SimpleNamespace(get=lambda *args: {"state": "completed"}),
+        semantic=SimpleNamespace(
+            _load=lambda *args: job,
+            _public=lambda job: {"retryable_work": False},
+            start=lambda *args, **kwargs: pytest.fail("Completed evaluation must not be restarted"),
+        ),
+    )
     LearningCoordinator(store, background).advance(cycle["agent_id"])
     saved = store.snapshot(cycle["agent_id"])["learning"][0]
     assert saved["state"] == "completed" and saved["budget_resume_pending"] is None
@@ -151,23 +191,150 @@ def test_cancel_between_denial_and_allocation_cannot_grant_or_resume(tmp_path):
 def test_stale_budget_denial_does_not_expand_for_new_pause_error(tmp_path):
     store, _, ledger, _, job = setup(tmp_path)
     deny(store, ledger, job)
-    job['error_details'] = [{'provider_code': 'AGENT_BUDGET', 'reason': 'Agent is paused; new calls are deferred'}]
+    job["error_details"] = [{"provider_code": "AGENT_BUDGET", "reason": "Agent is paused; new calls are deferred"}]
     assert current_block(store, job) is None
+
+
+@pytest.mark.parametrize("provider_code", ["AGENT_CONTROL", "AGENT_BUDGET"])
+def test_agent_control_pause_waits_then_resumes_same_job_without_expansion(tmp_path, provider_code):
+    store, _, _, cycle, job = setup(tmp_path)
+    job.update(state="failed", error_details=[dict(provider_code=provider_code, reason="Agent is paused; new calls are deferred")])
+    calls = []
+
+    def start(sid, analysis, options, **kwargs):
+        calls.append(options)
+        job.update(state="running", host_resume_requests=[kwargs["resume_request_id"]])
+
+    background = SimpleNamespace(
+        trajectory=SimpleNamespace(get=lambda *args: {"state": "completed"}),
+        semantic=SimpleNamespace(_load=lambda *args: job, _public=lambda job: {"retryable_work": False}, start=start),
+    )
+    coordinator = LearningCoordinator(store, background)
+    store.command(cycle["agent_id"], "pause", "pause", 2)
+    coordinator.advance(cycle["agent_id"])
+    assert calls == []
+    store.command(cycle["agent_id"], "resume", "resume", 3)
+    coordinator.advance(cycle["agent_id"])
+    assert calls == [{"resume_id": "evaluation"}]
+    snapshot = store.snapshot(cycle["agent_id"])
+    assert snapshot["learning"][0]["state"] == "running"
+    assert snapshot["learning"][0]["attempts"] == 2
+    assert snapshot["learning_allocations"] == []
+
+
+@pytest.mark.asyncio
+async def test_paused_provider_has_control_code_and_never_calls_model(tmp_path):
+    from loom.autonomy.budget import BudgetProvider
+
+    store, _, ledger, cycle, job = setup(tmp_path)
+    store.command(cycle["agent_id"], "pause", "pause", 2)
+    wrapped = BudgetProvider(
+        SimpleNamespace(model="fixture", chat=lambda *args: pytest.fail("Paused provider cannot call model")),
+        ledger,
+        job["autonomy_budget"],
+        output_tokens=1,
+        category="learning",
+    )
+    result = await wrapped.chat([])
+    assert not result.ok and result.error.code == "AGENT_CONTROL"
 
 
 def test_unknown_usage_reservations_remain_charged_after_expansion(tmp_path):
     store, _, ledger, cycle, job = setup(tmp_path)
-    ledger.reserve('unknown', job['autonomy_budget'], 15, 'learning')
-    ledger.settle('unknown', None)
+    ledger.reserve("unknown", job["autonomy_budget"], 15, "learning")
+    ledger.settle("unknown", None)
     block = deny(store, ledger, job)
-    admit_resume(store, cycle['agent_id'], cycle, job, block)
-    assert store.snapshot(cycle['agent_id'])['learning_allocations'][0]['grants'][0]['used'] == 95
-    ledger.reserve('fits', job['autonomy_budget'], 105, 'learning')
-    with pytest.raises(ServiceError, match='limit=200, used=200'):
-        ledger.reserve('over', job['autonomy_budget'], 1, 'learning')
+    admit_resume(store, cycle["agent_id"], cycle, job, block)
+    assert store.snapshot(cycle["agent_id"])["learning_allocations"][0]["grants"][0]["used"] == 95
+    ledger.reserve("fits", job["autonomy_budget"], 105, "learning")
+    with pytest.raises(ServiceError, match="limit=200, used=200"):
+        ledger.reserve("over", job["autonomy_budget"], 1, "learning")
 
 
-@pytest.mark.parametrize('policy', [{'auto_expand': 'yes'}, {'max_resumes': True}, {'max_expansions': 11}, {'max_learning_tokens': 0}])
+@pytest.mark.parametrize("policy", [{"auto_expand": "yes"}, {"max_resumes": True}, {"max_expansions": 11}, {"max_learning_tokens": 0}])
 def test_learning_policy_rejects_invalid_bounds(tmp_path, policy):
     with pytest.raises(ServiceError):
         setup(tmp_path, policy=policy)
+
+
+def test_evaluation_call_limit_expands_same_job_then_completes(tmp_path):
+    store, _, _, cycle, job = setup(tmp_path)
+    job.update(state="budget_exhausted", settings={"max_calls": 48, "max_seconds": 3600}, usage={"calls": 48}, elapsed_seconds=10)
+    calls = []
+
+    def start(sid, analysis_id, options, **kwargs):
+        calls.append((options, kwargs))
+        job.update(state="queued", host_resume_requests=[kwargs["resume_request_id"]])
+
+    background = SimpleNamespace(
+        trajectory=SimpleNamespace(get=lambda *args: {"state": "completed"}),
+        semantic=SimpleNamespace(_load=lambda *args: job, _public=lambda job: {"retryable_work": False}, start=start),
+    )
+    coordinator = LearningCoordinator(store, background)
+    coordinator.advance(cycle["agent_id"])
+    coordinator.advance(cycle["agent_id"])
+    assert len(calls) == 1 and calls[0][0] == {"resume_id": "evaluation", "max_calls": 96}
+    job.update(state="completed")
+    coordinator.advance(cycle["agent_id"])
+    saved = store.snapshot(cycle["agent_id"])["learning"][0]
+    assert saved["state"] == "completed" and saved["coverage"] == "full" and saved["attempts"] == 2
+
+
+def test_incomplete_is_retried_but_never_misreported_as_completed(tmp_path):
+    store, _, _, cycle, job = setup(tmp_path)
+    job.update(state="incomplete")
+    calls = []
+
+    def start(sid, analysis_id, options, **kwargs):
+        calls.append(options)
+        job.setdefault("host_resume_requests", []).append(kwargs["resume_request_id"])
+
+    background = SimpleNamespace(
+        trajectory=SimpleNamespace(get=lambda *args: {"state": "completed"}),
+        semantic=SimpleNamespace(_load=lambda *args: job, _public=lambda job: {"retryable_work": True}, start=start),
+    )
+    coordinator = LearningCoordinator(store, background)
+    coordinator.advance(cycle["agent_id"])
+    assert calls == [{"resume_id": "evaluation", "retry_failed": True}]
+    coordinator.advance(cycle["agent_id"])
+    saved = store.snapshot(cycle["agent_id"])["learning"][0]
+    assert saved["state"] == "incomplete" and saved["coverage"] == "partial"
+    assert "no new completed units" in saved["blocked_reason"]
+    coordinator.advance(cycle["agent_id"])
+    assert len(calls) == 1
+
+
+def test_legacy_partial_cycle_keeps_polling_an_already_running_job(tmp_path):
+    store, _, _, cycle, job = setup(tmp_path)
+    with store.sessions.transaction() as db:
+        cycle.update(state="completed", coverage="partial", completion_policy_seen=1)
+        store.put(db, "agent_learning_cycles", cycle)
+    job.update(state="running")
+    background = SimpleNamespace(
+        trajectory=SimpleNamespace(get=lambda *args: {"state": "completed"}),
+        semantic=SimpleNamespace(_load=lambda *args: job, _public=lambda job: {"retryable_work": False}),
+    )
+    coordinator = LearningCoordinator(store, background)
+    coordinator.advance(cycle["agent_id"])
+    assert store.snapshot(cycle["agent_id"])["learning"][0]["state"] == "running"
+    job.update(state="completed")
+    coordinator.advance(cycle["agent_id"])
+    saved = store.snapshot(cycle["agent_id"])["learning"][0]
+    assert saved["state"] == "completed" and saved["coverage"] == "full"
+
+
+@pytest.mark.parametrize("policy,reason", [({"max_attempts": 1}, "attempt limit"), ({"max_evaluation_calls": 48}, "ceiling")])
+def test_analysis_retry_hard_limits_retain_source_and_no_new_calls(tmp_path, policy, reason):
+    store, _, _, cycle, job = setup(tmp_path, policy=policy)
+    job.update(state="budget_exhausted", settings={"max_calls": 48}, usage={"calls": 48})
+    background = SimpleNamespace(
+        trajectory=SimpleNamespace(get=lambda *args: {"state": "completed"}),
+        semantic=SimpleNamespace(
+            _load=lambda *args: job, _public=lambda job: {"retryable_work": False}, start=lambda *args, **kwargs: pytest.fail("Limit cannot be bypassed")
+        ),
+    )
+    LearningCoordinator(store, background).advance(cycle["agent_id"])
+    saved = store.snapshot(cycle["agent_id"])["learning"][0]
+    assert saved["state"] == "incomplete" and reason in saved["blocked_reason"]
+    assert saved["evaluation_id"] == cycle["evaluation_id"]
+    assert saved["run_id"] == cycle["run_id"]

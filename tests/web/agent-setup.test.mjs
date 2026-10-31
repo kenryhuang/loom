@@ -44,6 +44,17 @@ test('Agent setup shares Session blocks and loads named model/resource choices',
     assert.match(f.view.tools.count.textContent,/1/);
     assert.equal(role.long_term_objectives[0].schedule,undefined);
     assert.equal(role.long_term_objectives[0].stage_planning,undefined);
+    assert.equal(role.scheduling_policy.enabled,true);
+    assert.equal(role.scheduling_policy.tick_seconds,60);
+    assert.equal(role.scheduling_policy.max_recovery_attempts,3);
+    assert.equal(role.scheduling_policy.auto_expand_objective_budget,true);
+    f.view.objectiveCeiling.choice.value='custom';f.change(f.view.objectiveCeiling.choice);
+    f.view.form.elements.objective_ceiling_custom.value='20000000';
+    assert.equal(f.view.payload().scheduling_policy.max_objective_tokens,20000000);
+    assert.equal(f.view.form.elements.slice_default,undefined);
+    f.view.queueTick.choice.value='custom';f.change(f.view.queueTick.choice);
+    f.view.form.elements.queue_tick_custom.value='180';
+    assert.equal(f.view.payload().scheduling_policy.tick_seconds,180);
     f.view.stageMode.value='autonomous';
     f.view.form.elements.stage_constraints.value='先设计，再修改';
     f.view.form.elements.stage_completion.value='可复现验收通过';
@@ -147,7 +158,7 @@ test('Learning policy uses selectable bounds and preserves explicit settings on 
   try {
     await f.view.load();
     assert.equal(f.view.payload().budget.learning_tokens,250000);
-    assert.deepEqual(f.view.payload().learning_policy,{auto_expand:true,max_learning_tokens:1000000,max_expansions:2,max_resumes:3});
+    assert.deepEqual(f.view.payload().learning_policy,{auto_expand:true,max_learning_tokens:1000000,max_expansions:2,max_resumes:3,max_attempts:6,max_evaluation_calls:500});
     f.view.daily.choice.value='250000';f.change(f.view.daily.choice);
     assert.equal(f.view.payload().learning_policy.max_learning_tokens,250000);
     f.view.learningAuto.value='false';

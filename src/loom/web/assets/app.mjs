@@ -213,7 +213,7 @@ function currentId() {
   try {
     return decodeURIComponent(
       /^#\/(?:sessions|evaluation)\/([^/]+)(?:\/trajectory)?$/.exec(
-        location.hash,
+        location.hash.split('?')[0],
       )?.[1] || "",
     );
   } catch {
@@ -266,8 +266,10 @@ async function openEvaluation(id, { fromHistory = false } = {}) {
   $("evaluation-title").textContent = session?.title || "Session evaluation";
   if (!fromHistory)
     history.pushState(null, "", `#/evaluation/${encodeURIComponent(id)}`);
-  if (trajectory.sessionId !== id)
-    await trajectory.open(controller.api, id, session?.event_cursor || 0);
+  const params=new URLSearchParams(fromHistory ? location.hash.split('?')[1] || '' : '');
+  const target={analysisId:params.get('analysis'),evaluationId:params.get('evaluation'),runId:params.get('run')};
+  if (trajectory.sessionId !== id || JSON.stringify(trajectory.target) !== JSON.stringify(target))
+    await trajectory.open(controller.api, id, session?.event_cursor || 0,target);
 }
 async function select(id, { fromHistory = false } = {}) {
   if (!controller || !id) return;

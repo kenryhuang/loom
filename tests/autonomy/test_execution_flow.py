@@ -33,8 +33,8 @@ def test_real_worker_two_related_runs_and_learning(tmp_path):
         service.start()
         first = until(lambda: facade.snapshot(aid), lambda s: s["goals"][0]["state"] in {"completed", "blocked"})
         assert first["goals"][0]["state"] == "completed", first
-        learned = until(lambda: facade.snapshot(aid), lambda s: s["learning"] and s["learning"][0]["state"] in {"completed", "failed", "deferred"})
-        assert learned["learning"][0]["state"] == "completed", learned["learning"]
+        learned = until(lambda: facade.snapshot(aid), lambda s: s["learning"] and s["learning"][0]["state"] in {"completed", "incomplete", "deferred"})
+        assert learned["learning"][0]["state"] == "incomplete" and "no new completed units" in learned["learning"][0]["blocked_reason"], learned["learning"]
         assert learned["learning"][0]["memory_result"]["accepted"] >= 1, learned["learning"]
         facade.guidance(aid, dict(command_id="guide", text="以后区分已实现与拟议能力", scope="persistent"))
         facade.store.add_goal(aid, "goal-2", goals()[1])

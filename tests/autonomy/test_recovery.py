@@ -115,7 +115,7 @@ def test_learning_daily_budget_defers_then_resumes_same_evaluation(agent_service
     facade.store.clock = clock
     job = dict(state="incomplete", error="AGENT_BUDGET: Agent daily token budget exhausted", checkpoint={})
     calls = []
-    semantic = SimpleNamespace(_load=lambda *args: job, _public=lambda job: {"retryable_work": True}, start=lambda *args: calls.append(args))
+    semantic = SimpleNamespace(_load=lambda *args: job, _public=lambda job: {"retryable_work": True}, start=lambda *args, **kwargs: calls.append((args, kwargs)))
     background = SimpleNamespace(semantic=semantic, trajectory=SimpleNamespace(get=lambda *args: {"state": "completed"}))
     coordinator = LearningCoordinator(facade.store, background)
     cycle = dict(
@@ -130,7 +130,8 @@ def test_learning_daily_budget_defers_then_resumes_same_evaluation(agent_service
     assert calls == []
     clock.advance(86401)
     coordinator.advance(aid)
-    assert calls == [("s", "a", {"resume_id": "e", "retry_failed": True})]
+    assert calls[0][0] == ("s", "a", {"resume_id": "e", "retry_failed": True})
+    assert calls[0][1]["resume_request_id"] == facade.snapshot(aid)["learning"][0]["resume_intent"]["id"]
     assert facade.snapshot(aid)["learning"][0]["state"] == "running"
 
 
@@ -148,7 +149,7 @@ def test_learning_preserves_budget_values_and_never_retries_cumulative_limit_at_
         facade.store.put(db, 'agent_learning_cycles', cycle)
     LearningCoordinator(facade.store, background).advance(aid)
     result = facade.snapshot(aid)['learning'][0]
-    assert result['state'] == 'failed'
+    assert result['state'] == 'incomplete'
     assert result['blocked_reason'] == message
     assert not result.get('auto_resume')
 
@@ -168,7 +169,7 @@ def test_learning_command_is_durable_idempotent_and_deletion_is_final(agent_serv
     with service.store.transaction() as db:
         facade.store.put(db, "agent_learning_cycles", cycle)
     facade.supervisor.learning.advance(aid)
-    assert facade.snapshot(aid)["learning"][0]["state"] == "failed"
+    assert facade.snapshot(aid)["learning"][0]["state"] == "incomplete"
 
 
 def test_document_import_is_immutable_and_workspace_scoped(agent_service):

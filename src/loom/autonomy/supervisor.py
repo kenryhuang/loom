@@ -20,6 +20,11 @@ class AgentSupervisor:
         from loom.autonomy.stages import StageCoordinator
 
         self.stages = StageCoordinator(service, store, StagePlanner(service, store, getattr(service, "agent_stage_planner", None)))
+        from loom.autonomy.scheduling import QueueScheduler
+
+        self.scheduler = QueueScheduler(self)
+        self.timer_thread = None
+        self.schedule_threads = {}
         self.stopped = threading.Event()
         self.thread = None
         self.tick_lock = threading.Lock()
@@ -39,6 +44,10 @@ class AgentSupervisor:
                 if agent.get("planner_lease"):
                     agent.update(planner_lease=None, generation=agent["generation"] + 1)
                     store.put(db, "agents", agent)
+                if agent.get("scheduler", {}).get("state") in {"checking", "planning"}:
+                    agent["scheduler"].update(state="interrupted", reason="Service restart; next check reconciles actual Session state")
+                    agent.update(next_schedule_at=store.now(), schedule_requested=True)
+                    store.put(db, "agents", agent)
             for row in db.execute("SELECT body FROM agent_runs").fetchall():
                 run = json.loads(row[0])
                 if run["state"] == "planning":
@@ -49,16 +58,63 @@ class AgentSupervisor:
         if self.thread is None and not self.stopped.is_set():
             self.thread = threading.Thread(target=self._loop, name="loom-agent-supervisor", daemon=True)
             self.thread.start()
+            self.timer_thread = threading.Thread(target=self._timer_loop, name="loom-agent-background", daemon=True)
+            self.timer_thread.start()
 
     def close(self):
         self.stopped.set()
         if self.thread:
             self.thread.join(timeout=5)
+        if self.timer_thread:
+            self.timer_thread.join(timeout=5)
+        for thread in list(self.schedule_threads.values()):
+            thread.join(timeout=5)
+
+    def _timer_loop(self):
+        # Independent of model planning latency; controls still use service admission.
+        while not self.stopped.wait(0.5):
+            with self.store.sessions.transaction() as db:
+                ids = [r[0] for r in db.execute("SELECT id FROM agents")]
+            for aid in ids:
+                try:
+                    self.learning.advance(aid, manual=False)
+                    from loom.autonomy import profile
+                    from loom.autonomy.method_feedback import advance as methods
+
+                    profile.scan_feedback(self.store, aid)
+                    profile.review_due(self.store, aid)
+                    methods(self.store, self.learning.background, aid)
+                    with self.store.sessions.transaction() as db:
+                        agent = self.store.get(db, "agents", aid)
+                        if agent.pop("background_error", None):
+                            self.store.put(db, "agents", agent)
+                except Exception as exc:
+                    with self.store.sessions.transaction() as db:
+                        agent = self.store.get(db, "agents", aid)
+                        if agent.get("background_error") != str(exc):
+                            agent["background_error"] = str(exc)
+                            self.store.put(db, "agents", agent)
+                            self.store.event(db, aid, "background.error", dict(reason=str(exc)))
 
     def _loop(self):
         while not self.stopped.wait(0.5):
             try:
-                self.tick()
+                from loom.autonomy.contracts import scheduling_policy
+
+                with self.store.sessions.transaction() as db:
+                    agents = [json.loads(r[0]) for r in db.execute("SELECT body FROM agents")]
+                for agent in agents:
+                    aid = agent["id"]
+                    if self.stopped.is_set():
+                        break
+                    if agent["state"] != "enabled" or (self.schedule_threads.get(aid) and self.schedule_threads[aid].is_alive()):
+                        continue
+                    policy = scheduling_policy(agent["role"])
+                    if not agent.get("schedule_requested") and (not policy["enabled"] or agent.get("next_schedule_at", "") > self.store.now()):
+                        continue
+                    thread = threading.Thread(target=self.scheduler.advance, args=(aid,), name=f"loom-schedule-{aid}", daemon=True)
+                    self.schedule_threads[aid] = thread
+                    thread.start()
                 self.last_error = None
             except Exception as exc:
                 self.last_error = str(exc)
@@ -73,7 +129,7 @@ class AgentSupervisor:
                 if self.stopped.is_set():
                     break
                 try:
-                    self._agent(aid)
+                    self.scheduler.advance(aid)
                 except Exception as exc:
                     with self.store.sessions.transaction() as db:
                         agent = self.store.get(db, "agents", aid)
@@ -90,40 +146,8 @@ class AgentSupervisor:
             self.tick_lock.release()
 
     def _agent(self, aid):
-        from loom.autonomy.control import drain
-
-        drain(self.service, self.store, aid)
-        from loom.autonomy.triggers import materialize
-
-        materialize(self.store, aid)
-        from loom.autonomy import goals, profile, sources
-
-        sources.refresh(self.store, aid)
-        profile.scan_feedback(self.store, aid)
-        profile.review_due(self.store, aid)
-        goals.materialize(self.store, aid)
-        from loom.autonomy.habits import materialize as habits
-        from loom.autonomy.method_feedback import advance as methods
-
-        habits(self.store, aid)
-        # Cancellation is consumed even while the Agent is paused.
-        self.learning.advance(aid)
-        methods(self.store, self.learning.background, aid)
-        self.stages.advance(aid)
-        with self.store.sessions.transaction() as db:
-            agent = self.store.get(db, "agents", aid)
-            if agent["state"] != "enabled":
-                return
-            ready = agent.get("next_wake_at", "") <= self.store.now()
-        if ready:
-            self._plan(agent)
-        with self.store.sessions.transaction() as db:
-            pending = [w for w in self.store.rows(db, "agent_work_packages", aid) if w["state"] == "pending"]
-            cycles = self.store.rows(db, "agent_learning_cycles", aid)
-        backlog = len([c for c in cycles if c["state"] not in {"completed", "cancelled"}])
-        if backlog < 20:
-            for work in pending:
-                self.dispatcher.dispatch(aid, work["id"])
+        # Explicit internal check, shared with the timer/manual scheduler logic.
+        return self.scheduler.advance(aid, manual=True)
 
     def _plan(self, agent):
         aid = agent["id"]
@@ -190,7 +214,7 @@ class AgentSupervisor:
                         order=order,
                         created_at=self.store.now(),
                         run_ids=[],
-                        read_only=goal.get('read_only', False),
+                        read_only=goal.get("read_only", False),
                         stage_id=goal.get("stage_id"),
                         roadmap_id=goal.get("roadmap_id"),
                         objective_id=goal["long_term_objective_id"],

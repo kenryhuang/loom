@@ -15,7 +15,7 @@ def task_payload(agent, work):
         knowledge_base_ids=role["knowledge_base_ids"],
         external_tool_ids=role["external_tool_ids"],
         **({"task_spec": role["task_spec"]} if role["task_spec"] else {}),
-        limits={"max_tokens": role["budget"]["work_tokens"]},
+        limits={"max_tokens": work.get("execution_budget", {}).get("tokens", role["budget"]["work_tokens"]), "max_duration_seconds": 3600},
     )
     if work.get('read_only'):
         payload['external_tool_ids'] = []
@@ -139,7 +139,7 @@ class Dispatcher:
                 state["autonomy"] = binding
                 state["task"]["objective"] = payload["objective"]
                 state["task"]["goal_revision"] += 1
-                state["task"]["limits"]["max_tokens"] = agent["role"]["budget"]["work_tokens"]
+                state["task"]["limits"].update(payload["limits"])
                 db.execute(
                     "INSERT INTO agent_sessions VALUES(?,?,?,0) ON CONFLICT(session_id) DO UPDATE SET work_package_id=excluded.work_package_id", (sid, aid, wid)
                 )

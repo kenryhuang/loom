@@ -484,3 +484,22 @@ def test_host_resume_intent_is_idempotent_after_completion_and_restart(evaluatio
             restored.start(sid, aid, options, resume_request_id="different-intent")
     finally:
         restored.close()
+
+
+def test_host_adoption_binds_future_calls_without_resetting_saved_usage(evaluation, monkeypatch):
+    from concurrent.futures import Future
+
+    _, _, semantic, provider, sid, aid = evaluation
+    first = semantic.start(sid, aid, {"analysis_version": "v2", "batch_rounds": 1, "max_calls": 1})
+    stopped = wait_job(semantic, sid, aid, first["id"])
+    assert stopped["state"] == "budget_exhausted"
+    checkpoint = semantic._load(sid, aid, first["id"])["checkpoint"]
+    # Hold admission before the worker starts so its persisted budget binding
+    # and the retained checkpoint can be inspected independently of model work.
+    monkeypatch.setattr(semantic.pool, "submit", lambda *args: Future())
+    binding = {"agent_id": "agent", "goal_id": "goal", "work_package_id": "work", "output_tokens": 8192}
+    resumed = semantic.start(sid, aid, {"resume_id": first["id"], "max_calls": 10}, budget_context=binding, resume_request_id="adopt")
+    saved = semantic._load(sid, aid, resumed["id"])
+    assert saved["autonomy_budget"] == binding
+    assert saved["checkpoint"] == checkpoint and saved["usage"] == stopped["usage"]
+    assert resumed["id"] == first["id"] and provider.calls == 1

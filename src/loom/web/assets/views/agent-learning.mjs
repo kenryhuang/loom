@@ -4,7 +4,7 @@ import {panel, cards, badge, number, disclosure} from './dashboard.mjs';
 const kinds = {facts:'事实',lessons:'经验',workflows:'方法'};
 const confidence = {high:'高',medium:'中',low:'低',unknown:'未知'};
 const reviews = {unreviewed:'待人工审核',confirmed:'人工已确认',corrected:'人工已更正'};
-const states = {pending:'待处理',running:'进行中',completed:'已完成',failed:'失败',deferred:'延后',cancelled:'已取消',
+const states = {pending:'待处理',running:'进行中',completed:'已完成',incomplete:'未完成（已退出队列）',failed:'失败',deferred:'延后',cancelled:'已取消',
   full:'完整',partial:'部分',none:'暂无',not_applicable:'无可分析证据'};
 const label = value => states[value] || value || '—';
 const uuid = () => globalThis.crypto.randomUUID();
@@ -235,7 +235,7 @@ export class AgentLearningView {
       row.append(element('h4','',`学习记录 · ${label(cycle.state)} · ${label(cycle.coverage)}`),element('p','small',`已接受记忆：${cycle.memory_result?.accepted || 0}`));
       if(cycle.blocked_reason)row.append(element('p','agent-notice',cycle.blocked_reason));
       row.append(link('查看 Analysis 与证据',`#/evaluation/${encodeURIComponent(cycle.session_id)}`));
-      if (['failed','deferred','cancelled'].includes(cycle.state) || cycle.state === 'completed' && cycle.coverage === 'partial') {
+      if (['incomplete','failed','deferred','cancelled'].includes(cycle.state) || cycle.state === 'completed' && cycle.coverage === 'partial') {
         const form = element('form'); this.message(form);
         form.append(button('重试缺口',()=>this.save(form,()=>this.api.post(this.detail.id,`learning/${encodeURIComponent(cycle.id)}/commands`,{command_id:uuid(),type:'retry'}),true)));
         row.append(form);

@@ -99,6 +99,7 @@ class AgentStore:
                 activity="idle",
                 guidance_version=0,
                 next_wake_at=self.now(),
+                next_schedule_at=self.now(),
                 created_at=self.now(),
                 planner_lease=None,
             )
@@ -160,6 +161,14 @@ class AgentStore:
                 raise ServiceError("Unknown Agent command")
             if agent["state"] == "archived":
                 raise ServiceError("Archived Agent cannot run", 409)
+            if kind == "wake":
+                # A manual check must not invalidate an in-flight planning response.
+                busy = agent.get("scheduler", {}).get("state") in {"checking", "planning"}
+                if not busy and agent["state"] == "enabled":
+                    agent.update(revision=agent["revision"] + 1, schedule_requested=True, next_schedule_at=self.now(), learning_schedule_requested=True)
+                    self.put(db, "agents", agent)
+                self.event(db, aid, "schedule.manual", dict(outcome="busy" if busy else "queued" if agent["state"] == "enabled" else "paused"))
+                return self.receipt(db, cid, value, agent)
             if kind in {"enable", "resume"}:
                 agent["state"] = "enabled"
             elif kind == "pause":
@@ -167,6 +176,9 @@ class AgentStore:
             elif kind == "archive":
                 agent["state"] = "archived"
             agent.update(revision=agent["revision"] + 1, generation=agent["generation"] + 1, next_wake_at=self.now(), planner_lease=None)
+            if kind in {"enable", "resume"}:
+                agent["next_schedule_at"] = self.now()
+                agent["next_learning_at"] = self.now()
             self.put(db, "agents", agent)
             self.event(db, aid, f"agent.{kind}", {"revision": agent["revision"]})
             if kind in {"pause", "archive", "resume"}:
@@ -199,6 +211,8 @@ class AgentStore:
                 generation=agent["generation"] + 1,
                 guidance_version=agent["guidance_version"] + 1,
                 next_wake_at=self.now(),
+                next_schedule_at=self.now(),
+                next_learning_at=self.now(),
             )
             self.put(db, "agents", agent)
             from loom.autonomy.stage_commands import reconcile_role_change

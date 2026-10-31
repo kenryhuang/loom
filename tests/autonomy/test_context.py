@@ -33,6 +33,9 @@ def test_review_confidence_reaches_context_without_rewriting_evaluation(agent_se
     assert found['human_review']['agent_id'] == aid
     snapshot = build_snapshot(facade.store, aid, goal={'objective': 'duplicate planets'}, purpose='planning')
     assert snapshot['memory']['records'][0]['review_state'] == 'confirmed'
+    with service.store.transaction() as db:
+        context = facade.store.get(db, 'agent_contexts', snapshot['id'], aid)
+    assert context['memory_refs'][0] == {k: ref[k] for k in ('record_id', 'evaluation_id', 'content_digest')}
     assert 'request_input' in snapshot['decision_policy']
     annotate(facade.store, aid, 'human-correct', dict(**payload, expected_revision=2, kind='correct', value='Check duplicate planets in this project only'))
     corrected = memory.browse(review='reviewed')['records'][0]

@@ -22,7 +22,7 @@ def test_running_guidance_annotation_and_action_evidence_at_next_request(tmp_pat
         facade.store.add_goal(aid, "first", goals()[0])
         facade.control(aid, dict(command_id="enable", type="enable", expected_revision=1))
         service.start()
-        first = until(lambda: facade.snapshot(aid), lambda s: s["learning"] and s["learning"][0]["state"] == "completed")
+        first = until(lambda: facade.snapshot(aid), lambda s: s["learning"] and s["learning"][0]["state"] in {"completed", "incomplete"})
         record = MemoryStore(service.store.path, workspace=tmp_path).search("Session fixture")["records"][0]
         facade.store.add_goal(aid, "second", {**goals()[1], "objective": "Session boundary-gate review"})
         until(lambda: (tmp_path / "request-pending").exists(), bool)
@@ -46,9 +46,9 @@ def test_running_guidance_annotation_and_action_evidence_at_next_request(tmp_pat
             ),
         )
         (tmp_path / "release-request").touch()
-        second = until(lambda: facade.snapshot(aid), lambda s: len(s["learning"]) == 2 and s["learning"][-1]["state"] in {"completed", "failed"})
+        second = until(lambda: facade.snapshot(aid), lambda s: len(s["learning"]) == 2 and s["learning"][-1]["state"] in {"completed", "incomplete"})
         assert second["goals"][-1]["state"] == "completed", second
-        assert second["learning"][-1]["state"] == "completed"
+        assert second["learning"][-1]["state"] == "incomplete" and "no new completed units" in second["learning"][-1]["blocked_reason"]
         sid = second["sessions"][0]["session_id"]
         rid = second["work_packages"][-1]["run_ids"][0]
         assert len(second["sessions"]) == 1
@@ -86,11 +86,15 @@ def test_failed_run_publishes_lesson_without_claiming_success(tmp_path):
         facade.store.add_goal(aid, "fail", {**goals()[0], "objective": "Session failure-fixture inspection"})
         facade.control(aid, dict(command_id="enable", type="enable", expected_revision=1))
         service.start()
-        first = until(lambda: facade.snapshot(aid), lambda s: s["learning"] and s["learning"][0]["state"] in {"completed", "failed"}, seconds=45)
+        first = until(lambda: facade.snapshot(aid), lambda s: s["learning"] and s["learning"][0]["state"] in {"completed", "incomplete"}, seconds=45)
         assert first["work_packages"][0]["state"] == "failed"
-        assert first["learning"][0]["state"] == "completed", first["learning"]
+        assert first["learning"][0]["state"] == "incomplete" and "no new completed units" in first["learning"][0]["blocked_reason"], first["learning"]
         memories = MemoryStore(service.store.path, workspace=tmp_path).search("Session missing-file")["records"]
         assert any(r["kind"] == "lessons" for r in memories), memories
+        # The queue now holds unknown failures for human intervention before moving on.
+        blocked = until(lambda: facade.snapshot(aid), lambda s: s.get("scheduler", {}).get("manual_required"))
+        goal = blocked["goals"][0]
+        facade.goal_command(aid, goal["id"], dict(command_id="dismiss-failed-goal", type="cancel", expected_revision=goal["revision"]))
         facade.store.add_goal(aid, "successor", goals()[1])
         next_run = until(lambda: facade.snapshot(aid), lambda s: len(s["goals"]) == 2 and s["goals"][-1]["state"] == "completed")
         work = next_run["work_packages"][-1]

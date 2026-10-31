@@ -90,13 +90,14 @@ def admit_resume(store, aid, cycle, job, block):
         role, budget = agent["role"], agent["role"]["budget"]
         policy = learning_policy(role)
         window = store.clock().astimezone(ZoneInfo(role["timezone"])).date().isoformat()
-        resume_key = digest([block["id"], window])
+        retry_round = cycle.get("retry_round", 0)
+        resume_key = digest([block["id"], window, retry_round] if retry_round else [block["id"], window])
         resumes = deepcopy(current.get("budget_resumes", []))
         prior = next((r for r in resumes if r["id"] == resume_key), None)
         if prior:
             cycle.update(budget_resumes=resumes, budget_resume_pending=prior)
             return dict(outcome="resume", resume=prior)
-        in_window = [r for r in resumes if r["window"] == window]
+        in_window = [r for r in resumes if r.get("retry_round", 0) == retry_round]
         fingerprint = progress(job)
         if in_window and in_window[-1]["progress"] == fingerprint:
             return dict(outcome="stop", reason="LEARNING_NO_PROGRESS: resumed evaluation produced no new completed work")
@@ -114,6 +115,19 @@ def admit_resume(store, aid, cycle, job, block):
         calls = db.execute("SELECT COUNT(*) FROM agent_budget_calls WHERE agent_id=? AND window=?", (aid, window)).fetchone()[0]
         if goal + requested > budget["goal_tokens"]:
             return dict(outcome="stop", reason=f"Goal budget insufficient: used={goal}, requested={requested}, limit={budget['goal_tokens']}")
+        goal_row = db.execute("SELECT body FROM agent_goals WHERE id=? AND agent_id=?", (cycle["goal_id"], aid)).fetchone()
+        objective_id = json.loads(goal_row[0]).get("long_term_objective_id") if goal_row else None
+        objective = next((o for o in role["long_term_objectives"] if o["id"] == objective_id), {})
+        if objective.get("stage_planning"):
+            total = used("(id IN (SELECT call_id FROM agent_budget_objectives WHERE agent_id=? AND objective_id=?) "
+                         "OR goal_id IN (SELECT id FROM agent_goals WHERE agent_id=? AND json_extract(body,'$.long_term_objective_id')=?))",
+                         (aid, objective_id, aid, objective_id))
+            from loom.autonomy.execution_budget import objective_limit
+
+            maximum = objective_limit(agent, objective)
+            if total + requested > maximum:
+                return dict(outcome="stop", reason=f"Objective budget insufficient: objective={objective_id}, "
+                            f"used={total}, requested={requested}, limit={maximum}")
         if daily + requested > budget["daily_tokens"] or calls >= budget["max_calls"]:
             return dict(outcome="wait", reason=f"Daily budget insufficient: tokens={daily}+{requested}/{budget['daily_tokens']}, "
                         f"calls={calls}/{budget['max_calls']}")
@@ -137,7 +151,7 @@ def admit_resume(store, aid, cycle, job, block):
             allocation.update(tokens=after, grants=[*allocation["grants"], grant])
             store.put(db, "agent_learning_allocations", allocation)
             store.event(db, aid, "learning.budget.expanded", grant)
-        resume = dict(id=resume_key, evaluation_id=job["id"], window=window, block_id=block["id"], progress=fingerprint,
+        resume = dict(id=resume_key, evaluation_id=job["id"], window=window, retry_round=retry_round, block_id=block["id"], progress=fingerprint,
                       before=before, after=after, at=store.now())
         current.update(budget_resumes=[*resumes, resume], budget_resume_pending=resume, state="pending", retry_after="")
         store.put(db, "agent_learning_cycles", current)

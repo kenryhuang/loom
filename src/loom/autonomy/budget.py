@@ -53,7 +53,7 @@ class BudgetLedger:
                 raise ServiceError("Agent no longer available", 409)
             agent = json.loads(row[0])
             if agent["state"] != "enabled":
-                raise ServiceError("Agent is paused; new calls are deferred", 409)
+                raise ServiceError("Agent is paused; new calls are deferred", 409, "AGENT_CONTROL")
             policy = agent["role"]["budget"]
             goal = None
             if binding.get("goal_id"):
@@ -64,11 +64,11 @@ class BudgetLedger:
             if stage_id and category not in {"learning", "method_learning"}:
                 stage_row = db.execute("SELECT body FROM agent_stages WHERE id=? AND agent_id=?", (stage_id, agent["id"])).fetchone()
                 if stage_row and json.loads(stage_row[0])["state"] in {"paused", "cancelled", "superseded", "blocked"}:
-                    raise ServiceError("Stage is not runnable; new calls are deferred", 409)
+                    raise ServiceError("Stage is not runnable; new calls are deferred", 409, "AGENT_CONTROL")
             objective = next((o for o in agent["role"]["long_term_objectives"] if o["id"] == objective_id), {})
             if (category not in {"learning", "method_learning"} and (stage_id or (goal or {}).get("stage_discovery"))
                     and objective.get("stage_planning", {}).get("mode") != "autonomous"):
-                raise ServiceError("Automatic stage planning is disabled; new calls are deferred", 409)
+                raise ServiceError("Automatic stage planning is disabled; new calls are deferred", 409, "AGENT_CONTROL")
             window = self.clock().astimezone(ZoneInfo(agent["role"]["timezone"])).date().isoformat()
             clauses = [("daily", "agent_id=? AND window=?", (agent["id"], window), f"window={window}, timezone={agent['role']['timezone']}")]
             if objective.get("stage_planning"):
@@ -88,12 +88,15 @@ class BudgetLedger:
                 clauses.append(("learning", "agent_id=? AND window=? AND category IN (?,?)", (agent["id"], window, "learning", "method_learning"),
                                 f"window={window}, timezone={agent['role']['timezone']}"))
             failures, scopes = [], []
+            from loom.autonomy.execution_budget import objective_limit
             from loom.autonomy.learning_budget import allowance
 
             effective_learning = allowance(db, agent, window)
+            work_row = db.execute("SELECT body FROM agent_work_packages WHERE id=? AND agent_id=?", (binding.get("work_package_id"), agent["id"])).fetchone()
+            work_limit = (json.loads(work_row[0]).get("execution_budget") or {}).get("tokens", policy["work_tokens"]) if work_row else policy["work_tokens"]
             for scope, where, args, context in clauses:
-                maximum = (objective["stage_planning"]["objective_tokens"] if scope == "objective"
-                           else effective_learning if scope == "learning" else policy[f"{scope}_tokens"])
+                maximum = (objective_limit(agent, objective) if scope == "objective"
+                           else effective_learning if scope == "learning" else work_limit if scope == "work" else policy[f"{scope}_tokens"])
                 actual, reserved = db.execute(
                     f"SELECT COALESCE(SUM(actual),0), COALESCE(SUM(CASE WHEN actual IS NULL THEN reserved ELSE 0 END),0) "
                     f"FROM agent_budget_calls WHERE {where}", args,
@@ -127,6 +130,12 @@ class BudgetLedger:
                     block["id"] = identifier
                     db.execute("INSERT INTO agent_budget_blocks VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
                                (binding["evaluation_id"], agent["id"], canonical(block)))
+                elif category not in {"learning", "method_learning"} and binding.get("work_package_id"):
+                    from loom.service.contracts import canonical
+
+                    block.update(id=identifier, at=self.clock().isoformat())
+                    db.execute("INSERT INTO agent_budget_blocks VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
+                               ("execution:" + binding["work_package_id"], agent["id"], canonical(block)))
             else:
                 db.execute(
                     "INSERT INTO agent_budget_calls VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -203,7 +212,10 @@ class BudgetLedger:
                                  "(id IN (SELECT call_id FROM agent_budget_objectives WHERE agent_id=? AND objective_id=?) OR "
                                  "goal_id IN (SELECT id FROM agent_goals WHERE agent_id=? AND json_extract(body,'$.long_term_objective_id')=?))",
                                  (aid, aid, objective['id'], aid, objective['id'])).fetchone()
-                result.append(dict(objective_id=objective['id'], limit=objective['stage_planning']['objective_tokens'], calls=row[0],
+                from loom.autonomy.execution_budget import objective_limit
+
+                result.append(dict(objective_id=objective['id'], limit=objective_limit(agent, objective),
+                                   initial_limit=objective['stage_planning']['objective_tokens'], calls=row[0],
                                    actual_tokens=row[1], reserved_or_unknown=row[2], unknown_calls=row[3]))
             unattributed = db.execute("SELECT COUNT(*) FROM agent_budget_calls WHERE agent_id=? AND goal_id IS NULL "
                                       "AND id NOT IN (SELECT call_id FROM agent_budget_objectives)", (aid,)).fetchone()[0]
@@ -255,7 +267,8 @@ class BudgetProvider:
         try:
             identifier = self._reserve(messages, tools)
         except ServiceError as exc:
-            return err(make_loom_error("AGENT_BUDGET", str(exc), retryable=True, cause=getattr(exc, "budget_block", None)))
+            code = exc.code if exc.code in {"AGENT_BUDGET", "AGENT_CONTROL"} else "AGENT_ADMISSION"
+            return err(make_loom_error(code, str(exc), retryable=code != "AGENT_ADMISSION", cause=getattr(exc, "budget_block", None)))
         kwargs = dict(tools=tools, cancellation=cancellation)
         if tool_choice is not None and "tool_choice" in inspect.signature(self.provider.chat).parameters:
             kwargs["tool_choice"] = tool_choice

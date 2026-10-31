@@ -5,24 +5,17 @@ import {AgentLearningView} from './agent-learning.mjs';
 import {panel, cards, table, badge, number, disclosure} from './dashboard.mjs';
 import {agentResourceChoices} from './agent-resources.mjs';
 import {selectedTools} from './external-tools.mjs';
+import {renderRoadmaps, roadmapDisclosure} from './agent-roadmap.mjs';
+import {renderExecution} from './agent-execution.mjs';
 
 const status = {draft:'未启用', enabled:'已启用', paused:'已暂停', archived:'已归档', idle:'空闲', waiting:'等待',
   working:'执行中', planning:'编排中', degraded:'需要处理', pending:'待处理', running:'进行中', completed:'已完成',
-  failed:'失败', blocked:'阻塞', deferred:'延后', cancelled:'已取消', queued:'排队中', active:'进行中', succeeded:'已验收',
+  incomplete:'未完成（已退出队列）',failed:'失败', blocked:'阻塞', deferred:'延后', cancelled:'已取消', queued:'排队中', active:'进行中', succeeded:'已验收',
   dispatched:'已派发', full:'完整', partial:'部分', none:'暂无', not_applicable:'无可分析证据'};
 const label = value => status[value] || value || '—';
 const tabs = ['Overview','Goals','Work','Profile','Knowledge','Learning'];
 const titles = ['概览','目标','执行','工作方式','知识来源','学习'];
 const uuid = () => globalThis.crypto.randomUUID();
-const terminalGoals = new Set(['completed','cancelled','superseded']);
-
-function stageOrder(d, objectiveId) {
-  const stages = (d.stages || []).filter(s=>s.objective_id===objectiveId);
-  const state = (d.objective_planning || []).find(s=>s.objective_id===objectiveId);
-  const current = stages.find(s=>s.id===state?.stage_id) || stages.at(-1);
-  const previous = stages.find(s=>s.id===current?.predecessor_id) || stages[stages.indexOf(current)-1];
-  return {current, previous, stages:[...new Set([current,previous,...stages.slice().reverse()].filter(Boolean))]};
-}
 
 function field(form, name, title, value = '', multiline = false) {
   const wrap = element('label', 'agent-field', title);
@@ -43,6 +36,7 @@ export class AgentsView {
     this.expandedBudgetSections = new Set();
     this.learningStates = new Map();
     this.stageExpansionStates = new Map();
+    this.roadmapSelections = new Map();
     this.heading = root.parentElement?.querySelector('#agents-heading');
   }
   close() {
@@ -131,8 +125,12 @@ export class AgentsView {
     if (d) {
       const actions = element('div', 'trajectory-actions agent-actions');
       actions.append(badge(d.pause_pending ? '暂停中' : label(d.state)), badge(label(d.activity), d.activity === 'degraded' ? 'blocked' : d.activity));
-      const controls = d.state === 'enabled' ? [['pause','暂停'],['wake','立即检查']] : d.state === 'archived' ? [] : d.state === 'paused' ? [['resume','恢复']] : [['enable','启用']];
-      for (const [type, title] of controls) actions.append(button(title, () => this.act(() => this.api.command(d.id,type,d.revision)), type === 'enable' ? 'primary' : 'quiet'));
+      const controls = d.state === 'enabled' ? [['pause','暂停'],['wake','手动调度']] : d.state === 'archived' ? [] : d.state === 'paused' ? [['resume','恢复']] : [['enable','启用']];
+      for (const [type, title] of controls) {
+        const action=button(title, () => this.act(() => this.api.command(d.id,type,d.revision)), type === 'enable' ? 'primary' : 'quiet');
+        if(type==='wake' && ['checking','planning'].includes(d.execution?.scheduler?.state)){action.disabled=true;action.title='调度程序正在执行，本次不重复启动';}
+        actions.append(action);
+      }
       head.append(actions);
     }
   }
@@ -164,7 +162,7 @@ export class AgentsView {
     summary.append(schedule); this.updateSchedule(d);
     cards(summary, [['待处理目标',number(d.goals.filter(g => !['completed','cancelled','superseded'].includes(g.state)).length)],
       ['活动工作包',number(d.work_packages.filter(w => ['dispatched','running'].includes(w.state)).length)],
-      ['关联 Session',number(d.sessions.length)], ['学习待办',number(d.learning.filter(l => !['completed','cancelled'].includes(l.state)).length)]]);
+      ['关联 Session',number(d.sessions.length)], ['学习待办',number(d.learning.filter(l => !['completed','cancelled','failed','incomplete'].includes(l.state)).length)]]);
     const goals = panel(root,'长期目标');
     this.showRows(goals,d.role.long_term_objectives.map(g => g.desired_outcome));
     const runtime = panel(root,'运行配置');
@@ -273,148 +271,89 @@ export class AgentsView {
   }
   showRows(root, values) { const list = element('ul','dashboard-file-list'); for (const value of values) list.append(element('li','',value)); root.append(list); }
   focusGoal(id) {
+    const goal=this.detail.goals.find(g=>g.id===id);
+    const stage=(this.detail.stages || []).find(s=>s.id===goal?.stage_id || s.goal_ids?.includes(id));
+    if(stage) this.roadmapSelections.set(JSON.stringify([this.detail.id,stage.objective_id]),stage.id);
+    this.stageExpansionStates.set(JSON.stringify([this.detail.id,`goal:${id}`]),true);
+    this.stageExpansionStates.set(JSON.stringify([this.detail.id,'unassigned']),true);
     this.tab='Goals';this.render();
     const row=[...this.root.querySelectorAll('[data-goal-id]')].find(node=>node.dataset.goalId===id);
-    if (row) {row.focus();row.scrollIntoView?.({block:'center'});}
+    if (row) {for(let node=row;node && node!==this.root;node=node.parentElement) if(node.tagName==='DETAILS') node.open=true;
+      row.focus();row.scrollIntoView?.({block:'center'});}
   }
-  renderScheduledGoals(root, d, ids, {stageId=null}={}) {
-    const selected=[...new Set([...ids,...(stageId?d.goals.filter(g=>g.stage_id===stageId).map(g=>g.id):[])])];
-    if (!selected.length) {root.append(element('p','muted','尚未生成阶段目标。'));return;}
-    for (const id of selected) {
-      const goal=d.goals.find(g=>g.id===id), item=element('section','agent-scheduled-goal');item.dataset.scheduledGoalId=id;
-      if (!goal) {item.append(element('p','muted',`目标详情暂不可用：${id}`));root.append(item);continue;}
-      const heading=element('div','actions');heading.append(button(goal.objective,()=>this.focusGoal(id)),badge(label(goal.state),goal.state));item.append(heading);
-      if (!ids.includes(id)) item.append(element('p','muted','历史 attempt，保留原执行结果。'));
-      item.append(element('p','muted',`Goal：${id}`));
-      const works=d.work_packages.filter(w=>w.goal_id===id).sort((a,b)=>(a.order??0)-(b.order??0));
-      if (!works.length) item.append(element('p','muted','尚未拆分或派发工作包。'));
-      else table(item,['工作包','状态','执行去向'],works.map(w=>{
-        const destination=element('div');
-        if (w.session_id) destination.append(link('打开 Session',`#/sessions/${encodeURIComponent(w.session_id)}`));
-        else destination.append(element('span','muted','尚未派发'));
-        if (w.run_ids?.length) {
-          const runs=disclosure(destination,`执行记录 · ${w.run_ids.length} 次`);this.showRows(runs,w.run_ids);
-        }
-        const name=element('div','',w.objective);
-        if (w.blocked_reason) name.append(element('p','notice',w.blocked_reason));
-        return [name,w.superseded_contract?'旧合同 · '+label(w.state):badge(label(w.state),w.state),destination];
-      }));
-      root.append(item);
-    }
+  renderGoalWork(root,d,goal) {
+    const works=d.work_packages.filter(w=>w.goal_id===goal.id).sort((a,b)=>(a.order??0)-(b.order??0));
+    if(!works.length) {root.append(element('p','muted','尚未拆分或派发工作包。'));return;}
+    table(root,['工作包','状态','执行去向'],works.map(w=>{
+      const destination=element('div');
+      if(w.session_id) destination.append(link('打开 Session',`#/sessions/${encodeURIComponent(w.session_id)}`));
+      else destination.append(element('span','muted','尚未派发'));
+      if(w.run_ids?.length) this.showRows(roadmapDisclosure(this,destination,d,`work-runs:${w.id}`,`执行记录 · ${w.run_ids.length} 次`),w.run_ids);
+      const name=element('div','',w.objective);
+      if(w.reason) name.append(element('p','muted',`编排依据：${w.reason}`));
+      if(w.blocked_reason && !['succeeded','completed'].includes(w.state)) name.append(element('p','notice',w.blocked_reason));
+      return [name,badge(w.superseded_contract?'旧合同 · '+label(w.state):label(w.state),w.state),destination];
+    }));
   }
   renderGoals(root, d) {
-    this.renderStages(root,d);
-    if (!d.goals.length) panel(root,'目标队列',true).append(element('p','empty-state','暂无目标。在下方添加本次交付目标与验收条件。'));
-    for (const goal of d.goals) {
-      const row = element('article', 'dashboard-panel dashboard-wide agent-card'); row.append(element('h3','',goal.objective),badge(label(goal.state),goal.state));
-      row.dataset.goalId=goal.id;row.tabIndex=-1;
-      this.showRows(row, goal.acceptance);
-      const selection = (d.selection || []).find(s => s.goal_id === goal.id);
-      if (selection) row.append(element('p','muted',selection.reason));
-      if (goal.proposal) row.append(element('p','muted',`提案依据：${goal.proposal.reason} · 来源：${goal.proposal.source}`));
-      if (goal.not_before) row.append(element('p','muted',`最早重试：${goal.not_before}`));
-      if (goal.source_changed) row.append(element('p','notice','来源在规划后发生变化，后续派发已等待目标复核。'));
-      if (goal.state === 'blocked') {
-        const retry = element('form','agent-form');
-        const kind = element('select'); kind.name='change_kind';
-        for (const [value,title] of [['input','输入变化'],['method','方法变化'],['environment','环境变化']]) {
-          const option=element('option','',title); option.value=value; kind.append(option);
-        }
-        retry.append(kind); field(retry,'change','本次与上次失败相比有什么变化','',true);
-        retry.append(button('创建有退避的新 attempt',()=>this.act(()=>this.api.post(d.id,`goals/${encodeURIComponent(goal.id)}/retry`,
-          {command_id:uuid(),expected_revision:goal.revision,change_kind:kind.value,change:retry.elements.change.value}))));
-        row.append(retry);
-      }
-      if (!['completed','cancelled','superseded'].includes(goal.state)) for (const type of ['pause','resume','cancel']) row.append(button(
-        {pause:'暂停目标',resume:'恢复目标',cancel:'取消目标'}[type], () => this.act(() => this.api.post(d.id, `goals/${encodeURIComponent(goal.id)}/commands`,
-          {command_id:uuid(), type, expected_revision:goal.revision}))));
-      if (!['completed','cancelled','superseded'].includes(goal.state)) row.append(button('修订目标', () => {
-        const form=element('form','agent-form');field(form,'objective','目标',goal.objective,true);field(form,'acceptance','验收条件',goal.acceptance.join('\n'),true);
-        form.append(button('保存新合同',()=>this.act(async()=>{await this.api.post(d.id,`goals/${encodeURIComponent(goal.id)}/commands`,
-          {command_id:uuid(),type:'revise',expected_revision:goal.revision,payload:{objective:form.elements.objective.value,acceptance:lines(form.elements.acceptance.value),
-            long_term_objective_id:goal.long_term_objective_id,depends_on:goal.depends_on,priority:goal.priority,stop_conditions:goal.stop_conditions,learning_dependency:goal.learning_dependency}});
-          document.activeElement?.blur();})));row.append(form);
-      }));
-      root.append(row);
+    renderRoadmaps(root,d,this);
+    const assigned=new Set((d.stages || []).flatMap(s=>s.goal_ids || []));
+    const standalone=d.goals.filter(g=>!assigned.has(g.id) && !(d.stages || []).some(s=>s.id===g.stage_id));
+    if(standalone.length) {
+      const block=roadmapDisclosure(this,root,d,'unassigned',`独立与历史目标 · ${standalone.length}`);
+      block.classList.add('dashboard-panel','dashboard-wide');
+      block.append(element('p','muted','未归入阶段的交付保留在这里，作为后续规划的现状依据。'));
+      for(const goal of standalone) this.renderGoal(block,d,goal);
     }
+    const add=roadmapDisclosure(this,root,d,'add-goal','添加目标');add.classList.add('dashboard-panel','dashboard-wide');
     const form = element('form','agent-form'); field(form,'objective','本次交付目标','',true); field(form,'acceptance','验收条件（每行一条）','',true);
     const submit = element('button','primary','添加目标'); submit.type='submit'; form.append(submit);
     form.addEventListener('submit', e => {e.preventDefault(); this.act(async () => {await this.api.post(d.id,'goals',
-      {command_id:uuid(),goal:{objective:form.elements.objective.value,acceptance:lines(form.elements.acceptance.value)}}); form.reset(); document.activeElement?.blur();});}); panel(root,'添加目标',true).append(form);
+      {command_id:uuid(),goal:{objective:form.elements.objective.value,acceptance:lines(form.elements.acceptance.value)}}); form.reset(); document.activeElement?.blur();});});add.append(form);
   }
-  renderStages(root, d) {
-    for (const objective of d.role.long_term_objectives) {
-      const state = (d.objective_planning || []).find(s=>s.objective_id===objective.id);
-      if (!objective.id && !state) continue;
-      const block=panel(root,`阶段路线图 · ${objective.desired_outcome}`,true);
-      if (objective.stage_planning?.mode !== 'autonomous') {
-        block.append(element('p','muted','自动阶段规划未开启。开启后将核实现状，并在既有范围与预算内生成阶段目标、拆分执行。'));
-        block.append(element('p','muted',`该长期目标累计上限：${objective.stage_planning?.objective_tokens || 10000000} tokens，包含可归属的历史用量；可在角色配置中调整。`));
-        block.append(button('开启该目标的阶段规划',()=>this.act(()=>this.api.post(d.id,`objectives/${encodeURIComponent(objective.id)}/planning/commands`,
-          {command_id:uuid(),expected_revision:d.revision,type:'enable'}))));
+  renderGoal(root,d,goal) {
+    const row=roadmapDisclosure(this,root,d,`goal:${goal.id}`,goal.objective);
+    row.classList.add('agent-roadmap-goal');row.dataset.goalId=goal.id;row.tabIndex=-1;
+    const summary=row.querySelector('summary');summary.append(badge(label(goal.state),goal.state));
+    row.append(element('code','agent-roadmap-id',goal.id));
+    row.append(element('h5','','验收条件'));
+    this.showRows(row, goal.acceptance);
+    const selection = (d.selection || []).find(s => s.goal_id === goal.id);
+    if (selection) row.append(element('p','muted',selection.reason));
+    if (goal.proposal) row.append(element('p','muted',`提案依据：${goal.proposal.reason} · 来源：${goal.proposal.source}`));
+    if (goal.not_before) row.append(element('p','muted',`最早重试：${goal.not_before}`));
+    if (goal.source_changed) row.append(element('p','notice','来源在规划后发生变化，后续派发已等待目标复核。'));
+    if (goal.state === 'blocked') {
+      const retry = element('form','agent-form');
+      const kind = element('select'); kind.name='change_kind';
+      for (const [value,title] of [['input','输入变化'],['method','方法变化'],['environment','环境变化']]) {
+        const option=element('option','',title); option.value=value; kind.append(option);
       }
-      if (!state) {
-        if (objective.stage_planning?.mode === 'autonomous') block.append(element('p','muted','已开启，等待核实现状和首轮规划。'));
-        continue;
-      }
-      block.append(element('p','',`${state.state} · ${state.reason || ''}`));
-      const usage=d.objective_budget?.objectives?.find(b=>b.objective_id===objective.id);
-      if (usage) block.append(element('p','muted',`累计 Token：${usage.actual_tokens} · 预留或未知：${usage.reserved_or_unknown} · 上限：${usage.limit} · 调用：${usage.calls}`));
-      if (d.objective_budget?.unattributed_historical_calls) block.append(element('p','muted',`另有 ${d.objective_budget.unattributed_historical_calls} 次历史调用无法归属到具体长期目标，其用量不能当作零。`));
-      if (state.next_review_at) block.append(element('p','muted',`下次复查：${state.next_review_at}`));
-      const route=`objectives/${encodeURIComponent(objective.id)}/planning/commands`;
-      const send=(type,extra={})=>this.act(()=>this.api.post(d.id,route,{command_id:uuid(),expected_revision:state.revision,type,...extra}));
-      block.append(button(state.manual_pause?'恢复阶段推进':'暂停阶段推进',()=>send(state.manual_pause?'resume':'pause')));
-      const roadmap=(d.roadmaps || []).find(r=>r.id===state.roadmap_id);
-      if (roadmap) {
-        block.append(element('p','',`现状：${roadmap.baseline}`));
-        this.showRows(block,roadmap.future.map(s=>`远期暂定：${s.title} — ${s.expected_outcome}`));
-      }
-      const {current,previous,stages}=stageOrder(d,objective.id);
-      for (const stage of stages) {
-        const prefix=stage.id===current?.id?(terminalGoals.has(stage.state)?'最近阶段':'当前阶段'):stage.id===previous?.id?'上一阶段':'历史阶段';
-        const detail=disclosure(block,`${prefix}：${stage.title} · ${label(stage.state)}`), expansionKey=JSON.stringify([d.id,stage.id]);
-        detail.dataset.stageId=stage.id;
-        detail.open=this.stageExpansionStates.get(expansionKey) ?? (stage.id===current?.id||stage.id===previous?.id);
-        detail.addEventListener('toggle',()=>{if(detail.isConnected)this.stageExpansionStates.set(expansionKey,detail.open);});
-        detail.append(element('p','',stage.expected_contribution));this.showRows(detail,stage.acceptance);
-        detail.append(element('p','muted',`估计：${stage.estimated_cost}`));
-        this.renderScheduledGoals(detail,d,stage.goal_ids || [],{stageId:stage.id});
-        const review=(d.stage_reviews || []).find(r=>r.id===stage.review_id);
-        if (review) {
-          detail.append(element('p','',`验收复盘：${review.decision.reason}`));
-          const gaps=review.learning.filter(c=>c.state!=='completed'||c.coverage!=='full');
-          if (gaps.length) detail.append(element('p','notice',`学习有 ${gaps.length} 项缺口；业务验收与学习状态分别记录。`));
-        }
-        if (!['completed','cancelled','superseded'].includes(stage.state)) {
-          const form=element('form','agent-form');field(form,'reason','跳过、取消或修订的原因','',true);
-          const action=(type,payload)=>this.act(()=>this.api.post(d.id,`stages/${encodeURIComponent(stage.id)}/commands`,
-            {command_id:uuid(),expected_revision:stage.revision,type,reason:form.elements.reason.value,...(payload?{payload}:{})}));
-          form.append(button('跳过阶段',()=>action('skip')),button('取消阶段',()=>action('cancel')));
-          field(form,'outcome','修订后的交付',stage.expected_outcome,true);field(form,'criteria','修订后的验收条件',stage.acceptance.join('\n'),true);
-          form.append(button('保存修订并重新规划',()=>action('revise',{expected_outcome:form.elements.outcome.value,acceptance:lines(form.elements.criteria.value)})));
-          detail.append(form);
-        }
-      }
-      if (state.state==='awaiting_input' && state.question) {
-        const form=element('form','agent-form');form.append(element('p','',state.question.text));
-        this.showRows(form,state.question.options || []);field(form,'answer','你的回答','',true);
-        form.append(button('提交阶段问题回答',()=>send('answer',{question_id:state.question.id,question_revision:state.question.revision,answer:form.elements.answer.value})));
-        block.append(form);
-      }
-      const replan=element('form','agent-form');field(replan,'reason','有哪些新信息或条件变化','',true);
-      replan.append(button('根据新信息重新规划',()=>send('replan',{reason:replan.elements.reason.value})));block.append(replan);
+      retry.append(kind); field(retry,'change','本次与上次失败相比有什么变化','',true);
+      retry.append(button('创建有退避的新 attempt',()=>this.act(()=>this.api.post(d.id,`goals/${encodeURIComponent(goal.id)}/retry`,
+        {command_id:uuid(),expected_revision:goal.revision,change_kind:kind.value,change:retry.elements.change.value}))));
+      row.append(retry);
     }
+    if (!['completed','cancelled','superseded'].includes(goal.state)) for (const type of ['pause','resume','cancel']) row.append(button(
+      {pause:'暂停目标',resume:'恢复目标',cancel:'取消目标'}[type], () => this.act(() => this.api.post(d.id, `goals/${encodeURIComponent(goal.id)}/commands`,
+        {command_id:uuid(), type, expected_revision:goal.revision}))));
+    if (!['completed','cancelled','superseded'].includes(goal.state)) row.append(button('修订目标', () => {
+      const form=element('form','agent-form');field(form,'objective','目标',goal.objective,true);field(form,'acceptance','验收条件',goal.acceptance.join('\n'),true);
+      form.append(button('保存新合同',()=>this.act(async()=>{await this.api.post(d.id,`goals/${encodeURIComponent(goal.id)}/commands`,
+        {command_id:uuid(),type:'revise',expected_revision:goal.revision,payload:{objective:form.elements.objective.value,acceptance:lines(form.elements.acceptance.value),
+          long_term_objective_id:goal.long_term_objective_id,depends_on:goal.depends_on,priority:goal.priority,stop_conditions:goal.stop_conditions,learning_dependency:goal.learning_dependency}});
+        document.activeElement?.blur();})));row.append(form);
+    }));
+    row.append(element('h5','','执行工作包'));this.renderGoalWork(row,d,goal);
   }
   renderWork(root, d) {
-    const work = panel(root,'工作包',true);
-    table(work,['目标','状态','Session','编排依据'],d.work_packages.map(w => [w.objective,badge(label(w.state),w.state),
-      w.session_id ? link('打开执行记录',`#/sessions/${encodeURIComponent(w.session_id)}`) : '尚未派发',w.blocked_reason || w.reason]));
-    const sessions = panel(root,'Session 管理',true);
+    renderExecution(root,d,this);
+    const sessions = roadmapDisclosure(this,root,d,'execution-sessions','Session 管理与路由');
+    sessions.classList.add('dashboard-wide');
     table(sessions,['Session','归属','操作'],d.sessions.map(s => [link(s.session_id,`#/sessions/${encodeURIComponent(s.session_id)}`),
       badge(s.taken_over ? '人工接管' : 'Agent 管理'),button(s.taken_over ? '归还 Session' : '接管 Session',()=>this.act(()=>this.api.post(d.id,
         `sessions/${encodeURIComponent(s.session_id)}/commands`,{command_id:uuid(),type:s.taken_over?'release':'takeover',expected_revision:d.revision})))]));
-    const routes = panel(root,'Session 选择依据',true), output=element('div'); routes.append(output);
+    const routes = roadmapDisclosure(this,sessions,d,'execution-routes','Session 选择依据'), output=element('div'); routes.append(output);
     routes.firstChild.append(button('查看路由记录',()=>this.act(async()=>{const {routes:rows}=await this.api.get(d.id,'routes');output.replaceChildren();
       table(output,['选择','依据'],rows.map(r=>[r.action,r.reason]));})));
   }

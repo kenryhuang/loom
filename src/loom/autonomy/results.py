@@ -25,8 +25,8 @@ def record_session_state(db, state):
     status = run["state"]
     if status not in {"completed", "failed", "stopped"}:
         if work["state"] not in {"succeeded", "failed", "cancelled"}:
-            work["state"] = "running" if status == "running" else "blocked"
-            work["blocked_reason"] = state["task"]["state"]
+            work["state"] = "running" if status == "running" else "dispatched" if status == "queued" else "blocked"
+            work["blocked_reason"] = None if status in {"running", "queued"} else state["task"]["state"]
         db.execute("UPDATE agent_work_packages SET body=? WHERE id=?", (canonical(work), wid))
         return
     identifier = "learning_" + digest([state["session_id"], rid])[:32]
@@ -41,9 +41,13 @@ def record_session_state(db, state):
     passed = gate is not None and gate[0] == "acceptance.gate.passed"
     work.update(
         state="succeeded" if status == "completed" and passed else ("cancelled" if status == "stopped" else "failed"),
+        blocked_reason=None if status == "completed" and passed else (run.get("reason") or ("Acceptance did not pass" if status == "completed" else status)),
         terminal_run_id=rid,
-        outcome=dict(run_state=status, acceptance="passed" if passed else "unknown", event_cursor=cursor, artifacts=state.get("output_artifacts", [])),
+        outcome=dict(run_state=status, reason=run.get("reason"), acceptance="passed" if passed else "unknown", event_cursor=cursor,
+                     artifacts=state.get("output_artifacts", [])),
     )
+    if work.get("slice"):
+        work["slice"]["phase"] = "finished"
     for usage in db.execute("SELECT id,body FROM agent_memory_uses WHERE run_id=?", (rid,)).fetchall():
         body = json.loads(usage["body"])
         body["outcome"] = work["outcome"]
@@ -65,8 +69,9 @@ def record_session_state(db, state):
         created_at=work.get("created_at"),
         attempts=0,
     )
-    db.execute("INSERT INTO agent_learning_cycles VALUES(?,?,?)", (identifier, aid, canonical(cycle)))
-    db.execute("INSERT OR IGNORE INTO agent_outbox VALUES(?,?,?,?,?)", (identifier, aid, "learning", "pending", canonical(cycle)))
+    from loom.autonomy.learning_queue import enqueue
+
+    enqueue(db, cycle)
     db.execute("UPDATE agent_sessions SET work_package_id=NULL WHERE session_id=? AND work_package_id=?", (state["session_id"], wid))
     row = db.execute("SELECT body FROM agents WHERE id=?", (aid,)).fetchone()
     if row:

@@ -34,6 +34,7 @@ def role(workspace):
         "long_term_objectives": [{"id": "quality", "desired_outcome": "设计与实现一致", "mode": "ongoing"}],
         "source_routes": [{"id": "code", "topic": "实现事实", "paths": ["src", "tests"]}],
         "methods": ["结论附代码依据"],
+        "scheduling_policy": {"tick_seconds": 1},
     }
 
 

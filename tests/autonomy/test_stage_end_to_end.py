@@ -93,6 +93,6 @@ def test_long_term_objective_alone_drives_discovery_two_stages_and_finite_stop(t
         assert result["stages"][1]["predecessor_id"] == result["stages"][0]["id"]
         facade.supervisor.stages.advance(aid)
         assert len(calls) == 5
-        until(lambda: facade.snapshot(aid), lambda s: all(c["state"] in {"completed", "failed", "deferred"} for c in s["learning"]))
+        until(lambda: facade.snapshot(aid), lambda s: all(c["state"] in {"completed", "incomplete", "deferred"} for c in s["learning"]))
     finally:
         service.close()

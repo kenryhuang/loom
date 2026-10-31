@@ -28,14 +28,14 @@ def test_source_goal_execution_learning_preference_and_next_cycle(tmp_path):
         facade.store.command(aid, "enable", "enable", 1)
         refresh(facade.store, aid, force=True)
         service.start()
-        first = until(lambda: facade.snapshot(aid), lambda s: s["learning"] and s["learning"][0]["state"] == "completed")
+        first = until(lambda: facade.snapshot(aid), lambda s: s["learning"] and s["learning"][0]["state"] in {"completed", "incomplete"})
         assert first["goals"][0]["producer"] == "goal_proposal"
         feedback(facade.store, aid, dict(command_id="correction", key="language", text="Use Chinese in future", kind="explicit"))
         # A check records the Agent's completed own work without generating a feedback loop.
         refresh(facade.store, aid, force=True)
         note.write_text("Session fixture evidence: external version two")
         refresh(facade.store, aid, force=True)
-        second = until(lambda: facade.snapshot(aid), lambda s: len(s["learning"]) == 2 and s["learning"][-1]["state"] == "completed")
+        second = until(lambda: facade.snapshot(aid), lambda s: len(s["learning"]) == 2 and s["learning"][-1]["state"] in {"completed", "incomplete"})
         rid = second["work_packages"][-1]["run_ids"][-1]
         with facade.store.sessions.transaction() as db:
             contexts = facade.store.rows(db, "agent_contexts", aid)

@@ -56,6 +56,9 @@ class AutonomyService:
                 "AND json_extract(s.body,'$.deleted_at') IS NULL AND json_extract(s.body,'$.input_request.state')='pending'", (aid,),
             )
             result["pending_decisions"] = [{**dict(row), "request": json.loads(row["request"]), "taken_over": bool(row["taken_over"])} for row in rows]
+            from loom.autonomy.execution import report
+
+            result['execution'] = report(self.store, self.service, db, result)
         return result
 
     def control(self, aid, body):
@@ -280,13 +283,27 @@ class AutonomyService:
             action = body.get("type")
             if action not in {"retry", "cancel"}:
                 raise ServiceError("Unknown learning command")
-            if action == "retry" and cycle["state"] not in {"failed", "deferred", "completed", "cancelled"}:
+            if action == "retry" and cycle["state"] not in {"incomplete", "failed", "deferred", "completed", "cancelled"}:
                 raise ServiceError("Learning is already active", 409)
             if action == "retry" and cycle["state"] == "completed" and cycle["coverage"] != "partial":
                 raise ServiceError("Completed evaluation has no retryable gap", 409)
+            if action == "retry" and cycle.get("evaluation_id") and db.execute(
+                "SELECT 1 FROM semantic_jobs WHERE id=? AND json_extract(body,'$.state') IN ('queued','running')", (cycle["evaluation_id"],)
+            ).fetchone():
+                raise ServiceError("Evaluation is still running or cancelling; wait for it to stop", 409)
             cycle.update(requested_action=action, command_generation=cycle.get("command_generation", 0) + 1, retry_options=limits, retry_after="")
+            if action == "retry":
+                from loom.autonomy.learning_queue import next_order
+
+                cycle.update(state="pending", queue_order=next_order(db, aid), enqueued_at=self.store.now(),
+                             retry_round=cycle.get("retry_round", 0) + 1, round_start_attempts=cycle.get("attempts", 0),
+                             control_failures=0, analysis_attempts=0, budget_waits=0, auto_resume=False,
+                             resume_intent=None, budget_resume_pending=None, last_retry_progress=None, blocked_reason=None)
             if action == "cancel":
                 cycle["state"] = "cancelled"
+            agent = self.store.get(db, "agents", aid)
+            agent["learning_schedule_requested"] = True
+            self.store.put(db, "agents", agent)
             self.store.put(db, "agent_learning_cycles", cycle)
             self.store.event(db, aid, "learning.command", dict(cycle_id=lid, action=action))
             return self.store.receipt(db, body["command_id"], request, cycle)
@@ -404,6 +421,18 @@ class AutonomyService:
             from loom.memory.annotations import annotate
 
             return annotate(self.store, aid, body.get("command_id"), {k: v for k, v in body.items() if k != "command_id"})
+        if route == ["learning", "schedule"] and method == "POST":
+            strict(body, {"command_id"})
+            request = dict(agent_id=aid, type="learning.schedule", **body)
+            with self.store.sessions.transaction() as db:
+                replay = self.store.replay(db, body.get("command_id"), request)
+                if replay:
+                    return replay
+                agent = self.store.get(db, "agents", aid)
+                agent["learning_schedule_requested"] = True
+                self.store.put(db, "agents", agent)
+                self.store.event(db, aid, "learning.schedule.requested", {})
+                return self.store.receipt(db, body["command_id"], request, {"state": "requested"})
         if len(route) == 3 and route[0] == "learning" and route[2] == "commands" and method == "POST":
             return self.learning_command(aid, route[1], body)
         if method != "GET":

@@ -24,6 +24,7 @@ ROLE_FIELDS = {
     "timezone",
     "budget",
     "learning_policy",
+    "scheduling_policy",
     "task_spec",
     "owner_id",
     "method_learning",
@@ -51,23 +52,52 @@ def integer(value, name, low=1, high=100000000):
 
 def learning_policy(role):
     """Old roles receive the same bounded host policy as newly created roles."""
-    raw = strict(role.get("learning_policy", {}), {"auto_expand", "max_learning_tokens", "max_expansions", "max_resumes"})
+    raw = strict(
+        role.get("learning_policy", {}), {"auto_expand", "max_learning_tokens", "max_expansions", "max_resumes", "max_attempts", "max_evaluation_calls"}
+    )
     budget = role["budget"]
-    value = dict(auto_expand=True, max_learning_tokens=min(budget["daily_tokens"], budget["learning_tokens"] * 4),
-                 max_expansions=2, max_resumes=3)
+    value = dict(
+        auto_expand=True,
+        max_learning_tokens=min(budget["daily_tokens"], budget["learning_tokens"] * 4),
+        max_expansions=2,
+        max_resumes=3,
+        max_attempts=6,
+        max_evaluation_calls=500,
+    )
     value.update(raw)
     if type(value["auto_expand"]) is not bool:
         raise ServiceError("auto_expand must be boolean")
     integer(value["max_learning_tokens"], "max_learning_tokens")
     integer(value["max_expansions"], "max_expansions", 0, 10)
     integer(value["max_resumes"], "max_resumes", 0, 10)
+    integer(value["max_attempts"], "max_attempts", 1, 20)
+    integer(value["max_evaluation_calls"], "max_evaluation_calls", 1, 500)
+    return value
+
+
+def scheduling_policy(role):
+    value = dict(enabled=True, tick_seconds=60, max_recovery_attempts=3, auto_expand_work_budget=True,
+                 max_work_tokens=min(role.get("budget", {}).get("daily_tokens", 10000000), role.get("budget", {}).get("goal_tokens", 10000000)),
+                 auto_expand_objective_budget=True, max_objective_tokens=role.get("budget", {}).get("goal_tokens", 10000000))
+    raw = strict(role.get("scheduling_policy", {}), {*value, "min_slice_seconds", "max_slice_seconds", "default_slice_seconds"})
+    value.update({k: v for k, v in raw.items() if k in value})
+    if type(value["enabled"]) is not bool:
+        raise ServiceError("scheduling enabled must be boolean")
+    if type(value["auto_expand_work_budget"]) is not bool:
+        raise ServiceError("auto_expand_work_budget must be boolean")
+    if type(value["auto_expand_objective_budget"]) is not bool:
+        raise ServiceError("auto_expand_objective_budget must be boolean")
+    integer(value["tick_seconds"], "tick_seconds", 1, 31536000)
+    integer(value["max_recovery_attempts"], "max_recovery_attempts", 0, 10)
+    integer(value["max_work_tokens"], "max_work_tokens")
+    integer(value["max_objective_tokens"], "max_objective_tokens")
     return value
 
 
 def role_contract(value):
     value = strict(value, ROLE_FIELDS)
-    if type(value.get('method_learning', False)) is not bool:
-        raise ServiceError('method_learning must be boolean')
+    if type(value.get("method_learning", False)) is not bool:
+        raise ServiceError("method_learning must be boolean")
     workspace = value.get("workspace")
     if workspace is not None:
         workspace = str(Path(text(workspace, "workspace")).expanduser().resolve())
@@ -103,9 +133,11 @@ def role_contract(value):
             criteria = strings(iteration.get("acceptance", []), "iteration acceptance")
             if not criteria:
                 raise ServiceError("Autonomous iteration requires explicit acceptance")
-            normalized[-1]["iteration"] = dict(acceptance=criteria,
+            normalized[-1]["iteration"] = dict(
+                acceptance=criteria,
                 max_depth=integer(iteration.get("max_depth", 2), "max_depth", 1, 5),
-                review_seconds=integer(iteration.get("review_seconds", 86400), "review_seconds", 60, 31536000))
+                review_seconds=integer(iteration.get("review_seconds", 86400), "review_seconds", 60, 31536000),
+            )
         if item.get("schedule") is not None:
             schedule = strict(item["schedule"], {"every_seconds", "acceptance"})
             criteria = strings(schedule.get("acceptance", []), "scheduled acceptance")
@@ -129,8 +161,21 @@ def role_contract(value):
         raise ServiceError("source_routes must contain at most 30 routes")
     route_ids = set()
     for route in routes:
-        strict(route, {"id", "topic", "paths", "knowledge_base_ids", "external_tool_ids", "freshness", "on_unavailable",
-                       "refresh_seconds", "objective_id", "fallback_route_ids"})
+        strict(
+            route,
+            {
+                "id",
+                "topic",
+                "paths",
+                "knowledge_base_ids",
+                "external_tool_ids",
+                "freshness",
+                "on_unavailable",
+                "refresh_seconds",
+                "objective_id",
+                "fallback_route_ids",
+            },
+        )
         identifier = text(route.get("id"), "source route id", max_length=100)
         if identifier in route_ids:
             raise ServiceError("Duplicate source route")
@@ -148,13 +193,13 @@ def role_contract(value):
             if not workspace or not (Path(directory or workspace) / path).resolve().is_relative_to(workspace):
                 raise ServiceError("Source path outside workspace")
     for route in routes:
-        fallback = strings(route.get('fallback_route_ids', []), 'fallback_route_ids')
-        if not set(fallback) <= route_ids - {route['id']}:
-            raise ServiceError('Fallback routes must reference other bound sources')
+        fallback = strings(route.get("fallback_route_ids", []), "fallback_route_ids")
+        if not set(fallback) <= route_ids - {route["id"]}:
+            raise ServiceError("Fallback routes must reference other bound sources")
     return dict(
         schema_version=SCHEMA_VERSION,
         owner_id=text(value.get("owner_id", "local"), "owner_id", max_length=100),
-        method_learning=value.get('method_learning', False),
+        method_learning=value.get("method_learning", False),
         name=text(value.get("name"), "name", max_length=200),
         role_text=text(value.get("role_text"), "role_text", max_length=20000),
         workspace=workspace,
@@ -165,6 +210,7 @@ def role_contract(value):
         timezone=timezone,
         budget=budget,
         learning_policy=learning_policy({**value, "budget": budget}),
+        scheduling_policy=scheduling_policy({**value, "budget": budget}),
         interval_seconds=integer(value.get("interval_seconds", 86400), "interval_seconds", 10, 31536000),
         knowledge_base_ids=strings(value.get("knowledge_base_ids", []), "knowledge_base_ids", 20),
         external_tool_ids=strings(value.get("external_tool_ids", []), "external_tool_ids", 64),
@@ -175,14 +221,29 @@ def role_contract(value):
 
 
 def stage_policy(raw):
-    value = strict(raw, {"mode", "horizon_stages", "max_goals_per_stage", "max_new_stages_per_day",
-                         "max_replans_without_progress", "review_seconds", "objective_tokens", "constraints", "completion_criteria"})
+    value = strict(
+        raw,
+        {
+            "mode",
+            "horizon_stages",
+            "max_goals_per_stage",
+            "max_new_stages_per_day",
+            "max_replans_without_progress",
+            "review_seconds",
+            "objective_tokens",
+            "constraints",
+            "completion_criteria",
+        },
+    )
     if value.get("mode", "off") not in {"off", "autonomous"}:
         raise ServiceError("Invalid stage planning mode")
     result = dict(mode=value.get("mode", "off"))
     for key, default, low, high in [
-        ("horizon_stages", 3, 1, 3), ("max_goals_per_stage", 3, 1, 3), ("max_new_stages_per_day", 3, 1, 10),
-        ("max_replans_without_progress", 2, 1, 5), ("review_seconds", 86400, 60, 31536000),
+        ("horizon_stages", 3, 1, 3),
+        ("max_goals_per_stage", 3, 1, 3),
+        ("max_new_stages_per_day", 3, 1, 10),
+        ("max_replans_without_progress", 2, 1, 5),
+        ("review_seconds", 86400, 60, 31536000),
         ("objective_tokens", 10000000, 1, 100000000),
     ]:
         result[key] = integer(value.get(key, default), key, low, high)
@@ -196,8 +257,20 @@ def stage_enabled(objective):
 
 
 def goal_contract(value, role):
-    value = strict(value, {"objective", "acceptance", "long_term_objective_id", "depends_on", "priority", "stop_conditions", "learning_dependency",
-                           "deadline", "required_source_ids"})
+    value = strict(
+        value,
+        {
+            "objective",
+            "acceptance",
+            "long_term_objective_id",
+            "depends_on",
+            "priority",
+            "stop_conditions",
+            "learning_dependency",
+            "deadline",
+            "required_source_ids",
+        },
+    )
     objective_id = value.get("long_term_objective_id") or role["long_term_objectives"][0]["id"]
     if objective_id not in {g["id"] for g in role["long_term_objectives"]}:
         raise ServiceError("Unknown long-term objective")

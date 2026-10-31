@@ -40,12 +40,13 @@ const button = (text, action) => {
 };
 
 export class EvaluationView {
-  constructor(root, { api, sessionId, analysisId, signal, evidence, onError, onResult, onExplore, onInduce }) {
+  constructor(root, { api, sessionId, analysisId, evaluationId, signal, evidence, onError, onResult, onExplore, onInduce }) {
     Object.assign(this, {
       root,
       api,
       sessionId,
       analysisId,
+      evaluationId,
       signal,
       evidence,
       onError,
@@ -185,7 +186,10 @@ export class EvaluationView {
       this.matchScopeVersion();
       this.applyDefaults();
       this.renderHistory();
-      const latest = this.scopedJobs()[0];
+      const selected = this.evaluationId && catalog.jobs.find(job=>job.id===this.evaluationId);
+      if(this.evaluationId && !selected)throw new Error('The linked evaluation is unavailable in this analysis snapshot.');
+      if(selected){this.runSelect.value=this.scopeValue(selected);this.matchScopeVersion();this.renderHistory();}
+      const latest = selected || this.scopedJobs()[0];
       if (latest) this.follow(latest.id);
 
     } catch (error) {

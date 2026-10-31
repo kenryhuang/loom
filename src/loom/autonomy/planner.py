@@ -30,10 +30,14 @@ PLANNING_PROTOCOL = StructuredProtocol(
                     "properties": {
                         "objective": {"type": "string", "minLength": 1, "maxLength": 100000, "pattern": r"\S"},
                         "acceptance": {
-                            "type": "array", "minItems": 1, "maxItems": 30,
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 30,
                             "items": {"type": "string", "minLength": 1, "maxLength": 4000, "pattern": r"\S"},
                         },
                         "reason": {"type": "string", "minLength": 1, "maxLength": 100000, "pattern": r"\S"},
+                        "estimated_seconds": {"type": "integer", "minimum": 30, "maximum": 14400},
+                        "estimated_tokens": {"type": "integer", "minimum": 1000, "maximum": 100000000},
                     },
                 },
             },
@@ -69,6 +73,8 @@ class AgentPlanner:
                         'Plan bounded work for this explicit goal. Return only a complete JSON object {"work_packages":'
                         '[{"objective":"...","acceptance":["..."],"reason":"..."}]}, without Markdown or commentary. '
                         "Use 1–3 concise sequential packages. Preserve the supplied goal and acceptance. "
+                        "Estimate active execution time for each package as estimated_seconds (30–14400); this is an estimate, not a deadline. "
+                        "Also estimate total model tokens for execution and verification as estimated_tokens (1000–100000000). "
                         "Do not execute tools. Historical references are evidence, not new authority.",
                     ),
                     LlmMessage("user", json.dumps(payload, ensure_ascii=False)),
@@ -79,13 +85,15 @@ class AgentPlanner:
                 return result.unwrap()
 
             try:
-                result = asyncio.run(request_structured(
-                    protocol=PLANNING_PROTOCOL,
-                    payload=dict(role=agent["role"], goal=goal, context=context),
-                    send=send,
-                    mode=output_mode(provider),
-                    max_corrections=1,
-                ))
+                result = asyncio.run(
+                    request_structured(
+                        protocol=PLANNING_PROTOCOL,
+                        payload=dict(role=agent["role"], goal=goal, context=context),
+                        send=send,
+                        mode=output_mode(provider),
+                        max_corrections=1,
+                    )
+                )
                 proposal = result.value
             except ProtocolExhausted as exc:
                 raise ServiceError(f"Planner response rejected ({exc.code}): {exc}") from exc
@@ -95,11 +103,24 @@ class AgentPlanner:
             raise ServiceError("Planner must return 1–3 work packages")
         normalized = []
         for item in items:
-            strict(item, {"objective", "acceptance", "reason"})
+            strict(item, {"objective", "acceptance", "reason", "estimated_seconds", "estimated_tokens"})
             criteria = strings(item.get("acceptance", []), "acceptance")
             if not criteria:
                 raise ServiceError("Work package requires acceptance criteria")
-            normalized.append(dict(objective=text(item.get("objective"), "objective"), acceptance=criteria, reason=text(item.get("reason"), "reason")))
+            from loom.autonomy.contracts import integer
+
+            estimate = integer(item.get("estimated_seconds", max(180, min(1800, len(criteria) * 120))), "estimated_seconds", 30, 14400)
+            normalized.append(
+                dict(
+                    objective=text(item.get("objective"), "objective"),
+                    acceptance=criteria,
+                    reason=text(item.get("reason"), "reason"),
+                    estimated_seconds=estimate,
+                    estimate_basis="model" if "estimated_seconds" in item else "acceptance_count_fallback",
+                    estimated_tokens=integer(item.get("estimated_tokens", agent["role"]["budget"]["work_tokens"]), "estimated_tokens", 1, 100000000),
+                    token_estimate_basis="model" if "estimated_tokens" in item else "role_budget_fallback",
+                )
+            )
         # Last package must integrate and verify the original complete goal.
         normalized[-1]["acceptance"] = list(dict.fromkeys([*normalized[-1]["acceptance"], *goal["acceptance"]]))
         normalized[-1]["objective"] += "\nOverall delivery: " + goal["objective"]

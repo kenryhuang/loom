@@ -56,4 +56,11 @@ def migrate(db):
     db.execute("INSERT OR IGNORE INTO autonomy_migrations VALUES(1)")
     db.execute("INSERT OR IGNORE INTO autonomy_migrations VALUES(2)")
     db.execute("INSERT OR IGNORE INTO autonomy_migrations VALUES(3)")
+    if not db.execute("SELECT 1 FROM autonomy_migrations WHERE version=4").fetchone():
+        # A successful delivery cannot have a current blocker. Keep the original
+        # field as migration evidence; run outcomes and planning rationale are unchanged.
+        db.execute("UPDATE agent_work_packages SET body=json_set(body,'$.legacy_blocked_reason',json_extract(body,'$.blocked_reason'),"
+                   "'$.blocked_reason',NULL) WHERE json_extract(body,'$.state')='succeeded' "
+                   "AND json_extract(body,'$.blocked_reason') IS NOT NULL")
+        db.execute("INSERT INTO autonomy_migrations VALUES(4)")
     db.execute("INSERT OR IGNORE INTO memory_versions VALUES('effective',0)")

@@ -58,7 +58,7 @@ def main():
             aid = agent["id"]
             request("/" + aid + "/goals", dict(command_id="g1", goal=goals()[0]))
             request("/" + aid + "/commands", dict(command_id="enable", type="enable", expected_revision=1))
-            first = until(lambda: request("/" + aid), lambda s: s["learning"] and s["learning"][0]["state"] == "completed")
+            first = until(lambda: request("/" + aid), lambda s: s["learning"] and s["learning"][0]["state"] in {"completed", "incomplete"})
             memory = request("/" + aid + "/memory?query=Session")["records"][0]
             request(
                 "/" + aid + "/memory/annotations",
@@ -74,7 +74,7 @@ def main():
             )
             request("/" + aid + "/guidance", dict(command_id="guide", text="Distinguish implementation from proposals", scope="persistent"))
             request("/" + aid + "/goals", dict(command_id="g2", goal=goals()[1]))
-            second = until(lambda: request("/" + aid), lambda s: len(s["learning"]) == 2 and all(c["state"] == "completed" for c in s["learning"]))
+            second = until(lambda: request("/" + aid), lambda s: len(s["learning"]) == 2 and all(c["state"] in {"completed", "incomplete"} for c in s["learning"]))
             assert len(second["sessions"]) == 1
             assert all(g["state"] == "completed" for g in second["goals"])
             assert first["work_packages"][0]["run_ids"] != second["work_packages"][1]["run_ids"]

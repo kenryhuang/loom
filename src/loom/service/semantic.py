@@ -485,6 +485,10 @@ class SessionSemantic:
                 **({'autonomy_budget': budget_context} if budget_context else {}),
             }
             consumed = {"max_calls": body["usage"]["calls"], "max_tokens": body["usage"]["total_tokens"], "max_seconds": body["elapsed_seconds"]}
+            # Host-adopted histories retain their checkpoint and cumulative
+            # evaluation usage; all future calls also enter the Agent ledger.
+            if budget_context and not body.get("autonomy_budget"):
+                body["autonomy_budget"] = budget_context
             exhausted = [k for k, value in consumed.items() if value >= settings[k] and (k != "max_tokens" or version != GRAPH_ENGINE)]
             if exhausted:
                 limits = ", ".join(f"{k} > {consumed[k]}" for k in exhausted)

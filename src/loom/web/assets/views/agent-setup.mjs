@@ -64,7 +64,7 @@ export class AgentSetupView {
     const stage = block(form, '自主阶段规划').body, policy = objective.stage_planning || {};
     this.stageMode = selectField(stage, 'stage_mode', '根据长期目标规划阶段并执行', [['off','关闭'],['autonomous','自动推进']], policy.mode || 'off');
     stage.append(element('p','muted','先核实现状，再拆分近期阶段；验收后自动推进下一阶段。沿用当前工作目录、权限和预算。'));
-    this.stageBudget = preset(stage, 'stage_budget', '长期目标累计额度', budgets, policy.objective_tokens || 10000000, {min:1,max:100000000});
+    this.stageBudget = preset(stage, 'stage_budget', '长期目标初始累计额度', budgets, policy.objective_tokens || 10000000, {min:1,max:100000000});
     field(stage, 'stage_constraints', '阶段规划约束（每行一条）', (policy.constraints || []).join('\n'), {multiline:true});
     field(stage, 'stage_completion', '最终完成条件（有限目标必填）', (policy.completion_criteria || []).join('\n'), {multiline:true});
 
@@ -81,6 +81,15 @@ export class AgentSetupView {
 
     const timing = block(form, '运行节奏').body, grid = element('div', 'setup-settings-grid'); timing.append(grid);
     this.interval = preset(grid, 'interval', '目标检查频率', intervals, r.interval_seconds || 86400, {min:10,max:31536000});
+    const scheduling=r.scheduling_policy || {};
+    this.queueMode=selectField(grid,'queue_mode','定时调度',[['true','开启（默认）'],['false','仅手动调度']],String(scheduling.enabled ?? true));
+    this.queueTick=preset(grid,'queue_tick','调度检查间隔（秒）',[['60','1 分钟'],['300','5 分钟'],['900','15 分钟'],['3600','1 小时']],scheduling.tick_seconds ?? 60,{min:1,max:31536000});
+    this.recoveryAttempts=preset(grid,'recovery_attempts','每任务自动恢复次数上限',[['0','不自动恢复'],['3','3 次'],['5','5 次']],scheduling.max_recovery_attempts ?? 3,{min:0,max:10});
+    this.workExpansion=selectField(grid,'work_expansion','工作包预算自动扩容',[['true','开启'],['false','关闭']],String(scheduling.auto_expand_work_budget ?? true));
+    this.workCeiling=preset(grid,'work_ceiling','单工作包自动分配 / 扩容上限（token）',budgets,scheduling.max_work_tokens ?? Math.min(r.budget?.daily_tokens ?? 10000000,r.budget?.goal_tokens ?? 10000000),{min:1,max:100000000});
+    this.objectiveExpansion=selectField(grid,'objective_expansion','长期目标预算自动扩容',[['true','开启'],['false','关闭']],String(scheduling.auto_expand_objective_budget ?? true));
+    this.objectiveCeiling=preset(grid,'objective_ceiling','长期目标自动扩容上限（token）',budgets,scheduling.max_objective_tokens ?? r.budget?.goal_tokens ?? 10000000,{min:1,max:100000000});
+    timing.append(element('p','muted small','运行中的任务不打断；阻塞时先尝试恢复，无法恢复则请求人工介入。每次派发 / 恢复的执行时间上限为 1 小时；队列全部完成后才进入新目标规划。'));
     let zones = Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : [];
     const zone = r.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     zones = [...new Set([zone, 'UTC', ...zones])];
@@ -121,6 +130,8 @@ export class AgentSetupView {
     this.learningMax = preset(learning, 'learning_max', '学习额度扩容上限', [['auto','初始学习额度的 4 倍（受每日总额限制）'],...budgets], r.learning_policy?.max_learning_tokens ?? 'auto');
     this.learningExpansions = preset(learning, 'learning_expansions', '每天最多扩容次数', [['0','0 次'],['1','1 次'],['2','2 次'],['3','3 次'],['5','5 次']], r.learning_policy?.max_expansions ?? 2, {min:0,max:10});
     this.learningResumes = preset(learning, 'learning_resumes', '每个评估每天最多自动续跑次数', [['0','0 次'],['1','1 次'],['2','2 次'],['3','3 次'],['5','5 次']], r.learning_policy?.max_resumes ?? 3, {min:0,max:10});
+    this.learningAttempts=preset(learning,'learning_attempts','每个评估累计分析次数上限',[['3','3 次'],['6','6 次'],['10','10 次']],r.learning_policy?.max_attempts ?? 6,{min:1,max:20});
+    this.learningCalls=preset(learning,'learning_eval_calls','单个评估 Calls 扩容上限',[['100','100 次'],['250','250 次'],['500','500 次']],r.learning_policy?.max_evaluation_calls ?? 500,{min:1,max:500});
     learning.append(element('p','muted small','每次扩容最多翻倍，仅对当天有效。每日总额、目标累计额度和调用次数上限保持有效；无进展时停止自动续跑，已完成分析与记忆会保留。'));
     this.tools = block(form, '外部工具', {folded:true,summary:true});
     this.toolList = element('div', 'external-choices'); this.toolList.setAttribute('role','group'); this.toolList.setAttribute('aria-label','外部工具');
@@ -184,9 +195,12 @@ export class AgentSetupView {
       source_routes:structuredClone(prior.source_routes || []), methods:lines(f.methods.value),
       interval_seconds:this.interval.value(), timezone:f.timezone.value, model:f.model.value || null, evaluation_model:f.evaluation_model.value || null,
       knowledge_base_ids:selectedTools(this.knowledgeList), external_tool_ids:selectedTools(this.toolList),
-      learning_policy:{auto_expand:this.learningAuto.value === 'true',
+      scheduling_policy:{enabled:this.queueMode.value==='true',tick_seconds:this.queueTick.value(),max_recovery_attempts:this.recoveryAttempts.value(),
+        auto_expand_work_budget:this.workExpansion.value==='true',max_work_tokens:this.workCeiling.value(),
+        auto_expand_objective_budget:this.objectiveExpansion.value==='true',max_objective_tokens:this.objectiveCeiling.value()},
+      learning_policy:{...prior.learning_policy,auto_expand:this.learningAuto.value === 'true',
         max_learning_tokens:this.learningMax.choice.value === 'auto' ? Math.min(this.daily.value(),this.learning.value()*4) : this.learningMax.value(),
-        max_expansions:this.learningExpansions.value(),max_resumes:this.learningResumes.value()},
+        max_expansions:this.learningExpansions.value(),max_resumes:this.learningResumes.value(),max_attempts:this.learningAttempts.value(),max_evaluation_calls:this.learningCalls.value()},
       budget:{...prior.budget,daily_tokens:this.daily.value(),work_tokens:this.workTokens(),goal_tokens:this.goalBudget.value(),max_calls:this.maxCalls.value(),
         ...(prior.budget?.learning_tokens != null || !this.edit || this.learning.value() !== 250000 ? {learning_tokens:this.learning.value()} : {})}};
     delete role.schema_version;

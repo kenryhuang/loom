@@ -49,7 +49,7 @@ test('Details reuse Evaluation shell, dashboards and keyboard tab navigation',as
   assert.match(view.root.textContent,/添加目标/);
   for(const tab of ['Work','Profile','Knowledge','Learning']){
    view.tab=tab;view.render();
-   assert.ok([...view.root.querySelector('.agent-content').children].every(n=>n.classList.contains('dashboard-panel')));
+   assert.ok([...view.root.querySelector('.agent-content').children].every(n=>n.classList.contains('dashboard-panel') || n.classList.contains('dashboard-disclosure')));
   }
   await view.createForm(data); assert.equal(heading.hidden,true); assert.ok(view.root.querySelector('.setup-form'));
   [...view.root.querySelectorAll('button')].find(b=>b.textContent==='取消').click();
@@ -93,7 +93,7 @@ test('Overview omits scheduling details while Work retains packages and Session 
  }finally{view.close();dom.window.close();}
 });
 
-test('Current and previous stage show concrete goals, attempts and execution destinations',async()=>{
+test('Roadmap selects one stage and retains inspected goals across polling',async()=>{
  const data=fixture();data.role.long_term_objectives=[{id:'quality',desired_outcome:'Improve Solaris',stage_planning:{mode:'autonomous'}}];
  data.objective_planning=[{id:'p',objective_id:'quality',revision:2,state:'active',stage_id:'new'}];
  data.stages=[
@@ -115,14 +115,22 @@ test('Current and previous stage show concrete goals, attempts and execution des
   await view.open();await view.select('a');
   assert.equal(view.root.querySelector('[data-scheduled-stage-id]'),null);
   view.tab='Goals';view.render();
-  const current=view.root.querySelector('[data-stage-id="new"]'),previous=view.root.querySelector('[data-stage-id="old"]');
+  const current=view.root.querySelector('[data-stage-id="new"]');
   assert.match(current.textContent,/当前阶段：Navigation/);assert.match(current.textContent,/Implement camera controls/);
   assert.match(current.textContent,/历史 attempt/);assert.doesNotMatch(current.textContent,/Renderer checks/);
-  assert.match(previous.textContent,/上一阶段：Rendering/);assert.match(previous.textContent,/Verify renderer/);
-  assert.equal(current.open,true);
-  const old=view.root.querySelector('[data-stage-id="old"]');assert.equal(old.open,true);
-  old.open=false;await tick();data.activity='working';await view.refresh();
-  assert.equal(view.root.querySelector('[data-stage-id="old"]').open,false);
+  assert.equal(view.root.querySelectorAll('[data-goal-id="camera"]').length,1);
+  assert.equal(view.root.querySelector('[data-stage-id="old"]'),null);
+  view.root.querySelector('[data-roadmap-node="old"]').click();
+  assert.match(view.root.querySelector('[data-stage-id="old"]').textContent,/Verify renderer/);
+  assert.equal(view.root.querySelector('[data-stage-id="new"]'),null);
+  const goal=view.root.querySelector('[data-goal-id="render"]');goal.open=true;await tick();
+  data.activity='working';await view.refresh();
+  assert.equal(view.root.querySelector('[data-goal-id="render"]').open,true);
+  assert.equal(view.root.querySelector('[data-roadmap-node="old"]').getAttribute('aria-pressed'),'true');
+  assert.ok(view.root.querySelector('a[href="#/sessions/renderer"]'));
+  view.focusGoal('camera-old');
+  assert.equal(view.root.querySelector('[data-goal-id="camera-old"]').open,true);
+  assert.equal(view.root.querySelector('[data-roadmap-node="new"]').getAttribute('aria-pressed'),'true');
  }finally{view.close();dom.window.close();}
 });
 
@@ -139,7 +147,7 @@ test('Stage roadmap shows actual delivery, learning gaps and versioned human ans
   return path==='/v1/agents'?{agents:[data]}:data;}});
  try{
   await view.open();await view.select('a');view.tab='Goals';view.render();
-  assert.match(view.root.textContent,/Recorded source inspection/);assert.match(view.root.textContent,/远期暂定：Galaxy/);
+  assert.match(view.root.textContent,/Recorded source inspection/);assert.match(view.root.querySelector('.agent-roadmap-rail').textContent,/Galaxy/);
   assert.match(view.root.textContent,/学习有 1 项缺口/);assert.match(view.root.textContent,/goal1/);
   view.root.querySelector('[name="answer"]').value='Camera';
   [...view.root.querySelectorAll('button')].find(b=>b.textContent==='提交阶段问题回答').click();await tick();
@@ -293,4 +301,140 @@ test('Profile shows shared scope, conflicts, review and versioned adoption contr
   [...view.root.querySelectorAll('button')].find(b=>b.textContent==='试用七天').click();await tick();
   assert.equal(calls[0][1].expected_revision,3);assert.equal(calls[0][1].type,'trial');
  } finally {view.close();dom.window.close();}
+});
+
+test('Roadmap updates tentative directions, separates replaced stages and falls back to the current stage',async()=>{
+ const data=fixture();data.role.long_term_objectives=[{id:'quality',desired_outcome:'Solar → Galaxy',stage_planning:{mode:'autonomous'}}];
+ data.objective_planning=[{objective_id:'quality',state:'active',revision:3,stage_id:'current',roadmap_id:'r2'}];
+ data.stages=[{id:'replaced',objective_id:'quality',roadmap_id:'r1',state:'superseded',title:'Old approach',goal_ids:[],acceptance:[]},
+  {id:'current',objective_id:'quality',roadmap_id:'r2',state:'active',title:'Current delivery',goal_ids:['g'],acceptance:['tests'],revision:2}];
+ data.goals=[{id:'g',stage_id:'current',objective:'Concrete implementation',state:'queued',acceptance:['tests'],revision:1}];
+ data.selection=[{goal_id:'g',eligible:false,reason:'Refresh required source routes'}];
+ data.roadmaps=[{id:'r1',objective_id:'quality',revision:1,baseline:'Old baseline',reason:'Old evidence',future:[{key:'abandoned',title:'Abandoned direction'}]},
+  {id:'r2',objective_id:'quality',revision:2,baseline:'Verified baseline',reason:'New evidence',future:[{key:'next',title:'Galaxy',expected_outcome:'Larger scale',depends_on:['current']}]}];
+ const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');view.tab='Goals';view.render();
+  const rail=view.root.querySelector('.agent-roadmap-rail');
+  assert.doesNotMatch(rail.textContent,/Old approach|Abandoned direction/);
+  assert.match(view.root.querySelector('.agent-roadmap-detail').textContent,/当前卡点：所需来源尚未刷新/);
+  assert.equal(view.root.querySelectorAll('[data-goal-id="g"]').length,1);
+  assert.equal(view.root.querySelector('[name="outcome"]').closest('details').open,false);
+  view.root.querySelector('[data-roadmap-node="future:r2:next"]').click();
+  assert.match(view.root.querySelector('.agent-roadmap-detail').textContent,/远期暂定：Galaxy/);
+  assert.match(view.root.querySelector('.agent-roadmap-detail').textContent,/依赖：Current delivery/);
+  assert.equal(view.root.querySelector('.agent-roadmap-detail form'),null);
+  data.activity='working';await view.refresh();
+  assert.equal(view.root.querySelector('[data-roadmap-node="future:r2:next"]').getAttribute('aria-pressed'),'true');
+  data.roadmaps.push({id:'r3',objective_id:'quality',revision:3,reason:'Scope changed after review',future:[{key:'new',title:'Local group'}]});
+  data.objective_planning[0].roadmap_id='r3';await view.refresh();
+  assert.equal(view.root.querySelector('[data-roadmap-node="current"]').getAttribute('aria-pressed'),'true');
+  assert.match(view.root.querySelector('.agent-roadmap-rail').textContent,/Local group/);
+  assert.doesNotMatch(view.root.querySelector('.agent-roadmap-rail').textContent,/Galaxy/);
+  assert.match(view.root.textContent,/路线调整记录/);
+ }finally{view.close();dom.window.close();}
+});
+
+test('Standalone goals remain editable once and stage revisions retain the selected contract version',async()=>{
+ const data=fixture();data.role.long_term_objectives=[{id:'quality',desired_outcome:'Improve',stage_planning:{mode:'autonomous'}}];
+ data.objective_planning=[{objective_id:'quality',state:'active',revision:3,stage_id:'s'}];
+ data.stages=[{id:'s',objective_id:'quality',state:'active',title:'Current',goal_ids:['g'],acceptance:['original'],expected_outcome:'Original',revision:7}];
+ data.goals=[{id:'g',stage_id:'s',objective:'Stage goal',state:'active',acceptance:[],revision:2},
+  {id:'manual',objective:'Manual goal',state:'queued',acceptance:[],revision:4}];
+ let sent;const {dom,view}=setup({json:async(path,options)=>{if(options?.body){sent={path,body:options.body};return {};}
+  return path==='/v1/agents'?{agents:[data]}:data;}});
+ try{
+  await view.open();await view.select('a');view.tab='Goals';view.render();
+  assert.equal(view.root.querySelectorAll('[data-goal-id]').length,2);
+  const standalone=view.root.querySelector('[data-goal-id="manual"]');assert.equal(standalone.closest('.dashboard-panel').open,false);
+  const form=view.root.querySelector('[name="outcome"]').form;form.elements.reason.value='New requirement';form.elements.outcome.value='Changed';form.elements.criteria.value='Keep original\nNew check';
+  [...form.querySelectorAll('button')].find(b=>b.textContent==='保存修订并重新规划').click();await tick();
+  assert.equal(sent.path,'/v1/agents/a/stages/s/commands');assert.equal(sent.body.expected_revision,7);
+  assert.deepEqual(sent.body.payload,{expected_outcome:'Changed',acceptance:['Keep original','New check']});
+  view.focusGoal('manual');assert.equal(view.root.querySelector('[data-goal-id="manual"]').open,true);
+ }finally{view.close();dom.window.close();}
+});
+
+test('Execution shows concrete blockers, recovery steps, slices and bounded background analysis',async()=>{
+ const data=fixture();data.execution={policy:{enabled:true,tick_seconds:60,min_slice_seconds:60,max_slice_seconds:900},
+  blockers:[{id:'source:g',code:'SOURCE_NOT_CURRENT',scope_id:'g',reason:'必需来源不可用或已过期',details:['来源 implementation','失效项：tests'],
+    next_steps:['核对项目实际路径','刷新已绑定来源'],action:'refresh_sources'}],
+  learning_policy:{max_attempts:6,max_evaluation_calls:500,max_learning_tokens:5000000},
+  runtime:[{work_package_id:'w',task_state:'paused',run_state:'suspended',steps:4,active_seconds:300,checkpoint_available:true}],history:[]};
+ data.work_packages=[{id:'w',goal_id:'g',objective:'Inspect source',state:'blocked',session_id:'s',slice:{phase:'paused',number:2,seconds:300},
+  latest_context:{id:'ctx',memory_refs:[{record_id:'memory1'}],guidance_ids:[],completed_learning_ids:['c']}}];
+ data.learning=[{id:'c',session_id:'s',work_package_id:'w',state:'incomplete',attempts:6,coverage:'partial',memory_result:{accepted:3},blocked_reason:'Analysis attempt limit reached'}];
+ let sent;const {dom,view}=setup({json:async(path,options)=>{if(options?.body){sent=path;return {};}return path==='/v1/agents'?{agents:[data]}:data;}});
+ try{
+  await view.open();await view.select('a');view.tab='Work';view.render();
+  assert.match(view.root.textContent,/失效项：tests/);assert.match(view.root.textContent,/核对项目实际路径/);
+  assert.match(view.root.textContent,/历史时间片 #2 · 已暂停/);assert.match(view.root.textContent,/已有 checkpoint/);
+  assert.match(view.root.textContent,/1 条相关记忆/);assert.match(view.root.textContent,/本轮 6\/6/);
+  assert.match(view.root.textContent,/Analysis attempt limit reached/);
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='刷新已绑定来源').click();await tick();
+  assert.equal(sent,'/v1/agents/a/sources/refresh');
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='重新排队分析').click();await tick();
+  assert.equal(sent,'/v1/agents/a/learning/c/commands');
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='检查分析队列').click();await tick();
+  assert.equal(sent,'/v1/agents/a/learning/schedule');
+ }finally{view.close();dom.window.close();}
+});
+
+test('Work rationale remains text and stale blocker does not override a successful result',async()=>{
+ const data=fixture();data.work_packages=[{id:'w',goal_id:'g',objective:'Delivered work',state:'succeeded',blocked_reason:'failed',reason:'Verify before integration'}];
+ const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');view.tab='Work';view.render();
+  assert.match(view.root.textContent,/编排依据：Verify before integration/);
+  const row=view.root.querySelector('[data-queue-id="w"]');assert.match(row.textContent,/Delivered work/);assert.match(row.textContent,/已验收/);
+  assert.doesNotMatch(view.root.textContent,/当前阻塞：failed/);
+ }finally{view.close();dom.window.close();}
+});
+
+test('Queue scheduling warns on intervention and ignores manual checks while planning',async()=>{
+ const data=fixture();data.execution={policy:{enabled:true,tick_seconds:180},scheduler:{state:'intervention',manual_required:true,reason:'目标预算不足'},blockers:[],runtime:[],history:[]};
+ const calls=[];const {dom,view}=setup({json:async(path,options)=>{if(options?.body){calls.push(options.body);return data;}return path==='/v1/agents'?{agents:[data]}:data;}});
+ try{
+  await view.open();await view.select('a');view.tab='Work';view.render();
+  assert.match(view.root.textContent,/定时检查队列/);assert.match(view.root.textContent,/每次执行上限 1 小时/);
+  assert.match(view.root.querySelector('.agent-schedule-warning').textContent,/目标预算不足/);
+  let manual=[...document.querySelectorAll('button')].find(b=>b.textContent==='手动调度');manual.click();await tick();
+  assert.equal(calls[0].type,'wake');
+  data.execution.scheduler={state:'planning'};view.render();
+  manual=[...document.querySelectorAll('button')].find(b=>b.textContent==='手动调度');assert.equal(manual.disabled,true);
+  assert.equal(view.root.querySelector('.agent-schedule-warning'),null);
+ }finally{view.close();dom.window.close();}
+});
+
+test('Execution focuses two tabular queues, collapses reverse chronological history and links exact analysis',async()=>{
+ const data=fixture();data.execution={policy:{enabled:true,tick_seconds:900},scheduler:{work_package_id:'failed',state:'intervention'},runtime:[],blockers:[]};
+ data.work_packages=[
+  {id:'active',objective:'Current execution',state:'running',created_at:'2026-11-01T01:00:00Z',session_id:'session/a'},
+  {id:'old',objective:'Older delivery',state:'succeeded',created_at:'2026-11-01T02:00:00Z',session_id:'s'},
+  {id:'failed',objective:'Newer failure',state:'failed',created_at:'2026-11-01T03:00:00Z',session_id:'s'},
+  {id:'waiting',objective:'Queued work',state:'pending',created_at:'2026-11-01T04:00:00Z'}];
+ data.learning=[
+  {id:'current',work_package_id:'active',state:'running',queue_order:1,session_id:'session/a',analysis_id:'snapshot/a',evaluation_id:'eval/a',run_id:'run/a'},
+  {id:'previous',work_package_id:'old',state:'completed',queue_order:2,session_id:'s'},
+  {id:'latest',work_package_id:'failed',state:'incomplete',queue_order:3,session_id:'s'},
+  {id:'queued',work_package_id:'waiting',state:'pending',queue_order:4,session_id:'s'}];
+ const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');view.tab='Work';view.render();
+  const panels=[...view.root.querySelectorAll('.agent-queue-panel')];assert.equal(panels.length,2);
+  assert.deepEqual(panels.map(p=>p.querySelector('h3').textContent),['执行队列','分析队列']);
+  const ids=(panel,kind)=>[...panel.querySelectorAll(`[data-queue-table="${kind}"] [data-queue-id]`)].map(row=>row.dataset.queueId);
+  assert.deepEqual(ids(panels[0],'current'),['active']);assert.deepEqual(ids(panels[1],'current'),['current']);
+  assert.deepEqual(ids(panels[0],'history'),['failed','old']);assert.deepEqual(ids(panels[1],'history'),['latest','previous']);
+  assert.deepEqual(ids(panels[0],'waiting'),['waiting']);assert.deepEqual(ids(panels[1],'waiting'),['queued']);
+  assert.ok([...view.root.querySelectorAll('[data-queue-section]')].every(d=>d.tagName==='DETAILS' && !d.open));
+  const refs=panels[0].querySelector('[data-queue-id="active"]');
+  assert.equal(refs.querySelector('a').getAttribute('href'),'#/sessions/session%2Fa');
+  const deep=[...refs.querySelectorAll('a')].find(a=>a.textContent==='Deep Eval').getAttribute('href');
+  assert.equal(deep,'#/evaluation/session%2Fa?analysis=snapshot%2Fa&evaluation=eval%2Fa&run=run%2Fa');
+  const history=panels[0].querySelector('[data-queue-section="history"]');history.open=true;history.dispatchEvent(new dom.window.Event('toggle'));
+  view.render();assert.equal(view.root.querySelector('.agent-queue-panel [data-queue-section="history"]').open,true);
+  data.work_packages[0].state='succeeded';view.render();
+  assert.equal(view.root.querySelector('.agent-queue-panel [data-queue-table="current"] [data-queue-id]').dataset.queueId,'failed');
+ }finally{view.close();dom.window.close();}
 });

@@ -276,6 +276,12 @@ class LoomService:
                              (event.get('snapshot_id'), binding['agent_id'])).fetchone()
             if not row or json.loads(row[0])['run_id'] != run['id']:
                 raise ServiceError('Context snapshot does not belong to this run', 409)
+            snapshot = json.loads(row[0])
+            workrow = db.execute('SELECT body FROM agent_work_packages WHERE id=?', (binding['work_package_id'],)).fetchone()
+            if workrow:
+                work = json.loads(workrow[0])
+                work['latest_context'] = {k: snapshot.get(k) for k in ('id', 'run_id', 'created_at', 'memory_refs', 'completed_learning_ids', 'guidance_ids')}
+                db.execute('UPDATE agent_work_packages SET body=? WHERE id=?', (canonical(work), work['id']))
             for gid in json.loads(row[0]).get('guidance_ids', []):
                 guidance = db.execute('SELECT body FROM agent_guidance WHERE id=? AND agent_id=?', (gid, binding['agent_id'])).fetchone()
                 if guidance:

@@ -31,7 +31,7 @@ async def execute(state, bridge, config_path, provider_factory, plugin_registry_
     if state.get('autonomy'):
         from loom.autonomy.budget import BudgetLedger, BudgetProvider
 
-        provider = BudgetProvider(provider, BudgetLedger(state['memory_database']), state['autonomy'])
+        provider = BudgetProvider(provider, BudgetLedger(state['memory_database']), {**state['autonomy'], 'run_id': state['run']['id']})
     task = state["task"]
     request = TaskRequest(
         task["objective"],
@@ -72,9 +72,9 @@ async def _execute_assembled(state, bridge, provider, request, assembly):
 
         ledger = BudgetLedger(state['memory_database'])
         if verification_provider:
-            verification_provider = BudgetProvider(verification_provider, ledger, state['autonomy'], category='acceptance')
+            verification_provider = BudgetProvider(verification_provider, ledger, {**state['autonomy'], 'run_id': state['run']['id']}, category='acceptance')
         if visual_provider:
-            visual_provider = BudgetProvider(visual_provider, ledger, state['autonomy'], category='acceptance')
+            visual_provider = BudgetProvider(visual_provider, ledger, {**state['autonomy'], 'run_id': state['run']['id']}, category='acceptance')
     assembly.configure_acceptance(provider, limits=state["task"]["limits"], verification_provider=verification_provider, visual_provider=visual_provider)
     assembly.acceptance_resume_request = state['run'].get('acceptance_budget_request')
     planning = assembly.workflow

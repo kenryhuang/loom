@@ -6,6 +6,7 @@ from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 
 from loom.autonomy.contracts import goal_contract, stage_enabled
+from loom.autonomy.execution_budget import execution_block, objective_limit
 from loom.autonomy.store import digest
 from loom.service.contracts import ServiceError
 
@@ -110,7 +111,7 @@ def role_signature(role):
     from copy import deepcopy
 
     value = deepcopy(role)
-    for key in ("budget", "learning_policy"):
+    for key in ("budget", "learning_policy", "scheduling_policy"):
         value.pop(key, None)
     for objective in value["long_term_objectives"]:
         for key in ("objective_tokens", "mode", "max_new_stages_per_day"):
@@ -217,7 +218,7 @@ class StageCoordinator:
             budget_key = digest(
                 [
                     agent["role"]["budget"],
-                    objective["stage_planning"]["objective_tokens"],
+                    objective_limit(agent, objective),
                     store.clock().astimezone(ZoneInfo(agent["role"]["timezone"])).date().isoformat(),
                 ]
             )
@@ -250,6 +251,11 @@ class StageCoordinator:
                     self.save(db, state, state="blocked", reason=stage["reason"], last_input=fingerprint, no_progress=state["no_progress"] + 1)
                     return False
                 if failed:
+                    for work in store.rows(db, "agent_work_packages", aid):
+                        if work["goal_id"] in stage["goal_ids"] and work["state"] == "failed" and work.get("session_id"):
+                            saved = db.execute("SELECT body FROM sessions WHERE id=?", (work["session_id"],)).fetchone()
+                            if saved and execution_block(store, db, agent, work, json.loads(saved[0])):
+                                return False  # Budget stops belong to queue recovery, not model acceptance review.
                     live = [
                         w
                         for w in store.rows(db, "agent_work_packages", aid)
@@ -267,7 +273,7 @@ class StageCoordinator:
                 if any(g["state"] not in TERMINAL and not g.get("stage_id") and g.get("producer") != "stage_discovery" for g in goals):
                     self.save(db, state, state="waiting", reason="Finish or resolve existing objective Goals before creating overlapping work")
                     return False
-                backlog = [c for c in store.rows(db, "agent_learning_cycles", aid) if c["state"] not in {"completed", "cancelled"}]
+                backlog = [c for c in store.rows(db, "agent_learning_cycles", aid) if c["state"] not in {"completed", "cancelled", "failed", "incomplete"}]
                 if len(backlog) >= 20:
                     self.save(
                         db,

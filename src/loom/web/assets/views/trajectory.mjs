@@ -112,10 +112,12 @@ export class TrajectoryView {
     this.refresh.title = this.status.title;
     this.status.hidden = this.selectedTab !== 0 || (this.job.state === "completed" && !stale);
   }
-  async open(api, sessionId, cursor = 0) {
+  async open(api, sessionId, cursor = 0, target = {}) {
     const selectedRun = this.sessionId === sessionId ? this.runFilter?.value || "" : "";
     this.close();
-    this.selectedRun = selectedRun;
+    this.target = target;
+    this.selectedRun = target.runId || selectedRun;
+    if(target.analysisId)this.selectedTab=target.evaluationId?1:0;
     this.api = api;
     this.sessionId = sessionId;
     this.cursor = cursor;
@@ -173,7 +175,7 @@ export class TrajectoryView {
     this.traceHeading = heading;
     this.selectTab(this.selectedTab || 0);
     try {
-      const started = await api.startTrajectory(sessionId, signal);
+      const started = target.analysisId ? {id:target.analysisId} : await api.startTrajectory(sessionId, signal);
       if (signal.aborted) return;
       this.job = started;
       this.snapshotLabel();
@@ -232,6 +234,7 @@ export class TrajectoryView {
         api: this.api,
         sessionId: this.sessionId,
         analysisId: this.job.id,
+        evaluationId: this.target?.evaluationId,
         signal: this.abort.signal,
         evidence: (ref) => this.showEvidence(ref),
         onError: this.onError,

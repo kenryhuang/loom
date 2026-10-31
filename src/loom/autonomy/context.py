@@ -81,7 +81,7 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
         methods=methods,
         memory=memory,
         prior_deliveries=recent_work,
-        pending_learning_cycle_ids=[c["id"] for c in cycles if c["state"] not in {"completed", "cancelled"}],
+        pending_learning_cycle_ids=[c["id"] for c in cycles if c["state"] not in {"completed", "cancelled", "failed", "incomplete"}],
     )
     # Never silently truncate explicit obligations. Excess guidance must be narrowed by the user.
     if len(json.dumps(snapshot, ensure_ascii=False)) > 24000:
@@ -103,6 +103,9 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
                 run_id=run_id,
                 purpose=purpose,
                 guidance_ids=[entry["id"] for entry in entries],
+                memory_refs=[{k: r.get('source', r).get(k) for k in ('record_id', 'evaluation_id', 'content_digest')} for r in memory.get('records', [])],
+                completed_learning_ids=[c['id'] for c in cycles if c['state'] == 'completed' and c.get('coverage') == 'full'],
+                created_at=store.now(),
             ),
         )
     return snapshot
