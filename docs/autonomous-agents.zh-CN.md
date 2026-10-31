@@ -139,4 +139,134 @@ npm --prefix tests/web test
 
 smoke 使用真实 HTTP、SQLite、执行 worker 和 Deep eval 管线，模型判断由可控 fixture 提供；它验证编排、身份、恢复和注入，不证明真实模型判断质量。`--serve` 可保留临时演示用于浏览器检查，Ctrl-C 关闭并验证重启恢复。
 
-当前以单个主要 Agent、一个 workspace、本机 native_os 为支持范围。P4 的自主目标发现、推断偏好、知识自动刷新、方法效果学习，以及 P5 的跨角色共享、外部事件和隔离并发尚未开放。手工方法与显式偏好已经生效，长期习惯推断不属于本次实现。
+基础执行环境仍为本机 native_os；持续学习、多 Agent 协作与隔离并发的支持范围和显式开关见下文。
+
+## P4～P5：持续迭代与协作扩展
+
+目标推进支持两种模式：原有 `iteration` 由观测和来源事件派生目标；新增 `stage_planning` 从长期目标生成近期阶段、拆分执行并在验收后推进下一阶段。后者默认关闭，详见下文和[设计第 23 节](superpowers/specs/2026-10-25-autonomous-agent-design.zh-CN.md#23-长期目标驱动的阶段规划与自动推进)。
+
+长期目标可配置 `iteration: {acceptance: [...], max_depth: 2, review_seconds: 86400}`。
+新的人工观测或绑定来源变化会生成有来源的 GoalProposal；相同对象和证据版本去重。
+`met/gap/unknown` 保留原始来源。持续目标到期复核，有限目标不会仅因时间经过重新打开。
+目标选择综合优先级、截止时间、依赖影响与等待时间，Goals 页面显示选择或阻塞原因。
+失败 Goal 不改写终态；`goals/{id}/retry` 必须提供 `change_kind`（input/method/environment）、
+`change` 和 `expected_revision`，产生有血缘、指数退避且次数受限的新 attempt。
+
+偏好通过 `preferences/feedback` 提交。`kind=explicit` 是明确长期指导；推断候选必须引用
+该 Agent 所有 Session 的真实 `producer=human` 消息，不按消息 role 推断用户身份。
+独立 Session/episode 才增加支持数，重复反馈或 evaluation 不增加支持。
+Supervisor 有界扫描真实人工消息中的明确未来指导（如“以后”“今后”），只生成待审候选；不会将普通单次任务自动升级为长期偏好。
+`preferences/commands` 支持 activate/trial/once/lock/unlock/retire/restore，带 entry_id 和 expected_revision。
+试用需要两个独立反馈且无未解决反例，七天后复核；锁定条目不会被推断覆盖，停用条目不被扫描复活。
+Profile 页面可查看共享范围、冲突、到期时间并执行采用/试用/停用。
+采用只改变指导，不增加外部写权限。`habits` 可将已采用偏好绑定到已有允许 iteration 的职责，
+至少每小时一次；Host 将工作包编译为只有文件读取和任务控制的独立环境。
+
+Role 的 `owner_id` 默认 `local`。同 owner 可共享偏好，优先级是当前任务 > Agent 局部例外 > owner。
+经验 memory 的 workspace/Session 范围不变。多个 Agent 不自动共享 Session；显式
+`sessions/{id}/commands` 的 transfer 需要源和目标 revision，且 Session 必须空闲、无预留、目录兼容。
+暂停、取消和预算仍分别归属对应 Agent。调度按上次服务时间轮转；目录父子路径存在写冲突时不能并行。
+
+来源路由可设置 `refresh_seconds`、`objective_id`、`fallback_route_ids`。
+`sources/refresh` 立即检查已有绑定，定时检查由 Supervisor 驱动。保存文档摘要、版本、成功版本与覆盖缺口。
+现有 sqlite_fts 本地文件索引可增量刷新并传播删除；不会复制新知识库。
+本地源文件改变或删除后，旧索引段落先停止返回。需要最新事实的 Goal 可声明 `required_source_ids`，
+规划和派发均检查当前版本或显式替代来源；其他无依赖工作仍可继续。
+带 embedding/模型调用但没有逐调用 Agent 计量适配的后端不会自动刷新；绑定外部工具在使用时核验，
+不会自动创建连接或权限。历史成功版本保留供解释，不能作为当前事实的唯一依据。
+
+`external-events` 接收绑定来源的通用事件：source_id、event_id、object_id、整数 version、occurred_at、
+cursor、origin、causation、depth、type（changed/deleted/revoked）、summary 和 command_id。
+持久 inbox 处理重复、乱序、撤销和重连重放；第一适配器是现有来源版本扫描。
+自身执行期间/终态带来的来源变化保守抑制，不自动回环生成同类目标。该策略可能合并并发外部变化，
+需要明确人工观测时可调用 `observations`；不会假称能识别任意外部系统的写入来源。
+
+方法反馈关联 context 中的方法/记忆、工作包、模型声明、真实工具调用和验收结果。
+`methods/feedback` 区分明确未采用、失败、采用和 unknown；没有采用记录本身不证明未采用。
+Role 的 `method_learning=true` 开启终态学习后的有界 Skill 归纳；默认关闭。
+也可通过 `methods/evolve` 显式启动，所有模型调用进入 Agent BudgetLedger。沿用冻结案例、反例与验证发布门槛。
+Host 在请求发送前拒绝预算时进入 deferred，不计为已发送或未知费用；额度配置或本地日期窗口变化后最多自动续跑三次，保留已有归纳检查点。
+跨项目推广使用 `methods/promote`，指定源版本/revision、目标 Agent、conditions 和冻结 environment digests。
+它创建目标 workspace 的新 candidate，不共享原始 trace/memory，不继承已验证状态；原版本停用使依赖候选失效。
+真正启用仍要求现有 SkillPairedValidation 的独立 family/holdout、真实执行、目标环境和验收证据。
+反馈报告不把一次成功、引用次数或重复家族声称为因果改善。
+
+### 从长期目标自动规划阶段（P4.5）
+
+让服务加载新代码后刷新页面；已有服务进程需要沿用原数据目录、模型配置和启动参数重启。功能不会自动开启旧 Agent。
+
+以“研发搭档”为例：
+
+1. 在 **工作方式 → 修订角色与预算 → 自主阶段规划** 选择自动推进，设置长期目标累计额度、阶段约束与完成条件。也可在 **目标 → 阶段路线图** 对某个长期目标单独开启；该入口默认累计额度为 1000 万 tokens，包含可归属的历史调用。
+2. 保留长期目标“从太阳系逐步扩展到银河系、整个宇宙”，目标类型使用持续维护；约束可填写“先形成设计与细粒度实施计划，再修改实现；每步完成后验证”。有限目标应提供最终完成条件，缺失时会出现具体待答问题。
+3. Agent 首先复用新鲜的实际交付证据；没有证据或基线已过期时，生成只读调查 Goal。调查失败会保留原失败，不反复创建同一调查。
+4. 阶段规划器生成具体近期交付、验收与子 Goal，现有规划器继续拆成工作包执行。模型可提出暂定远期方向，但只有近期阶段会激活；下一阶段由完成验收后的复盘触发，无需手工添加短期 Goal，也无需等待普通六小时检查周期。
+5. 在目标页查看基线、当前阶段、关联 Goal、未来概要、复盘和累计用量。可以暂停/恢复、说明原因后跳过/取消、修订近期交付与验收，或根据新信息重新规划。修订有在途执行的阶段前，先完成或取消现有工作；不会原地替换正在执行的合同。
+
+目标页展示当前/最近阶段与上一阶段的目标名称、状态、工作包和 Session 入口，点击目标名称跳到完整目标合同；默认展开当前与上一阶段，保留重试前的历史 attempt。执行页保留全部工作包与 Session 关联，包括没有阶段归属的历史工作。概览只展示运行摘要与调度时间，不重复展示阶段执行详情。
+
+自动推进沿用当前权限和任务执行环境。阶段规划不会自行增加外部工具、发布权限或预算。与授权或交付范围有关的重要缺失选择显示为阶段待答问题；问题和版本由 Agent 保存，回答不会创建伪造的 Session。
+
+Role 中每个长期目标可以配置：
+
+```json
+{
+  "stage_planning": {
+    "mode": "autonomous",
+    "objective_tokens": 10000000,
+    "horizon_stages": 3,
+    "max_goals_per_stage": 3,
+    "max_new_stages_per_day": 3,
+    "max_replans_without_progress": 2,
+    "review_seconds": 86400,
+    "constraints": ["先完成设计与实施计划，再修改代码"],
+    "completion_criteria": ["交付具有实际执行和验收证据"]
+  }
+}
+```
+
+这是长期目标对象内的配置片段，Role 修订需提交完整 Role。已有 `iteration`、周期职责、来源事件与习惯在阶段模式下汇入规划输入，不再各自复制同一职责的 Goal；未开启阶段模式的目标保留原行为。已有人工目标先完成或解除阻塞，再规划新的阶段。
+
+默认每阶段最多 3 个 Goal、每个 Goal 最多 3 个顺序工作包。最后一个 Goal 保留全部阶段验收，工作包最后一步继续保留 Goal 的完整验收。阶段完成还必须经过逐项证据复盘；仅运行 completed 或 Deep eval completed 不等于阶段验收通过。
+
+阶段规划和复盘的结构、证据引用与依赖语义校验共用有界纠错流程：首次响应不合规时，将具体错误与原提案交给模型修正一次；每次调用仍先检查并计入预算。当前阶段在远期依赖中固定使用 `current`，其他依赖只能引用更早的远期阶段 key；Goal 依赖只能引用本阶段更早的 Goal key。不能用标题、交付键或数据库 ID 替代这些 key，也不允许重复、自依赖和前向依赖。拒绝的提案保存为 artifact，`stage.protocol.*` 事件记录关联规划 run、尝试次数与校验错误；只有完整通过校验的提案才能提交。纠错耗尽后阻塞，预算不足则延后，网络错误和模型拒绝不会作为格式错误重试。修复协议或补充有效输入后，可通过目标的“重新规划”入口恢复，历史失败和已消耗预算保留。
+
+失败复盘可以选择有明确方法变化的有限后继 attempt，保留原失败，第一次退避 60 秒，后续指数增加。相同修复不重复提交；达到无进展上限需要新输入。来源被撤销或必要来源改变时，停止后续派发并显示需要复核的合同，修订或重新规划后才继续。终态合同不能改写，跳过不算验收通过。
+
+Deep eval incomplete/partial 或学习预算 deferred 会单列为学习缺口；业务验收通过且没有必要学习依赖时可以进入下一阶段。达到既有 20 项学习积压门槛时仍会暂停新阶段，明确显示积压原因。方法归纳与 Deep eval 共用学习子额度，长期目标累计额度还覆盖规划、执行、验收和学习；换阶段、重试和跨日均不清零累计用量。
+
+API 路径相对 `/v1/agents/{id}`：
+
+| 路径 | 内容与版本 |
+| --- | --- |
+| `GET objectives/{objective}/roadmap` | 当前路线图与 planning 状态，首次未规划时也返回可操作的初始状态 |
+| `GET stages`、`GET stages/{stage}` | 阶段、Goal 关联及复盘记录 |
+| `POST objectives/{objective}/planning/commands` | enable/disable 使用 Agent revision；pause/resume/replan/answer 使用 planning revision |
+| `POST stages/{stage}/commands` | pause/resume/skip/cancel/revise 使用 stage revision |
+
+命令均包含 `command_id`、`type` 和 `expected_revision`。重新规划、跳过、取消和修订需要 `reason`；修订的 `payload` 为 `{expected_outcome, acceptance}`。回答需要 `question_id`、`question_revision` 和 `answer`。重放相同命令不会重复执行，过期回答或 revision 冲突会拒绝。enable/disable 与 Role 的 stage_planning.mode 是同一配置。
+
+阶段路线图以不可变版本保存。模型有效响应先持久化，再原子提交阶段与 Goal；重启优先复用已记录响应。已发送但未记录响应的调用保持未知费用，等待带原因的重规划，不自动重发。文件来源与模型语义质量仍需实际核实；结构/依赖/范围校验及文本相似度检查不能证明模型选出的阶段就是最优路线。
+
+### 执行扩展的开关与限制
+
+仍默认使用原只读 barrier。显式 TaskSpec 可配置：
+
+```json
+{"workflow":{"plugin":"adaptive_dag","parallel":{"mode":"pipeline","isolated_writes":true,"max_lanes":2}}}
+```
+
+该片段需与实际 session_environment、tools 和 nodes 合并。`pipeline` 是有界滑动窗口：
+一个节点完成后，其依赖节点可先于其他慢分支启动。`execution_hint=main_candidate` 允许明确独立的只读
+主线节点参加同一调度器并复用 main context；一般主线工具和最终验收仍在稳定边界串行执行。
+`isolated_write=true` 的节点只支持 read_file/write_file，由 Host 操作独立副本；禁止 shell、网络、连接器和进程。
+节点可指定服务已配置的 `model`，恢复必须匹配原模型配置摘要，费用仍归所属 Agent/Goal/WorkPackage。
+
+写副本最多 2000 个文件、单文件 2 MB、总计 20 MB，不支持符号链接、删除、Git 操作和外部副作用。
+副本在运行期不直接影响主目录；集成队列核验基线、逐文件持久 journal，并使旧验收失效。
+重复集成幂等，中途退出会核对 before/after 摘要；主线基线变化或多个写分支相冲突时暂停，保留副本，
+需要人工检查后取消旧合同并以新基线重建，首版不自动三方合并。
+分支存储必须位于源 workspace 外；服务数据目录若位于源 workspace 内，将拒绝写分支。
+CLI 的临时副本会随检查点记录路径；临时目录被系统清理后不能假装恢复成功。
+native_os 并未因此成为完整 OS 沙箱。设计与恢复协议见
+[执行扩展子设计](superpowers/specs/2026-10-30-autonomous-agent-execution-extensions.zh-CN.md)。

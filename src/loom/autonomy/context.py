@@ -19,6 +19,11 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
         else:
             work, pinned = None, role
         entries = store.rows(db, "agent_guidance", aid)
+        from loom.autonomy.profile import effective
+        from loom.autonomy.sources import view as source_view
+
+        preferences = effective(store, db, agent, work_id=work['id'] if work else None)
+        source_status = source_view(store, db, agent)
         entries = [
             e
             for e in entries
@@ -39,6 +44,7 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
             for w in store.rows(db, "agent_work_packages", aid)
             if w.get("outcome")
         ][-4:]
+        stage = store.get(db, 'agent_stages', goal['stage_id'], aid) if goal and goal.get('stage_id') else None
     query = (work or goal or {}).get("objective", role["role_text"])
     # Planner with no workspace may use delivery summaries, never aggregate Session memory.
     memory = {"records": [], "issues": []}
@@ -59,12 +65,17 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
         role_text=role["role_text"],
         long_term_objectives=role["long_term_objectives"],
         source_routes=pinned["source_routes"],
+        source_status=source_status,
+        preferences=[{k: p[k] for k in ('id', 'key', 'text', 'scope', 'revision', 'state')} for p in preferences],
         role_methods=role["methods"],
         decision_policy=("When a material execution choice depends on missing human preferences or conflicting requirements, "
                          "use request_input with a concrete question, alternatives and their tradeoffs. "
                          "Proceed autonomously on routine implementation choices. Retrospective analysis alternatives are suggestions, "
                          "not pending human decisions. Human answers guide the current task; only explicit persistent guidance applies across tasks."),
         goal=goal,
+        stage_id=(goal or {}).get('stage_id'),
+        roadmap_id=(goal or {}).get('roadmap_id'),
+        stage_contract={k: stage[k] for k in ('title', 'expected_outcome', 'scope', 'non_goals', 'acceptance', 'stop_conditions')} if stage else None,
         work_package_id=work["id"] if work else None,
         guidance=[dict(id=e["id"], text=e["text"], source="human", scope=e["scope"]) for e in entries],
         methods=methods,
@@ -117,7 +128,8 @@ class RuntimeAgentContext:
                         "record_id": {"type": "string"},
                         "method_version_id": {"type": "string"},
                         "explanation": {"type": "string"},
-                        "tool_call_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 20},
+                        "disposition": {"enum": ["adopted", "declined"]},
+                        "tool_call_ids": {"type": "array", "items": {"type": "string"}, "minItems": 0, "maxItems": 20},
                     },
                     "required": ["tool_call_ids", "explanation"],
                     "additionalProperties": False,
@@ -153,9 +165,11 @@ def record_use(store, binding, run_id, payload):
     from loom.autonomy.contracts import strict, strings
     from loom.service.contracts import ServiceError, canonical
 
-    strict(payload, {"evaluation_id", "record_id", "method_version_id", "tool_call_ids", "explanation"})
+    strict(payload, {"evaluation_id", "record_id", "method_version_id", "tool_call_ids", "explanation", "disposition"})
+    if payload.get('disposition', 'adopted') not in {'adopted', 'declined'}:
+        raise ServiceError('Invalid adoption disposition')
     ids = strings(payload.get("tool_call_ids", []), "tool_call_ids", 20)
-    if not ids:
+    if not ids and payload.get('disposition') != 'declined':
         raise ServiceError("Link at least one completed tool call")
     aid = binding["agent_id"]
     with store.sessions.transaction() as db:

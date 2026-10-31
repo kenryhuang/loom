@@ -73,6 +73,92 @@ test('Unchanged polling retains inspected records; server state changes refresh 
 });
 
 const tick = () => new Promise(resolve => setTimeout(resolve,0));
+
+test('Overview omits scheduling details while Work retains packages and Session links',async()=>{
+ const data=fixture();
+ data.goals=[{id:'baseline',objective:'调研项目技术架构',state:'completed',acceptance:['形成架构文档'],created_at:'2026-10-30'}];
+ data.work_packages=[
+  {id:'w2',goal_id:'baseline',objective:'构建与测试',state:'succeeded',order:1,session_id:'session/b',run_ids:['run-test']},
+  {id:'w1',goal_id:'baseline',objective:'代码调研',state:'succeeded',order:0,session_id:'session-a',run_ids:['run-old','run-retry']},
+  {id:'w3',goal_id:'baseline',objective:'撰写架构文档',state:'succeeded',order:2,session_id:'session/b',run_ids:['run-doc']},
+ ];
+ const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');
+  assert.doesNotMatch(view.root.textContent,/当前与最近调度|最近调度目标（未归入阶段）/);
+  assert.equal(view.root.querySelector('[data-scheduled-goal-id]'),null);
+  view.tab='Work';view.render();
+  assert.match(view.root.textContent,/代码调研/);assert.match(view.root.textContent,/构建与测试/);assert.match(view.root.textContent,/撰写架构文档/);
+  assert.ok([...view.root.querySelectorAll('a')].some(a=>a.getAttribute('href')==='#/sessions/session%2Fb'));
+ }finally{view.close();dom.window.close();}
+});
+
+test('Current and previous stage show concrete goals, attempts and execution destinations',async()=>{
+ const data=fixture();data.role.long_term_objectives=[{id:'quality',desired_outcome:'Improve Solaris',stage_planning:{mode:'autonomous'}}];
+ data.objective_planning=[{id:'p',objective_id:'quality',revision:2,state:'active',stage_id:'new'}];
+ data.stages=[
+  {id:'old',objective_id:'quality',title:'Rendering',state:'completed',goal_ids:['render'],acceptance:[],estimated_cost:'One package'},
+  {id:'new',predecessor_id:'old',objective_id:'quality',title:'Navigation',state:'active',goal_ids:['camera'],acceptance:[],estimated_cost:'Two packages'},
+ ];
+ data.goals=[
+  {id:'render',stage_id:'old',objective:'Verify renderer',state:'completed',acceptance:[]},
+  {id:'camera-old',stage_id:'new',objective:'First camera attempt',state:'blocked',acceptance:[],revision:1},
+  {id:'camera',stage_id:'new',objective:'Implement camera controls',state:'active',acceptance:[],revision:1},
+ ];
+ data.work_packages=[
+  {id:'render-work',goal_id:'render',objective:'Renderer checks',state:'succeeded',session_id:'renderer',run_ids:['run-render']},
+  {id:'camera-work',goal_id:'camera',objective:'Camera controls',state:'running',session_id:'camera',run_ids:['run-camera']},
+  {id:'camera-failure',goal_id:'camera-old',objective:'Earlier camera attempt',state:'failed',session_id:'earlier',run_ids:['run-failed']},
+ ];
+ const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');
+  assert.equal(view.root.querySelector('[data-scheduled-stage-id]'),null);
+  view.tab='Goals';view.render();
+  const current=view.root.querySelector('[data-stage-id="new"]'),previous=view.root.querySelector('[data-stage-id="old"]');
+  assert.match(current.textContent,/当前阶段：Navigation/);assert.match(current.textContent,/Implement camera controls/);
+  assert.match(current.textContent,/历史 attempt/);assert.doesNotMatch(current.textContent,/Renderer checks/);
+  assert.match(previous.textContent,/上一阶段：Rendering/);assert.match(previous.textContent,/Verify renderer/);
+  assert.equal(current.open,true);
+  const old=view.root.querySelector('[data-stage-id="old"]');assert.equal(old.open,true);
+  old.open=false;await tick();data.activity='working';await view.refresh();
+  assert.equal(view.root.querySelector('[data-stage-id="old"]').open,false);
+ }finally{view.close();dom.window.close();}
+});
+
+test('Stage roadmap shows actual delivery, learning gaps and versioned human answers',async()=>{
+ const data=fixture();data.role.long_term_objectives=[{id:'quality',desired_outcome:'Improve Solaris',stage_planning:{mode:'autonomous'}}];
+ data.objective_planning=[{id:'p',objective_id:'quality',revision:4,state:'awaiting_input',reason:'Choose the next scope',stage_id:'stage1',roadmap_id:'roadmap1',
+  question:{id:'question1',revision:2,text:'Which interaction matters?',options:['Camera','Selection']}}];
+ data.roadmaps=[{id:'roadmap1',baseline:'Recorded source inspection',future:[{title:'Galaxy',expected_outcome:'Tentative larger scale'}]}];
+ data.stages=[{id:'stage1',objective_id:'quality',title:'Camera navigation',state:'completed',expected_contribution:'Stable controls',acceptance:['Recorded test passed'],
+  goal_ids:['goal1'],estimated_cost:'Bounded package',review_id:'review1'}];
+ data.stage_reviews=[{id:'review1',decision:{reason:'Original acceptance verified'},learning:[{state:'deferred',coverage:'partial'}]}];
+ let sent;
+ const {dom,view}=setup({json:async(path,options)=>{if(options?.body){sent={path,body:options.body};return {};}
+  return path==='/v1/agents'?{agents:[data]}:data;}});
+ try{
+  await view.open();await view.select('a');view.tab='Goals';view.render();
+  assert.match(view.root.textContent,/Recorded source inspection/);assert.match(view.root.textContent,/远期暂定：Galaxy/);
+  assert.match(view.root.textContent,/学习有 1 项缺口/);assert.match(view.root.textContent,/goal1/);
+  view.root.querySelector('[name="answer"]').value='Camera';
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='提交阶段问题回答').click();await tick();
+  assert.equal(sent.path,'/v1/agents/a/objectives/quality/planning/commands');
+  assert.equal(sent.body.expected_revision,4);assert.equal(sent.body.question_revision,2);assert.equal(sent.body.answer,'Camera');
+ }finally{view.close();dom.window.close();}
+});
+
+test('Stage planning is explicitly enabled per objective with the Agent revision',async()=>{
+ const data=fixture();data.role.long_term_objectives[0].id='quality';let sent;
+ const {dom,view}=setup({json:async(path,options)=>{if(options?.body){sent=options.body;return {};}
+  return path==='/v1/agents'?{agents:[data]}:data;}});
+ try{
+  await view.open();await view.select('a');view.tab='Goals';view.render();
+  assert.match(view.root.textContent,/自动阶段规划未开启/);assert.doesNotMatch(view.root.textContent,/已开启，等待/);
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='开启该目标的阶段规划').click();await tick();
+  assert.equal(sent.type,'enable');assert.equal(sent.expected_revision,2);
+ }finally{view.close();dom.window.close();}
+});
 const resourceCatalog = {external_tools:[{id:'lookup',connector_name:'Research',name:'Lookup',kind:'mcp',description:'Find references',effect_kind:'read_only'}]};
 const resourceBases = {knowledge_bases:[{id:'docs',name:'Project documents',description:'Design notes'}]};
 
@@ -192,4 +278,19 @@ test('Overview shows effective learning allowance and audited expansion',async()
  const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
  try{await view.open();await view.select('a');assert.match(view.root.textContent,/今日学习额度/);assert.match(view.root.textContent,/500,000/);assert.match(view.root.textContent,/exceeded allowance by 1509/);}
  finally{view.close();dom.window.close();}
+});
+
+test('Profile shows shared scope, conflicts, review and versioned adoption controls',async()=>{
+ const data=fixture(),calls=[];
+ data.shared_roles=[{id:'a',name:'Research'},{id:'b',name:'Writer'}];
+ data.profile_entries=[{id:'p',key:'style',text:'<script>concise</script>',scope:'owner',state:'candidate',revision:3,
+  independent_episodes:2,counterexamples:[],review_at:'2026-11-30',locked_by_user:false}];
+ const {dom,view}=setup({json:async(path,options)=>{if(options?.body)calls.push([path,options.body]);
+  return path==='/v1/agents'?{agents:[data]}:data;}});
+ try {
+  await view.open();await view.select('a');view.tab='Profile';view.render();
+  assert.match(view.root.textContent,/Research、Writer/);assert.equal(view.root.querySelector('script'),null);
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='试用七天').click();await tick();
+  assert.equal(calls[0][1].expected_revision,3);assert.equal(calls[0][1].type,'trial');
+ } finally {view.close();dom.window.close();}
 });

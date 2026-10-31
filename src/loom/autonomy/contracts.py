@@ -25,6 +25,8 @@ ROLE_FIELDS = {
     "budget",
     "learning_policy",
     "task_spec",
+    "owner_id",
+    "method_learning",
 }
 
 
@@ -64,6 +66,8 @@ def learning_policy(role):
 
 def role_contract(value):
     value = strict(value, ROLE_FIELDS)
+    if type(value.get('method_learning', False)) is not bool:
+        raise ServiceError('method_learning must be boolean')
     workspace = value.get("workspace")
     if workspace is not None:
         workspace = str(Path(text(workspace, "workspace")).expanduser().resolve())
@@ -79,7 +83,7 @@ def role_contract(value):
         raise ServiceError("Provide 1–20 long_term_objectives")
     normalized, ids = [], set()
     for item in objectives:
-        item = strict(item, {"id", "desired_outcome", "mode", "indicators", "schedule"})
+        item = strict(item, {"id", "desired_outcome", "mode", "indicators", "schedule", "iteration", "stage_planning"})
         identifier = text(item.get("id"), "objective id", max_length=100)
         if identifier in ids or item.get("mode", "ongoing") not in {"ongoing", "finite"}:
             raise ServiceError("Duplicate objective or invalid objective mode")
@@ -92,6 +96,16 @@ def role_contract(value):
                 indicators=strings(item.get("indicators", []), "indicators"),
             )
         )
+        if item.get("stage_planning") is not None:
+            normalized[-1]["stage_planning"] = stage_policy(item["stage_planning"])
+        if item.get("iteration") is not None:
+            iteration = strict(item["iteration"], {"acceptance", "max_depth", "review_seconds"})
+            criteria = strings(iteration.get("acceptance", []), "iteration acceptance")
+            if not criteria:
+                raise ServiceError("Autonomous iteration requires explicit acceptance")
+            normalized[-1]["iteration"] = dict(acceptance=criteria,
+                max_depth=integer(iteration.get("max_depth", 2), "max_depth", 1, 5),
+                review_seconds=integer(iteration.get("review_seconds", 86400), "review_seconds", 60, 31536000))
         if item.get("schedule") is not None:
             schedule = strict(item["schedule"], {"every_seconds", "acceptance"})
             criteria = strings(schedule.get("acceptance", []), "scheduled acceptance")
@@ -115,12 +129,17 @@ def role_contract(value):
         raise ServiceError("source_routes must contain at most 30 routes")
     route_ids = set()
     for route in routes:
-        strict(route, {"id", "topic", "paths", "knowledge_base_ids", "external_tool_ids", "freshness", "on_unavailable"})
+        strict(route, {"id", "topic", "paths", "knowledge_base_ids", "external_tool_ids", "freshness", "on_unavailable",
+                       "refresh_seconds", "objective_id", "fallback_route_ids"})
         identifier = text(route.get("id"), "source route id", max_length=100)
         if identifier in route_ids:
             raise ServiceError("Duplicate source route")
         route_ids.add(identifier)
         text(route.get("topic"), "source topic")
+        if "refresh_seconds" in route:
+            integer(route["refresh_seconds"], "refresh_seconds", 10, 31536000)
+        if route.get("objective_id") and route["objective_id"] not in ids:
+            raise ServiceError("Source route references unknown objective")
         for key in ("knowledge_base_ids", "external_tool_ids"):
             refs = strings(route.get(key, []), key)
             if not set(refs) <= set(strings(value.get(key, []), key, 64)):
@@ -128,8 +147,14 @@ def role_contract(value):
         for path in strings(route.get("paths", []), "paths"):
             if not workspace or not (Path(directory or workspace) / path).resolve().is_relative_to(workspace):
                 raise ServiceError("Source path outside workspace")
+    for route in routes:
+        fallback = strings(route.get('fallback_route_ids', []), 'fallback_route_ids')
+        if not set(fallback) <= route_ids - {route['id']}:
+            raise ServiceError('Fallback routes must reference other bound sources')
     return dict(
         schema_version=SCHEMA_VERSION,
+        owner_id=text(value.get("owner_id", "local"), "owner_id", max_length=100),
+        method_learning=value.get('method_learning', False),
         name=text(value.get("name"), "name", max_length=200),
         role_text=text(value.get("role_text"), "role_text", max_length=20000),
         workspace=workspace,
@@ -149,15 +174,51 @@ def role_contract(value):
     )
 
 
+def stage_policy(raw):
+    value = strict(raw, {"mode", "horizon_stages", "max_goals_per_stage", "max_new_stages_per_day",
+                         "max_replans_without_progress", "review_seconds", "objective_tokens", "constraints", "completion_criteria"})
+    if value.get("mode", "off") not in {"off", "autonomous"}:
+        raise ServiceError("Invalid stage planning mode")
+    result = dict(mode=value.get("mode", "off"))
+    for key, default, low, high in [
+        ("horizon_stages", 3, 1, 3), ("max_goals_per_stage", 3, 1, 3), ("max_new_stages_per_day", 3, 1, 10),
+        ("max_replans_without_progress", 2, 1, 5), ("review_seconds", 86400, 60, 31536000),
+        ("objective_tokens", 10000000, 1, 100000000),
+    ]:
+        result[key] = integer(value.get(key, default), key, low, high)
+    for key in ("constraints", "completion_criteria"):
+        result[key] = strings(value.get(key, []), key)
+    return result
+
+
+def stage_enabled(objective):
+    return objective.get("stage_planning", {}).get("mode") == "autonomous"
+
+
 def goal_contract(value, role):
-    value = strict(value, {"objective", "acceptance", "long_term_objective_id", "depends_on", "priority", "stop_conditions", "learning_dependency"})
+    value = strict(value, {"objective", "acceptance", "long_term_objective_id", "depends_on", "priority", "stop_conditions", "learning_dependency",
+                           "deadline", "required_source_ids"})
     objective_id = value.get("long_term_objective_id") or role["long_term_objectives"][0]["id"]
     if objective_id not in {g["id"] for g in role["long_term_objectives"]}:
         raise ServiceError("Unknown long-term objective")
     acceptance = strings(value.get("acceptance", []), "acceptance")
     if not acceptance:
         raise ServiceError("Goal requires explicit acceptance criteria")
+    deadline = value.get("deadline")
+    if deadline is not None:
+        from datetime import datetime
+
+        try:
+            if datetime.fromisoformat(deadline).tzinfo is None:
+                raise ValueError()
+        except (TypeError, ValueError) as exc:
+            raise ServiceError("deadline requires an ISO timestamp with timezone") from exc
+    required = strings(value.get("required_source_ids", []), "required_source_ids")
+    if not set(required) <= {r["id"] for r in role["source_routes"]}:
+        raise ServiceError("Unknown required source route")
     return dict(
+        deadline=deadline,
+        required_source_ids=required,
         objective=text(value.get("objective"), "objective"),
         acceptance=acceptance,
         long_term_objective_id=objective_id,

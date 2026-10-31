@@ -61,6 +61,12 @@ export class AgentSetupView {
     field(identity, 'role', '角色描述', r.role_text || '中文输出，结论附依据。先查实现，再修改设计。', {multiline:true,required:true});
     field(identity, 'objective', '长期目标', objective.desired_outcome, {multiline:true,required:true});
     this.mode = selectField(identity, 'mode', '目标类型', [['ongoing','持续维护'],['finite','一次性目标']], objective.mode || 'ongoing');
+    const stage = block(form, '自主阶段规划').body, policy = objective.stage_planning || {};
+    this.stageMode = selectField(stage, 'stage_mode', '根据长期目标规划阶段并执行', [['off','关闭'],['autonomous','自动推进']], policy.mode || 'off');
+    stage.append(element('p','muted','先核实现状，再拆分近期阶段；验收后自动推进下一阶段。沿用当前工作目录、权限和预算。'));
+    this.stageBudget = preset(stage, 'stage_budget', '长期目标累计额度', budgets, policy.objective_tokens || 10000000, {min:1,max:100000000});
+    field(stage, 'stage_constraints', '阶段规划约束（每行一条）', (policy.constraints || []).join('\n'), {multiline:true});
+    field(stage, 'stage_completion', '最终完成条件（有限目标必填）', (policy.completion_criteria || []).join('\n'), {multiline:true});
 
     const environment = block(form, '工作目录与模型').body;
     field(environment, 'workspace', '工作目录', r.workspace || '');
@@ -191,6 +197,10 @@ export class AgentSetupView {
       if (route[key]) route[key] = route[key].filter(id => role[key].includes(id));
     }
     const objective = role.long_term_objectives[0]; objective.desired_outcome = f.objective.value.trim(); objective.mode = f.mode.value;
+    if (this.stageMode.value === 'autonomous' || objective.stage_planning) objective.stage_planning = {
+      ...objective.stage_planning,mode:this.stageMode.value,objective_tokens:this.stageBudget.value(),
+      constraints:lines(f.stage_constraints.value),completion_criteria:lines(f.stage_completion.value),
+    };
     if (this.schedule.value() && objective.mode === 'ongoing') objective.schedule = {every_seconds:this.schedule.value(),acceptance:lines(f.criteria.value)};
     else delete objective.schedule;
     return role;

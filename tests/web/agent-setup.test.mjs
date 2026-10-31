@@ -22,7 +22,7 @@ test('Agent setup shares Session blocks and loads named model/resource choices',
     assert.equal(f.view.submit.disabled,true);
     await f.view.load();
     assert.deepEqual(f.calls,['/v1/web/catalog','/v1/knowledge-bases']);
-    assert.equal(f.view.form.querySelectorAll('.setup-block').length,8);
+    assert.equal(f.view.form.querySelectorAll('.setup-block').length,9);
     assert.ok(f.view.form.matches('.setup-form'));
     for(const name of ['model','evaluation_model','mode','interval','schedule','daily','timezone'])
       assert.equal(f.view.form.elements[name].tagName,'SELECT');
@@ -43,6 +43,14 @@ test('Agent setup shares Session blocks and loads named model/resource choices',
     assert.deepEqual(role.external_tool_ids,['lookup']); assert.deepEqual(role.knowledge_base_ids,['kb-project']);
     assert.match(f.view.tools.count.textContent,/1/);
     assert.equal(role.long_term_objectives[0].schedule,undefined);
+    assert.equal(role.long_term_objectives[0].stage_planning,undefined);
+    f.view.stageMode.value='autonomous';
+    f.view.form.elements.stage_constraints.value='先设计，再修改';
+    f.view.form.elements.stage_completion.value='可复现验收通过';
+    const planning=f.view.payload().long_term_objectives[0].stage_planning;
+    assert.equal(planning.mode,'autonomous'); assert.equal(planning.objective_tokens,10000000);
+    assert.deepEqual(planning.constraints,['先设计，再修改']);
+    assert.deepEqual(planning.completion_criteria,['可复现验收通过']);
   } finally {f.close();}
 });
 

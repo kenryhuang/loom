@@ -12,6 +12,15 @@ TABLES = {
     "agent_guidance",
     "agent_contexts",
     "agent_routes",
+    "agent_observations",
+    "agent_profile",
+    "agent_sources",
+    "agent_external_events",
+    "agent_method_feedback",
+    "agent_roadmaps",
+    "agent_stages",
+    "agent_stage_reviews",
+    "agent_objective_planning",
 }
 
 
@@ -31,6 +40,7 @@ def migrate(db):
         "CREATE TABLE IF NOT EXISTS agent_outbox(id TEXT PRIMARY KEY, agent_id TEXT, kind TEXT, state TEXT, body TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS agent_budget_calls(id TEXT PRIMARY KEY, agent_id TEXT, goal_id TEXT, work_package_id TEXT, "
         "window TEXT, category TEXT, reserved INTEGER, actual INTEGER, state TEXT, created_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS agent_budget_objectives(call_id TEXT PRIMARY KEY, agent_id TEXT, objective_id TEXT, stage_id TEXT)",
         "CREATE TABLE IF NOT EXISTS memory_annotations(id TEXT PRIMARY KEY, agent_id TEXT, evaluation_id TEXT, "
         "record_id TEXT, digest TEXT, revision INTEGER, body TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS memory_suppressions(agent_id TEXT, lineage TEXT, body TEXT NOT NULL, PRIMARY KEY(agent_id,lineage))",
@@ -44,4 +54,6 @@ def migrate(db):
     db.execute("CREATE INDEX IF NOT EXISTS agent_budget_window ON agent_budget_calls(agent_id,window)")
     db.execute("CREATE INDEX IF NOT EXISTS agent_outbox_pending ON agent_outbox(agent_id,kind,state)")
     db.execute("INSERT OR IGNORE INTO autonomy_migrations VALUES(1)")
+    db.execute("INSERT OR IGNORE INTO autonomy_migrations VALUES(2)")
+    db.execute("INSERT OR IGNORE INTO autonomy_migrations VALUES(3)")
     db.execute("INSERT OR IGNORE INTO memory_versions VALUES('effective',0)")

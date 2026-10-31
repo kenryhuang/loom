@@ -19,11 +19,14 @@ class AdaptiveDagWorkflow(DynamicWorkflowPolicy):
         base = {k: v for k, v in config.items() if k != "parallel"}
         super().__init__({k: v for k, v in base.items() if k != "nodes"}, **services)
         self.config = json_value(config)
-        self.parallel = {"max_lanes": 2, "max_calls_per_node": 8, "max_output_tokens": 2048, "max_seed_chars": 16000,
+        self.parallel = {"mode": "barrier", "isolated_writes": False,
+                         "max_lanes": 2, "max_calls_per_node": 8, "max_output_tokens": 2048, "max_seed_chars": 16000,
                          "max_result_chars": 8000, **config.get("parallel", {})}
-        if set(self.parallel) - {"max_lanes", "max_calls_per_node", "max_output_tokens", "max_seed_chars", "max_result_chars"}:
+        if set(self.parallel) - {"mode", "isolated_writes", "max_lanes", "max_calls_per_node", "max_output_tokens", "max_seed_chars", "max_result_chars"}:
             raise ValueError("Unknown DAG parallel setting")
-        if any(type(v) is not int or v < 1 for v in self.parallel.values()) or self.parallel["max_lanes"] > 2:
+        if (self.parallel['mode'] not in {'barrier', 'pipeline'} or type(self.parallel['isolated_writes']) is not bool or
+                any(type(v) is not int or v < 1 for k, v in self.parallel.items() if k not in {'mode', 'isolated_writes'})
+                or self.parallel["max_lanes"] > 2):
             raise ValueError("DAG limits must be positive integers; max_lanes is at most two")
         self.controller = DagController(**{k: services.get(k, ()) for k in ("capabilities", "resources", "tools", "loops")}, **base.get("limits", {}))
         if base.get("nodes"):
@@ -37,6 +40,15 @@ class AdaptiveDagWorkflow(DynamicWorkflowPolicy):
         self.reserved_tokens = 0
         self.assembly = self.provider = None
         self._completion_outputs = None
+        self.lane_providers = {}  # Host-only injection; never a model-supplied provider.
+
+    def branch_admission(self, node):
+        return branch_admission(node, self.assembly.bindings, isolated_writes=self.parallel['isolated_writes'],
+                                pipeline=self.parallel['mode'] == 'pipeline')
+
+    @staticmethod
+    def lane_key(node):
+        return 'main' if node.get('execution_hint') == 'main_candidate' else node.get('work_group_hint') or node['id']
 
     def snapshot(self):
         return {**super().snapshot(), "main_context_id": self.main_context_id, "main_messages": encode(self.main_messages),
@@ -103,10 +115,17 @@ class AdaptiveDagWorkflow(DynamicWorkflowPolicy):
         contract = ("Adaptive DAG: use revise_workflow to express result-oriented dependencies. Node switches reuse this conversation. "
                     "Default execution_hint is reuse_preferred. Only propose parallel_candidate for substantial independently solvable work, "
                     "with context_independent=true, independence_reason, self-contained stable_inputs, explicit allowed_tools, named outputs. "
-                    "Do not split diagnose -> fix -> test or small reads into agents. Empty dependencies do not justify a new context. "
-                    "Host requires at least two independent read-only branches; shell, writes and unknown effects stay on the main line. "
+                    "Do not split diagnose -> fix -> test or small reads into agents. Empty dependencies do not justify a new context. " +
+                    ("Host requires at least two independent read-only branches; shell, writes and unknown effects stay on the main line. "
+                     if not self.parallel['isolated_writes'] else
+                     "Isolated file branches are enabled: isolated_write=true permits only read_file/write_file inside a private snapshot. "
+                     "Main workspace integration is host-controlled and conflicts pause for review. Shell/external effects cannot run in a branch. ") +
                     "Inputs use {from_node,output_name,required}; outputs use {name,kind}. complete_node includes an outputs object for named results. "
                     "Integrate branch results in this original context; final finish still requires task acceptance.")
+        if self.parallel['mode'] == 'pipeline':
+            contract += (' Ready dependencies may start before unrelated peers finish. An independent read-only main node can use '
+                         'execution_hint=main_candidate to retain this conversation while peers run; final integration remains serial.')
+        contract += ' Nodes may pin a configured model name with model; unavailable models are rejected before dispatch.'
         if node:
             inputs = {f"{i['from_node']}.{i['output_name']}": self.controller.results.get(i["from_node"], {}).get("outputs", {}).get(i["output_name"])
                       for i in node["inputs"]}
@@ -132,10 +151,12 @@ class AdaptiveDagWorkflow(DynamicWorkflowPolicy):
 
     def tool_refs(self):
         refs = list(super().tool_refs())
+        scope = ('Independent file writes require isolated_write=true and only read_file/write_file. '
+                 if self.parallel['isolated_writes'] else 'Only self-contained independent read work may fork. ')
         refs[0] = replace(refs[0], description="Upsert future DAG nodes using the current base_revision. Omitted nodes are retained by the host. "
             "Completed/running contracts are immutable; skip obsolete pending nodes explicitly. "
             "Use dependencies, inputs [{from_node,output_name,required}], outputs [{name,kind}]. "
-            "Only self-contained independent read work may use execution_hint=parallel_candidate, context_independent=true, "
+            + scope + "Use execution_hint=parallel_candidate, context_independent=true, "
             "independence_reason, stable_inputs and executor_config.allowed_tools; otherwise reuse_preferred.")
         schema = thaw_json(refs[1].input_schema)
         schema["properties"]["outputs"] = {"type": "object", "additionalProperties": {"type": "string"}}
@@ -185,6 +206,9 @@ class AdaptiveDagWorkflow(DynamicWorkflowPolicy):
             if cp and cp.get("phase") != "dag_lanes" and cp.get("phase") != "step_done":
                 return await serial.step(context, runtime)
             unfinished = [n for n in self.controller.nodes if n["status"] not in {"succeeded", "skipped", "superseded"}]
+            for node in unfinished:
+                if node.get('isolated_write') and (reason := self.branch_admission(node)):
+                    raise ValueError('Isolated write contract cannot fall back to shared main tools: ' + reason)
             if len(unfinished) == 1 and unfinished[0]["outputs"] and unfinished[0]["status"] != "failed":
                 self.controller.propose(dict(base_revision=self.controller.revision, reason="Named results require parent integration",
                     nodes=[*self.controller.nodes, dict(id="integrate-" + uuid.uuid4().hex[:8],
@@ -193,16 +217,17 @@ class AdaptiveDagWorkflow(DynamicWorkflowPolicy):
             candidates = []
             if not active:
                 for node in self.controller.ready():
-                    reason = branch_admission(node, self.assembly.bindings)
+                    reason = self.branch_admission(node)
                     self.decisions[node["id"]] = reason or "Eligible; requires an independent peer"
                     if reason is None:
                         candidates.append(node)
                 # One writer per persistent work-group context.
                 groups = set()
-                candidates = [n for n in candidates if not ((n.get("work_group_hint") or n["id"]) in groups
-                              or groups.add(n.get("work_group_hint") or n["id"]))][:self.parallel["max_lanes"]]
-            retained = candidates and all((n.get("work_group_hint") or n["id"]) in self.lanes for n in candidates)
-            if (cp and cp.get("phase") == "dag_lanes") or len(candidates) >= 2 or retained:
+                candidates = [n for n in candidates if not (self.lane_key(n) in groups
+                              or groups.add(self.lane_key(n)))][:self.parallel["max_lanes"]]
+            retained = candidates and all(self.lane_key(n) in self.lanes for n in candidates)
+            explicit_branch = any(n.get('isolated_write') or n.get('model') for n in candidates)
+            if (cp and cp.get("phase") == "dag_lanes") or len(candidates) >= 2 or retained or explicit_branch:
                 from loom.tasks.dag_lanes import run_lanes
                 return await run_lanes(self, context, runtime, candidates)
             return await serial.step(context, runtime)

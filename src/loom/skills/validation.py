@@ -40,6 +40,8 @@ class SkillPairedValidation:
                     'knowledge_digest', 'memory_digest', 'budget_digest'}
         if set(environment) != required or any(not isinstance(v, str) or len(v) != 64 for v in environment.values()):
             raise ValueError('Freeze environment, solver, tools, permissions, evaluator, knowledge, memory and budget digests')
+        if version.get('promotion') and version['promotion']['environment'] != environment:
+            raise ValueError('Promotion validation must use the frozen target environment')
         identity = 'skill-validation:' + digest([version_id, tasks, environment, repetitions])
         with self.store.transaction() as db:
             existing = db.execute('SELECT body FROM skill_validations WHERE id=?', (identity,)).fetchone()

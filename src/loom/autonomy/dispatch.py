@@ -7,7 +7,7 @@ from loom.service.contracts import ServiceError
 def task_payload(agent, work):
     role = agent["role"]
     text = work["objective"] + "\nAcceptance criteria:\n" + "\n".join("- " + c for c in work["acceptance"])
-    return dict(
+    payload = dict(
         objective=text,
         workspace=role["working_directory"],
         model=role["model"],
@@ -17,6 +17,13 @@ def task_payload(agent, work):
         **({"task_spec": role["task_spec"]} if role["task_spec"] else {}),
         limits={"max_tokens": role["budget"]["work_tokens"]},
     )
+    if work.get('read_only'):
+        payload['external_tool_ids'] = []
+        payload['task_spec'] = dict(session_environment=dict(plugin='session', resources=[
+            dict(id='workspace', kind='directory', uri=role['working_directory'], access='read-only')]
+            if role['working_directory'] else []), tools=dict(collections=['filesystem', 'task_control']
+            if role['working_directory'] else ['task_control']))
+    return payload
 
 
 class Dispatcher:
@@ -33,7 +40,21 @@ class Dispatcher:
                 if agent["state"] != "enabled" or work["state"] != "pending":
                     return
                 goal = self.store.get(db, "agent_goals", work["goal_id"], aid)
+                from loom.autonomy.stages import runnable
+
+                if not runnable(self.store, db, agent, goal):
+                    return
                 if goal["state"] in {"paused", "cancelled", "superseded", "blocked"}:
+                    return
+                if goal.get('source_changed'):
+                    work['blocked_reason'] = 'Source changed after planning; review or revise the goal before dispatch'
+                    self.store.put(db, 'agent_work_packages', work)
+                    return
+                from loom.autonomy.goals import sources_ready
+
+                if not sources_ready(self.store, db, agent, goal):
+                    work['blocked_reason'] = 'Required current source must be refreshed before dispatch'
+                    self.store.put(db, 'agent_work_packages', work)
                     return
                 if work["role_revision"] != agent["role_revision"]:
                     work.update(state="blocked", blocked_reason="role_changed; revise or replace work contract")
@@ -60,6 +81,8 @@ class Dispatcher:
                         continue
                     if link["taken_over"] or link["work_package_id"]:
                         reason = "taken_over_or_reserved"
+                    elif work.get('read_only'):
+                        reason = 'Routine checks require a fresh restricted environment'
                     elif state["session_id"] in self.service.active or state["task"]["state"] != "idle" or state.get("workspace_blocked"):
                         reason = "busy_or_recovering"
                     elif state.get("input_request") and state["input_request"]["state"] == "pending":
@@ -109,6 +132,9 @@ class Dispatcher:
                     role_revision=agent["role_revision"],
                     output_tokens=agent["role"]["budget"]["output_tokens"],
                     previous_run_id=(state.get("run") or {}).get("id"),
+                    objective_id=goal["long_term_objective_id"],
+                    stage_id=goal.get("stage_id"),
+                    roadmap_id=goal.get("roadmap_id"),
                 )
                 state["autonomy"] = binding
                 state["task"]["objective"] = payload["objective"]

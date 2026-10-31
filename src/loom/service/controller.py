@@ -29,7 +29,7 @@ def _time_budget_exceeded(state):
 
 class LoomService:
     def __init__(self, directory, *, config_path=None, max_active_runs=2, provider_factory=None, plugin_registry_factory=None,
-                 autonomy_enabled=False, agent_planner=None, evaluation_provider_factory=None):
+                 autonomy_enabled=False, agent_planner=None, evaluation_provider_factory=None, agent_stage_planner=None):
         if isinstance(max_active_runs, bool) or not isinstance(max_active_runs, int) or max_active_runs < 1:
             raise ServiceError("max_active_runs must be positive")
         self.store = SessionStore(directory, plugin_registry_factory=plugin_registry_factory)
@@ -55,6 +55,7 @@ class LoomService:
         self._background = None
         self.autonomy_enabled = autonomy_enabled
         self.agent_planner = agent_planner
+        self.agent_stage_planner = agent_stage_planner
         self.evaluation_provider_factory = evaluation_provider_factory
         self.cleanup_checked = 0
         for state in self.store.list_sessions():

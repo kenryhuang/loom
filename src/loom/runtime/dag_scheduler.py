@@ -3,7 +3,8 @@
 from loom.runtime.plugin_contracts import json_value
 from loom.runtime.workflow import WorkflowController
 
-FIELDS = {"inputs", "outputs", "execution_hint", "work_group_hint", "independence_reason", "stable_inputs", "context_independent"}
+FIELDS = {"inputs", "outputs", "execution_hint", "work_group_hint", "independence_reason", "stable_inputs", "context_independent",
+          "isolated_write", "model"}
 
 
 class DagController(WorkflowController):
@@ -41,10 +42,12 @@ class DagController(WorkflowController):
             if n["executor_kind"] == "loop":
                 raise ValueError("DAG uses persistent lanes, not child-loop executors")
             n.setdefault("execution_hint", "reuse_preferred")
-            if n["execution_hint"] not in {"reuse_preferred", "parallel_candidate"}:
+            if n["execution_hint"] not in {"reuse_preferred", "parallel_candidate", "main_candidate"}:
                 raise ValueError("Unknown DAG execution hint")
             if type(n.get("context_independent", False)) is not bool:
                 raise ValueError("context_independent must be boolean")
+            if type(n.get('isolated_write', False)) is not bool or ('model' in n and (not isinstance(n['model'], str) or not n['model'])):
+                raise ValueError('Invalid branch isolation/model configuration')
             for field in ("work_group_hint", "independence_reason"):
                 if field in n and (not isinstance(n[field], str) or len(n[field]) > 2000):
                     raise ValueError(f"Invalid {field}")
@@ -70,22 +73,28 @@ class DagController(WorkflowController):
         return checked
 
     def ready(self):
-        succeeded = {n["id"] for n in self.nodes if n["status"] == "succeeded"}
+        succeeded = {n["id"] for n in self.nodes if n["status"] == "succeeded" and self.results.get(n['id'], {}).get('status') not in {'stale', 'conflict'}}
         return [n for n in self.nodes if n["status"] == "running" or (
             n["status"] in {"pending", "ready"} and set(n["dependencies"]).issubset(succeeded)
             and all(not i.get("required", True) or i["output_name"] in self.results.get(i["from_node"], {}).get("outputs", {})
                     for i in n["inputs"]))]
 
 
-def branch_admission(node, bindings):
+def branch_admission(node, bindings, *, isolated_writes=False, pipeline=False):
     """Conservative host gate; empty deps and a model hint are insufficient."""
-    if node.get("execution_hint") != "parallel_candidate" or node["executor_kind"] != "llm":
+    hints = {'parallel_candidate', 'main_candidate'} if pipeline else {'parallel_candidate'}
+    if node.get("execution_hint") not in hints or node["executor_kind"] != "llm":
         return "Reuse main context"
     if not node.get("context_independent") or not node.get("independence_reason", "").strip() or not node.get("stable_inputs"):
         return "Independence and stable self-contained inputs are not established"
     allowed = node["executor_config"].get("allowed_tools")
     if not isinstance(allowed, list):
         return "A bounded explicit tool set is required"
+    if node.get('isolated_write'):
+        if (not isolated_writes or node.get('execution_hint') == 'main_candidate' or
+                not set(allowed) <= {'read_file', 'write_file'} or 'write_file' not in allowed or not node['outputs']):
+            return 'Isolated writes require the file-only capability and named branch outputs'
+        return None
     if any(t not in bindings or bindings[t].effect_kind != "read_only" or bindings[t].placement != "execution" for t in allowed):
         return "Only host-registered read-only execution tools can run in parallel"
     if not node["outputs"]:

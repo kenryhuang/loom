@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS skill_uses(id TEXT PRIMARY KEY, version_id TEXT NOT N
 CREATE TABLE IF NOT EXISTS skill_validations(id TEXT PRIMARY KEY, version_id TEXT NOT NULL, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS skill_trial_sessions(session_id TEXT, version_id TEXT, run_id TEXT,
     PRIMARY KEY(session_id,version_id));
+CREATE TABLE IF NOT EXISTS skill_version_dependencies(version_id TEXT, source_id TEXT, source_revision INTEGER,
+    PRIMARY KEY(version_id,source_id));
 '''
 
 
@@ -106,7 +108,14 @@ class SkillStore:
         value = json.loads(row['body'])
         return {**value, 'state': row['state'], 'revision': row['revision']}
 
-    def dependencies_valid(self, version_id, *, db):
+    def dependencies_valid(self, version_id, *, db, visiting=()):
+        if version_id in visiting:
+            return False
+        for dep in db.execute('SELECT source_id,source_revision FROM skill_version_dependencies WHERE version_id=?', (version_id,)):
+            source = self.version(dep[0], db=db)
+            if (source['revision'] != dep[1] or source['state'] not in {'active', 'trial', 'candidate'}
+                    or not self.dependencies_valid(dep[0], db=db, visiting=(*visiting, version_id))):
+                return False
         rows = db.execute('''SELECT c.body,d.case_revision FROM skill_dependencies d
             LEFT JOIN skill_cases c ON c.id=d.case_id WHERE d.version_id=?''', (version_id,)).fetchall()
         return bool(rows) and all(row['body'] and json.loads(row['body'])['revision'] == row['case_revision']

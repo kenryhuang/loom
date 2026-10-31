@@ -110,7 +110,7 @@ def admit_resume(store, aid, cycle, job, block):
         requested = block["requested"]
         daily = used("window=?", (window,))
         goal = used("goal_id=?", (cycle["goal_id"],))
-        learning = used("window=? AND category='learning'", (window,))
+        learning = used("window=? AND category IN ('learning','method_learning')", (window,))
         calls = db.execute("SELECT COUNT(*) FROM agent_budget_calls WHERE agent_id=? AND window=?", (aid, window)).fetchone()[0]
         if goal + requested > budget["goal_tokens"]:
             return dict(outcome="stop", reason=f"Goal budget insufficient: used={goal}, requested={requested}, limit={budget['goal_tokens']}")

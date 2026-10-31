@@ -16,6 +16,10 @@ def materialize(store, aid):
         windows = agent.setdefault("schedule_windows", {})
         changed = False
         for objective in agent["role"]["long_term_objectives"]:
+            from loom.autonomy.contracts import stage_enabled
+
+            if stage_enabled(objective):
+                continue
             schedule = objective.get("schedule")
             if not schedule:
                 continue

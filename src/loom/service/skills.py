@@ -14,7 +14,7 @@ from loom.memory.store import bound_workspace
 from loom.service.contracts import ServiceError
 from loom.skills.catalog import CaseCatalog
 from loom.skills.contracts import VERSION, canonical, digest
-from loom.skills.induction import BudgetStop, Induction
+from loom.skills.induction import AgentBudgetDeferred, BudgetStop, Induction
 from loom.skills.retrieval import freeze_split
 from loom.skills.store import SkillStore
 from loom.tasks.config import load_task_config
@@ -112,7 +112,7 @@ class SessionSkills:
             version['evidence_state'] = 'independently_tested'
         return version
 
-    def start(self, session_id, options):
+    def start(self, session_id, options, *, agent_binding=None):
         if not isinstance(options, dict) or set(options) - {'query', 'model', 'settings', 'parent_version_id'}:
             raise ValueError('Use query, model, settings and optional parent_version_id')
         query = options.get('query')
@@ -141,7 +141,7 @@ class SessionSkills:
         if parent and parent['workspace'] != workspace:
             raise ValueError('Parent Skill is outside this workspace')
         fingerprint = digest([(c['id'], c['revision'], c['task_family_id'], c['split_group_id']) for c in corpus])
-        identity = digest([VERSION, workspace, fingerprint, query, model, config_digest, settings,
+        identity = digest([VERSION, workspace, fingerprint, query, model, config_digest, settings, agent_binding,
                            parent and [parent['id'], parent['revision']]])
         identifier = 'induction:' + identity[:32]
         with self.lock:
@@ -157,7 +157,7 @@ class SessionSkills:
                 seen_cases = {c['id'] for job in old_jobs for c in job.get('delivered_cases', [])}
                 seen_cases.update(cid for job in old_jobs for cid in job.get('exposed_case_ids', []))
                 exposed.update(c['split_group_id'] for c in corpus if c['id'] in seen_cases)
-                body = dict(id=identifier, workspace=workspace, session_id=session_id, query=query, model=model,
+                body = dict(id=identifier, workspace=workspace, session_id=session_id, query=query, model=model, agent_binding=agent_binding,
                     state='queued', stage='frozen', created_at=now_iso(), settings=settings,
                     algorithm=VERSION, config_digest=config_digest, corpus_revision=fingerprint, corpus=corpus,
                     split=freeze_split(corpus, exposed_groups=exposed), checkpoints={}, requests=[],
@@ -184,11 +184,19 @@ class SessionSkills:
                     raise ValueError('Model configuration changed; create a new induction job')
                 config = load_task_config(self.semantic.config_path).unwrap()
                 provider = create_evaluation_provider(config, model_name=body['model']).unwrap()
+            if body.get('agent_binding'):
+                from loom.autonomy.budget import BudgetLedger, BudgetProvider
+
+                provider = BudgetProvider(provider, BudgetLedger(self.store.path), body['agent_binding'],
+                                          category='method_learning', output_tokens=body['settings']['output_tokens'])
             def stopped():
                 return self.closed.is_set() or self.cancels[identifier].is_set()
             body.update(state='running', error=None)
             self.store.save_job(body)
             asyncio.run(Induction(self.store, self.catalog, provider, stopped=stopped).run(body))
+        except AgentBudgetDeferred as exc:
+            body.update(state='deferred', error=str(exc))
+            self.store.save_job(body)
         except BudgetStop as exc:
             body.update(state='cancelled' if self.cancels[identifier].is_set() else 'budget_exhausted', error=str(exc))
             self.store.save_job(body)
@@ -201,7 +209,7 @@ class SessionSkills:
             if identifier in self.futures and not self.futures[identifier].done():
                 raise ValueError('Skill job is already running')
             body = self.store.job(identifier)
-            if body['state'] not in {'failed', 'interrupted', 'cancelled'}:
+            if body['state'] not in {'failed', 'interrupted', 'cancelled', 'deferred'}:
                 raise ValueError('Only failed, interrupted or cancelled jobs can resume with their frozen budgets')
             body.update(state='queued', error=None)
             self.store.save_job(body)

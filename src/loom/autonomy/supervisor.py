@@ -16,6 +16,10 @@ class AgentSupervisor:
         self.planner = AgentPlanner(service, store, planner)
         self.dispatcher = Dispatcher(service, store)
         self.learning = LearningCoordinator(store, background)
+        from loom.autonomy.stage_planner import StagePlanner
+        from loom.autonomy.stages import StageCoordinator
+
+        self.stages = StageCoordinator(service, store, StagePlanner(service, store, getattr(service, "agent_stage_planner", None)))
         self.stopped = threading.Event()
         self.thread = None
         self.tick_lock = threading.Lock()
@@ -38,7 +42,7 @@ class AgentSupervisor:
             for row in db.execute("SELECT body FROM agent_runs").fetchall():
                 run = json.loads(row[0])
                 if run["state"] == "planning":
-                    run.update(state="superseded", reason="Service restart")
+                    run.update(state="recoverable" if run.get("kind") in {"stage_plan", "stage_review"} else "superseded", reason="Service restart")
                     store.put(db, "agent_runs", run)
 
     def start(self):
@@ -64,7 +68,7 @@ class AgentSupervisor:
             return
         try:
             with self.store.sessions.transaction() as db:
-                ids = [r[0] for r in db.execute("SELECT id FROM agents")]
+                ids = [r[0] for r in db.execute("SELECT id FROM agents ORDER BY COALESCE(json_extract(body,'$.last_served_at'),'')")]
             for aid in ids:
                 if self.stopped.is_set():
                     break
@@ -92,8 +96,20 @@ class AgentSupervisor:
         from loom.autonomy.triggers import materialize
 
         materialize(self.store, aid)
+        from loom.autonomy import goals, profile, sources
+
+        sources.refresh(self.store, aid)
+        profile.scan_feedback(self.store, aid)
+        profile.review_due(self.store, aid)
+        goals.materialize(self.store, aid)
+        from loom.autonomy.habits import materialize as habits
+        from loom.autonomy.method_feedback import advance as methods
+
+        habits(self.store, aid)
         # Cancellation is consumed even while the Agent is paused.
         self.learning.advance(aid)
+        methods(self.store, self.learning.background, aid)
+        self.stages.advance(aid)
         with self.store.sessions.transaction() as db:
             agent = self.store.get(db, "agents", aid)
             if agent["state"] != "enabled":
@@ -116,16 +132,10 @@ class AgentSupervisor:
             if current["generation"] != agent["generation"] or current.get("planner_lease"):
                 return
             goals = self.store.rows(db, "agent_goals", aid)
-            done = {g["id"] for g in goals if g["state"] == "completed"}
             packages = self.store.rows(db, "agent_work_packages", aid)
-            candidates = [
-                g
-                for g in goals
-                if g["state"] == "queued"
-                and set(g["depends_on"]) <= done
-                and not any(w["goal_id"] == g["id"] and not w.get("superseded_contract") for w in packages)
-            ]
-            candidates.sort(key=lambda g: (-g["priority"], g["created_at"]))
+            from loom.autonomy.goals import rank
+
+            candidates, decisions = rank(self.store, db, current, goals, packages)
             goal = candidates[0] if candidates else None
             run = dict(
                 id=new_id("agent_run"),
@@ -136,8 +146,11 @@ class AgentSupervisor:
                 created_at=self.store.now(),
                 goal_id=goal["id"] if goal else None,
                 reason="Ready goal" if goal else "No new ready goal",
+                selection=decisions,
             )
             current.update(
+                last_served_at=self.store.now(),
+                selection=decisions,
                 planner_lease=run["id"] if goal else None,
                 next_wake_at=(self.store.clock() + timedelta(seconds=agent["role"]["interval_seconds"])).isoformat(),
                 activity="planning" if goal else ("working" if any(w["state"] in {"dispatched", "running"} for w in packages) else "waiting"),
@@ -177,6 +190,10 @@ class AgentSupervisor:
                         order=order,
                         created_at=self.store.now(),
                         run_ids=[],
+                        read_only=goal.get('read_only', False),
+                        stage_id=goal.get("stage_id"),
+                        roadmap_id=goal.get("roadmap_id"),
+                        objective_id=goal["long_term_objective_id"],
                     )
                     self.store.put(db, "agent_work_packages", work)
                     db.execute("INSERT INTO agent_outbox VALUES(?,?,?,?,?)", (wid, aid, "dispatch", "pending", canonical(work)))

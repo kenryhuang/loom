@@ -36,12 +36,15 @@ class BudgetLedger:
         with self.transaction() as db:
             prior = db.execute("SELECT * FROM agent_budget_calls WHERE id=?", (identifier,)).fetchone()
             if prior:
+                attribution = db.execute("SELECT objective_id,stage_id FROM agent_budget_objectives WHERE call_id=?", (identifier,)).fetchone()
                 if (
                     prior["agent_id"] != binding["agent_id"]
                     or prior["reserved"] != tokens
                     or prior["category"] != category
                     or prior["goal_id"] != binding.get("goal_id")
                     or prior["work_package_id"] != binding.get("work_package_id")
+                    or binding.get("objective_id") and (not attribution or attribution[0] != binding["objective_id"])
+                    or binding.get("stage_id") and (not attribution or attribution[1] != binding["stage_id"])
                 ):
                     raise ServiceError("Budget call identity conflict", 409)
                 return dict(prior)
@@ -52,24 +55,45 @@ class BudgetLedger:
             if agent["state"] != "enabled":
                 raise ServiceError("Agent is paused; new calls are deferred", 409)
             policy = agent["role"]["budget"]
+            goal = None
+            if binding.get("goal_id"):
+                goal_row = db.execute("SELECT body FROM agent_goals WHERE id=? AND agent_id=?", (binding["goal_id"], agent["id"])).fetchone()
+                goal = json.loads(goal_row[0]) if goal_row else None
+            objective_id = (goal or {}).get("long_term_objective_id", binding.get("objective_id"))
+            stage_id = (goal or {}).get("stage_id", binding.get("stage_id"))
+            if stage_id and category not in {"learning", "method_learning"}:
+                stage_row = db.execute("SELECT body FROM agent_stages WHERE id=? AND agent_id=?", (stage_id, agent["id"])).fetchone()
+                if stage_row and json.loads(stage_row[0])["state"] in {"paused", "cancelled", "superseded", "blocked"}:
+                    raise ServiceError("Stage is not runnable; new calls are deferred", 409)
+            objective = next((o for o in agent["role"]["long_term_objectives"] if o["id"] == objective_id), {})
+            if (category not in {"learning", "method_learning"} and (stage_id or (goal or {}).get("stage_discovery"))
+                    and objective.get("stage_planning", {}).get("mode") != "autonomous"):
+                raise ServiceError("Automatic stage planning is disabled; new calls are deferred", 409)
             window = self.clock().astimezone(ZoneInfo(agent["role"]["timezone"])).date().isoformat()
             clauses = [("daily", "agent_id=? AND window=?", (agent["id"], window), f"window={window}, timezone={agent['role']['timezone']}")]
+            if objective.get("stage_planning"):
+                # Include attributable legacy Goal calls without rewriting original ledger rows.
+                clauses.append(("objective", "agent_id=? AND (id IN (SELECT call_id FROM agent_budget_objectives WHERE agent_id=? AND objective_id=?) "
+                                "OR goal_id IN (SELECT id FROM agent_goals WHERE agent_id=? AND json_extract(body,'$.long_term_objective_id')=?))",
+                                (agent["id"], agent["id"], objective_id, agent["id"], objective_id), f"objective_id={objective_id}"))
             if binding.get("goal_id"):
                 clauses.append(("goal", "agent_id=? AND goal_id=?", (agent["id"], binding["goal_id"]), f"goal_id={binding['goal_id']}"))
-            if binding.get("work_package_id") and category != "learning":
+            if binding.get("work_package_id") and category not in {"learning", "method_learning"}:
                 clauses.append(
-                    ("work", "agent_id=? AND work_package_id=? AND category<>?", (agent["id"], binding["work_package_id"], "learning"),
+                    ("work", "agent_id=? AND work_package_id=? AND category NOT IN (?,?)",
+                     (agent["id"], binding["work_package_id"], "learning", "method_learning"),
                      f"work_package_id={binding['work_package_id']}")
                 )
-            if category == "learning":
-                clauses.append(("learning", "agent_id=? AND window=? AND category=?", (agent["id"], window, category),
+            if category in {"learning", "method_learning"}:
+                clauses.append(("learning", "agent_id=? AND window=? AND category IN (?,?)", (agent["id"], window, "learning", "method_learning"),
                                 f"window={window}, timezone={agent['role']['timezone']}"))
             failures, scopes = [], []
             from loom.autonomy.learning_budget import allowance
 
             effective_learning = allowance(db, agent, window)
             for scope, where, args, context in clauses:
-                maximum = effective_learning if scope == "learning" else policy[f"{scope}_tokens"]
+                maximum = (objective["stage_planning"]["objective_tokens"] if scope == "objective"
+                           else effective_learning if scope == "learning" else policy[f"{scope}_tokens"])
                 actual, reserved = db.execute(
                     f"SELECT COALESCE(SUM(actual),0), COALESCE(SUM(CASE WHEN actual IS NULL THEN reserved ELSE 0 END),0) "
                     f"FROM agent_budget_calls WHERE {where}", args,
@@ -119,6 +143,8 @@ class BudgetLedger:
                         self.clock().isoformat(),
                     ),
                 )
+                if objective_id:
+                    db.execute("INSERT INTO agent_budget_objectives VALUES(?,?,?,?)", (identifier, agent["id"], objective_id, stage_id))
         if failures:
             failure = ServiceError(" | ".join(failures), 409, code="AGENT_BUDGET")
             failure.budget_block = block
@@ -164,6 +190,24 @@ class BudgetLedger:
             window = self.clock().astimezone(ZoneInfo(agent["role"]["timezone"])).date().isoformat()
             return dict(window=window, initial_tokens=agent["role"]["budget"]["learning_tokens"],
                         effective_tokens=allowance(db, agent, window), policy=learning_policy(agent["role"]))
+
+    def objective_summary(self, aid):
+        with self.transaction() as db:
+            agent = json.loads(db.execute("SELECT body FROM agents WHERE id=?", (aid,)).fetchone()[0])
+            result = []
+            for objective in agent["role"]["long_term_objectives"]:
+                if not objective.get("stage_planning"):
+                    continue
+                row = db.execute("SELECT COUNT(*),COALESCE(SUM(actual),0),COALESCE(SUM(CASE WHEN actual IS NULL THEN reserved ELSE 0 END),0),"
+                                 "COALESCE(SUM(actual IS NULL),0) FROM agent_budget_calls WHERE agent_id=? AND "
+                                 "(id IN (SELECT call_id FROM agent_budget_objectives WHERE agent_id=? AND objective_id=?) OR "
+                                 "goal_id IN (SELECT id FROM agent_goals WHERE agent_id=? AND json_extract(body,'$.long_term_objective_id')=?))",
+                                 (aid, aid, objective['id'], aid, objective['id'])).fetchone()
+                result.append(dict(objective_id=objective['id'], limit=objective['stage_planning']['objective_tokens'], calls=row[0],
+                                   actual_tokens=row[1], reserved_or_unknown=row[2], unknown_calls=row[3]))
+            unattributed = db.execute("SELECT COUNT(*) FROM agent_budget_calls WHERE agent_id=? AND goal_id IS NULL "
+                                      "AND id NOT IN (SELECT call_id FROM agent_budget_objectives)", (aid,)).fetchone()[0]
+            return dict(objectives=result, unattributed_historical_calls=unattributed)
 
 
 class BudgetProvider:

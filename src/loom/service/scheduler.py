@@ -1,6 +1,16 @@
 """FIFO admission with shared reads and exclusive resource writes."""
 
 from datetime import UTC, datetime
+from pathlib import Path
+
+
+def resource_overlap(left, right):
+    if left == right:
+        return True
+    if left.startswith('directory:') and right.startswith('directory:'):
+        a, b = Path(left[10:]).resolve(), Path(right[10:]).resolve()
+        return a.is_relative_to(b) or b.is_relative_to(a)
+    return False
 
 
 def resource_claims(task):
@@ -12,7 +22,7 @@ def resource_claims(task):
 
 def conflicts(left, right):
     return any(
-        a["resource_id"] == b["resource_id"]
+        resource_overlap(a["resource_id"], b["resource_id"])
         and "none" not in {a["access_mode"], b["access_mode"]}
         and "exclusive_write" in {a["access_mode"], b["access_mode"]}
         for a in left

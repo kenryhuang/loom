@@ -34,10 +34,21 @@ class AutonomyService:
         result["service_enabled"] = self.service.autonomy_enabled
         result["service_error"] = self.supervisor.last_error
         result["budget"] = BudgetLedger(self.store.sessions.path).summary(aid)
+        result["objective_budget"] = BudgetLedger(self.store.sessions.path).objective_summary(aid)
         result["learning_budget"] = BudgetLedger(self.store.sessions.path, clock=self.store.clock).learning_summary(aid)
         result["pause_pending"] = result["state"] in {"paused", "archived"} and any(s["session_id"] in self.service.active for s in result["sessions"])
         result["pending_decisions"] = []
         with self.store.sessions.transaction() as db:
+            from loom.autonomy.profile import effective
+            from loom.autonomy.sources import view as source_view
+
+            result['preferences'] = effective(self.store, db, result)
+            owner = result['role'].get('owner_id', 'local')
+            result['profile_entries'] = [json.loads(r[0]) for r in db.execute('SELECT body FROM agent_profile')
+                if json.loads(r[0])['agent_id'] == aid or (json.loads(r[0])['scope'] == 'owner' and json.loads(r[0])['owner_id'] == owner)]
+            result['source_status'] = source_view(self.store, db, result)
+            result['shared_roles'] = [dict(id=a['id'], name=a['role']['name']) for r in db.execute('SELECT body FROM agents')
+                if (a := json.loads(r[0]))['role'].get('owner_id', 'local') == owner]
             rows = db.execute(
                 "SELECT a.session_id,a.work_package_id,a.taken_over,json_extract(s.body,'$.input_request') AS request,"
                 "json_extract(s.body,'$.task.revision') AS task_revision,json_extract(s.body,'$.task.objective') AS objective "
@@ -145,6 +156,7 @@ class AutonomyService:
                     if any(w["state"] in {"dispatched", "running", "blocked"} and w.get("session_id") for w in works):
                         raise ServiceError("Pause and finish or cancel current work before revising its contract", 409)
                     goal.update(goal_contract(body.get("payload", {}), agent["role"]))
+                    goal.pop('source_changed', None)
                     for work in works:
                         work["superseded_contract"] = True
                         if work["state"] == "pending":
@@ -202,7 +214,7 @@ class AutonomyService:
             return self.store.receipt(db, body["command_id"], request, entry)
 
     def session_command(self, aid, sid, body):
-        strict(body, {"command_id", "type", "expected_revision"})
+        strict(body, {"command_id", "type", "expected_revision", "target_agent_id", "target_revision"})
         request = dict(agent_id=aid, session_id=sid, **body)
         with self.service.lock, self.store.sessions.transaction() as db:
             replay = self.store.replay(db, body.get("command_id"), request)
@@ -213,7 +225,28 @@ class AutonomyService:
             state = self.service.store._load(db, sid)
             link = db.execute("SELECT * FROM agent_sessions WHERE session_id=?", (sid,)).fetchone()
             kind = body.get("type")
-            if kind == "bind":
+            if kind == 'transfer':
+                from loom.memory.store import bound_workspace
+
+                target = self.store.get(db, 'agents', body.get('target_agent_id'))
+                self.store.expect(target, body.get('target_revision'))
+                if (not link or link['agent_id'] != aid or link['work_package_id'] or sid in self.service.active
+                        or state['task']['state'] != 'idle' or target['id'] == aid
+                        or agent['role'].get('owner_id', 'local') != target['role'].get('owner_id', 'local')
+                        or bound_workspace(state['task']) != target['role']['working_directory']
+                        or state['task'].get('model') != target['role']['model']
+                        or state['task'].get('knowledge_base_ids', []) != target['role']['knowledge_base_ids']
+                        or state['task'].get('external_tool_ids', []) != target['role']['external_tool_ids']
+                        or (state.get('input_request') or {}).get('state') == 'pending'
+                        or any(m['role'] == 'user' and m['state'] == 'accepted' for m in state['messages'])):
+                    raise ServiceError('Transfer requires an idle compatible unreserved Session and matching owner', 409)
+                db.execute('UPDATE agent_sessions SET agent_id=?,taken_over=0 WHERE session_id=?', (target['id'], sid))
+                state.pop('autonomy', None)
+                self.service.store._save(db, state)
+                target.update(generation=target['generation'] + 1, revision=target['revision'] + 1)
+                self.store.put(db, 'agents', target)
+                self.store.event(db, target['id'], 'session.transferred', dict(session_id=sid, from_agent_id=aid))
+            elif kind == "bind":
                 from loom.memory.store import bound_workspace
 
                 if link or bound_workspace(state["task"]) != agent["role"]["working_directory"] or state["task"]["state"] != "idle":
@@ -276,6 +309,79 @@ class AutonomyService:
         if len(parts) == 1 and method == "GET":
             return self.snapshot(aid)
         route = parts[1:]
+        if len(route) == 3 and route[0] == 'objectives' and route[2] == 'roadmap' and method == 'GET':
+            from loom.autonomy.stages import planning_state
+
+            with self.store.sessions.transaction() as db:
+                agent = self.store.get(db, 'agents', aid)
+                objective = next((o for o in agent['role']['long_term_objectives'] if o['id'] == route[1]), None)
+                if objective is None:
+                    raise ServiceError('Unknown long-term objective', 404)
+                state = planning_state(self.store, db, agent, objective)
+                return dict(planning=state, roadmap=self.store.get(db, 'agent_roadmaps', state['roadmap_id'], aid) if state.get('roadmap_id') else None)
+        if len(route) == 4 and route[0] == 'objectives' and route[2:] == ['planning', 'commands'] and method == 'POST':
+            from loom.autonomy.stage_commands import command
+
+            return command(self, aid, route[1], body)
+        if route == ['stages'] and method == 'GET':
+            return dict(stages=self.store.snapshot(aid)['stages'])
+        if len(route) == 2 and route[0] == 'stages' and method == 'GET':
+            with self.store.sessions.transaction() as db:
+                stage = self.store.get(db, 'agent_stages', route[1], aid)
+                return dict(stage=stage, reviews=[r for r in self.store.rows(db, 'agent_stage_reviews', aid) if r['stage_id'] == stage['id']])
+        if len(route) == 3 and route[0] == 'stages' and route[2] == 'commands' and method == 'POST':
+            from loom.autonomy.stage_commands import command
+
+            return command(self, aid, route[1], body, stage_command=True)
+        if route == ['habits'] and method == 'POST':
+            from loom.autonomy.habits import configure
+
+            return configure(self.store, aid, body)
+        if route == ['methods', 'evolve'] and method == 'POST':
+            from loom.autonomy.method_feedback import evolve
+
+            return evolve(self, aid, body)
+        if route == ['methods', 'promote'] and method == 'POST':
+            from loom.skills.promotion import promote
+
+            strict(body, {'version_id', 'revision', 'target_agent_id', 'conditions', 'environment'})
+            source, target = self.store.snapshot(aid), self.store.snapshot(body.get('target_agent_id'))
+            skill = self.background.skills.store.version(body.get('version_id'))
+            if (source['role'].get('owner_id', 'local') != target['role'].get('owner_id', 'local')
+                    or skill['workspace'] != source['role']['working_directory']):
+                raise ServiceError('Method promotion outside owner/workspace scope', 404)
+            return promote(self.background.skills.store, skill['id'], revision=body.get('revision'),
+                           target_workspace=target['role']['working_directory'], conditions=body.get('conditions'), environment=body.get('environment', {}))
+        if route == ['methods', 'feedback'] and method == 'GET':
+            from loom.autonomy.method_feedback import report
+
+            return report(self.store, aid)
+        if route == ['observations'] and method == 'POST':
+            from loom.autonomy.goals import observe
+
+            strict(body, {'command_id', 'observation'})
+            return observe(self.store, aid, body.get('command_id'), body.get('observation'))
+        if route == ['external-events'] and method == 'POST':
+            from loom.autonomy.events import ingest
+
+            return ingest(self.store, aid, body)
+        if route == ['sources', 'refresh'] and method == 'POST':
+            from loom.autonomy.sources import refresh
+
+            strict(body, set())
+            return {'sources': refresh(self.store, aid, force=True)}
+        if route == ['preferences', 'feedback'] and method == 'POST':
+            from loom.autonomy.profile import feedback
+
+            return feedback(self.store, aid, body)
+        if route == ['preferences', 'commands'] and method == 'POST':
+            from loom.autonomy.profile import command
+
+            return command(self.store, aid, body)
+        if len(route) == 3 and route[0] == 'goals' and route[2] == 'retry' and method == 'POST':
+            from loom.autonomy.goals import retry
+
+            return retry(self.store, aid, route[1], body)
         if route == ["commands"] and method == "POST":
             return self.control(aid, body)
         if route == ["role", "revisions"] and method == "POST":
@@ -362,6 +468,10 @@ class AutonomyService:
             "context": "agent_contexts",
             "routes": "agent_routes",
             "role-revisions": "agent_roles",
+            "observations": "agent_observations",
+            "sources": "agent_sources",
+            "external-events": "agent_external_events",
+            "method-feedback": "agent_method_feedback",
         }
         if len(route) in {1, 2} and route[0] in tables:
             with self.store.sessions.transaction() as db:

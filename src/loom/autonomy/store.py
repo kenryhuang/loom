@@ -120,6 +120,10 @@ class AgentStore:
                 ("learning", "agent_learning_cycles"),
                 ("learning_allocations", "agent_learning_allocations"),
                 ("guidance", "agent_guidance"),
+                ("stages", "agent_stages"),
+                ("roadmaps", "agent_roadmaps"),
+                ("objective_planning", "agent_objective_planning"),
+                ("stage_reviews", "agent_stage_reviews"),
             ]:
                 agent[key] = self.rows(db, table, aid)
             agent["event_cursor"] = db.execute("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE agent_id=?", (aid,)).fetchone()[0]
@@ -182,10 +186,10 @@ class AgentStore:
                 return replay
             agent = self.get(db, "agents", aid)
             self.expect(agent, revision)
-            resource_fields = {"budget", "learning_policy"}
-            budget_only = {k: v for k, v in agent["role"].items() if k not in resource_fields} == {
-                k: v for k, v in role.items() if k not in resource_fields
-            }
+            previous_role = {'owner_id': 'local', 'method_learning': False, **agent['role']}
+            from loom.autonomy.stages import role_signature
+
+            budget_only = role_signature(previous_role) == role_signature(role)
             previous_role_revision = agent["role_revision"]
             # Running contracts stay pinned; semantic role changes invalidate queued work.
             agent.update(
@@ -197,6 +201,9 @@ class AgentStore:
                 next_wake_at=self.now(),
             )
             self.put(db, "agents", agent)
+            from loom.autonomy.stage_commands import reconcile_role_change
+
+            reconcile_role_change(self, db, agent, previous_role, cid)
             if budget_only:
                 # Resource limits do not change the execution contract. Keep
                 # queued packages dispatchable after a budget-only revision.

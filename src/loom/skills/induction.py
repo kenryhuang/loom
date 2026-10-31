@@ -31,6 +31,10 @@ class BudgetStop(ValueError):
     pass
 
 
+class AgentBudgetDeferred(BudgetStop):
+    """Host admission refused the request before any provider call."""
+
+
 class Induction:
     def __init__(self, store, catalog, provider, *, stopped=lambda: False):
         self.store, self.catalog, self.provider, self.stopped = store, catalog, provider, stopped
@@ -63,7 +67,13 @@ class Induction:
             provider = protocol_provider(evaluator_provider(self.provider, output_tokens=settings['output_tokens'],
                                                             timeout_seconds=timeout), protocol, output_mode(self.provider))
             async with asyncio.timeout(timeout):
-                response = (await request_llm_response(provider, [LlmMessage('system', SYSTEM), LlmMessage('user', prompt)], tools=None)).unwrap()
+                reply = await request_llm_response(provider, [LlmMessage('system', SYSTEM), LlmMessage('user', prompt)], tools=None)
+                if not reply.ok and reply.error.code == 'AGENT_BUDGET':
+                    request['state'] = 'not_sent'
+                    usage['calls'] -= 1
+                    usage['tokens'] -= reservation
+                    raise AgentBudgetDeferred(reply.error.message)
+                response = reply.unwrap()
             request['usage'] = asdict(response.usage)
             if response.usage.total_tokens:
                 usage['tokens'] += response.usage.total_tokens - reservation
