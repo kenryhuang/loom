@@ -5,6 +5,8 @@
 
 针对反复校验失败的整体改造，见[Deep Eval 可靠性重构设计](deep-eval-reliability-design.zh-CN.md)。
 该设计的实现以本文及源码为准；真实模型的语义质量仍需单独评测。
+2026-10-31 的历史任务排查、框架事件处理和 incomplete 分类见
+[框架事件与 incomplete 审视记录](deep-eval-framework-audit.zh-CN.md)。
 
 ## 职责边界
 
@@ -33,6 +35,7 @@ flowchart LR
 | `evaluation/rules.py` | 规则类别对应的 scope、severity、disposition 与恢复策略 |
 | `evaluation/repair.py` | 输入级持久化重试额度、自动修复总额与提供方退避 |
 | `evaluation/work_items.py` | settled/deferred 工作、执行与质量状态、显式定向重试 |
+| `evaluation/framework.py` | 框架事件的来源能力、root 归属和语义判断义务 |
 | `evaluation/evidence_delivery.py` | 来源 span、请求 manifest、短句柄、受限 trace 分页 |
 | `goal_loops/graph_decode.py` | JSON/JSONL/旧 group 解码；完整独立行可保留，不补括号或猜字段 |
 | `goal_loops/graph_normalization.py` | 旧字段别名、缺省值及明确的元数据兼容转换；写入审计记录 |
@@ -77,9 +80,22 @@ Graph closure 仅在 `evidence_state=unknown` 时允许省略 `supported_conditi
 宿主生成兼容 citations，文本必须是交付 span。旧 v1 响应仍按原始字面引用校验，
 不模糊匹配或跨 ref 偷换。归纳只收到已接受引文，不能扩展到其未引用上下文。
 引用来源 action 的补齐是宿主已有元数据的规范化，有独立审计，不修改引文或事实内容。
-观察类记录必须有工具结果来源，但来源存在不等于证明其全部语义；贡献度、因果性和
+观察类事实可以由工具结果或明确列出的运行时状态事件支持；运行时状态只证明框架记录了该状态，
+不证明任务产物、模型结论或恢复成功。模型计划、开始事件和历史记忆不自动成为观察。
+观察类恢复经验和工作流步骤仍须有工具结果来源。来源存在不等于证明其全部语义；贡献度、因果性和
 工作流有效性仍是模型基于有限证据的判断。observed 工作流必须逐步提供 observed 来源；
 未执行的新增步骤只能标 proposed。关键证据截断时可请求目录内一个有界 trace page，不能读当前 workspace。
+每个 workflow 顶层及每一步最多选择 8 个句柄，canonical 引用保留它们的去重并集，
+最多 88 条（10 步）；不会再用单条 fact 的 8 条上限拒绝合法步骤证据。
+
+纯 boundary 窗口由宿主直接记录，不调用模型，也不计入语义 unknown。工具调用和验证模型调用
+继续保留判断义务、成本与来源。框架要求的 root 归属独立于旧模型 stage 归属；
+Memory 请求给出每个 stage 的 eligible_key_action_ids，框架边界与 root 专属动作不参与该列表。
+
+重试从 quarantine 恢复候选内容和稳定 ID，不能只给错误摘要；请求到的 trace page
+必须保留在修复请求的 manifest 中。可选 facts/lessons/workflows 可以通过显式
+withdrawals（candidate_id、reason）撤回未获证据支持的候选，原候选和原因留作审计。
+省略记录仍表示未解决；必需 contribution、其他窗口候选和已接受记录不能撤回。
 
 Graph 不允许未来证据、越过任务修订的证据、未知父目标或不合法的阶段归属。
 有效的 action 判断可以独立于失败的 attribution 提交。声明按依赖顺序处理。

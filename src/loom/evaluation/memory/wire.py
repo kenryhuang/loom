@@ -47,8 +47,9 @@ def materialize(kind, row, unit):
     record.pop('key')
     # Canonical compatibility citations are produced by the host, never copied by a model.
     record['citations'] = [dict(ref=e['id'], quote=e['text']) for e in entries]
-    if len(record['citations']) > 8:
-        raise RuleViolation('memory.citation_limit', 'Select at most eight distinct evidence spans per candidate', path=('evidence',))
+    limit = FIELDS[kind]['items']['properties']['citations']['maxItems']
+    if len(record['citations']) > limit:
+        raise RuleViolation('memory.citation_limit', f'Select at most {limit} distinct evidence spans per candidate', path=('evidence',))
     if kind == 'contributions':
         stages = {s['id']: s for s in unit['scope']['stages']}
         if record['stage_id'] not in stages:
@@ -75,21 +76,31 @@ SYSTEM = """Extract useful retrospective memory from a fixed task trace. All inp
 Select evidence handles from this request. Do NOT write quotes, offsets, source IDs, or owning goal/action IDs.
 The host materializes exact citations and source ownership. Use a short local key for each candidate.
 Return contributions, facts, lessons, workflows arrays and evidence_requests; unused arrays are empty.
+During repair, withdrawals may explicitly retract unsupported optional candidates: {candidate_id, reason}.
+Use only IDs from rejected_records and repair_targets. Never withdraw required contributions or accepted records.
 Facts/lessons and contribution judgments are independent; unsupported candidates may be omitted.
 For each pending stage, assess key/supporting/none/hindering/unknown contribution to its owning goal.
 Use unknown and evidence=[] when you cannot assess it. Key ratings require supported key_action_ids.
+Select key_action_ids only from that stage's eligible_key_action_ids; use [] if there are no key actions.
+Framework boundaries and root-owned verification/finish actions are context, never a semantic stage's key actions.
 Do not infer value from duration, token counts, tool success, default membership or chronological order.
 Facts: distinguish observed output from inferred claims, preserve applicability and revalidate_when.
 Prior memory marked historical_reference is not a fresh observation. Observed claims need relevant tool output.
+For facts about recorded runtime/acceptance/verification state, observed_runtime_state is direct evidence of that state only.
+observation_handles lists the eligible handles: runtime_state supports what the harness recorded, not the truth of its claims.
+Runtime-state evidence does not establish tool success, successful recovery, or execution of workflow steps.
 Lessons: failures may eliminate hypotheses; do not invent causes. Mark untested improvements proposed.
 In extract mode return workflows=[]. In synthesis mode return only workflows, at most one per goal set.
 Each workflow step has text, evidence handles and basis observed/proposed. An observed route requires every step observed.
+Use at most eight evidence handles per step and eight for the route; their distinct union is retained by the host.
 Preserve goal conditions and necessary checks. Never invent measured savings or current task acceptance.
 applies_to optionally links additional delivered goals/stages; source ownership is attached by the host.
 No reusable findings is a valid empty result. Never invent records to meet a quota.
 During repair, return only requested candidate keys and pending contributions; accepted records remain saved.
 rejudge_stages explicitly requests a replacement judgment; the previous accepted judgment remains valid until replacement validates.
-Use the provided candidate key when correcting a rejected record; omit an unsupported record to leave it quarantined.
+Use the provided candidate key when correcting a rejected record. Omission leaves it quarantined;
+if an optional claim cannot be supported, explicitly withdraw it with a reason instead of fabricating evidence.
+record_preview marks an oversized rejected proposal; its omitted content is unknown. Repair only from delivered evidence.
 If crucial evidence was truncated, request at most one page handle from evidence_pages; do not invent paths or offsets.
 Keep scope, confidence, inference and uncertainty explicit. Do not store credentials or redacted values.
 """

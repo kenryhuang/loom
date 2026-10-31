@@ -6,6 +6,7 @@ import time
 from copy import deepcopy
 
 from loom.core import ok
+from loom.evaluation.framework import card_policy, semantic_unknown_ids
 from loom.evaluation.goal_loops.attribution import action_attributions
 from loom.evaluation.goal_loops.cards import VERSION as EXTRACTOR
 from loom.evaluation.goal_loops.cards import compile_cards, link_cards
@@ -138,6 +139,13 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
                           unit_id=event.get("analysis_stage"))
 
     reconcile_checkpoint(cp, cards, metadata=judge_cards)
+    # Older checkpoints treated host-only records as failed semantic judgments.
+    # Preserve their saved assessments; repair only the completion bookkeeping.
+    for unit in cp['units'].values():
+        if (terminal(unit) and unit.get('disposition') == 'abstained' and not unit.get('issues')
+                and not unit.get('feedback') and not window_issues(cp, unit)
+                and not set(unit['cards']) & semantic_unknown_ids(cp)):
+            settle(unit, [], accepted=len(unit['cards']))
     # A resumable unit retains its cutoff and bounded read state. Failed earlier
     # groups are retried without exposing judgments from later windows.
     for unit in cp["units"].values():
@@ -175,6 +183,16 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         unit = pending[0]
         subset = [card_map[c] for c in unit["cards"]]
         cutoff = unit["cutoff"]
+        if all(not card_policy(c)['semantic_review'] for c in subset) and not unit.get('feedback'):
+            if unit['id'] not in cp['units']:
+                cp['units'][unit['id']] = unit
+                cp['cursor'] += len(subset)
+            complete_framework_boundaries(cp, cards, unit)
+            unit = cp['units'][unit['id']]
+            settle(unit, window_issues(cp, unit), accepted=len(unit['cards']))
+            await save()
+            pending.pop(0)
+            continue
         # Earlier retries use the state as of their cutoff, not later conclusions.
         # Avoid copying extraction, raw responses, reservations and revision history
         # just to build the bounded semantic view of this window.
@@ -389,7 +407,7 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         errors = window_issues(cp, unit) + errors
         unit.update(complete=not errors, feedback=errors)
         settle(unit, errors, accepted=sum(cid in cp['assessments'] for cid in unit['cards']),
-               unknown=any(cp['assessments'].get(cid, {}).get('status') == 'unknown' for cid in unit['cards']))
+               unknown=bool(set(unit['cards']) & semantic_unknown_ids(cp)))
         cp["conflicts"] = [c for c in cp["conflicts"] if c["batch_id"] != unit["id"]]
         cp["conflicts"] += [dict(batch_id=unit["id"], **e) for e in errors]
         await save()

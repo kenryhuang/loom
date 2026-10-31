@@ -4,7 +4,7 @@ from copy import deepcopy
 
 from jsonschema import Draft202012Validator
 
-from loom.evaluation.goal_loops.attribution import root_owned_card
+from loom.evaluation.framework import card_policy
 from loom.evaluation.goal_loops.coverage import window_issues
 from loom.evaluation.goal_loops.graph_contract import UPDATE_FIELDS
 from loom.evaluation.goal_loops.graph_replay import replay_saved_response
@@ -20,7 +20,7 @@ def complete_framework_boundaries(cp, cards, unit):
     """Host events need no invented semantic utility judgment when omitted."""
     recovered = []
     for card in cards:
-        if card["id"] not in unit["cards"] or card["id"] in cp["assessments"] or card["kind"] != "boundary" or not root_owned_card(card):
+        if card["id"] not in unit["cards"] or card["id"] in cp["assessments"] or card_policy(card)['semantic_review']:
             continue
         row = dict(card_id=card["id"], status="unknown", purpose=f"Framework event: {card['name']}",
                    delta="Recorded framework transition; semantic contribution not assessed",

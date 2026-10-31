@@ -82,6 +82,24 @@ test('history retry action sends an explicit retry_failed operation', async () =
   abort.abort(); dom.window.close();
 });
 
+test('completed memory still exposes explicitly withdrawn proposals and their reasons', () => {
+  const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
+  const root = document.querySelector('main'), data = fixture();
+  data.memory = {status: 'complete', contributions: [], facts: [], lessons: [], workflows: [], limitations: [],
+    coverage: {completed_windows: 1, total_windows: 1, evidence_chars: 30, truncated_slices: 0, errors: []},
+    withdrawn_candidates: [{id: 'candidate:unsupported', unit_id: 'window', kind: 'workflows',
+      withdrawal_reason: 'No evidence of recovery <script>bad()</script>'}]};
+  const view = new IncrementalGraphView(root); view.update(data); click(root, 'Memory');
+  const withdrawn = root.querySelector('[data-key="memory-withdrawn"]');
+  assert.match(withdrawn.textContent, /Withdrawn candidates · 1/);
+  withdrawn.open = true; withdrawn.dispatchEvent(new dom.window.Event('toggle'));
+  assert.match(withdrawn.textContent, /No evidence of recovery/);
+  assert.match(withdrawn.textContent, /candidate:unsupported/);
+  assert.equal(withdrawn.querySelector('script'), null);
+  assert.equal(root.querySelector('.memory-card'), null);
+  dom.window.close();
+});
+
 test('memory opt-in is sent only for supported graph jobs and resets for a new evaluation', async () => {
   const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
   const controller = new AbortController(), options = [], root = document.querySelector('main');

@@ -1,15 +1,8 @@
 """Deterministic tree membership, separate from evidence-backed judgments."""
 
+from loom.evaluation.framework import root_owned_card as root_owned_card
+
 VERSION = "sequential-attribution.2"
-
-
-def root_owned_card(card):
-    """Harness acceptance and final termination concern the effective task root."""
-    return ((card.get("actor") or {}).get("role") == "verification"
-            or (card["kind"] == "tool" and card["name"] == "finish")
-            or (card["kind"] == "boundary" and card["name"].startswith(
-                ("acceptance.", "verification.", "run.completed", "run.failed", "run.stopped",
-                 "task.configured", "task.defined", "task.assessed", "task.decision", "task.outcome", "task.completed"))))
 
 
 def action_attributions(cp, cards):

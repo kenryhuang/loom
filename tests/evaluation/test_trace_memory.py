@@ -6,7 +6,7 @@ import pytest
 from loom.core import ok
 from loom.evaluation.behavior_facts import build_behavior_facts
 from loom.evaluation.goal_loops.graph_projection import project
-from loom.evaluation.memory.evidence import card_evidence
+from loom.evaluation.memory.evidence import card_evidence, refresh_runtime_evidence
 from loom.evaluation.memory.projection import project_memory
 from loom.evaluation.memory.review import commit, messages_for, protocol_for, validate_record
 from loom.llm import LlmResponse, TokenUsage
@@ -384,6 +384,58 @@ def boundary_memory_case(kind="facts"):
             validation="proposed",
         )
     return unit, row
+
+
+@pytest.mark.parametrize('event_type,observed', [
+    ('acceptance.gate.blocked', True),
+    ('acceptance.gate.passed', True),
+    ('acceptance.budget.renewed', True),
+    ('verification.completed', True),
+    ('run.stopped', True),
+    ('run.failed', True),
+    ('verification.started', False),
+    ('acceptance.verifying', False),
+    ('plan.updated', False),
+    ('tool.started', False),
+    ('llm.completed', False),
+])
+def test_runtime_state_supports_observed_facts_without_promoting_intent(event_type, observed):
+    from dataclasses import asdict
+
+    store = source([dict(type=event_type, acceptance={'budget': {'generation': 1}})])
+    ref = asdict(store.ref(store.events[0], 'acceptance.budget.generation'))
+    card = dict(id='verification', kind='model' if event_type == 'llm.completed' else 'boundary',
+                name=event_type, refs=['r'])
+    evidence = card_evidence(store, card, {'r': {'ref': ref}})
+    unit, row = boundary_memory_case()
+    unit['evidence'] = evidence
+    row['citations'] = [dict(ref=evidence[0]['id'], quote='1')]
+    if observed:
+        assert evidence[0]['basis'] == 'observed_runtime_state'
+        assert validate_record('facts', row, unit)['basis'] == 'observed'
+    else:
+        with pytest.raises(ValueError, match='intent alone'):
+            validate_record('facts', row, unit)
+
+    # Retrying a saved window updates provenance only, preserving source spans.
+    if observed:
+        evidence[0]['basis'] = 'recorded_input_or_boundary'
+    before = deepcopy(evidence)
+    refresh_runtime_evidence(unit, store)
+    expected = [{**entry, 'basis': 'observed_runtime_state'} for entry in before] if observed else before
+    assert evidence == expected
+    refreshed = deepcopy(unit)
+    refresh_runtime_evidence(unit, store)
+    assert unit == refreshed
+
+
+@pytest.mark.parametrize('kind', ['lessons', 'workflows'])
+def test_runtime_state_alone_does_not_prove_recovery_or_workflow_execution(kind):
+    unit, row = boundary_memory_case(kind)
+    unit['evidence'][0]['basis'] = 'observed_runtime_state'
+    row['validation'] = 'observed_recovery' if kind == 'lessons' else 'observed'
+    with pytest.raises(ValueError, match='recorded tool output'):
+        validate_record(kind, row, unit)
 
 
 @pytest.mark.parametrize("quote", [

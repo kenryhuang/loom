@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import asdict
 
 from loom.evaluation.evidence_store import text_value
+from loom.evaluation.framework import boundary_event
 from loom.evaluation.goal_loops.facts import identity
 from loom.evaluation.goal_loops.packing import serialized
 
@@ -169,7 +170,7 @@ def compile_cards(source, facts, view):
         cards.append(card)
 
     for record in view["records"]:
-        if record["call_ids"] or not record["type"].startswith(("verification.", "acceptance.", "run.completed", "run.failed", "plan.")):
+        if record["call_ids"] or not boundary_event(record['type']):
             continue
         excerpts = []
         metadata = {}

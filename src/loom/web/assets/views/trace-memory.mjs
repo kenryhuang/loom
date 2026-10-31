@@ -107,4 +107,11 @@ export function renderTraceMemory(view, root) {
         ['Field path', (row.issue.path || []).join('/')], ['Disposition', row.issue.disposition || 'quarantine']]);
     }, false, 'setup-block');
   }, false, 'setup-block');
+  if (memory.withdrawn_candidates?.length) view.details(root, 'memory-withdrawn', `Withdrawn candidates · ${memory.withdrawn_candidates.length}`, body => {
+    body.append(element('p', 'muted', 'These optional proposals were explicitly withdrawn during review and are not available as memory.'));
+    for (const row of memory.withdrawn_candidates) {
+      body.append(element('p', '', `${row.kind} · ${row.withdrawal_reason}`));
+      table(body, ['Field', 'Value'], [['Window', row.unit_id], ['Candidate', row.id]]);
+    }
+  }, false, 'setup-block');
 }

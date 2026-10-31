@@ -145,7 +145,7 @@ async def test_budget_reservation_resume_and_projection_without_model():
     result = await run(store, facts, rid, cp, judge, max_calls=10, batch_rounds=2)
     assert result["coverage"]["pipeline_complete"], cp["conflicts"]
     assert cp["revisions"][:len(first)] == first
-    assert len(judge.requests) == 3  # Two paired actions and terminal boundary.
+    assert len(judge.requests) == 2  # Two paired actions; the host records the terminal boundary.
     assert all(r["state"] == "settled" for r in cp["reservations"])
 
 

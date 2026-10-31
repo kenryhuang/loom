@@ -1,5 +1,6 @@
 """Execution progress and semantic quality are separate, read-only projections."""
 
+from loom.evaluation.framework import semantic_unknown_ids
 from loom.evaluation.rules import policy
 
 VERSION = 'evaluation-status.2'
@@ -24,7 +25,7 @@ def status(cp):
     done = graph_scanned and all(terminal(u) for u in graph) and (not requested or memory.get('execution_complete', memory.get('complete', False)))
     units = graph + (list(memory.get('units', {}).values()) if requested else [])
     issues = list(cp.get('conflicts', [])) + [e for u in memory.get('units', {}).values() for e in u.get('issues', [])]
-    unknown = sum(a.get('status') == 'unknown' for a in cp.get('assessments', {}).values())
+    unknown = len(semantic_unknown_ids(cp))
     unknown += sum(r.get('rating') == 'unknown' for r in memory.get('records', {}).values() if r.get('publication_state') != 'stale')
     quality = bool(issues or unknown or any(u.get('disposition') in {'abstained', 'quarantined', 'exhausted'} for u in units))
     return dict(status_version=VERSION, execution_state='completed' if done else 'paused',
@@ -44,7 +45,7 @@ def retry_failed(cp):
                 unit.setdefault('retry_history', []).append(dict(disposition=unit['disposition'], issues=unit.get('issues', [])))
                 unit.update(work_state='pending', complete=False, retry_requested=True)
                 if 'cards' in unit:
-                    unit['rejudge_cards'] = [cid for cid in unit['cards'] if cp.get('assessments', {}).get(cid, {}).get('status') == 'unknown']
+                    unit['rejudge_cards'] = sorted(set(unit['cards']) & semantic_unknown_ids(cp))
                 unit['retry_generation'] = unit.get('retry_generation', 0) + 1
                 unit.pop('disposition', None)
     if cp.get('memory'):

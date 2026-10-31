@@ -279,7 +279,10 @@ export class EvaluationView {
       const scope = this.savedScope(job);
       const field = (name, value, code = false) => {
         const cell = element("span", "evaluation-history-field");
-        cell.append(element("span", "evaluation-history-field-label", name), element(code ? "code" : "span", "evaluation-history-field-value", value));
+        const text = element(code ? "code" : "span", "evaluation-history-field-value", value);
+        // Selecting an ID must not open the record and replace the selected text.
+        if (code) text.addEventListener("click", event => event.stopPropagation());
+        cell.append(element("span", "evaluation-history-field-label", name), text);
         select.append(cell);
       };
       field(scope.id ? scope.label : "Run scope", scope.id || (scope.key === "snapshot" ? "Snapshot scope" : "Run ID was not recorded"), !!scope.id);

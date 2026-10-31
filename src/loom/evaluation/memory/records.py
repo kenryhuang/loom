@@ -17,7 +17,7 @@ from loom.evaluation.rules import policy
 from loom.llm.api import LlmResponse
 from loom.llm.structured import ProtocolError, parse_response
 
-VALIDATION_VERSION = 'memory-validation.7'
+VALIDATION_VERSION = 'memory-validation.8'
 
 
 def commit_records(memory, unit, response, *, schema=None, finish_reason=None):
@@ -59,7 +59,7 @@ def commit_records(memory, unit, response, *, schema=None, finish_reason=None):
         reject(issue("response.object", "Return a memory object with contributions, facts, lessons and workflows arrays", category="format", phase="decode"))
         return errors
     schema = schema if schema is not None else protocol_for(unit).schema
-    if set(value) - (set(FIELDS) | ({'evidence_requests'} if anchored else set())):
+    if set(value) - (set(FIELDS) | ({'evidence_requests', 'withdrawals'} if anchored else set())):
         reject(issue("response.fields", "Unknown memory fields; allowed: contributions, facts, lessons, workflows", category="format", phase="decode"))
     accepted_stages = {r["stage_id"] for r in memory["records"].values()
                        if r["unit_id"] == unit["id"] and r["kind"] == "contributions"
@@ -158,6 +158,28 @@ def commit_records(memory, unit, response, *, schema=None, finish_reason=None):
                             and isinstance(rejected.get('record'), dict)
                             and rejected['record'].get('stage_id') == record['stage_id']):
                         unit.setdefault('resolved_candidates', []).append(quarantine.pop(rejected_id))
+    if anchored and value.get('withdrawals'):
+        # Withdrawing an optional unsupported proposal is explicit and audited;
+        # omission alone never discards a failure or a required stage judgment.
+        try:
+            withdrawal_schema = schema['properties'].get('withdrawals', dict(type='array', maxItems=0))
+            validate_schema(value['withdrawals'], withdrawal_schema)
+            for withdrawal in value['withdrawals']:
+                cid = withdrawal['candidate_id']
+                rejected = quarantine.get(cid)
+                if (not rejected or cid not in unit.get('repair_targets', []) or rejected['unit_id'] != unit['id']
+                        or rejected['kind'] not in {'facts', 'lessons', 'workflows'}
+                        or any(e.get('candidate_id') == cid for e in errors)
+                        or not withdrawal['reason'].strip()):
+                    raise RuleViolation('memory.withdrawal_scope', 'Withdraw only an unresolved optional candidate requested in this repair; give a reason',
+                                        path=('withdrawals',))
+            for withdrawal in value['withdrawals']:
+                cid = withdrawal['candidate_id']
+                if cid in quarantine:
+                    unit.setdefault('withdrawn_candidates', []).append(dict(
+                        **quarantine.pop(cid), withdrawal_reason=sanitize(withdrawal['reason']), validation_version=VALIDATION_VERSION))
+        except RuleViolation as exc:
+            reject(exc.issue, 'withdrawals')
     if unit["mode"] == "extract":
         missing = sorted({s["id"] for s in unit["scope"]["stages"]} - accepted_stages)
         if missing:

@@ -1850,6 +1850,7 @@ section.setup-block { padding: 20px; }
 .evaluation-history-field { display:grid; align-content:start; gap:6px; min-width:0; }
 .evaluation-history-field-label { color:var(--muted); font-size:11px; }
 .evaluation-history-field-value { font-size:12px; overflow-wrap:anywhere; white-space:normal; }
+.evaluation-history-field code { -webkit-user-select:text; user-select:text; cursor:text; }
 .evaluation-history-status { display:flex; justify-content:center; min-width:0; }
 .evaluation-history-actions { display:grid; grid-template-columns:80px 76px; gap:8px; align-items:center; }
 .evaluation-history-actions button { min-height:34px; padding:7px 12px; font-size:12px; }

@@ -4,9 +4,18 @@ import re
 
 from loom.diagnostics.evidence import SECRET, redact
 from loom.evaluation.evidence_store import text_value
+from loom.evaluation.framework import RUNTIME_STATE_EVENTS
 from loom.evaluation.goal_loops.facts import identity
 
 SKIP = {"messages", "reasoning", "reasoning_content", "image", "image_url", "data", "base64"}
+
+
+def refresh_runtime_evidence(unit, source):
+    """Recover runtime-state provenance for saved windows when they are retried."""
+    for entry in [*unit.get('legacy_evidence', []), *unit['evidence'], *unit.get('pages', {}).values()]:
+        if (entry['basis'] == 'recorded_input_or_boundary'
+                and source.event(entry['ref']).event_type in RUNTIME_STATE_EVENTS):
+            entry['basis'] = 'observed_runtime_state'
 
 
 def sanitize(value):
@@ -73,6 +82,8 @@ def card_evidence(source, card, registry):
                 if card["kind"] == "model"
                 else "observed_output"
                 if event_type in {"tool.completed", "tool.failed"}
+                else "observed_runtime_state"
+                if event_type in RUNTIME_STATE_EVENTS
                 else "recorded_input_or_boundary"
             )
             result.append(dict(id=key, ref=pointer, text=snippet, action_id=card["id"], basis=basis, truncated=end - start < len(text), redacted=clean != text))

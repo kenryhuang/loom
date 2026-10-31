@@ -29,6 +29,9 @@ def validate_record(kind, row, unit):
             raise RuleViolation("memory.key_action_scope", "Unknown key action", path=("key_action_ids",))
         for cid in row["key_action_ids"]:
             action = next(c for c in unit["scope"]["actions"] if c["id"] == cid)
+            if not action.get('framework', {}).get('stage_key_action', action.get('kind') != 'boundary'):
+                raise RuleViolation("memory.key_action_framework", "Framework records and root-owned actions cannot be stage key actions",
+                                    path=("key_action_ids",))
             if not any(m["stage_id"] == row["stage_id"] for m in action["memberships"]):
                 raise RuleViolation("memory.key_action_membership", "Key action is not attributed to this stage", path=("key_action_ids",))
         if row["rating"] == "key" and not row["key_action_ids"]:
@@ -78,8 +81,12 @@ def validate_record(kind, row, unit):
             or kind == "workflows"
             and row["validation"] == "observed"
         )
-        if observed and not any(e["basis"] == "observed_output" for e in cited):
-            raise RuleViolation("memory.observation_required", "Observed memory requires recorded tool output; intent alone is not observation",
+        observation_bases = {"observed_output"}
+        if kind == "facts":
+            observation_bases.add("observed_runtime_state")
+        if observed and not any(e["basis"] in observation_bases for e in cited):
+            requirement = "recorded tool output or runtime-state evidence" if kind == "facts" else "recorded tool output"
+            raise RuleViolation("memory.observation_required", f"Observed memory requires {requirement}; intent alone is not observation",
                 path=("citations",))
     elif cited:
         related = {a["id"] for a in unit["scope"]["actions"] if any(m["stage_id"] == row["stage_id"] for m in a["memberships"])}

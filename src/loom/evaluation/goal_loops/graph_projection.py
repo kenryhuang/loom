@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 
+from loom.evaluation.framework import card_policy, semantic_unknown_ids
 from loom.evaluation.goal_loops import SCHEMA
 from loom.evaluation.goal_loops.attribution import VERSION as ATTRIBUTION_VERSION
 from loom.evaluation.goal_loops.attribution import action_attributions
@@ -232,7 +233,8 @@ def project(source, facts, run_id, checkpoint, extraction=None):
         framework_attributed_cards=len(framework),
         default_attributed_cards=sum(r["basis"] == "default_rule" for r in attributions),
         pending_cards=len(pending),
-        unknown_cards=sum(a["status"] == "unknown" for a in cp["assessments"].values()),
+        unknown_cards=len(semantic_unknown_ids(cp)),
+        recorded_boundary_cards=sum(not card_policy(c)['semantic_review'] for c in cards),
         pending_card_ids=sorted(pending),
         eligible_calls=len(view["atoms"]),
         assigned_calls=len(assigned),

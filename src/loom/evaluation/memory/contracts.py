@@ -8,6 +8,8 @@ from loom.llm.structured import StructuredProtocol
 TEXT = dict(type="string", minLength=1, maxLength=1200)
 SHORT = dict(type="string", minLength=1, maxLength=240)
 CITATIONS = rows(dict(ref=ID, quote=dict(type="string", minLength=1, maxLength=400)), 8)
+# A route can cite eight spans globally and eight for each of its ten steps.
+WORKFLOW_CITATION_LIMIT = 8 + 10 * 8
 COMMON = dict(
     title=SHORT, summary=TEXT, scope=TEXT, confidence=dict(enum=["high", "medium", "low"]), goal_ids=IDS, stage_ids=IDS, action_ids=IDS, citations=CITATIONS
 )
@@ -38,7 +40,7 @@ FIELDS = dict(
     ),
     workflows=rows(
         dict(
-            **COMMON,
+            **{**COMMON, 'citations': {**CITATIONS, 'maxItems': WORKFLOW_CITATION_LIMIT}},
             preconditions=TEXT,
             steps=dict(type="array", items=TEXT, minItems=1, maxItems=10),
             avoid=TEXT,
@@ -64,6 +66,8 @@ Judge only supplied actions; this may be one slice of a longer stage. Failed exp
 Do not treat tool success, duration, token cost, default membership or chronological order as contribution proof.
 2. Extract material environment facts, configuration, investigated capabilities and project facts.
 Separate observed tool output from model claims/inference. Commands describe intent, not what exists.
+observed_runtime_state supports facts about recorded runtime/acceptance/verification state only;
+it does not establish tool success, successful recovery, or execution of workflow steps.
 Memory search/read results marked historical_reference are prior claims, not fresh observations of the current environment.
 Do not turn retrieved memories into new observed facts merely because the retrieval tool succeeded.
 Record exact applicability (host/workspace/version/time as known), unknown scope explicitly, and when to revalidate.
@@ -120,8 +124,22 @@ def protocol_for(unit):
                     array['items'] = {'$ref': '#/$defs/evidence_handle'}
                 else:
                     array['maxItems'] = 0
+        delivered = set(unit.get('manifest', {}).get('handles', {}).values())
+        bases = {e['basis'] for e in unit.get('evidence', []) if e['id'] in delivered}
+        if not bases & {'observed_output', 'observed_runtime_state'}:
+            schema['properties']['facts']['items']['properties']['basis']['enum'] = ['inferred']
+        if 'observed_output' not in bases:
+            schema['properties']['lessons']['items']['properties']['validation']['enum'] = ['proposed']
+            workflow = schema['properties']['workflows']['items']['properties']
+            workflow['validation']['enum'] = ['proposed']
+            workflow['steps']['items']['properties']['basis']['enum'] = ['proposed']
         schema['properties']['evidence_requests'] = dict(type='array', items=ID, maxItems=0 if unit.get('page_reads') else 1)
         schema['required'].append('evidence_requests')
+        candidates = [r['id'] for r in unit.get('rejected_records', [])
+                      if r.get('kind') in {'facts', 'lessons', 'workflows'} and r['id'] in unit.get('repair_targets', [])]
+        schema['properties']['withdrawals'] = rows(dict(
+            candidate_id=dict(type='string', enum=candidates) if candidates else ID,
+            reason={**TEXT, 'minLength': 1}), min(16, len(candidates)))
         version = 2
     pending = pending_stage_ids(unit)
     if unit["mode"] == "extract":

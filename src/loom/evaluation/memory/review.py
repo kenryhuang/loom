@@ -10,10 +10,10 @@ from loom.evaluation.goal_loops.attribution import action_attributions
 from loom.evaluation.goal_loops.facts import identity
 from loom.evaluation.issues import EvaluationFailure, describe, issue, provider_failure, request_budget_failure, request_failure_event, request_timeout, stopped
 from loom.evaluation.memory.contracts import protocol_for
-from loom.evaluation.memory.evidence import card_evidence, sanitize
+from loom.evaluation.memory.evidence import card_evidence, refresh_runtime_evidence, sanitize
 from loom.evaluation.memory.lifecycle import VERSION, dependencies, migrate
 from loom.evaluation.memory.records import VALIDATION_VERSION, commit, commit_records, replay_admission
-from loom.evaluation.memory.request import focus_repair, memory_input, messages_for, scope
+from loom.evaluation.memory.request import focus_repair, memory_input, messages_for, repair_context, scope
 from loom.evaluation.memory.validation import validate_record
 from loom.evaluation.provider import evaluator_provider
 from loom.evaluation.repair import provider_retry, reserve_repair
@@ -45,6 +45,15 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
 
     async def evaluate(unit):
         nonlocal mode
+        if unit.get('retry_requested') or unit.get('repair_targets'):
+            # An earlier empty repair clears rejected_records, but not quarantine.
+            # Restore the actual candidates and their stable keys for every retry.
+            repair_context(unit, memory)
+        if unit.get('retry_requested'):
+            unit.pop('delivery_span_ids', None)
+        if unit['mode'] == 'extract':
+            subset = [c for c in cards if c['id'] in {a['id'] for a in unit['scope']['actions']}]
+            unit['scope'] = scope(cp, subset, memberships)
         if unit.get('dependency_changed'):
             unit.pop('delivery_span_ids', None)
             subset = [c for c in cards if c['id'] in {a['id'] for a in unit['scope']['actions']}]
@@ -63,8 +72,9 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
                 unit['evidence'] = cited_evidence(inputs, [memory['units'][r['unit_id']] for r in inputs])
                 unit.pop('delivery_span_ids', None)
             unit.pop('dependency_changed')
+        refresh_runtime_evidence(unit, source)
         prepare(unit)
-        if unit.get('repair_targets'):
+        if unit.get('repair_targets') and not unit.get('requested_pages'):
             focus_repair(unit)
         unit.setdefault('pages', page_catalog(unit, source) if unit['mode'] == 'extract' else {})
         while not terminal(unit):
@@ -249,6 +259,8 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
                         raise stopped('budget.evidence_chars', 'Memory evidence page exceeds total evidence capacity', category='budget', stage='memory')
                     memory['read_chars'] += chars
                     unit['evidence'] += extra
+                    if unit.get('delivery_span_ids') is not None:
+                        unit['delivery_span_ids'] += [e['id'] for e in extra]
                     unit['page_reads'] = 1
                     prepare(unit)
                 except RuleViolation as exc:
@@ -256,10 +268,9 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
                     unit.pop('repair_reserved', None)
                     await persist()
                     continue
-            rejected = [r for r in memory['quarantine'].values() if r['unit_id'] == unit['id']]
-            unit['repair_targets'] = [r['id'] for r in rejected]
-            unit['rejected_records'] = rejected
-            focus_repair(unit)
+            repair_context(unit, memory)
+            if not unit.get('requested_pages'):
+                focus_repair(unit)
             unit.update(work_state='pending', complete=False)
             await persist()
             await evaluate(unit)

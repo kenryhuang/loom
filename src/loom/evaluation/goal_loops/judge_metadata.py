@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict
 
 from loom.evaluation.evidence_store import text_value
+from loom.evaluation.framework import card_policy
 from loom.evaluation.goal_loops.facts import identity
 from loom.evaluation.goal_loops.graph_normalization import terminal_metadata_records as terminal_metadata_records
 from loom.evaluation.goal_loops.packing import serialized
@@ -98,6 +99,7 @@ def card_metadata(source, card, registry):
     return dict(
         **{key: card[key] for key in ("id", "kind", "name", "status", "start_line", "end_line")},
         usage_role=(card.get("actor") or {}).get("role", "unknown"),
+        framework=card_policy(card),
         fields=fields,
         refs=list(dict.fromkeys(f["ref"] for f in fields)),
         **({"caller_card_id": card["caller_card_id"]} if card.get("caller_card_id") else {}),
