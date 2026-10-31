@@ -2276,9 +2276,9 @@ section.setup-block { padding: 20px; }
 .goal-tree-time-track.is-unknown { background:repeating-linear-gradient(135deg,transparent,transparent 4px,var(--line) 4px,var(--line) 6px); }
 .goal-tree-time-track.is-partial .goal-tree-time-fill { background:repeating-linear-gradient(135deg,var(--accent),var(--accent) 4px,color-mix(in srgb,var(--accent) 65%,var(--panel)) 4px,color-mix(in srgb,var(--accent) 65%,var(--panel)) 6px); }
 .goal-tree-time-legend { color:var(--muted); font-size:12px; line-height:1.5; margin:8px 0 12px; }
-.goal-tree-content { padding:0 12px 12px; min-width:0; overflow-wrap:anywhere; }
+.goal-tree-content { padding:0 4px 12px; min-width:0; overflow-wrap:anywhere; }
 .goal-tree-content:empty { padding:0; }
-.goal-tree-children { padding-left:16px; border-left:1px solid var(--line); margin-left:5px; min-width:0; }
+.goal-tree-children { padding-left:7px; min-width:0; }
 .goal-tree-goal > summary { background:color-mix(in srgb,var(--accent) 5%,transparent); border-radius:8px; }
 .goal-tree-stage > summary { font-size:13px; }
 .goal-tree-action > summary { font-size:12px; }
@@ -2289,8 +2289,8 @@ section.setup-block { padding: 20px; }
 .goal-process-tree .base-table-scroll,.goal-acceptance .base-table-scroll { max-width:100%; overflow:auto; }
 .goal-acceptance { padding:8px 0; min-width:0; }
 @media (max-width:700px) {
-  .goal-tree-children { padding-left:8px; margin-left:0; }
-  .goal-tree-content { padding:0 8px 8px; }
+  .goal-tree-children { padding-left:calc(8px / 3); }
+  .goal-tree-content { padding:0 calc(8px / 3) 8px; }
   .goal-tree-metrics { grid-column:1; grid-row:auto; width:100%; }
   .goal-tree-heading { grid-template-columns:minmax(0,1fr); gap:6px; }
 }
