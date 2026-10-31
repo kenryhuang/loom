@@ -36,6 +36,15 @@ class AutonomyService:
         result["budget"] = BudgetLedger(self.store.sessions.path).summary(aid)
         result["learning_budget"] = BudgetLedger(self.store.sessions.path, clock=self.store.clock).learning_summary(aid)
         result["pause_pending"] = result["state"] in {"paused", "archived"} and any(s["session_id"] in self.service.active for s in result["sessions"])
+        result["pending_decisions"] = []
+        with self.store.sessions.transaction() as db:
+            rows = db.execute(
+                "SELECT a.session_id,a.work_package_id,a.taken_over,json_extract(s.body,'$.input_request') AS request,"
+                "json_extract(s.body,'$.task.revision') AS task_revision,json_extract(s.body,'$.task.objective') AS objective "
+                "FROM agent_sessions a JOIN sessions s ON s.id=a.session_id WHERE a.agent_id=? "
+                "AND json_extract(s.body,'$.deleted_at') IS NULL AND json_extract(s.body,'$.input_request.state')='pending'", (aid,),
+            )
+            result["pending_decisions"] = [{**dict(row), "request": json.loads(row["request"]), "taken_over": bool(row["taken_over"])} for row in rows]
         return result
 
     def control(self, aid, body):
@@ -293,7 +302,7 @@ class AutonomyService:
             return self.learning_command(aid, route[1], body)
         if method != "GET":
             raise ServiceError("Unknown Agent route", 404)
-        if route == ["memory"]:
+        if route in (["memory"], ["memory", "library"]):
             from loom.memory.store import MemoryStore
 
             agent = self.store.snapshot(aid)
@@ -303,9 +312,24 @@ class AutonomyService:
                     raise ServiceError("Select an owned Session for memory without workspace")
             else:
                 sid = ""
-            return MemoryStore(self.store.sessions.path, workspace=agent["role"]["working_directory"], session_id=sid).search(
-                query.get("query", [agent["role"]["role_text"]])[0]
-            )
+            memory = MemoryStore(self.store.sessions.path, workspace=agent["role"]["working_directory"], session_id=sid)
+            if route == ["memory", "library"]:
+                try:
+                    offset, limit = int(query.get("offset", ["0"])[0]), int(query.get("limit", ["20"])[0])
+                except ValueError as exc:
+                    raise ServiceError("Invalid memory library pagination") from exc
+                result = memory.browse(query=query.get("query", [""])[0], kind=query.get("kind", [""])[0],
+                                       review=query.get("review", [""])[0], offset=offset, limit=limit)
+                # Review commands use this Agent's revision even when workspace annotations are shared.
+                with self.store.sessions.transaction() as db:
+                    for record in result["records"]:
+                        source = record["source"]
+                        source["annotation_revision"] = db.execute(
+                            "SELECT COALESCE(MAX(revision),0) FROM memory_annotations WHERE agent_id=? AND evaluation_id=? AND record_id=?",
+                            (aid, source["evaluation_id"], source["record_id"]),
+                        ).fetchone()[0]
+                return result
+            return memory.search(query.get("query", [agent["role"]["role_text"]])[0])
         if route == ["profile"]:
             snapshot = self.snapshot(aid)
             return dict(role=snapshot["role"], entries=snapshot["guidance"])

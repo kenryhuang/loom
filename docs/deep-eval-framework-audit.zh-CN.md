@@ -85,3 +85,33 @@ partial、框架动作归属、证据类别能力、十步 workflow 引用、空
 仅靠来源存在和字段规则无法完全验证事实语义、因果关系、恢复有效性或工作流优化收益。
 自动修复仍受总调用预算和输入级次数限制；显式撤回解决的是可选错误提案的收敛，
 不保证任意不完整 trace 都能变为 ready。
+
+## 后续修复：历史必需贡献与新 scope 冲突
+
+同日继续检查上述评估的 `memory:extract:4a643432560705ffe235dc33`，发现之前的重构
+漏掉了历史义务迁移：当前窗口已没有需要评价贡献的 stage，但旧 quarantine 仍要求修复
+`finish_architecture_report`。提交贡献会撞上 `contributions.maxItems=0`，撤回又因必需贡献
+不可撤回而失败，空响应则保留原来的 `memory.key_action_membership`。增加预算无法解决此循环。
+
+现在由 `evaluation/memory/obligations.py` 确定性协调：仅当旧 stage 已不在当前 scope、
+历史成员可追溯且全部属于框架上下文或 root 专属动作时，将旧候选标为 `not_applicable`。
+原候选及原因保存在独立审计记录中，页面显示已取消的框架判断义务；不会将它发布为有效记忆。
+真实语义动作、未知 stage、缺失动作证据、在途响应和其他错误均不适用此迁移。
+正常加载/重试在完成状态短路之前执行协调。
+
+已停止任务也可使用下列命令预览，再加 `--apply` 保存：
+
+```sh
+.venv/bin/python -m loom.service.evaluation_reconciliation \
+  --data-dir runs/service \
+  --evaluation-id evaluation_b100291734684397a4776678bb7f2a1e
+```
+
+该命令拒绝运行中任务，在事务内校验原始来源摘要、备份完整旧任务并重建结果 artifact，
+不启动模型或重启服务。此次已应用到上述评估并通过实时 API 复核：隔离候选从 1 变为 0，
+67 条已发布记录保留，调用量仍为 74。结果为 `execution_state=completed`、
+`result_state=partial`、`pending_work=0`、`unknown_judgments=1`。
+剩余判断涉及读取 package.json 的意图，固定 trace 中没有对应成功执行的工具输出；该缺口保留。
+
+新增回归覆盖协调幂等性、正常重新加载与显式重试零调用完成、拒绝迁移真实语义动作及在途响应、
+其他错误保留、停止任务 artifact 重建和备份、页面审计展示。

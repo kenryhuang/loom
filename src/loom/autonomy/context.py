@@ -60,6 +60,10 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
         long_term_objectives=role["long_term_objectives"],
         source_routes=pinned["source_routes"],
         role_methods=role["methods"],
+        decision_policy=("When a material execution choice depends on missing human preferences or conflicting requirements, "
+                         "use request_input with a concrete question, alternatives and their tradeoffs. "
+                         "Proceed autonomously on routine implementation choices. Retrospective analysis alternatives are suggestions, "
+                         "not pending human decisions. Human answers guide the current task; only explicit persistent guidance applies across tasks."),
         goal=goal,
         work_package_id=work["id"] if work else None,
         guidance=[dict(id=e["id"], text=e["text"], source="human", scope=e["scope"]) for e in entries],

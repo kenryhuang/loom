@@ -8,6 +8,29 @@ from loom.service.store import SessionStore
 from tests.memory.helpers import fact, seed
 
 
+def test_review_library_browses_beyond_runtime_search_and_keeps_scope(tmp_path):
+    store = SessionStore(tmp_path / 'data')
+    workspace = tmp_path / 'project'
+    records = [{**fact(f'fact-{index:02}'), 'title': f'Fact {index}'} for index in range(25)]
+    records.append({**fact('method'), 'kind': 'workflows', 'steps': ['Inspect identifiers'], 'validation': 'proposed'})
+    seed(store, workspace, records=records)
+    seed(store, tmp_path / 'other', evaluation='private')
+    memory = MemoryStore(store.path, workspace=workspace)
+    page = memory.browse(kind='facts', review='unreviewed', limit=20)
+    assert page['total'] == 25 and len(page['records']) == 20 and page['next_offset'] == 20
+    following = memory.browse(kind='facts', offset=20)
+    assert len(following['records']) == 5 and following['next_offset'] is None
+    assert not {r['id'] for r in page['records']} & {r['id'] for r in following['records']}
+    method = memory.browse(kind='workflows')['records'][0]
+    assert method['steps'] == ['Inspect identifiers'] and method['citations']
+    assert not memory.browse(query='unrelated-payments')['records']
+    assert not memory.browse(review='reviewed')['records']
+    assert all(r['source']['evaluation_id'] == 'eval-memory' for r in memory.browse(limit=50)['records'])
+    for arguments in ({'limit': 500}, {'offset': -1}, {'review': 'approved'}, {'kind': 'unknown'}):
+        with pytest.raises(MemoryError):
+            memory.browse(**arguments)
+
+
 def test_quarantined_stale_and_legacy_unverified_records_never_enter_runtime_search(tmp_path):
     store = SessionStore(tmp_path / 'data')
     good = {**fact('published'), 'publication_state': 'published'}

@@ -63,7 +63,13 @@ API 中的 Role 示例（替换为真实目录）：
 
 记忆仍限制在同 workspace；没有 workspace 时只允许同 Session。人工可认可、拒绝、更正、限定范围、打标签、置顶、停用和恢复。标注为覆盖层，保留原始提取和 trace；更正标为 `human_asserted`，认可不会将推断改成观察。相同来源再次提取不能绕过拒绝。摘要注入、memory_search/read 和页面共用有效视图；源删除后失效。
 
-「工作方式」支持仅当前任务或长期指导、锁定/停用/恢复、手工方法文本与工作目录内 UTF-8 文档导入。文档按当时内容形成不可变版本，后续文件修改不会悄悄改变已导入方法。方法复用现有 Skill 版本存储，采用状态为 `user_guidance`，不伪造可执行验证或 active Skill。
+「学习」统一组织待人工决策、已学知识与审核、人工原则与方法，以及学习记录与追溯。「工作方式」保留角色定位与角色配置入口。已学知识默认列出当前 workspace 中的有效事实、经验和方法，可按类型、审核状态和关键词筛选并分页；没有 workspace 时必须选择一个归属当前 Agent 的 Session。每条内容可展开原始引用、适用条件、方法步骤与验证状态，不再仅展示与角色描述匹配的少量检索结果。
+
+未审核内容保留评估给出的 `confidence`。人工确认或更正后，覆盖层增加 `human_review`、`review_state`、`effective_confidence=high` 与 `confidence_basis=human_review`，检索优先参考相关的人工审核内容；原评估置信度、引用与原始记录保持不变。这些字段同时进入 context、memory_search/read 和页面。添加标签、限定范围或置顶本身不等于确认内容有效。人工审核提高的是历史参考的可信度，不表示当前任务已通过验收，也不会将推断或提案变成已观察的执行结果。
+
+「人工原则与方法」支持仅当前任务或长期指导、停用/恢复、手工方法文本与工作目录内 UTF-8 文档导入。文档按当时内容形成不可变版本，后续文件修改不会悄悄改变已导入方法。方法复用现有 Skill 版本存储，采用状态为 `user_guidance`，不伪造可执行验证或 active Skill。
+
+执行中的决策入口复用 `request_input(question, options)`：当重要选择缺少用户偏好或约束时，执行器提交具体问题及方案，学习页展示所属 Session 的待答问题。用户可选择建议项并补充说明，点击提交后通过原有 `answer_input` 命令恢复当前任务；问题 ID 和任务版本用于拒绝过期回答。回答默认作用于当前任务，不自动升级为长期原则。涉及工具副作用不确定的 recovery 问题仍在 Session 页面核实处理。Analysis 中的替代方案、改进建议属于事后复盘，可以作为人工原则的材料；当前不会自动将这些历史建议转成阻塞执行的待答问题。
 
 实际生效的 ContextSnapshot 可在「学习」查看。运行中的指导不会改写已经发送的模型请求或尚未完成的工具交换，而是在 `before_llm` 替换管理块并记录 `context.updated`。记忆检索只表示看到了参考；模型通过 `agent_record_use` 关联真实已完成动作时，记录模型声明的采用，仍不声称因果改善。
 
@@ -112,12 +118,14 @@ command ID 支持相同输入重放、不同输入冲突；人工修订携带 ex
 | `runs`、`work-packages`、`routes`、`sessions` | 编排和执行关联 |
 | `sessions/{session}/commands` | bind / takeover / release |
 | `learning`、`learning/{cycle}/commands` | 学习进度、retry / cancel |
-| `memory`、`memory/annotations` | 有效检索、标注与标注历史 |
+| `memory`、`memory/library`、`memory/annotations` | 运行时检索、分页审核知识库、标注与标注历史 |
 | `guidance`、`profile`、`profile/commands`、`methods/import` | 明确偏好、方法版本与采用 |
 | `context`、`context/{snapshot}`、`artifacts/{digest}` | 实际输入及归属校验 |
 | `events?after={cursor}` | 顺序事件追赶，每次最多 200 条 |
 
 历史列表支持 `offset` / `limit`（最多 200），返回 `next_offset`。页面当前按快照轮询，服务事件游标可供其他客户端增量追赶。
+
+`memory/library` 支持 `query`、`kind`（facts / lessons / workflows）、`review`（unreviewed / reviewed）、`offset` / `limit`（默认 20，最多 50）；无 workspace 时传 `session_id`。扫描仍限制为最近 500 条范围内的有效来源，并通过 `truncated` 标识。Agent 快照中的 `pending_decisions` 提供实际待答问题及任务版本，回答沿用 `/v1/sessions/{session}/commands`。
 
 ## 验证与当前范围
 

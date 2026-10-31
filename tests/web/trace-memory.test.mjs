@@ -100,6 +100,22 @@ test('completed memory still exposes explicitly withdrawn proposals and their re
   dom.window.close();
 });
 
+test('retired framework obligations are audited separately from accepted memories', () => {
+  const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
+  const root = document.querySelector('main'), data = fixture();
+  data.memory = {status: 'complete', contributions: [], facts: [], lessons: [], workflows: [], limitations: [],
+    coverage: {completed_windows: 1, total_windows: 1, evidence_chars: 0, truncated_slices: 0, errors: []},
+    retired_candidates: [{id: 'legacy', unit_id: 'window', stage_id: 'stage', resolution: 'not_applicable',
+      resolution_reason: 'Only framework members remain.'}]};
+  const view = new IncrementalGraphView(root); view.update(data); click(root, 'Memory');
+  const retired = root.querySelector('[data-key="memory-retired"]');
+  retired.open = true; retired.dispatchEvent(new dom.window.Event('toggle'));
+  assert.match(retired.textContent, /Only framework members remain/);
+  assert.match(retired.textContent, /claims were not accepted/);
+  assert.equal(root.querySelector('.memory-card'), null);
+  dom.window.close();
+});
+
 test('memory opt-in is sent only for supported graph jobs and resets for a new evaluation', async () => {
   const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
   const controller = new AbortController(), options = [], root = document.querySelector('main');

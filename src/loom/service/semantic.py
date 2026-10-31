@@ -293,7 +293,8 @@ class SessionSemantic:
             "running": [{key: job.get(key) for key in ("id", "session_id", "model", "stage")} for job in jobs if job["state"] == "running"],
         }
 
-    def _result(self, body, source, factual, semantic):
+    @staticmethod
+    def _result(body, source, factual, semantic):
         if body.get("analysis_version") in GOAL_ENGINES:
             report = semantic.get("report")
             if report and isinstance(report.get("text"), str):

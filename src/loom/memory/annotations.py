@@ -102,6 +102,8 @@ def effective(rows, annotations, suppressions):
                 record.setdefault("tags", []).append(annotation["value"])
             elif kind == "confirm":
                 record["human_confirmed"] = True
+            if kind in {"confirm", "correct"}:
+                record["human_review"] = {key: annotation[key] for key in ("id", "kind", "actor", "agent_id", "created_at")}
             applied.append(annotation["id"])
         if not hidden:
             source["annotation_ids"] = applied

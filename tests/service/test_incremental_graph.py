@@ -12,6 +12,64 @@ from tests.evaluation.test_incremental_graph import GraphJudge
 from tests.service.test_semantic import evaluation, wait_job  # noqa: F401
 
 
+def test_stopped_framework_reconciliation_republishes_result_without_model_or_claim_changes(evaluation):  # noqa: F811
+    import time
+
+    from loom.service.evaluation_reconciliation import reconcile
+    from tests.evaluation.test_memory_obligations import obsolete_candidate
+
+    store, trajectory, manager, _, sid, _ = evaluation
+    def finish(state, emit, db):
+        state['run']['state'] = 'completed'
+        emit('run.completed', {'status': 'completed'})
+    store.update(sid, finish)
+    aid = trajectory.start(sid)['id']
+    deadline = time.monotonic() + 10
+    while trajectory.get(sid, aid)['state'] != 'completed':
+        assert time.monotonic() < deadline
+        time.sleep(.01)
+    judge = GraphJudge()
+    manager.provider_factory = lambda _: judge
+    started = manager.start(sid, aid, dict(analysis_version='goal_graph_v1', run_id='r', batch_rounds=2, max_calls=10))
+    wait_job(manager, sid, aid, started['id'])
+    job = manager._load(sid, aid, started['id'])
+    cp = job['checkpoint']
+    boundary = next(c for c in cp['extraction']['cards'] if c['kind'] == 'boundary')
+    sid_stage = next(iter(cp['stages']))
+    cp['assessments'][boundary['id']]['stage_ids'] = [sid_stage]
+    candidate = obsolete_candidate('legacy-window', sid_stage, boundary['id'])
+    cp['memory_requested'] = True
+    cp['memory'] = dict(execution_complete=True, complete=False, cursor=len(cp['extraction']['cards']), records={},
+                        quarantine={candidate['id']: candidate}, read_chars=0, units={
+        'legacy-window': dict(id='legacy-window', mode='extract', work_state='settled', disposition='quarantined', complete=False,
+            scope=dict(goals=[], stages=[cp['stages'][sid_stage]], actions=[dict(id=boundary['id'], memberships=[])]),
+            issues=[candidate['issue']], errors=[candidate['error']], evidence=[], accepted_records=[])})
+    job.update(state='incomplete', error=candidate['error'])
+    manager._save(job)
+    original = deepcopy(job)
+    count = len(judge.requests)
+    preview = reconcile(store, job['id'])
+    assert preview['retired_candidates'] == [candidate['id']] and not preview['applied']
+    assert manager._load(sid, aid, job['id']) == original
+    applied = reconcile(store, job['id'], apply=True)
+    assert applied['applied'] and applied['model_calls'] == 0
+    saved = manager._load(sid, aid, job['id'])
+    assert saved['usage'] == original['usage'] and saved['checkpoint']['responses'] == original['checkpoint']['responses']
+    assert saved['checkpoint']['assessments'] == original['checkpoint']['assessments']
+    assert saved['state'] == 'completed' and saved['error'] is None
+    result = manager.get(sid, aid, job['id'])['evaluation']
+    assert result['memory']['coverage']['quarantined_records'] == 0
+    assert result['memory']['retired_candidates'][0]['id'] == candidate['id']
+    assert json.loads(store.artifacts.read(applied['backup'])) == original
+    assert len(judge.requests) == count
+    assert not reconcile(store, job['id'], apply=True)['applied']
+    assert manager._load(sid, aid, job['id']) == saved
+    saved['state'] = 'running'
+    manager._save(saved)
+    with pytest.raises(ServiceError, match='settled'):
+        reconcile(store, job['id'], apply=True)
+
+
 @pytest.mark.parametrize("old_prompt,old_analyzer", [
     ("goal-graph-rubric.2", "goal-graph.2"), ("goal-graph-rubric.4", "goal-graph.3"), ("goal-graph-rubric.5", "goal-graph.3"),
     ("goal-graph-rubric.9", "goal-graph.3"), ("goal-graph-rubric.6", "goal-graph.3"), ("goal-graph-rubric.7", "goal-graph.3"),

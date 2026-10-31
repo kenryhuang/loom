@@ -114,4 +114,11 @@ export function renderTraceMemory(view, root) {
       table(body, ['Field', 'Value'], [['Window', row.unit_id], ['Candidate', row.id]]);
     }
   }, false, 'setup-block');
+  if (memory.retired_candidates?.length) view.details(root, 'memory-retired', `Framework-only judgments no longer required · ${memory.retired_candidates.length}`, body => {
+    body.append(element('p', 'muted', 'These old stage judgments no longer apply to this window. Their claims were not accepted as memory.'));
+    for (const row of memory.retired_candidates) {
+      body.append(element('p', '', row.resolution_reason));
+      table(body, ['Field', 'Value'], [['Window', row.unit_id], ['Candidate', row.id], ['Stage', row.stage_id]]);
+    }
+  }, false, 'setup-block');
 }

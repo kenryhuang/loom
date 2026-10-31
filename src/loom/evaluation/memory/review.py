@@ -12,6 +12,7 @@ from loom.evaluation.issues import EvaluationFailure, describe, issue, provider_
 from loom.evaluation.memory.contracts import protocol_for
 from loom.evaluation.memory.evidence import card_evidence, refresh_runtime_evidence, sanitize
 from loom.evaluation.memory.lifecycle import VERSION, dependencies, migrate
+from loom.evaluation.memory.obligations import reconcile_framework_obligations
 from loom.evaluation.memory.records import VALIDATION_VERSION, commit, commit_records, replay_admission
 from loom.evaluation.memory.request import focus_repair, memory_input, messages_for, repair_context, scope
 from loom.evaluation.memory.validation import validate_record
@@ -32,10 +33,18 @@ async def review_memory(source, cp, *, run_id, provider, settings, save, emit, r
     )
     memory = migrate(cp, expected)
     replay_admission(cp)
-    if memory.get('execution_complete'):
-        return
     cards, registry = cp["extraction"]["cards"], cp["extraction"]["registry"]
     memberships = action_attributions(cp, cards)
+    for unit in memory['units'].values():
+        if unit.get('mode') == 'extract' and 'pending_response' not in unit:
+            ids = {a['id'] for a in unit['scope']['actions']}
+            unit['scope'] = scope(cp, [c for c in cards if c['id'] in ids], memberships)
+    if reconcile_framework_obligations(cp):
+        result = save()
+        if inspect.isawaitable(result):
+            await result
+    if memory.get('execution_complete'):
+        return
     mode = memory.get("output_mode", output_mode(provider))
 
     async def persist():

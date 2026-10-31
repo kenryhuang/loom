@@ -1,6 +1,7 @@
 import {element} from '../markdown.mjs';
 import {AgentsApi} from '../agents-api.mjs';
 import {AgentSetupView} from './agent-setup.mjs';
+import {AgentLearningView} from './agent-learning.mjs';
 import {panel, cards, table, badge, number, disclosure} from './dashboard.mjs';
 import {agentResourceChoices} from './agent-resources.mjs';
 import {selectedTools} from './external-tools.mjs';
@@ -31,10 +32,11 @@ export class AgentsView {
     this.root = root; this.listRoot = listRoot; this.apiSource = api; this.error = error;
     this.generation = 0; this.tab = 'Overview'; this.selected = null;
     this.expandedBudgetSections = new Set();
+    this.learningStates = new Map();
     this.heading = root.parentElement?.querySelector('#agents-heading');
   }
   close() {
-    ++this.generation; this.abort?.abort(); clearInterval(this.timer);
+    ++this.generation; this.abort?.abort(); clearInterval(this.timer); this.learningView?.close();
     this.setup?.close(); this.setup = null; this.creating = false; this.root.classList.remove('agent-setup-page');
   }
   async open() {
@@ -81,15 +83,17 @@ export class AgentsView {
     this.detail = detail;
     const editing = this.root.contains(document.activeElement) && /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName);
     const resourceEditing = this.resourceEditor?.form.isConnected && (this.resourceEditor.dirty || this.resourceEditor.saving);
-    if (!editing && !resourceEditing && !this.creating && this.renderedDetail !== JSON.stringify(detail)) this.render();
+    const learningEditing = this.learningView?.current && this.learningView.dirty;
+    if (!editing && !resourceEditing && !learningEditing && !this.creating && this.renderedDetail !== JSON.stringify(detail)) this.render();
     else if (!this.creating) this.updateSchedule(detail);
   }
-  async select(id) { this.renderedDetail = null; this.setup?.close(); this.setup = null; this.root.classList.remove('agent-setup-page'); this.selected = id; this.creating = false; this.tab = 'Overview'; await this.refresh(); }
+  async select(id) { this.learningView?.close(); this.renderedDetail = null; this.setup?.close(); this.setup = null; this.root.classList.remove('agent-setup-page'); this.selected = id; this.creating = false; this.tab = 'Overview'; await this.refresh(); }
   async act(action) {
     try { await action(); await this.refresh(); }
     catch (error) { this.showError(error); }
   }
   createForm(edit = null, section = null) {
+    this.learningView?.close();
     this.renderedDetail = null; this.setup?.close(); this.creating = true; if (!edit) this.selected = null;
     this.root.classList.add('agent-setup-page');
     if (this.heading) this.heading.hidden = true;
@@ -123,6 +127,7 @@ export class AgentsView {
     }
   }
   render() {
+    this.learningView?.close();
     const d = this.detail, head = this.heading || element('header', 'workspace-header');
     this.renderedDetail = JSON.stringify(d); this.renderHeading(head, d.role.name, d);
     const nav = element('nav', 'evaluation-tabs agent-tabs'); nav.setAttribute('role','tablist'); nav.setAttribute('aria-label','Agent 详情');
@@ -287,23 +292,10 @@ export class AgentsView {
       table(output,['选择','依据'],rows.map(r=>[r.action,r.reason]));})));
   }
   renderProfile(root, d) {
-    const role = panel(root,'角色与默认方法',true);
+    const role = panel(root,'角色定位',true);
     role.firstChild.append(button('修订角色与预算', () => this.createForm(d)));
-    role.append(element('p','',d.role.role_text)); this.showRows(role,d.role.methods);
-    for (const entry of d.guidance) {
-      const row=element('article','dashboard-panel dashboard-wide agent-card'); row.append(element('p','',entry.text),element('small','',
-        `${entry.scope==='persistent'?'长期指导':'仅当前任务'} · ${entry.applied_run_ids?.length?'已应用':'待下一执行边界生效'} · ${entry.state}`));
-      row.append(button(entry.state==='active'?'停用':'恢复',()=>this.act(()=>this.api.post(d.id,'profile/commands',
-        {command_id:uuid(),type:entry.state==='active'?'retire':'restore',entry_id:entry.id,expected_revision:entry.revision})))); root.append(row);
-    }
-    const form=element('form','agent-form');field(form,'text','补充偏好或方法论','',true); field(form,'document','或从方法文档导入（相对工作目录）');
-    const scope=element('select');scope.name='scope';for(const [value,title] of [['persistent','当前 Agent 长期使用'],['current_task','仅当前任务']]){const option=element('option','',title);option.value=value;scope.append(option);}form.append(scope);
-    const work=element('select');work.name='work';for(const w of d.work_packages.filter(w=>!['succeeded','cancelled','failed'].includes(w.state))){const option=element('option','',w.objective);option.value=w.id;work.append(option);}form.append(work);
-    form.append(button('保存指导',()=>this.act(async()=>{await this.api.post(d.id,'guidance',{command_id:uuid(),text:form.elements.text.value,
-      scope:scope.value,...(scope.value==='current_task'?{work_package_id:work.value}: {})});form.reset();document.activeElement?.blur();})),
-    button('导入为方法论',()=>this.act(async()=>{await this.api.post(d.id,'methods/import',{command_id:uuid(),title:'手工方法',method_text:form.elements.text.value,...(form.elements.document.value?{document_path:form.elements.document.value}:{}),
-      scope:scope.value,...(scope.value==='current_task'?{work_package_id:work.value}: {})});form.reset();document.activeElement?.blur();})));
-    panel(root,'补充指导与方法',true).append(form,element('p','muted','手工方法作为明确指导生效；其有效性仍需要执行证据。推断偏好学习将在后续阶段开放。'));
+    role.append(element('p','',d.role.role_text));
+    role.append(button('管理学习与人工方法',()=>{this.tab='Learning';this.render();}));
   }
   renderKnowledge(root,d) {
     const sources = panel(root,'资料获取位置',true);
@@ -375,33 +367,8 @@ export class AgentsView {
     panel(root,'知识更新',true).append(element('p','muted','使用已绑定的来源。周期刷新和自动连接新来源将在后续阶段开放。'));
   }
   renderLearning(root,d) {
-    const tools = panel(root,'学习与证据',true), actions=element('div','trajectory-actions');tools.append(actions);
-    actions.append(button('查看标注历史与恢复',()=>this.act(async()=>{
-      const {annotations}=await this.api.get(d.id,'memory/annotations');const latest=new Map();
-      for(const a of annotations) {const key=a.source.evaluation_id+':'+a.source.record_id;if(!latest.has(key))latest.set(key,a);}
-      for(const a of latest.values()){const row=element('article','dashboard-panel dashboard-wide agent-card');row.append(element('p','',`${a.kind} · ${a.value||a.reason||a.source.record_id}`));
-        if(['reject','retire'].includes(a.kind))row.append(button('恢复使用',()=>this.act(()=>this.api.post(d.id,'memory/annotations',
-          {command_id:uuid(),evaluation_id:a.source.evaluation_id,record_id:a.source.record_id,content_digest:a.source.content_digest,expected_revision:a.revision,kind:'restore'}))));tools.append(row);}
-    })));
-    actions.append(button('查看实际使用的上下文',()=>this.act(async()=>{
-      const {context}=await this.api.get(d.id,'context');for(const c of context.slice(-10)){const row=element('article','dashboard-panel dashboard-wide agent-card');
-        row.append(button(`${c.purpose} · ${c.run_id||'编排'}`,()=>this.act(async()=>{const value=await this.api.get(d.id,`context/${encodeURIComponent(c.id)}`);
-          const details=element('pre','',JSON.stringify(value,null,2));row.append(details);})));tools.append(row);}
-    })));
-
-    if (!d.learning.length) panel(root,'学习记录',true).append(element('p','empty-state','执行结束后将在这里显示自动评估与记忆提取结果。'));
-    for(const cycle of d.learning){const row=element('article','dashboard-panel dashboard-wide agent-card');row.append(element('h3','',`学习记录 · ${label(cycle.state)} · ${label(cycle.coverage)}`),
-      element('p','',`已接受记忆：${cycle.memory_result?.accepted||0}`));if(cycle.blocked_reason)row.append(element('p','agent-notice',cycle.blocked_reason));
-      row.append(link('查看 Analysis 与证据',`#/evaluation/${encodeURIComponent(cycle.session_id)}`));
-      if(['failed','deferred','cancelled'].includes(cycle.state) || cycle.state==='completed' && cycle.coverage==='partial')row.append(button('重试缺口',()=>this.act(()=>this.api.post(d.id,`learning/${encodeURIComponent(cycle.id)}/commands`,{command_id:uuid(),type:'retry'}))));root.append(row);}
-    const form=element('form','agent-form');field(form,'query','查找相关记忆',d.role.role_text);
-    const results=element('div');form.append(button('查找',()=>this.act(async()=>{const answer=await this.api.get(d.id,`memory?query=${encodeURIComponent(form.elements.query.value)}`);
-      results.replaceChildren();for(const memory of answer.records){const row=element('article','dashboard-panel dashboard-wide agent-card');row.append(element('h3','',memory.title),element('p','',memory.summary),element('small','',memory.scope));
-        const correction=element('textarea');correction.setAttribute('aria-label','更正或限定范围');row.append(correction);
-        for(const [kind,title] of [['confirm','认可'],['correct','更正'],['scope','限定范围'],['reject','不再使用'],['pin','优先参考']])row.append(button(title,()=>this.act(async()=>{
-          await this.api.post(d.id,'memory/annotations',{command_id:uuid(),evaluation_id:memory.source.evaluation_id,record_id:memory.source.record_id,
-            content_digest:memory.source.content_digest,expected_revision:memory.source.annotation_revision||0,kind,...(['correct','scope'].includes(kind)?{value:correction.value}:{})});
-          row.replaceChildren(element('p','','标注已保存，下个合法请求边界生效。'));})));results.append(row);}
-      if(!answer.records.length)results.append(element('p','','没有相关的有效记忆。'));})));panel(root,'记忆检索与标注',true).append(form,results);
+    if (!this.learningStates.has(d.id)) this.learningStates.set(d.id,{});
+    this.learningView = new AgentLearningView(root,{detail:d,api:this.api,transport:this.apiSource(),state:this.learningStates.get(d.id),
+      changed:async()=>{this.renderedDetail=null;await this.refresh();}});
   }
 }

@@ -48,6 +48,7 @@ def project_memory(cp):
             published_records=len(records),
             quarantined_records=len((memory or {}).get('quarantine', {})),
             withdrawn_candidates=sum(len(u.get('withdrawn_candidates', [])) for u in units),
+            retired_candidates=sum(len(u.get('retired_candidates', [])) for u in units),
             stale_records=sum(r.get('publication_state') == 'stale' for r in all_records),
             unknown_contributions=sum(r.get('rating') == 'unknown' for r in records),
             evidence_chars=(memory or {}).get("read_chars", 0),
@@ -59,6 +60,8 @@ def project_memory(cp):
         quarantine=[{k: deepcopy(v) for k, v in row.items() if k != 'record'} for row in (memory or {}).get('quarantine', {}).values()],
         withdrawn_candidates=[{k: deepcopy(v) for k, v in row.items() if k != 'record'}
                               for u in units for row in u.get('withdrawn_candidates', [])],
+        retired_candidates=[{k: deepcopy(v) for k, v in row.items() if k != 'record'}
+                            for u in units for row in u.get('retired_candidates', [])],
         analysis_epoch=(memory or {}).get('epoch', 1),
         previous_epochs=[{k: deepcopy(v) for k, v in row.items() if k != 'snapshot'}
                          for row in cp.get('analysis_epochs', []) if row.get('kind') == 'memory'],
