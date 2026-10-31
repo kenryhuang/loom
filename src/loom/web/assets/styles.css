@@ -2333,6 +2333,14 @@ section.setup-block { padding: 20px; }
 .agent-schedule { display:grid; gap:6px; margin-bottom:16px; padding-bottom:16px; border-bottom:1px solid var(--line); }
 .agent-schedule > strong { font-size:clamp(18px,2vw,25px); font-weight:550; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
 .agent-schedule > p { margin:0; }
+.agent-learning-budget { margin-top:20px; padding-top:20px; border-top:1px solid var(--line); }
+.agent-learning-budget > h4 { margin:0 0 16px; font-size:13px; font-weight:600; }
+.agent-budget-usage > h4 { margin:16px 0 10px; font-size:13px; font-weight:600; }
+.agent-budget-usage > .base-table-scroll > table > tbody > tr > td { vertical-align:middle; }
+.agent-budget-usage .agent-usage-toggle { margin:0; padding:4px 8px; white-space:nowrap; font-size:12px; }
+.agent-budget-usage > .base-table-scroll > table > tbody > .agent-usage-detail-row > td { padding:0 0 16px; }
+.agent-usage-day-detail { margin:0 0 0 12px; padding:12px 16px; border-left:2px solid var(--line); border-radius:4px; background:var(--raised); }
+.agent-usage-day-detail > h5 { margin:0 0 8px; color:var(--muted); font-size:12px; font-weight:500; }
 .agent-card { overflow-wrap: anywhere; }
 .agent-card > h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
 .agent-card > button, .agent-card > a { display: inline-block; margin: 10px 8px 0 0; }

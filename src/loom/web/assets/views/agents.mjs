@@ -1,7 +1,7 @@
 import {element} from '../markdown.mjs';
 import {AgentsApi} from '../agents-api.mjs';
 import {AgentSetupView} from './agent-setup.mjs';
-import {panel, cards, table, badge, number} from './dashboard.mjs';
+import {panel, cards, table, badge, number, disclosure} from './dashboard.mjs';
 import {agentResourceChoices} from './agent-resources.mjs';
 import {selectedTools} from './external-tools.mjs';
 
@@ -30,6 +30,7 @@ export class AgentsView {
   constructor(root, listRoot, {api, error = () => {}}) {
     this.root = root; this.listRoot = listRoot; this.apiSource = api; this.error = error;
     this.generation = 0; this.tab = 'Overview'; this.selected = null;
+    this.expandedBudgetSections = new Set();
     this.heading = root.parentElement?.querySelector('#agents-heading');
   }
   close() {
@@ -159,18 +160,70 @@ export class AgentsView {
     cards(budget,[['每日 token 上限',number(d.role.budget.daily_tokens)],['单工作包上限',number(d.role.budget.work_tokens)],
       ['单目标累计上限',number(d.role.budget.goal_tokens)],['每日调用次数上限',number(d.role.budget.max_calls)],['累计模型调用',number(d.budget.reduce((sum,r) => sum+r.calls,0))],
       ['未知用量调用',number(d.budget.reduce((sum,r) => sum+(r.unknown_calls || 0),0))]]);
-    table(budget,['预算窗口','用途','调用数','Token（含预留）','未知用量调用'],d.budget.map(r => [r.window,r.category,number(r.calls),number(r.tokens),number(r.unknown_calls)]));
     if (d.learning_budget) {
       const learning = d.learning_budget;
-      cards(budget,[['每日初始学习额度',number(learning.initial_tokens)],['今日学习额度',number(learning.effective_tokens)],
+      const learningSection = element('section','agent-learning-budget');
+      learningSection.append(element('h4','','学习额度'));
+      budget.append(learningSection);
+      cards(learningSection,[['每日初始学习额度',number(learning.initial_tokens)],['今日学习额度',number(learning.effective_tokens)],
         ['学习自动扩容',learning.policy.auto_expand ? `开启，最多 ${number(learning.policy.max_learning_tokens)} token` : '关闭']]);
       const grants = (d.learning_allocations || []).flatMap(a => a.grants.map(g => [a.window,number(g.before),number(g.after),g.reason]));
-      if (grants.length) table(budget,['预算窗口','扩容前','扩容后','原因'],grants);
+      if (grants.length) table(this.budgetDisclosure(learningSection,`学习窗口调整记录 · ${number(grants.length)} 条`,d.id,'learning'),
+        ['预算窗口','扩容前','扩容后','原因'],grants);
     }
+    this.renderBudgetUsage(budget,d);
     const history = panel(root,'编排记录',true);
     history.firstChild.append(button('查看最近编排原因',()=>this.act(async()=>{const {runs}=await this.api.get(d.id,'runs');
       output.replaceChildren();table(output,['状态','编排原因','时间'],runs.map(r=>[badge(label(r.state)),r.reason,r.created_at]));})));
     const output=element('div'); output.append(element('p','empty-state','查看每轮编排的原因与结果。'));history.append(output);
+  }
+  budgetDisclosure(root, title, agentId, section) {
+    const node = disclosure(root,title), key = JSON.stringify([agentId,section]);
+    node.open = this.expandedBudgetSections.has(key);
+    node.addEventListener('toggle', () => {
+      if (node.isConnected) node.open ? this.expandedBudgetSections.add(key) : this.expandedBudgetSections.delete(key);
+    });
+    return node;
+  }
+  renderBudgetUsage(root, d) {
+    const usage = this.budgetDisclosure(root,'用量明细',d.id,'usage');
+    usage.classList.add('agent-budget-usage');
+    usage.append(element('h4','','每日汇总'));
+    const days = new Map();
+    for (const row of [...d.budget].sort((a,b) => b.window.localeCompare(a.window) || a.category.localeCompare(b.category))) {
+      if (!days.has(row.window)) days.set(row.window,[]);
+      days.get(row.window).push(row);
+    }
+    const metrics = ['calls','tokens','unknown_calls'];
+    const headers = ['调用数','Token（含预留）','未知用量调用'];
+    const entries = [...days].map(([day, rows], index) => {
+      const totals = metrics.map(key => number(rows.reduce((sum,row) => sum+(row[key] || 0),0)));
+      const key = JSON.stringify([d.id,'usage',day]);
+      const detailRow = element('tr','agent-usage-detail-row'), cell = element('td'); cell.colSpan = 5;
+      detailRow.id = `agent-usage-day-${index}`;
+      const detail = element('section','agent-usage-day-detail');
+      detail.append(element('h5','',`${day} · 用途明细`));
+      table(detail,['用途',...headers],rows.map(row => [row.category,...metrics.map(metric => number(row[metric] || 0))]));
+      cell.append(detail); detailRow.append(cell);
+      const toggle = button('',() => {
+        const expanded = detailRow.hidden;
+        expanded ? this.expandedBudgetSections.add(key) : this.expandedBudgetSections.delete(key);
+        update(expanded);
+      },'quiet agent-usage-toggle');
+      const update = expanded => {
+        detailRow.hidden = !expanded;
+        toggle.textContent = expanded ? '收起明细' : '展开明细';
+        toggle.setAttribute('aria-expanded',String(expanded));
+        toggle.setAttribute('aria-label',`${day} ${toggle.textContent}`);
+      };
+      toggle.setAttribute('aria-controls',detailRow.id);
+      update(this.expandedBudgetSections.has(key));
+      return {values:[element('strong','',day),...totals,toggle],detailRow};
+    });
+    const daily = table(usage,['日期',...headers,'用途明细'],entries.map(entry => entry.values));
+    [...daily.tBodies[0].rows].forEach((row,index) => {
+      if (entries[index]) row.after(entries[index].detailRow);
+    });
   }
   updateSchedule(d, now = Date.now()) {
     const schedule = this.root.querySelector('[data-agent-schedule]'); if (!schedule) return;
