@@ -6,7 +6,7 @@ import pytest
 from loom.core import ok
 from loom.llm.api import LlmResponse, TokenUsage
 from loom.service.contracts import ServiceError
-from loom.service.session_setup import SessionSetup
+from loom.service.session_setup import REPAIR_ADDABLE, SessionSetup, recommend_setup
 from loom.tasks.config import load_task_config
 from tests.service.test_api import api  # noqa: F401
 
@@ -217,3 +217,40 @@ def test_recommendation_preserves_configured_model_options(api, monkeypatch, thi
     assert selected[0].max_completion_tokens == 4096
     assert configured.max_completion_tokens == 16384
     assert config_path.read_bytes() == before
+
+
+def test_dispatch_scope_strips_role_level_bindings_and_defaults_plan_mode(api):  # noqa: F811
+    service, *_ = api
+    base = service.store.knowledge.create({"name": "AI Infra", "description": "AI systems", "engine": "sqlite_fts"})
+    bound = proposal(knowledge_base_ids=[base["id"]], external_tools=["mcp.fake"], plugins={"workflow": "dynamic"})
+
+    result = recommend_setup(service, "实现一个功能", scope="dispatch", provider_factory=lambda _: Recommender(bound))
+
+    assert result["knowledge_base_ids"] == [] and result["external_tools"] == []
+    assert result["plan_mode"] == "auto"
+    assert "knowledge" not in result["tool_collections"]
+    with pytest.raises(ServiceError, match="unsupported configuration"):
+        recommend_setup(service, "实现一个功能", scope="dispatch", provider_factory=lambda _: Recommender(proposal(plan_mode="sometimes")))
+    forced = recommend_setup(service, "实现一个功能", scope="dispatch", provider_factory=lambda _: Recommender(proposal(plan_mode="force")))
+    assert forced["plan_mode"] == "force"
+
+
+def test_repair_scope_rejects_removal_and_role_level_additions(api):  # noqa: F811
+    service, *_ = api
+    extra = {"unresolved_requirements": ["需要浏览器验收截图"], "current_collections": ["filesystem", "shell", "task_control"]}
+    assert "browser" in REPAIR_ADDABLE and "knowledge" not in REPAIR_ADDABLE
+
+    with pytest.raises(ServiceError, match="unsupported configuration"):
+        recommend_setup(service, "修复验收", scope="repair", extra=extra,
+                        provider_factory=lambda _: Recommender(proposal(tool_collections=["filesystem", "task_control"])))
+    with pytest.raises(ServiceError, match="unsupported configuration"):
+        recommend_setup(service, "修复验收", scope="repair", extra=extra,
+                        provider_factory=lambda _: Recommender(proposal(tool_collections=["filesystem", "shell", "task_control", "knowledge"])))
+
+    repaired = recommend_setup(service, "修复验收", scope="repair", extra=extra,
+                               provider_factory=lambda _: Recommender(proposal(tool_collections=["filesystem", "shell", "task_control", "browser"])))
+    assert repaired["tool_collections"] == ["filesystem", "shell", "task_control", "browser"]
+    kept = recommend_setup(service, "修复验收", scope="repair",
+                           extra={"unresolved_requirements": ["需要浏览器验收截图"], "current_collections": ["filesystem", "task_control", "knowledge"]},
+                           provider_factory=lambda _: Recommender(proposal(tool_collections=["filesystem", "task_control", "knowledge", "browser"])))
+    assert "knowledge" in kept["tool_collections"] and "browser" in kept["tool_collections"]

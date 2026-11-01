@@ -4,6 +4,7 @@ from copy import deepcopy
 from importlib.resources import files
 
 from loom.service.contracts import COMMAND_TYPES
+from loom.service.session_setup import builtin_templates, capability_catalog
 
 COMMAND_LABELS = {
     "pause": "Pause", "resume": "Resume", "stop_run": "Stop run",
@@ -37,8 +38,6 @@ class WebFrontend:
         return (resource.read_bytes(), content_type) if resource.is_file() else None
 
     def catalog(self, service):
-        from loom.service.session_setup import capability_catalog
-
         models, default_model, model_aliases = [], None, {}
         visual_model = None
         if service.config_path:
@@ -63,20 +62,3 @@ class WebFrontend:
                                    "status": "configured" if visual_model else "model_not_configured"},
         }
 
-
-def builtin_templates():
-    general = {
-        "session_environment": {"plugin": "session"},
-        "context": {"plugin": "bounded_context", "max_window_chars": 24000},
-        "tools": {"collections": ["task_control"]},
-        "workflow": {"plugin": "dynamic"},
-    }
-    research = deepcopy(general)
-    research["context"]["plugin"] = "research_context"
-    research["tools"]["collections"] = ["web_research", "document_outputs", "task_control"]
-    research["outputs"] = [{"kind": "report", "format": "markdown", "require_evidence_refs": True, "require_verified_sources": True}]
-    return [
-        {"id": "general", "label": "General", "description": "Explain, reason, and write", "task_spec": general},
-        {"id": "research", "label": "Research", "description": "Read web sources and write cited reports", "task_spec": research},
-        {"id": "coding", "label": "Coding", "description": "Work with files and commands", "requires_workspace": True},
-    ]
