@@ -2,7 +2,9 @@
 
 import time
 from copy import deepcopy
+from pathlib import Path
 
+from loom.service.contracts import ServiceError
 from loom.service.session_setup import builtin_templates, recommend_setup
 
 # Collections derived from role-level bindings never distinguish a task spec.
@@ -44,6 +46,63 @@ def bind_for_dispatch(service, agent, work):
             "plan_mode": role.get("plan_mode") or "auto",
             "record": {"source": "fallback", "reason": str(exc), "at": at},
         }
+
+
+def repair_collections(service, *, objective, model, unresolved, current_collections):
+    """Recommend the minimum collection additions for an acceptance-blocked task.
+
+    Re-raises recommender failures (the caller counts them as decision-level
+    recovery failures). Returns only the NEW collections; an empty list means
+    the repair sees nothing to add.
+    """
+    recommender = getattr(service, "setup_recommender", None) or (
+        lambda text, *, model, scope, extra=None: recommend_setup(service, text, model=model, scope=scope, extra=extra)
+    )
+    proposal = recommender(
+        objective,
+        model=model,
+        scope="repair",
+        extra=dict(unresolved_requirements=list(unresolved), current_collections=list(current_collections)),
+    )
+    current = set(current_collections)
+    return [item for item in proposal["tool_collections"] if item not in current and item not in DERIVED]
+
+
+def merge_repair_collections(service, task, additions):
+    """Deep-copy the task's spec with additions merged in, validated the same way
+    session creation validates: normalize_task_spec + TaskAssembly. Raises
+    ServiceError when the merged configuration cannot be assembled."""
+    from loom.tasks.assembly import TaskAssembly, normalize_task_spec
+    from loom.tasks.request import TaskRequest
+
+    spec = deepcopy(task.get("task_spec") or {})
+    tools = spec.setdefault("tools", {})
+    collections = list(tools.get("collections") or [])
+    for item in additions:
+        if item not in collections:
+            collections.append(item)
+    tools["collections"] = collections
+    workspace = Path(task["workspace"]) if task.get("workspace") else None
+    plan_mode = task.get("plan_mode") or "auto"
+    try:
+        normalized = normalize_task_spec(spec, workspace=workspace, plan_mode=plan_mode)
+        registry = service.plugin_registry_factory() if getattr(service, "plugin_registry_factory", None) else None
+        TaskAssembly(
+            TaskRequest(
+                task.get("objective") or "Session repair",
+                workspace=workspace,
+                task_spec=normalized,
+                metadata={
+                    "knowledge_base_ids": task.get("knowledge_base_ids") or [],
+                    "external_tool_bindings": task.get("external_tool_bindings") or [],
+                },
+            ),
+            plan_mode=plan_mode,
+            registry=registry,
+        )
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ServiceError(str(exc)) from exc
+    return normalized
 
 
 def compatible_config(candidate_task, payload):

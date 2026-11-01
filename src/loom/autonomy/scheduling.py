@@ -240,6 +240,7 @@ class QueueScheduler:
                     policy = scheduling_policy(agent["role"])
                     recovery = work.get("recovery", {})
                     intent = recovery.get("pending")
+                    repair = None
                     if not intent:
                         # Decision-level failures consume one attempt (persisted by
                         # the handler below after this transaction rolls back);
@@ -262,35 +263,61 @@ class QueueScheduler:
                             if parent := parent_block(store, db, agent, work, agent["role"]["budget"]["output_tokens"]):
                                 raise _Decision(parent + "；请调整对应上限或等待每日窗口。")
                             allocate(store, db, agent, work, requested=state["task"]["limits"]["max_tokens"] + 1)
+                        elif (state.get("acceptance") or {}).get("state") == "blocked" and not work.get("read_only"):
+                            # Acceptance repair is two-phase: the recommendation is an
+                            # LLM call and must run outside the service lock. Phase 1
+                            # only captures the inputs; nothing is mutated here.
+                            repair = dict(
+                                objective=work["objective"] + "\nAcceptance criteria:\n"
+                                + "\n".join("- " + c for c in work.get("acceptance", [])),
+                                model=state["task"].get("model"),
+                                unresolved=list((state["acceptance"].get("plan") or {}).get("unresolved_requirements") or []),
+                                current=list(((state["task"].get("task_spec") or {}).get("tools") or {}).get("collections") or []),
+                                generation=agent["generation"],
+                                run_id=run.get("id"),
+                                reason=reason,
+                            )
                         elif not legacy and reason != "Active time budget exceeded":
                             raise _Decision(f"无法自动恢复：{reason or work.get('blocked_reason') or state['task']['state']}；请检查原 Session")
                         elif parent := parent_block(store, db, agent, work, agent["role"]["budget"]["output_tokens"]):
                             raise _Decision(parent + "；请调整对应上限或等待每日窗口。")
-                        intent = dict(id=new_id("schedule_resume"), run_id=run["id"], reason=reason)
-                        work["recovery"] = dict(attempts=recovery.get("attempts", 0) + 1, pending=intent)
+                        if repair is None:
+                            intent = dict(id=new_id("schedule_resume"), run_id=run["id"], reason=reason)
+                            work["recovery"] = dict(attempts=recovery.get("attempts", 0) + 1, pending=intent)
+                            store.put(db, "agent_work_packages", work)
+                            store.event(db, aid, "schedule.recovery.requested", dict(work_package_id=wid, **intent))
+                    if repair is None:
+                        if intent["run_id"] != run["id"]:
+                            raise ServiceError("恢复意图与当前 run 不匹配，请检查执行历史", 409)
+                        state["task"]["limits"].update(
+                            max_duration_seconds=3600, max_tokens=work.get("execution_budget", {}).get("tokens", state["task"]["limits"]["max_tokens"])
+                        )
+                        if run["state"] == "failed":
+                            run["time_budget_start_seconds"] = run.get("active_seconds", 0)
+                        service.store.append(db, state, "agent.schedule.limits", dict(work_package_id=wid, **state["task"]["limits"]), command_id=intent["id"])
+                        work.update(state="blocked", blocked_reason=None)
+                        if work.get("slice"):
+                            work["slice"]["phase"] = "retired"
                         store.put(db, "agent_work_packages", work)
-                        store.event(db, aid, "schedule.recovery.requested", dict(work_package_id=wid, **intent))
-                    if intent["run_id"] != run["id"]:
-                        raise ServiceError("恢复意图与当前 run 不匹配，请检查执行历史", 409)
-                    state["task"]["limits"].update(
-                        max_duration_seconds=3600, max_tokens=work.get("execution_budget", {}).get("tokens", state["task"]["limits"]["max_tokens"])
+                        if goal["state"] == "blocked":
+                            goal.update(state="active", revision=goal["revision"] + 1)
+                            store.put(db, "agent_goals", goal)
+                        db.execute("UPDATE agent_sessions SET work_package_id=? WHERE session_id=?", (wid, sid))
+                        service.store._save(db, state)
+            if repair is not None:
+                intent = self._repair(aid, wid, sid, repair)
+            with service.lock:
+                if intent.get("kind") == "restart":
+                    service.submit(
+                        sid,
+                        dict(command_id=intent["id"], type="restart_task",
+                             payload={"task": {"task_spec": intent["task_spec"]}, "reason": intent.get("reason") or ""}),
                     )
-                    if run["state"] == "failed":
-                        run["time_budget_start_seconds"] = run.get("active_seconds", 0)
-                    service.store.append(db, state, "agent.schedule.limits", dict(work_package_id=wid, **state["task"]["limits"]), command_id=intent["id"])
-                    work.update(state="blocked", blocked_reason=None)
-                    if work.get("slice"):
-                        work["slice"]["phase"] = "retired"
-                    store.put(db, "agent_work_packages", work)
-                    if goal["state"] == "blocked":
-                        goal.update(state="active", revision=goal["revision"] + 1)
-                        store.put(db, "agent_goals", goal)
-                    db.execute("UPDATE agent_sessions SET work_package_id=? WHERE session_id=?", (wid, sid))
-                    service.store._save(db, state)
-                from loom.autonomy.context import build_snapshot
+                else:
+                    from loom.autonomy.context import build_snapshot
 
-                build_snapshot(store, aid, binding=state["autonomy"], session_id=sid, run_id=run["id"], purpose="schedule_resume")
-                service.submit(sid, dict(command_id=intent["id"], type="resume", payload={}))
+                    build_snapshot(store, aid, binding=state["autonomy"], session_id=sid, run_id=run["id"], purpose="schedule_resume")
+                    service.submit(sid, dict(command_id=intent["id"], type="resume", payload={}))
                 with store.sessions.transaction() as db:
                     work = store.get(db, "agent_work_packages", wid, aid)
                     work["recovery"]["pending"] = None
@@ -308,3 +335,60 @@ class QueueScheduler:
                     work["recovery"] = dict(attempts=recovery.get("attempts", 0) + 1, pending=None)
                     store.put(db, "agent_work_packages", work)
             raise
+
+    def _repair(self, aid, wid, sid, repair):
+        """Phase 2 of acceptance repair: recommend lock-free, then revalidate and
+        book a restart intent under the lock. Returns the intent to submit."""
+        from loom.autonomy.binding import merge_repair_collections, repair_collections
+
+        store, service = self.store, self.service
+        try:
+            additions = repair_collections(
+                service,
+                objective=repair["objective"],
+                model=repair["model"],
+                unresolved=repair["unresolved"],
+                current_collections=repair["current"],
+            )
+        except Exception as exc:
+            raise _Decision(f"验收修复推荐失败：{exc}；请人工调整任务工具配置") from exc
+        if not additions:
+            raise _Decision("验收修复未给出可补充的工具集合；请人工调整任务工具配置")
+        with service.lock, store.sessions.transaction() as db:
+            agent = store.get(db, "agents", aid)
+            work = store.get(db, "agent_work_packages", wid, aid)
+            state = store.sessions._load(db, sid)
+            run = state.get("run") or {}
+            if (
+                agent["generation"] != repair["generation"]
+                or run.get("id") != repair["run_id"]
+                or state["task"]["state"] not in {"paused", "failed"}
+                or (state.get("acceptance") or {}).get("state") != "blocked"
+            ):
+                raise ServiceError("修复推荐期间会话状态已变化，放弃本次自动修复", 409)
+            try:
+                merged = merge_repair_collections(service, state["task"], additions)
+            except ServiceError as exc:
+                raise _Decision(f"验收修复配置不可用：{exc}") from exc
+            intent = dict(
+                id=new_id("schedule_resume"), run_id=run.get("id"), reason=repair["reason"],
+                kind="restart", task_spec=merged, additions=additions,
+            )
+            recovery = work.get("recovery", {})
+            work["recovery"] = dict(attempts=recovery.get("attempts", 0) + 1, pending=intent)
+            store.put(db, "agent_work_packages", work)
+            store.event(
+                db, aid, "schedule.recovery.requested",
+                dict(work_package_id=wid, id=intent["id"], run_id=intent["run_id"], reason=repair["reason"],
+                     kind="restart", additions=additions),
+            )
+            work.update(state="blocked", blocked_reason=None)
+            if work.get("slice"):
+                work["slice"]["phase"] = "retired"
+            store.put(db, "agent_work_packages", work)
+            goal = store.get(db, "agent_goals", work["goal_id"], aid)
+            if goal["state"] == "blocked":
+                goal.update(state="active", revision=goal["revision"] + 1)
+                store.put(db, "agent_goals", goal)
+            db.execute("UPDATE agent_sessions SET work_package_id=? WHERE session_id=?", (wid, sid))
+        return intent
