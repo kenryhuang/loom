@@ -1,6 +1,6 @@
 # Goal-loop execution time and public process drilldown
 
-Date: 2026-10-18. Design: [Goal-loop analysis, section 16](../../docs/deep-eval-goal-loops.md).
+Date: 2026-10-18. Design: [Goal-loop analysis, section 16](../../docs/design/deep-eval-goal-loops.md).
 
 ## Implemented
 

@@ -10,18 +10,18 @@ Loom 是一个运行在本地的 AI Agent 任务执行框架，用于编程、�
 供后续任务检索。持久服务让你在 Web 和终端中查看同一个任务；断开界面后，
 任务仍可继续运行，重新连接时可以查看已保存的状态。
 
-运行时验收会根据任务和 workspace 生成条件，执行实际检查及独立语义审阅；失败时有限修复或暂停，并展示验证证据。详见[实现范围与配置](docs/superpowers/specs/2026-10-10-runtime-acceptance-gate-design.zh-CN.md)。
+运行时验收会根据任务和 workspace 生成条件，执行实际检查及独立语义审阅；失败时有限修复或暂停，并展示验证证据。详见[实现范围与配置](docs/design/2026-10-10-runtime-acceptance-gate-design.zh-CN.md)。
 
 ## 主要特点
 
-- **自主 Agent（P0～P3）**：长期 Role、显式目标和周期职责编排、相关 Session 复用、终态自动 Deep eval、人工记忆标注与方法指导。使用 `loom serve --enable-agents` 启用，见[运行与人工介入](docs/autonomous-agents.zh-CN.md)。
+- **自主 Agent（P0～P3）**：长期 Role、显式目标和周期职责编排、相关 Session 复用、终态自动 Deep eval、人工记忆标注与方法指导。使用 `loom serve --enable-agents` 启用，见[运行与人工介入](docs/design/autonomous-agents.zh-CN.md)。
 
 - **Deep eval 经验记忆**：从 trace 提取 stage 对目标的贡献、环境与配置事实、失败经验和更有效的工作流。
   每条记录保留 goal / stage / action 与原始证据引用，区分观察、推断和待验证建议；支持预算恢复。
   Session 可检索同一 workspace 的相关记忆，CLI 通过 `--memory-store` 显式接入。
-  [执行期 Memory 设计](docs/runtime-memory.md)说明检索、注入与追踪机制。
-  使用方法与适用范围见 [Deep eval Memory](docs/deep-eval-memory.md)；
-  [分析管线与校验机制](docs/deep-eval-validation.zh-CN.md)说明模块边界、具体错误和有限重试规则。
+  [执行期 Memory 设计](docs/design/runtime-memory.md)说明检索、注入与追踪机制。
+  使用方法与适用范围见 [Deep eval Memory](docs/design/deep-eval-memory.md)；
+  [分析管线与校验机制](docs/design/deep-eval-validation.zh-CN.md)说明模块边界、具体错误和有限重试规则。
   Memory 使用宿主生成的证据锚点，隔离无效候选，并分别展示处理进度与结果质量。
   Resume 继续未完成工作，Retry failed items 定向重试质量缺口，保留已有有效记录。
 - **持久 Session**：保存对话、执行 checkpoint、工具结果、artifact 和事件历史，
@@ -42,7 +42,7 @@ Loom 是一个运行在本地的 AI Agent 任务执行框架，用于编程、�
 - **外部工具**：注册 MCP 服务或 CLI 命令，手工选择或通过 LLM 推荐选择具体工具，
   接入同一个 Task Loop，保留执行控制、调用记录和结果。
 - **可追踪的执行过程**：查看模型与工具活动、原始证据，分析 trace 和 Session 轨迹；
-  高级评估及 Meta-Harness 命令支持实验和受治理约束的优化。可选的 [行为评估 v3](docs/behavior-evaluation-v3.zh-CN.md) 将目标验收与意图、计划、推进、推理效率及恢复能力分开评估。
+  高级评估及 Meta-Harness 命令支持实验和受治理约束的优化。可选的 [行为评估 v3](docs/design/behavior-evaluation-v3.zh-CN.md) 将目标验收与意图、计划、推进、推理效率及恢复能力分开评估。
 
 当前通用任务执行后端使用本机 OS。项目面向 macOS/Linux 和单个本地用户；
 Docker/VM 任务执行后端尚未实现。环境探测可识别当前进程的容器标记及 Docker CLI，
@@ -147,7 +147,7 @@ TUI 也提供这些按钮，CLI 使用 `loom session restart SESSION_ID`。
 不自动暂存、提交或重启服务。**Read-only investigation** 保留原有只读调查方式。
 执行验证需要 macOS `sandbox-exec` 或 Linux `bubblewrap`，无无限制执行的降级路径。
 预算耗尽后在 **Budgets** 增加对应总预算，再 **Resume diagnosis**，复用已有证据。
-详见[设计与实现说明](docs/session-self-diagnosis.zh-CN.md)。
+详见[设计与实现说明](docs/design/session-self-diagnosis.zh-CN.md)。
 
 **Knowledge bases** 页面管理文档导入、embedding profile、网站来源和图谱。
 将知识库显式绑定到 Session 后，Agent 才能检索其中的资料。
@@ -159,8 +159,8 @@ LightRAG 的 **Sync activity** 展示当前页面或文档、执行阶段、已�
 **External tools** 页面注册 MCP（stdio / Streamable HTTP / SSE）和 CLI 连接。
 发现 MCP 工具后，可在 **New session** 中手工勾选，或通过 **Recommend with LLM**
 推荐；已有 Session 可在任务之间调整绑定。安装、配置和示例见
-[外部工具指南](docs/external-tools.zh-CN.md)。
-详细说明见 [Web 指南](docs/web-frontend.md) 和 [Session 创建指南](docs/session-setup.md)。
+[外部工具指南](docs/design/external-tools.zh-CN.md)。
+详细说明见 [Web 指南](docs/design/web-frontend.md) 和 [Session 创建指南](docs/design/session-setup.md)。
 
 关闭浏览器标签页不会停止后端任务。凭证只保存在当前标签页内存，
 刷新后需要重新连接。Web 页面随 Python 包发布，不需要 Node 或单独的前端服务。
@@ -192,7 +192,7 @@ Loom 自身的 Web 界面不需要 Node，但被验收的应用仍需具备自�
 单纯重启服务不会补充额度，暂停或环境阻塞也不算作候选修复失败。
 
 首期覆盖 Web 页面、Canvas 和 WebGL。安装配置、场景协议、证据边界和恢复流程详见
-[视觉观察与验收指南](docs/visual-observation-and-acceptance.zh-CN.md)。
+[视觉观察与验收指南](docs/design/visual-observation-and-acceptance.zh-CN.md)。
 
 ## TUI 与 Session CLI 使用方法
 
@@ -367,7 +367,7 @@ uv run loom session create '读取 https://www.python.org/about/ 并写出带来
   --task-spec examples/task-specs/research.yaml
 ```
 
-参考 [通用任务与插件指南](docs/general-task-runtime.md)，以及
+参考 [通用任务与插件指南](docs/design/general-task-runtime.md)，以及
 [General](examples/task-specs/general.yaml)、
 [Research](examples/task-specs/research.yaml)、
 [Coding](examples/task-specs/coding.yaml) 示例。
@@ -416,7 +416,7 @@ LightRAG 网站索引包含 LLM 实体/关系抽取和 embedding；
 大型文档可能需要多个 chunk 和多次模型调用。
 数据存储在本地，选定的模型/embedding 服务会接收请求所需内容。
 更换绑定的模型或 embedding 身份时，需要新建知识库。
-限制、超时与恢复方式见 [知识库指南](docs/knowledge-bases.md)。
+限制、超时与恢复方式见 [知识库指南](docs/design/knowledge-bases.md)。
 
 ## 一次性任务
 
@@ -460,16 +460,16 @@ uv run loom task '修复太阳系多余行星的渲染' --workspace ~/workspace/
 
 ## 进一步阅读
 
-- [Web 前端](docs/web-frontend.md)与 [TUI 展示](src/loom/tui/README.md)
-- [Session 创建与配置推荐](docs/session-setup.md)
-- [任务插件、工作流和报告输出](docs/general-task-runtime.md)
-- [知识库与 LightRAG 同步](docs/knowledge-bases.md)
-- [外部工具：MCP 与 CLI](docs/external-tools.zh-CN.md)
-- [Web / Canvas / WebGL 视觉观察与验收](docs/visual-observation-and-acceptance.zh-CN.md)
-- [Session 轨迹分析](docs/session-trajectory-analysis.md)
-- [Trace 效果分析](docs/trace-effectiveness-analysis.md)
-- [Meta-Harness：优化、实验与治理](docs/meta-harness.md)
-- [工具执行与进度](docs/tool-execution-and-progress-review.md)
+- [Web 前端](docs/design/web-frontend.md)与 [TUI 展示](src/loom/tui/README.md)
+- [Session 创建与配置推荐](docs/design/session-setup.md)
+- [任务插件、工作流和报告输出](docs/design/general-task-runtime.md)
+- [知识库与 LightRAG 同步](docs/design/knowledge-bases.md)
+- [外部工具：MCP 与 CLI](docs/design/external-tools.zh-CN.md)
+- [Web / Canvas / WebGL 视觉观察与验收](docs/design/visual-observation-and-acceptance.zh-CN.md)
+- [Session 轨迹分析](docs/design/session-trajectory-analysis.md)
+- [Trace 效果分析](docs/design/trace-effectiveness-analysis.md)
+- [Meta-Harness：优化、实验与治理](docs/design/meta-harness.md)
+- [工具执行与进度](docs/review/tool-execution-and-progress-review.md)
 
 ## 开发与验证
 

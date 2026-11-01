@@ -9,14 +9,14 @@ resume from saved checkpoints.
 
 ## Key features
 
-- **Autonomous Agents (P0–P3):** persistent roles, explicit goals and scheduled responsibilities, related session reuse, automatic terminal-run evaluation, and human memory corrections and method guidance. Opt in with `loom serve --enable-agents`; see the [operating guide (Chinese)](docs/autonomous-agents.zh-CN.md).
+- **Autonomous Agents (P0–P3):** persistent roles, explicit goals and scheduled responsibilities, related session reuse, automatic terminal-run evaluation, and human memory corrections and method guidance. Opt in with `loom serve --enable-agents`; see the [operating guide (Chinese)](docs/design/autonomous-agents.zh-CN.md).
 
 - **Deep eval memory:** extract stage contributions, scoped environment and configuration
   facts, failure lessons, and more efficient workflows from traces. Records link back
   to goals, stages, actions, and source evidence; observed findings stay distinct from
   proposed improvements. Sessions retrieve relevant accepted memories within the same workspace;
-  standalone tasks opt in with `--memory-store /path/to/service-data`. See [runtime memory](docs/runtime-memory.md), [Deep eval Memory](docs/deep-eval-memory.md) and the
-  [validation architecture](docs/deep-eval-validation.zh-CN.md) for module boundaries, structured errors, and bounded retries.
+  standalone tasks opt in with `--memory-store /path/to/service-data`. See [runtime memory](docs/design/runtime-memory.md), [Deep eval Memory](docs/design/deep-eval-memory.md) and the
+  [validation architecture](docs/design/deep-eval-validation.zh-CN.md) for module boundaries, structured errors, and bounded retries.
   Memory uses host-generated evidence anchors, isolates rejected candidates, and separates processing progress from result quality.
   Resume continues unfinished work; Retry failed items explicitly revisits quality gaps without discarding accepted records.
 - **Independent acceptance before completion:** actual command checks and a
@@ -49,7 +49,7 @@ resume from saved checkpoints.
 - **Failure diagnosis and evaluation:** investigate saved runs in a read-only
   loop or an isolated worktree, retain patches and test receipts, and review
   changes before merging. Trace analysis, Meta-Harness, and opt-in
-  [behavior evaluation v3](docs/behavior-evaluation-v3.md) support experiments
+  [behavior evaluation v3](docs/design/behavior-evaluation-v3.md) support experiments
   and distinguish goal acceptance from execution quality.
 
 The current general task runtime executes tools on the host OS. Loom targets
@@ -165,7 +165,7 @@ Use **Review patch → Merge reviewed changes** to apply the saved delta to the 
 working directory after conflict checks. Merging does not stage, commit, or restart the service.
 Validation requires macOS `sandbox-exec` or Linux `bubblewrap`; no unrestricted fallback.
 Use **Budgets → Resume diagnosis** after increasing an exhausted budget; saved evidence
-is reused. [Design and implementation notes](docs/session-self-diagnosis.zh-CN.md).
+is reused. [Design and implementation notes](docs/design/session-self-diagnosis.zh-CN.md).
 
 Coding and file/command tools require an existing workspace directory on the
 service host. Research can run without a workspace; bind a writable directory
@@ -183,12 +183,12 @@ page/document, stage, saved document count, request usage, and recent activity;
 The **External tools** view registers MCP (stdio, Streamable HTTP or legacy SSE) and CLI
 connections. Discover MCP tools, then select them in **New session** or use
 **Recommend with LLM**. Existing sessions can change their selection between
-tasks. See the [external tools guide](docs/external-tools.md) for installation,
+tasks. See the [external tools guide](docs/design/external-tools.md) for installation,
 configuration, and examples.
 
 **Trajectory** opens execution analysis for a session. **Outputs** exposes saved
-document paths and report artifacts. See the [Web guide](docs/web-frontend.md)
-and [session setup guide](docs/session-setup.md) for details.
+document paths and report artifacts. See the [Web guide](docs/design/web-frontend.md)
+and [session setup guide](docs/design/session-setup.md) for details.
 
 Closing the tab leaves backend tasks running. The browser keeps its credential
 in tab memory, so reloading requires reconnecting. The frontend ships with the
@@ -237,7 +237,7 @@ does not replenish this allocation; pauses and environment blockers do not count
 as failed candidate repairs.
 
 The initial scope covers Web pages, Canvas, and WebGL. See the
-[visual observation and acceptance guide (Chinese)](docs/visual-observation-and-acceptance.zh-CN.md)
+[visual observation and acceptance guide (Chinese)](docs/design/visual-observation-and-acceptance.zh-CN.md)
 for setup, scenarios, evidence boundaries, and recovery.
 
 ## Using the TUI and session CLI
@@ -418,7 +418,7 @@ uv run loom session create 'Read https://www.python.org/about/ and write a cited
   --task-spec examples/task-specs/research.yaml
 ```
 
-See the [general task/plugin guide](docs/general-task-runtime.md) and the
+See the [general task/plugin guide](docs/design/general-task-runtime.md) and the
 [General](examples/task-specs/general.yaml),
 [Research](examples/task-specs/research.yaml), and
 [Coding](examples/task-specs/coding.yaml) examples. Directory resource URIs in an
@@ -473,7 +473,7 @@ LightRAG website indexing includes LLM entity/relation extraction and embeddings
 a large document may require many model calls and chunks. Data is stored locally,
 while selected model/embedding services receive the content needed for their
 requests. Changing the bound model or embedding identity requires a new base.
-See [Knowledge bases](docs/knowledge-bases.md) for limits, timeouts, and recovery.
+See [Knowledge bases](docs/design/knowledge-bases.md) for limits, timeouts, and recovery.
 
 ## One-shot tasks
 
@@ -521,17 +521,17 @@ workflows remain reference material and require fresh verification.
 
 ## Further reading
 
-- [Web frontend](docs/web-frontend.md) and [TUI presentation](src/loom/tui/README.md)
-- [Session creation and recommendations](docs/session-setup.md)
-- [Task plugins, workflows, and report output](docs/general-task-runtime.md)
-- [Knowledge bases and LightRAG sync](docs/knowledge-bases.md)
-- [External tools: MCP and CLI](docs/external-tools.md)
-- [Runtime acceptance: implementation and configuration](docs/superpowers/specs/2026-10-10-runtime-acceptance-gate-design.md)
-- [Web / Canvas / WebGL visual observation and acceptance (Chinese)](docs/visual-observation-and-acceptance.zh-CN.md)
-- [Session trajectory analysis](docs/session-trajectory-analysis.md)
-- [Trace effectiveness analysis](docs/trace-effectiveness-analysis.md)
-- [Meta-Harness: optimization, experiments, and governance](docs/meta-harness.md)
-- [Tool execution and progress](docs/tool-execution-and-progress-review.md)
+- [Web frontend](docs/design/web-frontend.md) and [TUI presentation](src/loom/tui/README.md)
+- [Session creation and recommendations](docs/design/session-setup.md)
+- [Task plugins, workflows, and report output](docs/design/general-task-runtime.md)
+- [Knowledge bases and LightRAG sync](docs/design/knowledge-bases.md)
+- [External tools: MCP and CLI](docs/design/external-tools.md)
+- [Runtime acceptance: implementation and configuration](docs/design/2026-10-10-runtime-acceptance-gate-design.md)
+- [Web / Canvas / WebGL visual observation and acceptance (Chinese)](docs/design/visual-observation-and-acceptance.zh-CN.md)
+- [Session trajectory analysis](docs/design/session-trajectory-analysis.md)
+- [Trace effectiveness analysis](docs/design/trace-effectiveness-analysis.md)
+- [Meta-Harness: optimization, experiments, and governance](docs/design/meta-harness.md)
+- [Tool execution and progress](docs/review/tool-execution-and-progress-review.md)
 
 ## Development
 

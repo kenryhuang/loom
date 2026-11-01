@@ -2,7 +2,7 @@
 
 Date: 2026-10-17. Status: implemented; automated regression complete.
 
-Design and usage: [Goal-loop analysis, section 15](../../docs/deep-eval-goal-loops.md#15-执行协议-v22026-10-17).
+Design and usage: [Goal-loop analysis, section 15](../../docs/design/deep-eval-goal-loops.md#15-执行协议-v22026-10-17).
 
 ## Problem and outcome
 

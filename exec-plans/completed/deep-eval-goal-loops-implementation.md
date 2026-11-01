@@ -2,7 +2,7 @@
 
 Date: 2026-10-17. Status: implementation and automated regression complete.
 
-Source: [design and usage](../../docs/deep-eval-goal-loops.md).
+Source: [design and usage](../../docs/design/deep-eval-goal-loops.md).
 
 - [x] S1 Fixed-source single-run adapter, structured patch contracts and exact evidence pointers.
 - [x] S2 Persistent Goal / Attempt / Phase extraction, paged entity catalogue, bounded reconciliation and aliases.

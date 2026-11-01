@@ -1,7 +1,7 @@
 # Visual observation and acceptance implementation
 
 Scope: implement the accepted Web/Canvas/WebGL design in
-`docs/superpowers/specs/2026-10-22-visual-observation-and-acceptance-design.zh-CN.md`.
+`docs/design/2026-10-22-visual-observation-and-acceptance-design.zh-CN.md`.
 Preferred provider: dashscope/qwen3.8-omni-flash, JSON Mode with local validation.
 
 - [x] Binary artifacts, bounded worker transfer, authenticated media delivery.
@@ -15,7 +15,7 @@ Preferred provider: dashscope/qwen3.8-omni-flash, JSON Mode with local validatio
 Do not manually mark the historical session passed or edit its database. Preserve genuine
 external approval requirements. Ordinary text/JSON paths remain compatible.
 
-Delivered: see `docs/visual-observation-and-acceptance.zh-CN.md` for the actual v1
+Delivered: see `docs/design/visual-observation-and-acceptance.zh-CN.md` for the actual v1
 configuration, scenario contract, installation and boundaries. Configured the local
 image model and restarted the idle service; all 12 sessions were retained. The
 solar session subsequently bound browser tools through its normal edit/restart
