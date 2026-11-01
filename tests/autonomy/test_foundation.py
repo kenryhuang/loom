@@ -2,10 +2,25 @@ import pytest
 
 from loom.autonomy.budget import BudgetLedger
 from loom.autonomy.contracts import check_dependencies, role_contract
+from loom.autonomy.dispatch import task_payload
 from loom.autonomy.store import AgentStore
 from loom.service.contracts import ServiceError
 from loom.service.store import SessionStore
 from tests.autonomy.helpers import Clock, goals, role
+
+
+def test_role_accepts_and_defaults_plan_mode(tmp_path):
+    assert role_contract(role(tmp_path))["plan_mode"] == "auto"
+    assert role_contract({**role(tmp_path), "plan_mode": "force"})["plan_mode"] == "force"
+    with pytest.raises(ServiceError, match="plan_mode"):
+        role_contract({**role(tmp_path), "plan_mode": "bogus"})
+
+
+def test_task_payload_uses_role_plan_mode_as_fallback(tmp_path):
+    agent = {"role": role_contract({**role(tmp_path), "plan_mode": "force"})}
+    work = {"objective": "修复验收", "acceptance": ["通过验收"]}
+    assert task_payload(agent, work)["plan_mode"] == "force"
+    assert task_payload({"role": role_contract(role(tmp_path))}, work)["plan_mode"] == "auto"
 
 
 def test_role_scope_and_dependencies(tmp_path):

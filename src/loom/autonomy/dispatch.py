@@ -11,7 +11,7 @@ def task_payload(agent, work):
         objective=text,
         workspace=role["working_directory"],
         model=role["model"],
-        plan_mode="auto",
+        plan_mode=role.get("plan_mode") or "auto",
         knowledge_base_ids=role["knowledge_base_ids"],
         external_tool_ids=role["external_tool_ids"],
         **({"task_spec": role["task_spec"]} if role["task_spec"] else {}),

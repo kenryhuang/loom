@@ -26,6 +26,7 @@ ROLE_FIELDS = {
     "learning_policy",
     "scheduling_policy",
     "task_spec",
+    "plan_mode",
     "owner_id",
     "method_learning",
 }
@@ -196,6 +197,9 @@ def role_contract(value):
         fallback = strings(route.get("fallback_route_ids", []), "fallback_route_ids")
         if not set(fallback) <= route_ids - {route["id"]}:
             raise ServiceError("Fallback routes must reference other bound sources")
+    plan_mode = value.get("plan_mode", "auto")
+    if plan_mode not in {"auto", "force", "off"}:
+        raise ServiceError("plan_mode must be auto, force or off")
     return dict(
         schema_version=SCHEMA_VERSION,
         owner_id=text(value.get("owner_id", "local"), "owner_id", max_length=100),
@@ -217,6 +221,7 @@ def role_contract(value):
         model=text(value["model"], "model", max_length=200) if value.get("model") is not None else None,
         evaluation_model=text(value["evaluation_model"], "evaluation_model", max_length=200) if value.get("evaluation_model") is not None else None,
         task_spec=value.get("task_spec"),
+        plan_mode=plan_mode,
     )
 
 
