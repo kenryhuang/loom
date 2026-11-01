@@ -1,10 +1,11 @@
 """Session-compatible routing and replayable dispatch, under service admission."""
 
+from loom.autonomy.binding import bind_for_dispatch, compatible_config
 from loom.memory.store import bound_workspace, tokens
 from loom.service.contracts import ServiceError
 
 
-def task_payload(agent, work):
+def task_payload(agent, work, binding=None):
     role = agent["role"]
     text = work["objective"] + "\nAcceptance criteria:\n" + "\n".join("- " + c for c in work["acceptance"])
     payload = dict(
@@ -17,6 +18,20 @@ def task_payload(agent, work):
         **({"task_spec": role["task_spec"]} if role["task_spec"] else {}),
         limits={"max_tokens": work.get("execution_budget", {}).get("tokens", role["budget"]["work_tokens"]), "max_duration_seconds": 3600},
     )
+    if binding is not None:
+        # Normalize so the reuse-compatibility comparison and session creation
+        # see the same effective configuration.
+        from loom.tasks.assembly import normalize_task_spec
+
+        payload["plan_mode"] = binding["plan_mode"]
+        spec = normalize_task_spec(binding.get("task_spec"), workspace=role["working_directory"], plan_mode=binding["plan_mode"])
+        environment = spec.setdefault("session_environment", {"plugin": "session"})
+        if role["working_directory"] and not any(r.get("kind") == "directory" for r in environment.get("resources", [])):
+            environment["resources"] = [
+                *environment.get("resources", []),
+                {"id": "workspace", "kind": "directory", "uri": role["working_directory"], "access": "read-write"},
+            ]
+        payload["task_spec"] = spec
     if work.get('read_only'):
         payload['external_tool_ids'] = []
         payload['task_spec'] = dict(session_environment=dict(plugin='session', resources=[
@@ -32,6 +47,19 @@ class Dispatcher:
         self.fault = fault or (lambda point: None)
 
     def dispatch(self, aid, wid):
+        # Phase 1: lock-free snapshot. The recommendation calls an LLM and must
+        # never hold the service lock; every premise is re-validated in phase 2
+        # and bind() re-checks generation, so a stale snapshot cannot apply.
+        try:
+            with self.store.sessions.transaction() as db:
+                agent = self.store.get(db, "agents", aid)
+                work = self.store.get(db, "agent_work_packages", wid, aid)
+        except ServiceError:
+            return
+        if agent["state"] != "enabled" or work["state"] != "pending":
+            return
+        dynamic = bind_for_dispatch(self.service, agent, work)
+        payload = task_payload(agent, work, binding=dynamic)
         # Lock order is service lock -> SessionStore lock throughout dispatch/control.
         with self.service.lock:
             with self.store.sessions.transaction() as db:
@@ -96,6 +124,8 @@ class Dispatcher:
                         or state["task"].get("external_tool_ids", []) != agent["role"]["external_tool_ids"]
                         or state.get("autonomy")
                         and state["autonomy"]["role_revision"] != agent["role_revision"]
+                        or dynamic is not None
+                        and not compatible_config(state["task"], payload)
                     ):
                         reason = "incompatible_configuration"
                     score = len(tokens(state["task"]["objective"]) & tokens(work["objective"]))
@@ -114,7 +144,6 @@ class Dispatcher:
                 self.store.put(db, "agent_routes", route)
             self.fault("before_dispatch")
             cid = "agent-dispatch:" + wid
-            payload = task_payload(agent, work)
 
             def bind(state, emit, db):
                 current = self.store.get(db, "agents", aid)
@@ -143,10 +172,16 @@ class Dispatcher:
                 db.execute(
                     "INSERT INTO agent_sessions VALUES(?,?,?,0) ON CONFLICT(session_id) DO UPDATE SET work_package_id=excluded.work_package_id", (sid, aid, wid)
                 )
+                if dynamic is not None:
+                    work["binding"] = dynamic["record"]
                 work.update(state="dispatched", session_id=sid, dispatch_command_id=cid)
                 self.store.put(db, "agent_work_packages", work)
                 db.execute("UPDATE agent_outbox SET state='delivered' WHERE id=?", (wid,))
                 self.store.event(db, aid, "work.dispatched", dict(work_package_id=wid, session_id=sid, route=route["action"]))
+                if dynamic is not None:
+                    record = dynamic["record"]
+                    self.store.event(db, aid, "schedule.binding." + record["source"],
+                                     dict(work_package_id=wid, **{k: v for k, v in record.items() if k != "source"}))
                 emit("agent.work.bound", binding)
 
             if selected:
