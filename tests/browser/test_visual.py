@@ -510,3 +510,40 @@ def test_unclear_visual_evidence_gets_only_one_recapture(tmp_path):
     assert "insufficient_visual_evidence" in acceptance["reason"]
     assert len(seen) == 2
     assert sum(e["type"] == "visual.capture.completed" for e in sink.events) == 2
+
+
+def test_capture_deadline_covers_cold_preview_start_and_visual_narration():
+    # A capture pays for: preview dev-server cold start + Chromium launch + render + assertions
+    # (worker RPC) plus the bounded visual narration (~30s). The tool deadline must cover both
+    # with margin, otherwise every acceptance screenshot is a race against the clock.
+    from loom.browser.tools import BrowserCollection
+    from types import SimpleNamespace
+
+    refs = {binding.ref.id: binding.ref for binding in BrowserCollection(SimpleNamespace(workspace=None)).bindings()}
+    assert refs["browser_capture"].timeout_ms >= 180_000
+
+
+@pytest.mark.asyncio
+async def test_capture_worker_call_gets_extended_timeout_for_preview_cold_start(monkeypatch):
+    from types import SimpleNamespace
+
+    import loom.browser.tools as tools
+
+    calls = []
+
+    class FakeClient:
+        async def call(self, value, options=None, **kwargs):
+            calls.append(kwargs.get("timeout"))
+            return {"frames": [], "assertions": [], "page_errors": []}
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(tools, "BrowserClient", FakeClient)
+    collection = tools.BrowserCollection(SimpleNamespace(workspace=None))
+    collection.prepare = lambda scenario, *, verification=False: dict(scenario)
+    collection.validate_binding = lambda binding: None
+    collection.retain = lambda result, scenario, binding=None: ({"frames": []}, [], "ref")
+
+    await collection.capture({"id": "x", "url": "http://127.0.0.1:9/"})
+    assert calls and calls[0] >= 120

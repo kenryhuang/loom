@@ -25,7 +25,7 @@ class BrowserClient:
         self.process = None
         self.lock = asyncio.Lock()
 
-    async def call(self, value, options=None):
+    async def call(self, value, options=None, *, timeout=58):
         async with self.lock:
             if self.process is None:
                 self.process = await asyncio.create_subprocess_exec(
@@ -39,7 +39,7 @@ class BrowserClient:
                 await self.process.stdin.drain()
                 pending = asyncio.create_task(self.process.stdout.readline())
                 try:
-                    async with asyncio.timeout(58):
+                    async with asyncio.timeout(timeout):
                         while not pending.done():
                             await asyncio.wait({pending}, timeout=0.1)
                             if options and options.get("cancel_check") and options["cancel_check"]():
@@ -90,7 +90,9 @@ class BrowserCollection(ToolCollection):
                     input_schema={"type": "object", "properties": {}, "additionalProperties": False}, timeout_ms=10000),
             ToolRef("browser_capture", "Independently replay a bounded Web/Canvas/WebGL scenario and retain actual screenshots, runtime facts and assertions. "
                     "For local workspace code use preview.argv with {port}; requires shell. Do not treat screenshot collection as acceptance.",
-                    input_schema=SCENARIO_SCHEMA, timeout_ms=60000),
+                    # Deadline covers preview dev-server cold start + render (worker RPC, bounded at 120s)
+                    # plus the bounded visual narration (~30s) and snapshot/validation margin.
+                    input_schema=SCENARIO_SCHEMA, timeout_ms=180000),
             ToolRef("browser_open", "Open a Web application in an isolated Chromium context. Use a preview argv with {port} for current workspace code; "
                     "external URLs require a bound URL resource. Returns page_id. Does not install dependencies.",
                     input_schema=SCENARIO_SCHEMA, timeout_ms=60000),
@@ -224,7 +226,7 @@ class BrowserCollection(ToolCollection):
         client = BrowserClient()
         try:
             value = self.prepare(scenario, verification=True)
-            result = await client.call({**{k: v for k, v in value.items() if k != "source_binding"}, "method": "capture"}, options)
+            result = await client.call({**{k: v for k, v in value.items() if k != "source_binding"}, "method": "capture"}, options, timeout=120)
             binding = value.get("source_binding")
             self.validate_binding(binding or {})
             return self.retain(result, scenario, binding)
