@@ -93,3 +93,35 @@ def test_exhausted_work_does_not_block_other_dispatch(agent_service):
     assert second["state"] == "dispatched"
     assert second["session_id"] != sid
     assert len(service.store.list_sessions()) == 2
+
+
+def test_human_resume_resets_recovery_counter(agent_service):
+    service, facade, aid, work, sid = paused_work(agent_service, "某些无法识别的原因")
+    with service.store.transaction() as db:
+        agent = facade.store.get(db, "agents", aid)
+        agent["role"]["scheduling_policy"]["max_recovery_attempts"] = 1
+        facade.store.put(db, "agents", agent)
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    snap = facade.snapshot(aid)
+    assert snap["work_packages"][0]["blocked_reason"] == "recovery_exhausted"
+
+    service.submit(sid, dict(command_id="manual-1", type="resume", payload={}))
+    saved = facade.snapshot(aid)["work_packages"][0]
+    assert saved["recovery"] == {"attempts": 0, "pending": None}
+    assert saved.get("blocked_reason") != "recovery_exhausted"
+
+    # The scheduler may try to recover this work again afterwards.
+    service.store.update(sid, lambda s, e, db: s["task"].update(state="paused"))
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    snap = facade.snapshot(aid)
+    assert snap["work_packages"][0]["recovery"]["attempts"] == 1
+    assert snap["scheduler"]["state"] == "intervention"
+
+
+def test_scheduler_resume_does_not_reset_counter(agent_service):
+    service, facade, aid, work, sid = paused_work(agent_service)
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    saved = facade.snapshot(aid)["work_packages"][0]
+    assert saved["recovery"]["attempts"] == 1
+    assert service.snapshot(sid)["task"]["state"] == "queued"
