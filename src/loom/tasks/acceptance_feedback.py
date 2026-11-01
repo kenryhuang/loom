@@ -52,7 +52,8 @@ def decide(controller, *, origin="completion", completion_id=None):
         code = "EXECUTION_UNKNOWN"
     elif data.get("cause_code"):
         pass
-    elif (data.get("plan") or {}).get("unresolved_requirements"):
+    elif (data.get("plan") or {}).get("unresolved_requirements") and not blockers:
+        # Unobservable requirements alone pause for a human; repairable blockers still go to repair.
         code = "ACCEPTANCE_EXTERNAL_DEPENDENCY"
     elif data["model_calls"] >= controller.config["max_model_calls"] or data["elapsed_seconds"] >= controller.config["max_seconds"]:
         code = "ACCEPTANCE_BUDGET_EXHAUSTED"
@@ -89,6 +90,7 @@ def decide(controller, *, origin="completion", completion_id=None):
                     "goal_digest": data["goal_digest"], "task_episode_id": assembly.request.metadata.get("task_episode_id"),
                     "plan_revision": data["revision"], "candidate_ref": assembly.publish_artifact({"candidate": data["candidate"]}, "candidate"),
                     "evidence_manifest_ref": data.get("evidence_manifest_ref"), "gaps": gaps,
+                    "unresolved_requirements": list((data.get("plan") or {}).get("unresolved_requirements") or []),
                     "prior_attempts_ref": list(data.get("feedback_history", [])), "progress_baseline": binding,
                     "repair_round": data.get("repair_rounds", 0) + 1, "repair_limit": controller.config["max_repairs"],
                     "state": "pending", "origin": origin,

@@ -61,7 +61,8 @@ def vision_provider(status="passed", recapture=False):
         assert raw.startswith(b"\x89PNG")
         calls.append(body)
         verdict = status(len(calls)) if callable(status) else status
-        return {"ok": True, "json": {"choices": [{"message": {"content": json.dumps(visual_result(verdict, recapture))}, "finish_reason": "stop"}],
+        retake = recapture(len(calls)) if callable(recapture) else recapture
+        return {"ok": True, "json": {"choices": [{"message": {"content": json.dumps(visual_result(verdict, retake))}, "finish_reason": "stop"}],
                                     "usage": {"prompt_tokens": 500, "completion_tokens": 50, "total_tokens": 550}}}
 
     provider = OpenAIProvider(model="qwen3.8-omni-flash", api_key="test", http_client=http, input_modalities=("text", "image"),
@@ -368,6 +369,46 @@ def test_visual_failure_with_deferred_command_judgment_enters_repair_and_recaptu
     assert 'Correct appearance' in (tmp_path / 'index.html').read_text()
 
 
+def test_visual_blocker_is_repaired_by_revising_the_scenario_with_interaction_steps(tmp_path):
+    from loom.llm import LlmToolCall
+
+    pytest.importorskip('playwright')
+    (tmp_path / 'index.html').write_text('''<div id="ready">Solar mode</div><button id="to-galaxy">Galaxy</button>
+      <div id="galaxy" hidden>Galaxy mode</div><script>
+      document.querySelector('#to-galaxy').addEventListener('click', () => {
+        document.querySelector('#galaxy').hidden = false;
+      });</script>''')
+    criterion = {'id': 'appearance', 'description': 'Galaxy mode is rendered', 'verifier': 'visual', 'scope': [],
+                 'check': {'scenario': scene()}}
+
+    class Reviser(Judge):
+        def __init__(self):
+            super().__init__([criterion])
+            self.solver_calls = 0
+
+        async def chat(self, messages, tools=None, cancellation=None, **kwargs):
+            if messages[0].content.startswith(('You design', 'You independently')):
+                return await super().chat(messages, tools, cancellation, **kwargs)
+            self.solver_calls += 1
+            if self.solver_calls == 2:
+                revised = [dict(criterion, check={'scenario': scene(steps=[{'action': 'click', 'selector': '#to-galaxy'},
+                                                                           {'action': 'wait_visible', 'selector': '#galaxy'}])})]
+                args = json.dumps({'base_revision': 1, 'reason': 'Galaxy mode only renders after clicking the mode button',
+                                   'criteria': revised})
+                return ok(LlmResponse(tool_calls=(LlmToolCall('revise', 'revise_acceptance_plan', args),)))
+            return ok(LlmResponse(tool_calls=(LlmToolCall(f'finish-{self.solver_calls}', 'finish', '{"report":"done"}'),)))
+
+    provider, seen = vision_provider(status=lambda n: 'passed' if n > 2 else 'blocked', recapture=lambda n: n == 1)
+    sink = Sink()
+    result = asyncio.run(run_generic_task(TaskRequest('Render galaxy mode', workspace=tmp_path, task_spec=spec(tmp_path)),
+        provider=Reviser(), visual_provider=provider, options=TaskRunOptions(plan_mode='off', max_steps=6), trace_sink=sink)).unwrap()
+    acceptance = thaw_json(result.run_result.context.state.scratch['acceptance'])
+    assert acceptance['state'] == 'passed', acceptance['reason']
+    assert result.run_result.metrics.outcome == 'pass'
+    assert acceptance['revision'] == 2
+    assert len(seen) == 3
+
+
 @pytest.mark.parametrize('visual_status,state', [('failed', 'needs_repair'), ('blocked', 'blocked')])
 @pytest.mark.asyncio
 async def test_deferred_checks_do_not_hide_the_actual_visual_failure_or_blocker(tmp_path, visual_status, state):
@@ -397,6 +438,40 @@ async def test_deferred_checks_do_not_hide_the_actual_visual_failure_or_blocker(
         if state == 'blocked':
             assert 'appearance: Actual visual result' in assembly.acceptance.data['reason']
             assert 'Outcome judgment skipped' not in assembly.acceptance.data['reason']
+    finally:
+        await assembly.close()
+
+
+@pytest.mark.asyncio
+async def test_blocked_reason_lists_the_visual_blocker_and_the_unresolved_requirement(tmp_path):
+    from types import SimpleNamespace
+
+    from loom.tasks.runner import make_task_context
+
+    criterion = {'id': 'appearance', 'description': 'Galaxy mode is rendered', 'verifier': 'visual', 'scope': [],
+                 'check': {'scenario': scene()}}
+
+    class Unresolved(Judge):
+        async def chat(self, messages, tools=None, cancellation=None, **kwargs):
+            if messages[0].content.startswith('You design Loom task acceptance'):
+                return ok(LlmResponse(json.dumps({'criteria': [criterion],
+                                                  'unresolved_requirements': ['Baseline warning threshold is not recorded']})))
+            return await super().chat(messages, tools, cancellation, **kwargs)
+
+    assembly = TaskAssembly(TaskRequest('Fix appearance', workspace=tmp_path, task_spec=spec(tmp_path)), plan_mode='off')
+    assembly.configure_acceptance(Unresolved())
+    context = make_task_context(assembly.request, assembly=assembly, plan_mode='off').unwrap()
+    runtime = SimpleNamespace(run_id='run', loop_id='loop', trace_id='trace', trace_sink=Sink(), cancellation=None)
+
+    async def check(criterion, runtime):
+        return {'status': 'blocked', 'reason': 'Galaxy mode is not visible in any captured frame'}, {}
+
+    assembly.acceptance.check = check
+    try:
+        assert not await assembly.acceptance.verify(context, runtime, 'candidate')
+        reason = assembly.acceptance.data['reason']
+        assert 'appearance: Galaxy mode is not visible in any captured frame' in reason
+        assert 'Baseline warning threshold is not recorded' in reason
     finally:
         await assembly.close()
 
@@ -503,7 +578,8 @@ def test_unclear_visual_evidence_gets_only_one_recapture(tmp_path):
                  "check": {"scenario": scene()}}
     provider, seen = vision_provider("blocked", recapture=True)
     sink = Sink()
-    result = asyncio.run(run_generic_task(TaskRequest("Inspect scene", workspace=tmp_path, task_spec=spec(tmp_path)),
+    result = asyncio.run(run_generic_task(TaskRequest("Inspect scene", workspace=tmp_path,
+        task_spec={**spec(tmp_path), "acceptance": {"max_repairs": 0}}),
         provider=Judge([criterion]), visual_provider=provider, options=TaskRunOptions(plan_mode="off", max_steps=2), trace_sink=sink)).unwrap()
     acceptance = thaw_json(result.run_result.context.state.scratch["acceptance"])
     assert acceptance["state"] == "blocked"

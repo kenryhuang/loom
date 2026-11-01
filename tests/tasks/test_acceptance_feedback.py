@@ -76,6 +76,41 @@ def test_external_and_unknown_gaps_do_not_auto_resume(tmp_path, kind, code):
     assert result.run_result.context.state.scratch["acceptance"]["decision"]["reason_code"] == code
 
 
+def test_unresolved_requirements_do_not_mask_repairable_gaps(tmp_path):
+    from loom.tasks.acceptance_feedback import decide
+
+    assembly = TaskAssembly(TaskRequest("Report source", workspace=tmp_path), plan_mode="off")
+    context = make_task_context(assembly.request, assembly=assembly, plan_mode="off").unwrap()
+    gate = assembly.acceptance
+    gate.goal(context)
+    gate.data.update(
+        plan=gate.validate_plan({"criteria": [], "unresolved_requirements": ["Baseline warning threshold is not recorded"]}),
+        state="blocked", candidate="report", reason="Acceptance blocked: appearance: Missing galaxy frame",
+        results=[{"criterion_id": "appearance", "status": "blocked", "reason": "Missing galaxy frame",
+                  "gap": {"kind": "missing_evidence", "targets": [], "required_fact": "Galaxy mode frame",
+                          "suggested_action": "Add scenario interaction steps"}}])
+    decision = decide(gate)
+    assert decision.outcome == "repair"
+    assert gate.data["feedback"]["unresolved_requirements"] == ["Baseline warning threshold is not recorded"]
+    asyncio.run(assembly.close())
+
+
+def test_unresolved_requirements_alone_still_pause_for_human(tmp_path):
+    from loom.tasks.acceptance_feedback import decide
+
+    assembly = TaskAssembly(TaskRequest("Report source", workspace=tmp_path), plan_mode="off")
+    context = make_task_context(assembly.request, assembly=assembly, plan_mode="off").unwrap()
+    gate = assembly.acceptance
+    gate.goal(context)
+    gate.data.update(
+        plan=gate.validate_plan({"criteria": [], "unresolved_requirements": ["Customer approval cannot be observed"]}),
+        state="blocked", candidate="report", reason="Acceptance blocked: Customer approval cannot be observed", results=[])
+    decision = decide(gate)
+    assert decision.outcome == "pause"
+    assert decision.reason_code == "ACCEPTANCE_EXTERNAL_DEPENDENCY"
+    asyncio.run(assembly.close())
+
+
 def test_identical_report_after_repair_pauses_without_paid_reverification(tmp_path):
     judge = EvidenceJudge(repair=False)
     result = asyncio.run(run_generic_task(TaskRequest("Report source", workspace=tmp_path), provider=judge,

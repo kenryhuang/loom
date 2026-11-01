@@ -68,6 +68,15 @@ def visual_protocol(criterion, frames):
     return StructuredProtocol("visual_acceptance", 1, schema, normalize), validate
 
 
+def visual_gap(row):
+    """A blocked visual verdict is repairable: interaction steps or workspace changes expose the state."""
+    missing = [m for m in row.get("missing_evidence") or [] if isinstance(m, str) and m.strip()]
+    return {"kind": "missing_evidence", "targets": [{"kind": "tool", "value": "browser_capture"}],
+            "required_fact": "; ".join(missing) or row.get("reason", "Observable visual state"),
+            "suggested_action": "Repair the visual scenario (e.g. add interaction steps via revise_acceptance_plan) "
+                                "or make the required state observable in the workspace, then verify again"}
+
+
 async def verify_visual(controller, criterion, runtime):
     assembly = controller.assembly
     provider = assembly.visual_provider
@@ -123,6 +132,9 @@ async def verify_visual(controller, criterion, runtime):
                "visual_judgment": judgment_ref, "findings": judged["findings"], "missing_evidence": judged["missing_evidence"]}
         detail.update(judgment=judged, judgment_artifact=judgment_ref, acquisitions=history)
         if judged["status"] != "blocked" or not judged["recapture"]:
+            if judged["status"] == "blocked":
+                row["gap"] = visual_gap(row)
             return row, detail
     row["reason"] = "insufficient_visual_evidence: " + row["reason"]
+    row["gap"] = visual_gap(row)
     return row, detail

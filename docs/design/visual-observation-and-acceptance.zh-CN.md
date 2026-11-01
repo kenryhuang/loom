@@ -111,7 +111,7 @@ DOM 场景可以附带断言，例如：
 
 - 浏览器断言失败：返回 `failed`，进入已有修复循环。
 - 模型发现明确画面缺陷：保留截图、归一化区域与理由，返回 `failed`。
-- 视角/帧数不足：在同一允许场景内最多补采一次；仍不足返回 `insufficient_visual_evidence`。
+- 视角/帧数不足：在同一允许场景内最多补采一次；仍不足返回 `insufficient_visual_evidence`，并携带可修复 gap（missing_evidence，建议用 `revise_acceptance_plan` 为场景补交互步骤或让状态在 workspace 可观测）进入修复循环。
 - 浏览器、图像模型、预览或版本绑定不可用：具体 blocked 原因。
 - 条件满足且输入保持有效：与其他检查进入最终完整目标 gate。
 

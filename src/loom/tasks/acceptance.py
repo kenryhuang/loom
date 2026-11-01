@@ -63,11 +63,15 @@ Exit code zero alone is not proof of the condition: commands must assert the req
 Do not require successful finish/complete_node calls as prerequisites for completion; this creates a circular gate.
 The host always adds an independent semantic criterion for the full user goal, constraints and adequacy of these checks.
 Do not replace a user requirement by an easier substitute. Record unsupported requirements in unresolved_requirements.
+Record a requirement there only when no verifier, tool or workspace evidence can observe it even after repair. Facts derivable
+from the workspace itself (git history, recorded baselines, prior build output) are verifiable: design a command/artifact criterion instead.
 When browser_capture is available, use visual.check: {scenario: OBJECT matching its supplied schema} for actual page appearance.
 For workspace applications use scenario.preview with argv including {port}, cwd and route; omit url (or set null in native JSON Schema).
 url and preview are mutually exclusive. Never fill both. For Vite use ["npm","run","dev","--","--host","127.0.0.1","--port","{port}"].
 Do not assume an existing dev server serves the candidate. Optional adapter_path must be absent/null unless an existing adapter function is verified;
 an application entry point such as src/main.tsx is not a browser adapter. Do not invent paths or placeholder values for optional fields.
+When the required state appears only after interaction (mode/tab/button clicks, scrolling, async rendering), the scenario MUST include the
+steps array (click, fill, select, press, scroll, drag, wait_visible, wait_text); a load-and-capture scenario observes only the initial state.
 visual_capabilities describes actual availability. Missing screenshots before execution are pending evidence, not unresolved user requirements.
 For Canvas/WebGL collect multiple timed frames; use deterministic assertions for exact counts. Do not invent a requirement for human visual approval.
 A temporary browser/model capability gap is recoverable; specify a visual check with its concrete scenario rather than permanently unresolved eye inspection.
@@ -809,8 +813,10 @@ class AcceptanceController:
             self._completion_receipt = after if passed else None
             blockers = [r for r in self.data["results"] if r["status"] == "blocked" and not r.get("deferred")]
             if blockers or self.data["plan"]["unresolved_requirements"]:
-                self.data.update(state="blocked", reason="Acceptance blocked: " + "; ".join(self.data["plan"]["unresolved_requirements"] or
-                    [f"{r['criterion_id']}: {r['reason']}" for r in blockers]))
+                # List every actionable blocker first; unresolved requirements must not mask repairable gaps.
+                parts = [f"{r['criterion_id']}: {r['reason']}" for r in blockers]
+                parts.extend(self.data["plan"]["unresolved_requirements"])
+                self.data.update(state="blocked", reason="Acceptance blocked: " + "; ".join(parts))
             if self.data["state"] == "blocked" and (self.data["plan"]["unresolved_requirements"] or
                     any((r.get("gap") or {}).get("kind") == "external_dependency" for r in blockers)):
                 self.data["blocked_signature"] = blocked_signature
