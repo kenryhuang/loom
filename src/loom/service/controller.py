@@ -8,6 +8,7 @@ import json
 import sqlite3
 import threading
 import time
+import traceback
 from dataclasses import replace
 from pathlib import Path
 
@@ -703,58 +704,67 @@ class LoomService:
 
     def _schedule(self):
         while not self.stopping.wait(0.02):
-            with self.lock:
-                if time.monotonic() - self.cleanup_checked >= 1:
-                    self.cleanup_checked = time.monotonic()
-                    for state in self.store.list_sessions():
-                        if state.get("workspace_blocked"):
+            try:
+                self._tick()
+            except Exception:
+                # A transient store error (e.g. a held database lock) must not
+                # kill the supervisor; without it no session is ever scheduled.
+                traceback.print_exc()
+                self.stopping.wait(1)
 
-                            def cleanup(state, emit, db):
-                                state["workspace_blocked"] = [p for p in state["workspace_blocked"] if not reap_group(p["pid"], p["identity"])]
-                                if not state["workspace_blocked"]:
-                                    emit("workspace.released", {})
+    def _tick(self):
+        with self.lock:
+            if time.monotonic() - self.cleanup_checked >= 1:
+                self.cleanup_checked = time.monotonic()
+                for state in self.store.list_sessions():
+                    if state.get("workspace_blocked"):
 
-                            self.store.update(state["session_id"], cleanup)
-                for sid, attempt in list(self.active.items()):
-                    try:
-                        while attempt.connection.poll():
-                            record = attempt.connection.recv()
-                            try:
-                                result = self.worker_record(sid, record)
-                                attempt.connection.send({"value": encode(result)})
-                            except (ServiceError, sqlite3.Error) as exc:
-                                attempt.connection.send({"error": str(exc)})
-                    except (EOFError, BrokenPipeError, OSError):
-                        pass
+                        def cleanup(state, emit, db):
+                            state["workspace_blocked"] = [p for p in state["workspace_blocked"] if not reap_group(p["pid"], p["identity"])]
+                            if not state["workspace_blocked"]:
+                                emit("workspace.released", {})
+
+                        self.store.update(state["session_id"], cleanup)
+            for sid, attempt in list(self.active.items()):
+                try:
+                    while attempt.connection.poll():
+                        record = attempt.connection.recv()
+                        try:
+                            result = self.worker_record(sid, record)
+                            attempt.connection.send({"value": encode(result)})
+                        except (ServiceError, sqlite3.Error) as exc:
+                            attempt.connection.send({"error": str(exc)})
+                except (EOFError, BrokenPipeError, OSError):
+                    pass
+                state = self.store.snapshot(sid)
+                if attempt.process.is_alive() and state["run"]["state"] != "running":
+                    attempt.terminal_since = attempt.terminal_since or time.monotonic()
+                    if time.monotonic() - attempt.terminal_since > 2:
+                        attempt.process.kill()
+                if not attempt.process.is_alive():
+                    attempt.process.join()
+                    attempt.connection.close()
                     state = self.store.snapshot(sid)
-                    if attempt.process.is_alive() and state["run"]["state"] != "running":
-                        attempt.terminal_since = attempt.terminal_since or time.monotonic()
-                        if time.monotonic() - attempt.terminal_since > 2:
-                            attempt.process.kill()
-                    if not attempt.process.is_alive():
-                        attempt.process.join()
-                        attempt.connection.close()
-                        state = self.store.snapshot(sid)
-                        if state["run"]["state"] == "running":
-                            self.recover(sid, f"Worker exited ({attempt.process.exitcode})")
-                        else:
-                            self.store.update(sid, self._cleanup_groups)
-                        self.active.pop(sid)
-                shared = self.shared_active()
-                available = min(self.capacity - len(self.active), self.shared_capacity - len(self.active) - len(shared))
-                occupied = {**shared, **self.active}
-                candidates = self.store.list_sessions()
-                if not self.autonomy_enabled:
-                    candidates = [state for state in candidates if not state.get('autonomy')]
-                for sid in ready_sessions(candidates, occupied, len(occupied) + max(0, available)):
-                    try:
-                        descriptor = self.prepare_attempt(sid)
-                        attempt = spawn_attempt(descriptor, self.config_path, self.provider_factory, self.plugin_registry_factory)
-                        self.active[sid] = attempt
-                        process = {"pid": attempt.process.pid, "identity": process_identity(attempt.process.pid)}
-                        self.store.update(sid, lambda state, emit, db, process=process: state["run"].update(process=process))
-                    except Exception as exc:
-                        self.recover(sid, str(exc))
+                    if state["run"]["state"] == "running":
+                        self.recover(sid, f"Worker exited ({attempt.process.exitcode})")
+                    else:
+                        self.store.update(sid, self._cleanup_groups)
+                    self.active.pop(sid)
+            shared = self.shared_active()
+            available = min(self.capacity - len(self.active), self.shared_capacity - len(self.active) - len(shared))
+            occupied = {**shared, **self.active}
+            candidates = self.store.list_sessions()
+            if not self.autonomy_enabled:
+                candidates = [state for state in candidates if not state.get('autonomy')]
+            for sid in ready_sessions(candidates, occupied, len(occupied) + max(0, available)):
+                try:
+                    descriptor = self.prepare_attempt(sid)
+                    attempt = spawn_attempt(descriptor, self.config_path, self.provider_factory, self.plugin_registry_factory)
+                    self.active[sid] = attempt
+                    process = {"pid": attempt.process.pid, "identity": process_identity(attempt.process.pid)}
+                    self.store.update(sid, lambda state, emit, db, process=process: state["run"].update(process=process))
+                except Exception as exc:
+                    self.recover(sid, str(exc))
 
     def close(self):
         if self.closed:

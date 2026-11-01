@@ -27,6 +27,10 @@ class SessionStore:
         self.knowledge = KnowledgeStore(self.directory / "knowledge")
         self.lock = threading.RLock()
         self.changed = threading.Condition(self.lock)
+        # WAL persists in the database header: readers never block writers and
+        # writers never block readers, so polling and analytics cannot stall runs.
+        with sqlite3.connect(self.path) as db:
+            db.execute("PRAGMA journal_mode=WAL")
         with self.transaction() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, body TEXT NOT NULL);
@@ -57,6 +61,19 @@ class SessionStore:
                 raise
             finally:
                 db.close()
+
+    @contextmanager
+    def read(self):
+        """Consistent read snapshot without the write lock; safe under WAL."""
+        db = sqlite3.connect(self.path, timeout=10)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA busy_timeout=10000")
+            db.execute("BEGIN")  # Deferred: never competes with writers.
+            yield db
+            db.commit()
+        finally:
+            db.close()
 
     def _load(self, db, sid):
         row = db.execute("SELECT body FROM sessions WHERE id=?", (sid,)).fetchone()
@@ -427,11 +444,11 @@ class SessionStore:
         self.append(db, state, "command.applied", {}, command_id=cid)
 
     def snapshot(self, sid):
-        with self.transaction() as db:
+        with self.read() as db:
             return self._load(db, sid)
 
     def list_sessions(self):
-        with self.transaction() as db:
+        with self.read() as db:
             return [json.loads(row[0]) for row in db.execute("SELECT body FROM sessions WHERE json_extract(body, '$.deleted_at') IS NULL ORDER BY rowid DESC")]
 
     def delete(self, sid):
@@ -458,7 +475,7 @@ class SessionStore:
     def events(self, sid, after=0, limit=200):
         if isinstance(after, bool) or not isinstance(after, int) or after < 0 or not 1 <= limit <= 1000:
             raise ServiceError("Invalid event cursor or limit")
-        with self.transaction() as db:
+        with self.read() as db:
             state = self._load(db, sid)
             if after > state["event_cursor"]:
                 raise ServiceError("Cursor exceeds session history; reload snapshot", 409)
@@ -473,7 +490,7 @@ class SessionStore:
 
     def processes(self, sid):
         """Index execution rounds without loading model token streams."""
-        with self.transaction() as db:
+        with self.read() as db:
             state = self._load(db, sid)
             rows = db.execute(
                 """SELECT body FROM events WHERE session_id=? AND (
@@ -524,7 +541,7 @@ class SessionStore:
             return self.artifact_in_transaction(db, sid, value, kind)
 
     def read_artifact(self, sid, digest):
-        with self.transaction() as db:
+        with self.read() as db:
             self._load(db, sid)
             if not db.execute("SELECT 1 FROM artifacts WHERE session_id=? AND digest=?", (sid, digest)).fetchone():
                 raise ServiceError("Artifact not referenced by session", 404)
@@ -532,7 +549,7 @@ class SessionStore:
 
 
     def artifact_ref(self, sid, digest):
-        with self.transaction() as db:
+        with self.read() as db:
             self._load(db, sid)
             row = db.execute("SELECT ref FROM artifacts WHERE session_id=? AND digest=?", (sid, digest)).fetchone()
             if not row:

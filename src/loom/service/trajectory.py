@@ -192,7 +192,7 @@ class SessionTrajectory:
         try:
             body["state"] = "running"
             self._save(body)
-            with self.store.transaction() as db:
+            with self.store.read() as db:
                 events = [json.loads(row[0]) for row in db.execute(
                     "SELECT body FROM events WHERE session_id=? AND seq<=? AND json_extract(body,'$.type') NOT LIKE 'llm.%.delta' "
                     "AND json_extract(body,'$.type') NOT LIKE 'llm.stream.%' AND json_extract(body,'$.type') NOT LIKE 'llm.tool_call.%' ORDER BY seq",
@@ -253,7 +253,7 @@ class SessionTrajectory:
         return source, result
 
     def _load(self, sid, identifier):
-        with self.store.transaction() as db:
+        with self.store.read() as db:
             self.store._load(db, sid)
             row = db.execute("SELECT body FROM session_analyses WHERE id=? AND session_id=?", (identifier, sid)).fetchone()
             if row is None:

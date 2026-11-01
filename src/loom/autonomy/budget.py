@@ -32,6 +32,18 @@ class BudgetLedger:
         finally:
             db.close()
 
+    @contextmanager
+    def read(self):
+        """Consistent read snapshot without the write lock; safe under WAL."""
+        db = sqlite3.connect(self.database, timeout=10)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("BEGIN")  # Deferred: never competes with writers.
+            yield db
+            db.commit()
+        finally:
+            db.close()
+
     def reserve(self, identifier, binding, tokens, category):
         with self.transaction() as db:
             prior = db.execute("SELECT * FROM agent_budget_calls WHERE id=?", (identifier,)).fetchone()
@@ -161,7 +173,7 @@ class BudgetLedger:
         return {"id": identifier, "reserved": tokens, "state": "reserved"}
 
     def next_window(self, aid):
-        with self.transaction() as db:
+        with self.read() as db:
             agent = json.loads(db.execute("SELECT body FROM agents WHERE id=?", (aid,)).fetchone()[0])
         local = self.clock().astimezone(ZoneInfo(agent["role"]["timezone"]))
         return (local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).astimezone(UTC).isoformat()
@@ -180,7 +192,7 @@ class BudgetLedger:
             db.execute("UPDATE agent_budget_calls SET actual=?,state=? WHERE id=?", (actual, "settled" if actual is not None else "unknown", identifier))
 
     def summary(self, aid):
-        with self.transaction() as db:
+        with self.read() as db:
             return [
                 dict(r)
                 for r in db.execute(
@@ -194,14 +206,14 @@ class BudgetLedger:
         from loom.autonomy.contracts import learning_policy
         from loom.autonomy.learning_budget import allowance
 
-        with self.transaction() as db:
+        with self.read() as db:
             agent = json.loads(db.execute("SELECT body FROM agents WHERE id=?", (aid,)).fetchone()[0])
             window = self.clock().astimezone(ZoneInfo(agent["role"]["timezone"])).date().isoformat()
             return dict(window=window, initial_tokens=agent["role"]["budget"]["learning_tokens"],
                         effective_tokens=allowance(db, agent, window), policy=learning_policy(agent["role"]))
 
     def objective_summary(self, aid):
-        with self.transaction() as db:
+        with self.read() as db:
             agent = json.loads(db.execute("SELECT body FROM agents WHERE id=?", (aid,)).fetchone()[0])
             result = []
             for objective in agent["role"]["long_term_objectives"]:

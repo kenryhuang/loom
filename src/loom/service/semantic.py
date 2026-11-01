@@ -149,7 +149,7 @@ class SessionSemantic:
 
     def _load(self, sid, aid, identifier):
         self.trajectory._load(sid, aid)
-        with self.store.transaction() as db:
+        with self.store.read() as db:
             row = db.execute("SELECT body FROM semantic_jobs WHERE id=? AND session_id=?", (identifier, sid)).fetchone()
         if not row:
             raise ServiceError("Evaluation not found", 404)
@@ -160,7 +160,7 @@ class SessionSemantic:
 
     def list(self, sid, aid):
         parent = self.trajectory._load(sid, aid)
-        with self.store.transaction() as db:
+        with self.store.read() as db:
             rows = [json.loads(row[0]) for row in db.execute("SELECT body FROM semantic_jobs WHERE session_id=? ORDER BY rowid DESC", (sid,))]
         runs = []
         if parent["state"] == "completed":
@@ -281,7 +281,7 @@ class SessionSemantic:
                         graph_revision=snapshot['identity']['graph_revision'], extraction=cp.get('extraction', {}))))
 
     def _queue_info(self, identifier):
-        with self.store.transaction() as db:
+        with self.store.read() as db:
             jobs = [
                 json.loads(row[0])
                 for row in db.execute("SELECT body FROM semantic_jobs WHERE json_extract(body,'$.state') IN ('queued','running') ORDER BY rowid")
