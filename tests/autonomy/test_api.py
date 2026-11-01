@@ -94,3 +94,45 @@ def test_workspace_less_review_library_requires_an_owned_session(agent_service):
     result = facade.dispatch('GET', [aid, 'memory', 'library'], {'session_id': [sid]})
     assert result['total'] == 1
     assert result['records'][0]['source']['session_id'] == sid
+
+
+def test_agent_setup_recommend_returns_mappable_proposal(agent_service):
+    service, facade, _, _ = agent_service
+    seen = {}
+
+    def recommender(text, *, model, scope, extra=None):
+        seen.update(text=text, model=model, scope=scope)
+        return dict(
+            task_type="research",
+            tool_collections=["web_research", "document_outputs", "task_control"],
+            rationale="研究型职责",
+            collection_reasons={"web_research": "需要读取来源"},
+            knowledge_base_ids=[],
+            external_tools=[],
+            plugins={"context": "research_context", "workflow": "dynamic"},
+        )
+
+    service.setup_recommender = recommender
+    result = facade.dispatch("POST", ["setup", "recommend"], None, {"description": "跟踪竞品发布并写摘要", "model": None})
+    assert seen == {"text": "跟踪竞品发布并写摘要", "model": None, "scope": "agent_init"}
+    spec = result["task_spec"]
+    assert spec["tools"]["collections"] == ["web_research", "document_outputs", "task_control"]
+    assert spec["context"]["plugin"] == "research_context"
+    assert spec["workflow"]["plugin"] == "dynamic"
+    assert result["plan_mode"] == "auto"
+    assert result["knowledge_base_ids"] == []
+    assert result["external_tool_ids"] == []
+    assert result["rationale"] == "研究型职责"
+    assert result["collection_reasons"]["web_research"]
+
+
+def test_agent_setup_recommend_failure_surfaces_502(agent_service):
+    service, facade, _, _ = agent_service
+
+    def recommender(text, *, model, scope, extra=None):
+        raise RuntimeError("model down")
+
+    service.setup_recommender = recommender
+    with pytest.raises(ServiceError) as error:
+        facade.dispatch("POST", ["setup", "recommend"], None, {"description": "整理周报", "model": None})
+    assert error.value.status == 502

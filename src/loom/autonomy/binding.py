@@ -11,6 +11,19 @@ from loom.service.session_setup import builtin_templates, recommend_setup
 DERIVED = frozenset({"knowledge", "external_tools"})
 
 
+def spec_from_proposal(proposal):
+    """Build a task_spec from a recommendation: template by task_type, collections
+    replaced, context/workflow plugins merged over template defaults."""
+    templates = {row["id"]: row for row in builtin_templates()}
+    template = templates.get(proposal["task_type"], {}).get("task_spec") or templates["general"]["task_spec"]
+    spec = deepcopy(template)
+    spec["tools"] = {"collections": list(proposal["tool_collections"])}
+    for kind in ("context", "workflow"):
+        if proposal.get("plugins", {}).get(kind):
+            spec[kind] = {**(spec.get(kind) or {}), "plugin": proposal["plugins"][kind]}
+    return spec
+
+
 def bind_for_dispatch(service, agent, work):
     """Recommend a task_spec/plan_mode for this work package. Never raises.
 
@@ -28,15 +41,8 @@ def bind_for_dispatch(service, agent, work):
             lambda text, *, model, scope, extra=None: recommend_setup(service, text, model=model, scope=scope, extra=extra)
         )
         proposal = recommender(objective, model=role["model"], scope="dispatch")
-        templates = {row["id"]: row for row in builtin_templates()}
-        template = templates.get(proposal["task_type"], {}).get("task_spec") or templates["general"]["task_spec"]
-        spec = deepcopy(template)
-        spec["tools"] = {"collections": list(proposal["tool_collections"])}
-        for kind in ("context", "workflow"):
-            if proposal.get("plugins", {}).get(kind):
-                spec[kind] = {**(spec.get(kind) or {}), "plugin": proposal["plugins"][kind]}
         return {
-            "task_spec": spec,
+            "task_spec": spec_from_proposal(proposal),
             "plan_mode": proposal.get("plan_mode") or "auto",
             "record": {"source": "recommended", "rationale": proposal.get("rationale", ""), "at": at},
         }

@@ -308,6 +308,36 @@ class AutonomyService:
             self.store.event(db, aid, "learning.command", dict(cycle_id=lid, action=action))
             return self.store.receipt(db, body["command_id"], request, cycle)
 
+    def recommend_agent_setup(self, body):
+        """One recommend call for the agent creation form. Writes nothing."""
+        from loom.autonomy.binding import spec_from_proposal
+        from loom.service.session_setup import recommend_setup
+
+        value = strict(body, {"description", "model"})
+        description = text(value.get("description"), "description", max_length=20000)
+        model = value.get("model") or None
+        if model is not None:
+            text(model, "model", max_length=200)
+        try:
+            recommender = getattr(self.service, "setup_recommender", None)
+            proposal = (
+                recommender(description, model=model, scope="agent_init")
+                if recommender
+                else recommend_setup(self.service, description, model=model, scope="agent_init")
+            )
+        except ServiceError:
+            raise
+        except Exception as exc:
+            raise ServiceError("Setup model request failed; retry or configure manually", 502) from exc
+        return dict(
+            task_spec=spec_from_proposal(proposal),
+            plan_mode=proposal.get("plan_mode") or "auto",
+            knowledge_base_ids=proposal.get("knowledge_base_ids", []),
+            external_tool_ids=proposal.get("external_tools", []),
+            rationale=proposal.get("rationale", ""),
+            collection_reasons=proposal.get("collection_reasons", {}),
+        )
+
     def dispatch(self, method, parts, query, body=None):
         from urllib.parse import unquote
 
@@ -321,6 +351,10 @@ class AutonomyService:
                 return self.store.create(body.get("command_id"), body.get("role"))
             with self.store.sessions.transaction() as db:
                 return {"agents": [json.loads(r[0]) for r in db.execute("SELECT body FROM agents")], "service_enabled": self.service.autonomy_enabled}
+        if parts == ["setup", "recommend"]:
+            if method != "POST":
+                raise ServiceError("Setup recommendation supports POST", 405)
+            return self.recommend_agent_setup(body)
         aid = parts[0]
         self.store.snapshot(aid)  # All routes enforce existing Agent identity.
         if len(parts) == 1 and method == "GET":

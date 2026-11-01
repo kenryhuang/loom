@@ -103,6 +103,10 @@ _SYSTEM_PROMPT = (
 
 _SCOPE_PROMPTS = {
     "session": "",
+    "agent_init": (
+        " This configures a long-lived agent role rather than a single session: "
+        "choose the minimum collections and bindings that cover the role's recurring responsibilities."
+    ),
     "dispatch": (
         " Knowledge bases and external tools are bound at the agent role level, not per task: "
         "return empty knowledge_base_ids and external_tools, and omit the knowledge and external_tools collections. "
