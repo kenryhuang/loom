@@ -532,3 +532,46 @@ def test_restart_window_edit_updates_built_in_plugin_cap(tmp_path):
         assert task['task_spec']['context']['max_window_chars'] == 2400000
     finally:
         service.close()
+
+
+def test_tick_still_replies_when_a_record_handler_crashes(tmp_path, monkeypatch):
+    """An exception outside (ServiceError, sqlite3.Error) must not escape the per-record
+    reply path: an unanswered record freezes the worker on future.result() forever."""
+    from types import SimpleNamespace
+
+    service = LoomService(tmp_path / "data", provider_factory=provider_factory)
+    try:
+        sid = create(service, tmp_path / "workspace")
+        descriptor = service.prepare_attempt(sid)
+        replies = []
+
+        class FakeConnection:
+            def __init__(self):
+                self.records = [dict(epoch=descriptor["epoch"], attempt_id=descriptor["run"]["attempt_id"],
+                                     record_id="poison", type="read_artifact", payload=encode({"digest": "ab" * 32}))]
+
+            def poll(self):
+                return bool(self.records)
+
+            def recv(self):
+                return self.records.pop(0)
+
+            def send(self, reply):
+                replies.append(reply)
+
+        class FakeProcess:
+            def is_alive(self):
+                return True
+
+        service.active[sid] = SimpleNamespace(connection=FakeConnection(), process=FakeProcess(), terminal_since=None,
+                                              workspace=str(tmp_path / "workspace"))
+
+        def boom(*args):
+            raise RuntimeError("unexpected crash")
+
+        monkeypatch.setattr(service, "worker_record", boom)
+        service._tick()
+        assert replies and "unexpected crash" in replies[0].get("error", "")
+        service.active.pop(sid)
+    finally:
+        service.close()

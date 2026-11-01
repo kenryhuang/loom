@@ -532,11 +532,15 @@ class LoomService:
                 emit("artifact.created", {"artifact": response})
             elif kind == "read_artifact":
                 digest = value["digest"]
-                if not db.execute("SELECT 1 FROM artifacts WHERE session_id=? AND digest=?", (sid, digest)).fetchone():
+                row = db.execute("SELECT ref FROM artifacts WHERE session_id=? AND digest=?", (sid, digest)).fetchone()
+                if not row:
                     raise ServiceError(
                         "Artifact does not belong to this session. Use knowledge_read with knowledge_base_id and document_id "
                         "for knowledge documents; their checksums are not artifact IDs.", 404,
                     )
+                media_type = json.loads(row[0]).get("media_type")
+                if media_type:
+                    raise ServiceError(f"Artifact is binary ({media_type}); read_artifact reads text/json artifacts only", 400)
                 response = json.loads(self.store.artifacts.read(digest))
             elif kind == "request_input":
                 existing = state["input_request"]
@@ -736,6 +740,13 @@ class LoomService:
                             attempt.connection.send({"value": encode(result)})
                         except (ServiceError, sqlite3.Error) as exc:
                             attempt.connection.send({"error": str(exc)})
+                        except (EOFError, BrokenPipeError, OSError):
+                            raise
+                        except Exception as exc:
+                            # An unanswered record freezes the worker on future.result()
+                            # forever; unexpected handler failures still owe it an error.
+                            traceback.print_exc()
+                            attempt.connection.send({"error": f"Internal service error: {exc}"})
                 except (EOFError, BrokenPipeError, OSError):
                     pass
                 state = self.store.snapshot(sid)

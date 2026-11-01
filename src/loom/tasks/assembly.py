@@ -607,6 +607,7 @@ class TaskAssembly:
         return ToolRef(
             "read_artifact",
             "Read retained session artifacts by artifact digest. For knowledge documents use knowledge_read, not document_digest. "
+            "Binary artifacts such as images cannot be read as text; do not pass image digests. "
             "Auto prefers text; json returns serialized data. Follow read_more/next_offset to page forward; limit counts characters.",
             input_schema={
                 "type": "object",
@@ -905,7 +906,8 @@ class TaskAssembly:
             + json.dumps(plan, ensure_ascii=False)
             + ". Complete these conditions before finish. The host will verify actual results; failure returns acceptance feedback."
             + (" Current host feedback (resolve within original requirements and permissions): "
-               + json.dumps({k: self.acceptance.data["feedback"][k] for k in ("id", "gaps", "repair_round", "repair_limit", "prior_attempts_ref")}, ensure_ascii=False)
+               + json.dumps({k: self.acceptance.data["feedback"][k] for k in ("id", "gaps", "repair_round", "repair_limit", "prior_attempts_ref")},
+                            ensure_ascii=False)
                if (self.acceptance.data.get("feedback") or {}).get("state") in {"pending", "applied"} else ""),
         )
         scratch = {**(context.state.scratch or {}), "acceptance": self.acceptance.public()}

@@ -52,6 +52,28 @@ def test_worker_chunk_upload_and_authenticated_image_delivery(api):  # noqa: F81
     assert "base64" not in json.dumps(service.events(sid, limit=1000))
 
 
+def test_read_artifact_rpc_rejects_binary_artifact_with_clear_error(api):  # noqa: F811
+    """A PNG digest answered by json.loads crashes with UnicodeDecodeError, which escapes the
+    supervisor's per-record handling and leaves the worker RPC forever unanswered."""
+    service, _, client, directory = api
+    sid = create(service, directory / "workspace")
+    descriptor = service.prepare_attempt(sid)
+    serial = itertools.count()
+
+    def rpc(kind, value):
+        return service.worker_record(sid, dict(epoch=descriptor["epoch"], attempt_id=descriptor["run"]["attempt_id"],
+            record_id=f"binary-{next(serial)}", type=kind, payload=encode(value)))
+
+    raw = png(64, 64)
+    upload = rpc("artifact_upload_start", dict(sha256=hashlib.sha256(raw).hexdigest(), byte_size=len(raw), media_type="image/png", kind="screenshot"))
+    rpc("artifact_upload_chunk", dict(upload_id=upload, offset=0, data=base64.b64encode(raw).decode()))
+    ref = rpc("artifact_upload_finish", dict(upload_id=upload))
+    with pytest.raises(ServiceError, match="binary"):
+        rpc("read_artifact", dict(digest=ref["sha256"]))
+    text_ref = rpc("publish_artifact", dict(value={"note": "still readable"}, kind="note"))
+    assert rpc("read_artifact", dict(digest=text_ref["sha256"])) == {"note": "still readable"}
+
+
 def test_visual_acceptance_completes_in_durable_worker_and_images_survive_restart(tmp_path):
     pytest.importorskip("playwright")
     from loom.service.controller import LoomService
