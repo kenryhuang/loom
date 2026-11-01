@@ -68,12 +68,13 @@ export function renderExecution(root,d,view) {
     state.append(badge(label(w.state),w.state));
     if(live)state.append(element('span','muted small',`${live.steps || 0} 步 · ${Math.floor(live.active_seconds || 0)} 秒`));
     const issues=blockers.filter(b=>b.scope_id===w.id || b.scope_id===w.goal_id);
-    const reason=w.state==='succeeded'?'验收通过':w.blocked_reason || issues[0]?.reason;
+    const reason=w.state==='succeeded'?'验收通过':(w.blocked_reason==='recovery_exhausted'?'已挂起，等待人工恢复':w.blocked_reason) || issues[0]?.reason;
     if(reason && !['running','dispatched'].includes(w.state))result.append(compact(reason,w.state==='succeeded'?'muted':''));
     const detail=roadmapDisclosure(view,result,d,`execution:${w.id}`,'详情');
     detail.append(element('p','',w.objective),element('code','agent-roadmap-id',w.id));
     if(w.reason)detail.append(element('p','',`编排依据：${w.reason}`));
     if(reason && w.state!=='succeeded')detail.append(element('p','',`当前阻塞：${reason}`));
+    if(w.binding)detail.append(element('p','',`绑定：${w.binding.source==='recommended'?'推荐':'兜底'}${w.binding.rationale?` · ${w.binding.rationale}`:w.binding.reason?` · ${w.binding.reason}`:''}`));
     if(w.execution_budget)detail.append(element('p','',`Token 预算 ${number(w.execution_budget.tokens)} · 自动恢复 ${w.recovery?.attempts || 0}/${policy.max_recovery_attempts ?? 3} 次`));
     const objectiveId=w.objective_id || d.goals.find(g=>g.id===w.goal_id)?.long_term_objective_id,objectiveBudget=d.objective_budgets?.[objectiveId];
     const effectiveBudget=d.objective_budget?.objectives?.find(b=>b.objective_id===objectiveId);

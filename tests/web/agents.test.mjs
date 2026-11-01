@@ -380,6 +380,21 @@ test('Execution shows concrete blockers, recovery steps, slices and bounded back
  }finally{view.close();dom.window.close();}
 });
 
+test('Work package details show task binding source and recovery exhaustion',async()=>{
+ const data=fixture();
+ data.work_packages=[
+  {id:'w1',goal_id:'g',objective:'Bound work',state:'blocked',blocked_reason:'recovery_exhausted',recovery:{attempts:5,pending:null},execution_budget:{tokens:1000},binding:{source:'recommended',rationale:'需要浏览器截图'}},
+  {id:'w2',goal_id:'g',objective:'Fallback work',state:'pending',binding:{source:'fallback',reason:'推荐服务不可用'}}];
+ const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');view.tab='Work';view.render();
+  assert.match(view.root.textContent,/已挂起，等待人工恢复/);
+  assert.doesNotMatch(view.root.textContent,/recovery_exhausted/);
+  assert.match(view.root.textContent,/绑定：推荐 · 需要浏览器截图/);
+  assert.match(view.root.textContent,/绑定：兜底 · 推荐服务不可用/);
+ }finally{view.close();dom.window.close();}
+});
+
 test('Work rationale remains text and stale blocker does not override a successful result',async()=>{
  const data=fixture();data.work_packages=[{id:'w',goal_id:'g',objective:'Delivered work',state:'succeeded',blocked_reason:'failed',reason:'Verify before integration'}];
  const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});

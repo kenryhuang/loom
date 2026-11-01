@@ -22,7 +22,7 @@ test('Agent setup shares Session blocks and loads named model/resource choices',
     assert.equal(f.view.submit.disabled,true);
     await f.view.load();
     assert.deepEqual(f.calls,['/v1/web/catalog','/v1/knowledge-bases']);
-    assert.equal(f.view.form.querySelectorAll('.setup-block').length,9);
+    assert.equal(f.view.form.querySelectorAll('.setup-block').length,10);
     assert.ok(f.view.form.matches('.setup-form'));
     for(const name of ['model','evaluation_model','mode','interval','schedule','daily','timezone'])
       assert.equal(f.view.form.elements[name].tagName,'SELECT');
@@ -150,6 +150,103 @@ test('Work budget defaults to a tenth of daily allowance with selectable overrid
   f.view.daily.choice.value='custom';f.change(f.view.daily.choice);f.view.form.elements.daily_custom.value='1234567';
   f.view.form.elements.daily_custom.dispatchEvent(new f.dom.window.Event('input',{bubbles:true}));
   assert.equal(f.view.payload().budget.work_tokens,123456);
+ }finally{f.close();}
+});
+
+const EXEC_CATALOG={models:[{id:'fast',label:'Fast model'}],setup_recommendation:true,
+ tool_collections:[{id:'filesystem',label:'文件',description:'读写工作区文件'},{id:'shell',label:'命令',description:'执行命令'},{id:'task_control',label:'任务完成',description:'结束任务'}],
+ plugins:{context:[{id:'bounded_context',label:'Bounded context'}],workflow:[{id:'dynamic',label:'Dynamic'},{id:'legacy_planning',label:'Legacy planning'}]},
+ external_tools:[{id:'lookup',connector_name:'Research',name:'Lookup',kind:'mcp',description:'Find references',effect_kind:'read_only'}]};
+const EXEC_BASES={knowledge_bases:[{id:'kb-project',name:'Project documents',description:'Design notes'}]};
+const execBlock=view=>[...view.form.querySelectorAll('details.setup-block')].find(d=>d.textContent.includes('执行配置'));
+const execChecked=view=>[...execBlock(view).querySelectorAll('input[type="checkbox"]:checked')].map(n=>n.value);
+
+test('Recommend backfills execution config and manual edits reach the saved role',async()=>{
+ const proposal={task_spec:{schema_version:1,tools:{collections:['filesystem','shell','task_control']},context:{plugin:'bounded_context'},workflow:{plugin:'dynamic'}},
+  plan_mode:'force',knowledge_base_ids:['kb-project'],external_tool_ids:['lookup'],rationale:'需要读写源码并运行测试',collection_reasons:{filesystem:'读写源码',shell:'运行测试'}};
+ const calls=[];
+ const api={json:async(path,options)=>{calls.push([path,options?.body]);
+  if(path.endsWith('/catalog'))return EXEC_CATALOG;
+  if(path.endsWith('/knowledge-bases'))return EXEC_BASES;
+  if(path==='/v1/agents/setup/recommend')return proposal;
+  throw new Error('unexpected '+path);}};
+ const f=fixture({api});
+ try{
+  await f.view.load();
+  const block=execBlock(f.view);
+  assert.ok(block);assert.equal(block.open,false);
+  assert.match(block.querySelector('.setup-selection-summary').textContent,/跟随系统默认/);
+  assert.equal(f.view.payload().task_spec,null);
+  assert.equal(f.view.payload().plan_mode,'auto');
+  f.view.form.elements.role.value='先查实现，再修改设计';
+  f.view.form.elements.objective.value='维护项目文档';
+  const recommend=[...block.querySelectorAll('button')].find(b=>b.textContent==='智能推荐');
+  assert.equal(recommend.disabled,false);
+  recommend.click();await new Promise(r=>setTimeout(r,0));
+  const request=calls.find(c=>c[0]==='/v1/agents/setup/recommend');
+  assert.match(request[1].description,/先查实现，再修改设计/);
+  assert.match(request[1].description,/维护项目文档/);
+  assert.equal(request[1].model,null);
+  assert.deepEqual(execChecked(f.view),['filesystem','shell','task_control']);
+  assert.equal(f.view.form.elements.plan_mode.value,'force');
+  assert.equal(f.view.form.elements.context_plugin.value,'bounded_context');
+  assert.equal(f.view.form.elements.workflow_plugin.value,'dynamic');
+  assert.equal(f.view.knowledgeList.querySelector('input[value="kb-project"]').checked,true);
+  assert.equal(f.view.toolList.querySelector('input[value="lookup"]').checked,true);
+  assert.match(block.textContent,/需要读写源码并运行测试/);
+  assert.match(block.textContent,/读写源码/);
+  assert.match(block.querySelector('.setup-selection-summary').textContent,/已选择 3 项/);
+  const role=f.view.payload();
+  assert.deepEqual(role.task_spec,{schema_version:1,tools:{collections:['filesystem','shell','task_control']},context:{plugin:'bounded_context'},workflow:{plugin:'dynamic'}});
+  assert.equal(role.plan_mode,'force');
+  assert.deepEqual(role.knowledge_base_ids,['kb-project']);
+  assert.deepEqual(role.external_tool_ids,['lookup']);
+  execBlock(f.view).querySelector('input[value="shell"]').checked=false;
+  f.view.form.elements.plan_mode.value='auto';
+  assert.deepEqual(f.view.payload().task_spec.tools.collections,['filesystem','task_control']);
+  assert.equal(f.view.payload().plan_mode,'auto');
+ }finally{f.close();}
+});
+
+test('Recommend failure keeps manual configuration and reports the error',async()=>{
+ const api={json:async(path,options)=>{
+  if(path.endsWith('/catalog'))return EXEC_CATALOG;
+  if(path.endsWith('/knowledge-bases'))return EXEC_BASES;
+  throw new Error('模型不可用');}};
+ const f=fixture({api});
+ try{
+  await f.view.load();
+  const block=execBlock(f.view);
+  execBlock(f.view).querySelector('input[value="filesystem"]').checked=true;
+  f.view.form.elements.role.value='先查实现';
+  const recommend=[...block.querySelectorAll('button')].find(b=>b.textContent==='智能推荐');
+  recommend.click();await new Promise(r=>setTimeout(r,0));
+  assert.match(block.textContent,/模型不可用/);
+  assert.equal(recommend.disabled,false);
+  assert.deepEqual(execChecked(f.view),['filesystem']);
+  assert.deepEqual(f.view.payload().task_spec.tools.collections,['filesystem']);
+ }finally{f.close();}
+});
+
+test('Editing reads the role execution config and clearing it returns to system defaults',async()=>{
+ const role={name:'Existing',role_text:'Evidence first',workspace:'/project',model:'fast',
+  task_spec:{schema_version:1,tools:{collections:['filesystem','task_control']},workflow:{plugin:'dynamic'}},plan_mode:'force',
+  long_term_objectives:[{id:'primary',mode:'ongoing',desired_outcome:'Review'}],source_routes:[],knowledge_base_ids:[],external_tool_ids:[]};
+ const f=fixture({edit:{id:'a',revision:2,role},api:{json:async path=>path.endsWith('/catalog')?EXEC_CATALOG:EXEC_BASES}});
+ try{
+  await f.view.load();
+  const block=execBlock(f.view);
+  assert.deepEqual(execChecked(f.view),['filesystem','task_control']);
+  assert.equal(f.view.form.elements.workflow_plugin.value,'dynamic');
+  assert.equal(f.view.form.elements.context_plugin.value,'');
+  assert.equal(f.view.form.elements.plan_mode.value,'force');
+  assert.match(block.querySelector('.setup-selection-summary').textContent,/已选择 2 项/);
+  assert.equal(f.view.payload().task_spec.workflow.plugin,'dynamic');
+  assert.equal(f.view.payload().plan_mode,'force');
+  for(const check of execBlock(f.view).querySelectorAll('input[type="checkbox"]'))check.checked=false;
+  f.view.form.elements.workflow_plugin.value='';f.view.form.elements.plan_mode.value='auto';
+  assert.equal(f.view.payload().task_spec,null);
+  assert.equal(f.view.payload().plan_mode,'auto');
  }finally{f.close();}
 });
 

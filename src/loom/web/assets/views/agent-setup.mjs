@@ -133,6 +133,22 @@ export class AgentSetupView {
     this.learningAttempts=preset(learning,'learning_attempts','每个评估累计分析次数上限',[['3','3 次'],['6','6 次'],['10','10 次']],r.learning_policy?.max_attempts ?? 6,{min:1,max:20});
     this.learningCalls=preset(learning,'learning_eval_calls','单个评估 Calls 扩容上限',[['100','100 次'],['250','250 次'],['500','500 次']],r.learning_policy?.max_evaluation_calls ?? 500,{min:1,max:500});
     learning.append(element('p','muted small','每次扩容最多翻倍，仅对当天有效。每日总额、目标累计额度和调用次数上限保持有效；无进展时停止自动续跑，已完成分析与记忆会保留。'));
+    const spec = r.task_spec || {};
+    this.exec = block(form, '执行配置', {folded:true, summary:true});
+    this.exec.body.append(element('p', 'muted small', '每次派发会按任务描述动态推荐工具与规划模式；推荐失败时回落到此处的兜底配置。全部留空则跟随系统默认，修改后下一次调度生效。'));
+    const recommendRow = element('div', 'setup-form-actions');
+    this.recommendButton = button('智能推荐', () => this.recommend()); this.recommendButton.disabled = true;
+    recommendRow.append(this.recommendButton);
+    this.recommendStatus = element('p', 'muted small');
+    this.exec.body.append(recommendRow, this.recommendStatus);
+    this.execList = element('div', 'external-choices'); this.execList.setAttribute('role', 'group'); this.execList.setAttribute('aria-label', '工具集合');
+    this.execList.append(element('p', 'muted small', '加载可选项…'));
+    this.exec.body.append(this.execList);
+    const execGrid = element('div', 'setup-settings-grid'); this.exec.body.append(execGrid);
+    this.planMode = selectField(execGrid, 'plan_mode', '规划模式', [['auto','自动（默认）'],['force','强制规划'],['off','直接执行']], r.plan_mode || 'auto');
+    this.contextPlugin = selectField(execGrid, 'context_plugin', '上下文插件', [['','系统默认']], spec.context?.plugin || '');
+    this.workflowPlugin = selectField(execGrid, 'workflow_plugin', '工作流插件', [['','系统默认']], spec.workflow?.plugin || '');
+    this.execChoicesLoaded = false;
     this.tools = block(form, '外部工具', {folded:true,summary:true});
     this.toolList = element('div', 'external-choices'); this.toolList.setAttribute('role','group'); this.toolList.setAttribute('aria-label','外部工具');
     this.tools.body.append(this.toolList);
@@ -143,7 +159,9 @@ export class AgentSetupView {
     const summarize = () => {
       this.tools.count.textContent = `已选择 ${selectedTools(this.toolList).length} 项`;
       this.knowledge.count.textContent = `已选择 ${selectedTools(this.knowledgeList).length} 项`;
+      this.updateExecSummary();
     };
+    this.refreshSummaries = summarize;
     form.addEventListener('change', summarize); summarize();
     this.error = element('p', 'error'); this.error.setAttribute('role', 'alert');
     this.retry = button('重新加载选项', () => this.load()); this.retry.hidden = true;
@@ -164,6 +182,38 @@ export class AgentSetupView {
   }
   workTokens() { return this.work.choice.value === 'daily_fraction' ? Math.max(1,Math.floor(this.daily.value()/10)) : this.work.value(); }
   close() {this.closed = true; this.abort.abort();}
+  updateExecSummary() {
+    const count = selectedTools(this.execList).length;
+    this.exec.count.textContent = count ? `已选择 ${count} 项` : '跟随系统默认';
+  }
+  async recommend() {
+    const f = this.form.elements;
+    const description = [f.role.value.trim(), f.objective.value.trim()].filter(Boolean).join('\n');
+    if (!description) {this.recommendStatus.textContent = '请先填写角色描述或长期目标，再请求推荐。'; return;}
+    this.recommendButton.disabled = true; this.recommendStatus.textContent = '正在推荐…';
+    try {
+      const result = await this.api.json('/v1/agents/setup/recommend', {body:{description, model:f.model.value || null}, signal:this.abort.signal});
+      if (this.closed) return;
+      this.applyRecommendation(result);
+    } catch (error) {
+      if (this.closed || error.name === 'AbortError') return;
+      this.recommendStatus.textContent = `推荐失败：${error.message}；可手工调整或重试。`;
+    } finally {
+      if (!this.closed) this.recommendButton.disabled = !(this.catalog?.setup_recommendation && this.catalog?.models?.length);
+    }
+  }
+  applyRecommendation(result) {
+    const spec = result.task_spec || {}, chosen = spec.tools?.collections || [];
+    for (const check of this.execList.querySelectorAll('input')) check.checked = chosen.includes(check.value);
+    for (const [select, value] of [[this.contextPlugin, spec.context?.plugin],[this.workflowPlugin, spec.workflow?.plugin]])
+      if (value && [...select.options].some(o => o.value === value)) select.value = value;
+    this.planMode.value = result.plan_mode || 'auto';
+    for (const [list, ids] of [[this.knowledgeList, result.knowledge_base_ids || []],[this.toolList, result.external_tool_ids || []]])
+      for (const check of list.querySelectorAll('input')) if (ids.includes(check.value)) check.checked = true;
+    const reasons = Object.entries(result.collection_reasons || {}).map(([key, reason]) => `${key}：${reason}`).join('；');
+    this.recommendStatus.textContent = (result.rationale || '已按角色描述推荐，请核对后保存。') + (reasons ? `（${reasons}）` : '');
+    this.refreshSummaries();
+  }
   async load() {
     this.submit.disabled = true; this.retry.hidden = true; this.error.textContent = '';
     try {
@@ -171,6 +221,7 @@ export class AgentSetupView {
         this.api.json('/v1/web/catalog', {signal:this.abort.signal}), this.api.json('/v1/knowledge-bases', {signal:this.abort.signal}),
       ]);
       if (this.closed) return;
+      this.catalog = catalog;
       const r = this.edit?.role || {};
       for (const [select, configured] of [[this.model,r.model],[this.evaluationModel,r.evaluation_model]]) {
         const value = catalog.model_aliases?.[configured] || configured || '';
@@ -179,6 +230,24 @@ export class AgentSetupView {
         options(select, choices, value);
       }
       agentResourceChoices(this.toolList, this.knowledgeList, catalog, bases, r);
+      this.execChoicesLoaded = Array.isArray(catalog.tool_collections);
+      this.execList.replaceChildren();
+      if (!this.execChoicesLoaded) this.execList.append(element('p', 'muted small', '加载可选项…'));
+      else if (!catalog.tool_collections.length) this.execList.append(element('p', 'muted small', '暂无可用工具集合。'));
+      const chosen = r.task_spec?.tools?.collections || [];
+      for (const collection of catalog.tool_collections || []) {
+        const row = element('label', 'setup-collection'), check = element('input'), info = element('span');
+        check.type = 'checkbox'; check.value = collection.id; check.checked = chosen.includes(collection.id);
+        info.append(element('strong', '', collection.label || collection.id), element('small', 'muted', collection.description || ''));
+        row.append(check, info); this.execList.append(row);
+      }
+      for (const [select, list, configured] of [[this.contextPlugin, catalog.plugins?.context, r.task_spec?.context?.plugin],[this.workflowPlugin, catalog.plugins?.workflow, r.task_spec?.workflow?.plugin]]) {
+        const choices = [['','系统默认'], ...(list || []).map(p => [p.id, p.label || p.id])];
+        if (configured && !choices.some(c => c[0] === configured)) choices.push([configured, `${configured}（当前不可用）`]);
+        options(select, choices, configured || '');
+      }
+      this.recommendButton.disabled = !(catalog.setup_recommendation && catalog.models.length);
+      this.updateExecSummary();
       this.tools.count.textContent = `已选择 ${selectedTools(this.toolList).length} 项`;
       this.knowledge.count.textContent = `已选择 ${selectedTools(this.knowledgeList).length} 项`;
       this.submit.disabled = false;
@@ -204,6 +273,15 @@ export class AgentSetupView {
       budget:{...prior.budget,daily_tokens:this.daily.value(),work_tokens:this.workTokens(),goal_tokens:this.goalBudget.value(),max_calls:this.maxCalls.value(),
         ...(prior.budget?.learning_tokens != null || !this.edit || this.learning.value() !== 250000 ? {learning_tokens:this.learning.value()} : {})}};
     delete role.schema_version;
+    role.plan_mode = f.plan_mode.value || 'auto';
+    if (this.execChoicesLoaded) {
+      const collections = selectedTools(this.execList);
+      if (collections.length || f.context_plugin.value || f.workflow_plugin.value) {
+        role.task_spec = {schema_version:1, tools:{collections}};
+        if (f.context_plugin.value) role.task_spec.context = {plugin:f.context_plugin.value};
+        if (f.workflow_plugin.value) role.task_spec.workflow = {plugin:f.workflow_plugin.value};
+      } else role.task_spec = null;
+    }
     const paths = lines(f.sources.value);
     if (role.source_routes.length) role.source_routes[0].paths = paths;
     else if (paths.length) role.source_routes.push({id:'implementation', topic:'实现资料', paths});
