@@ -77,7 +77,7 @@ def learning_policy(role):
 
 
 def scheduling_policy(role):
-    value = dict(enabled=True, tick_seconds=60, max_recovery_attempts=3, auto_expand_work_budget=True,
+    value = dict(enabled=True, tick_seconds=60, max_recovery_attempts=5, auto_expand_work_budget=True,
                  max_work_tokens=min(role.get("budget", {}).get("daily_tokens", 10000000), role.get("budget", {}).get("goal_tokens", 10000000)),
                  auto_expand_objective_budget=True, max_objective_tokens=role.get("budget", {}).get("goal_tokens", 10000000))
     raw = strict(role.get("scheduling_policy", {}), {*value, "min_slice_seconds", "max_slice_seconds", "default_slice_seconds"})

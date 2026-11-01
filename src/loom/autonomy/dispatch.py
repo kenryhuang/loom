@@ -89,7 +89,13 @@ class Dispatcher:
                     self.store.put(db, "agent_work_packages", work)
                     return
                 siblings = self.store.rows(db, "agent_work_packages", aid)
-                if any(w["state"] in {"dispatched", "running", "blocked"} and w["id"] != wid and w.get("session_id") for w in siblings):
+                if any(
+                    w["state"] in {"dispatched", "running", "blocked"}
+                    and w.get("blocked_reason") != "recovery_exhausted"
+                    and w["id"] != wid
+                    and w.get("session_id")
+                    for w in siblings
+                ):
                     return
                 if any(
                     w["goal_id"] == goal["id"] and not w.get("superseded_contract") and w["order"] < work["order"] and w["state"] != "succeeded"
