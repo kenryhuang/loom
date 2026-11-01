@@ -9,7 +9,7 @@ resume from saved checkpoints.
 
 ## Key features
 
-- **Autonomous Agents (P0–P3):** persistent roles, explicit goals and scheduled responsibilities, related session reuse, automatic terminal-run evaluation, and human memory corrections and method guidance. Opt in with `loom serve --enable-agents`; see the [operating guide (Chinese)](docs/design/autonomous-agents.zh-CN.md).
+- **Autonomous Agents:** long-term objective and stage planning, separate execution and analysis queues, bounded budget recovery, related session reuse, terminal-run Deep Eval, and human memory corrections and method guidance. Opt in with `loom serve --enable-agents`; see the [runtime and scheduling design (Chinese)](docs/design/autonomous-agents.zh-CN.md).
 
 - **Deep eval memory:** extract stage contributions, scoped environment and configuration
   facts, failure lessons, and more efficient workflows from traces. Records link back

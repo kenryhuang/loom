@@ -77,7 +77,7 @@
 
 - [2026-10-25-autonomous-agent-design.zh-CN.md](2026-10-25-autonomous-agent-design.zh-CN.md) — 自主 Agent：数字分身与持续工作设计
 - [2026-10-30-autonomous-agent-execution-extensions.zh-CN.md](2026-10-30-autonomous-agent-execution-extensions.zh-CN.md) — 自主 Agent 执行扩展：隔离目录、模型分工与流水调度
-- [autonomous-agents.zh-CN.md](autonomous-agents.zh-CN.md) — 自主 Agent 运行与人工介入（P0～P3 使用指南）
+- [autonomous-agents.zh-CN.md](autonomous-agents.zh-CN.md) — 自主 Agent 完整运行与调度设计：阶段规划、执行/分析双队列、预算恢复与人工介入
 
 ## Meta-Harness 与模型配置
 
