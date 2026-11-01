@@ -99,8 +99,8 @@ def test_read_only_work_skips_recommend(agent_service):
     assert "binding" not in facade.snapshot(aid)["work_packages"][0]
 
 
-def idle_bound_session(service, facade, aid, path):
-    sid = service.create("manual", {"workspace": str(path)})["session_id"]
+def idle_bound_session(service, facade, aid, path, **create):
+    sid = service.create("manual", {"workspace": str(path), **create})["session_id"]
     facade.session_command(aid, sid, dict(command_id="bind", type="bind", expected_revision=2))
     with service.store.transaction() as db:
         state = service.store._load(db, sid)
@@ -139,3 +139,46 @@ def test_reuse_kept_when_binding_matches_candidate(agent_service):
         route = facade.store.rows(db, "agent_routes", aid)[0]
     assert route["action"] == "reuse"
     assert len(service.store.list_sessions()) == 1
+
+
+def test_reuse_ignores_role_derived_collections(agent_service):
+    service, facade, aid, path = agent_service
+    base = service.store.knowledge.create({"name": "AI Infra", "description": "AI systems", "engine": "sqlite_fts"})
+    agent = facade.store.create("create-kb", {**role(path), "knowledge_base_ids": [base["id"]]})
+    facade.store.command(agent["id"], "enable-kb", "enable", 1)
+    aid = agent["id"]
+    sid = idle_bound_session(service, facade, aid, path, knowledge_base_ids=[base["id"]])
+    # validate_create materializes the role-level binding into the session spec.
+    assert "knowledge" in service.snapshot(sid)["task"]["task_spec"]["tools"]["collections"]
+    # The dispatch prompt omits role-level bindings, so the recommendation never
+    # carries the knowledge collection; compatibility must ignore the derived diff.
+    service.setup_recommender = lambda objective, *, model, scope, extra=None: recommend(plan_mode="auto")
+    work = prepare(facade, aid)
+    facade.supervisor.dispatcher.dispatch(aid, work["id"])
+    bound = facade.snapshot(aid)["work_packages"][0]
+    assert bound["session_id"] == sid
+    with facade.store.sessions.transaction() as db:
+        route = facade.store.rows(db, "agent_routes", aid)[0]
+    assert route["action"] == "reuse"
+    assert len(service.store.list_sessions()) == 1
+
+
+def test_undispatchable_work_never_calls_the_recommender(agent_service):
+    service, facade, aid, _ = agent_service
+    work = prepare(facade, aid)
+    with facade.store.sessions.transaction() as db:
+        goal = facade.store.get(db, "agent_goals", work["goal_id"], aid)
+        goal["state"] = "blocked"
+        facade.store.put(db, "agent_goals", goal)
+    called = []
+
+    def spy(objective, *, model, scope, extra=None):
+        called.append(scope)
+        return recommend()
+
+    service.setup_recommender = spy
+    facade.supervisor.dispatcher.dispatch(aid, work["id"])
+    assert not called
+    assert not service.store.list_sessions()
+    work = facade.snapshot(aid)["work_packages"][0]
+    assert work["state"] == "pending" and "binding" not in work

@@ -275,12 +275,20 @@ export class AgentSetupView {
     delete role.schema_version;
     role.plan_mode = f.plan_mode.value || 'auto';
     if (this.execChoicesLoaded) {
+      // Merge over the prior spec: the form manages tools.collections and the
+      // context/workflow plugins; every other key (session_environment, outputs,
+      // acceptance, execution_runtime, tools.budget, …) is preserved untouched.
+      const spec = prior.task_spec && typeof prior.task_spec === 'object' ? structuredClone(prior.task_spec) : {};
+      spec.schema_version = 1;
       const collections = selectedTools(this.execList);
-      if (collections.length || f.context_plugin.value || f.workflow_plugin.value) {
-        role.task_spec = {schema_version:1, tools:{collections}};
-        if (f.context_plugin.value) role.task_spec.context = {plugin:f.context_plugin.value};
-        if (f.workflow_plugin.value) role.task_spec.workflow = {plugin:f.workflow_plugin.value};
-      } else role.task_spec = null;
+      if (collections.length) (spec.tools = spec.tools || {}).collections = collections;
+      else if (spec.tools) delete spec.tools.collections;
+      for (const [kind, plugin] of [['context', f.context_plugin.value], ['workflow', f.workflow_plugin.value]]) {
+        if (plugin) spec[kind] = {...(spec[kind] || {}), plugin};
+        else delete spec[kind];
+      }
+      if (spec.tools && !Object.keys(spec.tools).length) delete spec.tools;
+      role.task_spec = Object.keys(spec).some(key => key !== 'schema_version') ? spec : null;
     }
     const paths = lines(f.sources.value);
     if (role.source_routes.length) role.source_routes[0].paths = paths;

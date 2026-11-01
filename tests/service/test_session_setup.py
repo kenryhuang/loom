@@ -254,3 +254,18 @@ def test_repair_scope_rejects_removal_and_role_level_additions(api):  # noqa: F8
                            extra={"unresolved_requirements": ["需要浏览器验收截图"], "current_collections": ["filesystem", "task_control", "knowledge"]},
                            provider_factory=lambda _: Recommender(proposal(tool_collections=["filesystem", "task_control", "knowledge", "browser"])))
     assert "knowledge" in kept["tool_collections"] and "browser" in kept["tool_collections"]
+
+
+def test_repair_scope_tolerates_derived_collections_present_in_current(api):  # noqa: F811
+    service, *_ = api
+    # validate_create materializes role-level knowledge/external bindings into the
+    # session spec, so current_collections carries them; a model that follows the
+    # prompt omits them and one that mirrors the superset keeps them — both repair.
+    extra = {"unresolved_requirements": ["需要浏览器验收截图"],
+             "current_collections": ["filesystem", "shell", "task_control", "knowledge", "external_tools"]}
+    omitted = recommend_setup(service, "修复验收", scope="repair", extra=extra,
+                              provider_factory=lambda _: Recommender(proposal(tool_collections=["filesystem", "shell", "browser", "task_control"])))
+    assert set(omitted["tool_collections"]) == {"filesystem", "shell", "browser", "task_control"}
+    kept = recommend_setup(service, "修复验收", scope="repair", extra=extra,
+                           provider_factory=lambda _: Recommender(proposal(tool_collections=["filesystem", "shell", "task_control", "knowledge", "browser"])))
+    assert "browser" in kept["tool_collections"] and "knowledge" in kept["tool_collections"]

@@ -46,19 +46,62 @@ class Dispatcher:
         self.service, self.store = service, store
         self.fault = fault or (lambda point: None)
 
+    def _quiet_block(self, db, aid, agent, work, goal):
+        """Non-mutating dispatch gates, evaluated before the binding recommendation
+        (phase 1) and again under the service lock (phase 2). Returns a reason when
+        the work package currently cannot dispatch."""
+        from loom.autonomy.stages import runnable
+
+        if not runnable(self.store, db, agent, goal):
+            return "goal_not_runnable"
+        if goal["state"] in {"paused", "cancelled", "superseded", "blocked"}:
+            return "goal_" + goal["state"]
+        siblings = self.store.rows(db, "agent_work_packages", aid)
+        if any(
+            w["state"] in {"dispatched", "running", "blocked"}
+            and w.get("blocked_reason") != "recovery_exhausted"
+            and w["id"] != work["id"]
+            and w.get("session_id")
+            for w in siblings
+        ):
+            return "sibling_active"
+        if any(
+            w["goal_id"] == goal["id"] and not w.get("superseded_contract") and w["order"] < work["order"] and w["state"] != "succeeded"
+            for w in siblings
+        ):
+            return "earlier_unsucceeded"
+        for lid in goal.get("learning_dependency", []):
+            cycle = self.store.get(db, "agent_learning_cycles", lid, aid)
+            if cycle["state"] != "completed" or cycle["coverage"] != "full":
+                return "learning_incomplete"
+        return None
+
     def dispatch(self, aid, wid):
         # Phase 1: lock-free snapshot. The recommendation calls an LLM and must
-        # never hold the service lock; every premise is re-validated in phase 2
-        # and bind() re-checks generation, so a stale snapshot cannot apply.
+        # never hold the service lock, and never runs when a gate already blocks
+        # the dispatch; every premise is re-validated in phase 2 and bind()
+        # re-checks generation, so a stale snapshot cannot apply.
+        from loom.autonomy.goals import sources_ready
+
         try:
             with self.store.sessions.transaction() as db:
                 agent = self.store.get(db, "agents", aid)
                 work = self.store.get(db, "agent_work_packages", wid, aid)
+                if agent["state"] != "enabled" or work["state"] != "pending":
+                    return
+                goal = self.store.get(db, "agent_goals", work["goal_id"], aid)
+                if self._quiet_block(db, aid, agent, work, goal):
+                    return
+                # The marking gates still run (and mutate) in phase 2 only; their
+                # condition already tells phase 1 the recommendation would be wasted.
+                stale = (
+                    bool(goal.get("source_changed"))
+                    or not sources_ready(self.store, db, agent, goal)
+                    or work["role_revision"] != agent["role_revision"]
+                )
         except ServiceError:
             return
-        if agent["state"] != "enabled" or work["state"] != "pending":
-            return
-        dynamic = bind_for_dispatch(self.service, agent, work)
+        dynamic = None if stale else bind_for_dispatch(self.service, agent, work)
         payload = task_payload(agent, work, binding=dynamic)
         # Lock order is service lock -> SessionStore lock throughout dispatch/control.
         with self.service.lock:
@@ -68,18 +111,12 @@ class Dispatcher:
                 if agent["state"] != "enabled" or work["state"] != "pending":
                     return
                 goal = self.store.get(db, "agent_goals", work["goal_id"], aid)
-                from loom.autonomy.stages import runnable
-
-                if not runnable(self.store, db, agent, goal):
-                    return
-                if goal["state"] in {"paused", "cancelled", "superseded", "blocked"}:
+                if self._quiet_block(db, aid, agent, work, goal):
                     return
                 if goal.get('source_changed'):
                     work['blocked_reason'] = 'Source changed after planning; review or revise the goal before dispatch'
                     self.store.put(db, 'agent_work_packages', work)
                     return
-                from loom.autonomy.goals import sources_ready
-
                 if not sources_ready(self.store, db, agent, goal):
                     work['blocked_reason'] = 'Required current source must be refreshed before dispatch'
                     self.store.put(db, 'agent_work_packages', work)
@@ -88,24 +125,6 @@ class Dispatcher:
                     work.update(state="blocked", blocked_reason="role_changed; revise or replace work contract")
                     self.store.put(db, "agent_work_packages", work)
                     return
-                siblings = self.store.rows(db, "agent_work_packages", aid)
-                if any(
-                    w["state"] in {"dispatched", "running", "blocked"}
-                    and w.get("blocked_reason") != "recovery_exhausted"
-                    and w["id"] != wid
-                    and w.get("session_id")
-                    for w in siblings
-                ):
-                    return
-                if any(
-                    w["goal_id"] == goal["id"] and not w.get("superseded_contract") and w["order"] < work["order"] and w["state"] != "succeeded"
-                    for w in siblings
-                ):
-                    return
-                for lid in goal.get("learning_dependency", []):
-                    cycle = self.store.get(db, "agent_learning_cycles", lid, aid)
-                    if cycle["state"] != "completed" or cycle["coverage"] != "full":
-                        return
                 candidates = []
                 for link in db.execute("SELECT * FROM agent_sessions WHERE agent_id=?", (aid,)):
                     reason = None

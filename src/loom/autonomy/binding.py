@@ -5,10 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from loom.service.contracts import ServiceError
-from loom.service.session_setup import builtin_templates, recommend_setup
-
-# Collections derived from role-level bindings never distinguish a task spec.
-DERIVED = frozenset({"knowledge", "external_tools"})
+from loom.service.session_setup import DERIVED, builtin_templates, recommend_setup
 
 
 def spec_from_proposal(proposal):
@@ -62,7 +59,10 @@ def repair_collections(service, *, objective, model, unresolved, current_collect
     the repair sees nothing to add.
     """
     recommender = getattr(service, "setup_recommender", None) or (
-        lambda text, *, model, scope, extra=None: recommend_setup(service, text, model=model, scope=scope, extra=extra)
+        lambda text, *, model, scope, extra=None: recommend_setup(
+            service, text, model=model, scope=scope, extra=extra,
+            provider_factory=getattr(service, "setup_provider_factory", None),
+        )
     )
     proposal = recommender(
         objective,

@@ -235,7 +235,11 @@ class QueueScheduler:
                     legacy = (work.get("slice") or {}).get("pause_command_id") == control.get("command_id") and bool(control.get("command_id"))
                     if control.get("command_id") and not legacy:
                         raise ServiceError("当前为人工暂停或停止；请手动恢复，调度器不会覆盖人工控制", 409)
-                    if not run.get("checkpoint") and not state.get("context"):
+                    # Acceptance repair restarts with a repaired spec instead of
+                    # resuming the old run, so the checkpoint premise only guards
+                    # the resume paths.
+                    acceptance_repair = (state.get("acceptance") or {}).get("state") == "blocked" and not work.get("read_only")
+                    if not acceptance_repair and not run.get("checkpoint") and not state.get("context"):
                         raise ServiceError("缺少持久 checkpoint 或恢复上下文，不能安全自动续跑", 409)
                     policy = scheduling_policy(agent["role"])
                     recovery = work.get("recovery", {})
@@ -263,7 +267,7 @@ class QueueScheduler:
                             if parent := parent_block(store, db, agent, work, agent["role"]["budget"]["output_tokens"]):
                                 raise _Decision(parent + "；请调整对应上限或等待每日窗口。")
                             allocate(store, db, agent, work, requested=state["task"]["limits"]["max_tokens"] + 1)
-                        elif (state.get("acceptance") or {}).get("state") == "blocked" and not work.get("read_only"):
+                        elif acceptance_repair:
                             # Acceptance repair is two-phase: the recommendation is an
                             # LLM call and must run outside the service lock. Phase 1
                             # only captures the inputs; nothing is mutated here.
@@ -366,6 +370,24 @@ class QueueScheduler:
                 or (state.get("acceptance") or {}).get("state") != "blocked"
             ):
                 raise ServiceError("修复推荐期间会话状态已变化，放弃本次自动修复", 409)
+            # The recommendation ran lock-free; every premise recover() checked in
+            # phase 1 is re-validated here before any mutation. These are premise
+            # failures (plain ServiceError): they never consume a recovery attempt.
+            link = db.execute("SELECT * FROM agent_sessions WHERE session_id=? AND agent_id=?", (sid, aid)).fetchone()
+            if not link or link["taken_over"] or link["work_package_id"] not in {None, wid} or state.get("autonomy", {}).get("work_package_id") != wid:
+                raise ServiceError("修复推荐期间 Session 归属已变化，放弃本次自动修复", 409)
+            if sid in service.active:
+                raise ServiceError("修复推荐期间 Session 已重新开始执行，放弃本次自动修复", 409)
+            control = state.get("control") or {}
+            legacy = (work.get("slice") or {}).get("pause_command_id") == control.get("command_id") and bool(control.get("command_id"))
+            if control.get("command_id") and not legacy:
+                raise ServiceError("修复推荐期间 Session 被人工控制，放弃本次自动修复", 409)
+            if db.execute(
+                "SELECT 1 FROM operations WHERE session_id=? AND json_extract(body,'$.status')='started' "
+                "AND json_extract(body,'$.effect_kind')='side_effecting' LIMIT 1",
+                (sid,),
+            ).fetchone():
+                raise ServiceError("修复推荐期间出现未确认副作用操作，放弃本次自动修复", 409)
             try:
                 merged = merge_repair_collections(service, state["task"], additions)
             except ServiceError as exc:

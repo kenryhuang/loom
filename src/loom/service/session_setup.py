@@ -31,6 +31,12 @@ COLLECTIONS = {
 # bases and external tools stay bound at the agent role level.
 REPAIR_ADDABLE = frozenset({"browser", "filesystem", "shell", "web_research", "document_outputs", "task_control"})
 
+# Collections materialized from role-level bindings (knowledge_base_ids /
+# external_tool_ids). They are never re-selected per task: dispatch and repair
+# prompts omit them, compatibility checks ignore them, and repair validation
+# tolerates their presence or absence in the model's proposal.
+DERIVED = frozenset({"knowledge", "external_tools"})
+
 PLAN_MODES = frozenset({"auto", "force", "off"})
 
 
@@ -150,10 +156,15 @@ def validate(proposal, catalog, *, scope="session", extra=None):
     chosen = proposal["tool_collections"]
     if not isinstance(chosen, list) or any(not isinstance(item, str) or item not in allowed for item in chosen) or len(set(chosen)) != len(chosen):
         raise ValueError("Unknown tool collection")
+    carried = set()
     if scope == "repair":
         current = [item for item in ((extra or {}).get("current_collections") or []) if isinstance(item, str)]
+        # validate_create materializes role-level bindings into the session spec, so
+        # current_collections carries them while the repair prompt omits them: they
+        # are neutral here — never required, never rejected, never stripped.
+        carried = set(current) & DERIVED
         original = set(chosen)
-        if not set(current) <= original:
+        if not (set(current) - DERIVED) <= original:
             raise ValueError("Repair may not remove tool collections")
         if original - set(current) - REPAIR_ADDABLE:
             raise ValueError("Repair may only add tool collections")
@@ -194,22 +205,16 @@ def validate(proposal, catalog, *, scope="session", extra=None):
         raise ValueError("Knowledge collection unavailable")
     if ids and "knowledge" not in chosen:
         chosen.append("knowledge")
-    if not ids and "knowledge" in chosen:
+    if not ids and "knowledge" in chosen and "knowledge" not in carried:
         chosen.remove("knowledge")
         proposal["collection_reasons"].pop("knowledge", None)
     if external and 'external_tools' not in allowed:
         raise ValueError('External tool collection unavailable')
     if external and 'external_tools' not in chosen:
         chosen.append('external_tools')
-    if not external and 'external_tools' in chosen:
+    if not external and 'external_tools' in chosen and 'external_tools' not in carried:
         chosen.remove('external_tools')
         proposal['collection_reasons'].pop('external_tools', None)
-    if scope == "repair":
-        # Collections derived from role-level bindings must survive the repair
-        # merge even though this scope never re-selects the bindings themselves.
-        for derived in ("knowledge", "external_tools"):
-            if derived in current and derived in original and derived not in chosen:
-                chosen.append(derived)
     return proposal
 
 

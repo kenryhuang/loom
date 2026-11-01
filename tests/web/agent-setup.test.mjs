@@ -250,6 +250,30 @@ test('Editing reads the role execution config and clearing it returns to system 
  }finally{f.close();}
 });
 
+test('Saving preserves unknown task_spec keys while editing the managed ones',async()=>{
+ const role={name:'Existing',role_text:'Evidence first',workspace:'/project',model:'fast',
+  task_spec:{schema_version:1,session_environment:{plugin:'session',resources:[{id:'workspace',kind:'directory',uri:'/project',access:'read-write'}]},
+   tools:{collections:['filesystem','task_control'],budget:{max_output_tokens:4000}},outputs:{directory:'out'},
+   acceptance:{required:true},execution_runtime:{kind:'sandbox'},workflow:{plugin:'dynamic'}},
+  plan_mode:'force',long_term_objectives:[{id:'primary',mode:'ongoing',desired_outcome:'Review'}],source_routes:[],knowledge_base_ids:[],external_tool_ids:[]};
+ const f=fixture({edit:{id:'a',revision:2,role},api:{json:async path=>path.endsWith('/catalog')?EXEC_CATALOG:EXEC_BASES}});
+ try{
+  await f.view.load();
+  execBlock(f.view).querySelector('input[value="shell"]').checked=true;
+  f.view.form.elements.workflow_plugin.value='';f.view.form.elements.context_plugin.value='bounded_context';
+  const spec=f.view.payload().task_spec;
+  assert.deepEqual(spec.tools,{collections:['filesystem','shell','task_control'],budget:{max_output_tokens:4000}});
+  assert.deepEqual(spec.session_environment,role.task_spec.session_environment);
+  assert.deepEqual(spec.outputs,{directory:'out'});
+  assert.deepEqual(spec.acceptance,{required:true});
+  assert.deepEqual(spec.execution_runtime,{kind:'sandbox'});
+  assert.deepEqual(spec.context,{plugin:'bounded_context'});
+  assert.equal(spec.workflow,undefined);
+  assert.equal(spec.schema_version,1);
+  assert.deepEqual(role.task_spec.workflow,{plugin:'dynamic'});
+ }finally{f.close();}
+});
+
 test('Learning policy uses selectable bounds and preserves explicit settings on edit',async()=>{
   const f=fixture();
   try {
