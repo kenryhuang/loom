@@ -17,6 +17,8 @@ def configure(facade, aid, **policy):
 
 
 def delivery(facade, aid, goal=None, *, passed=True):
+    from loom.autonomy.acceptance import contract_key, verdict
+
     store = facade.store
     goal = goal or store.add_goal(aid, "baseline", dict(objective="Baseline file inspection", acceptance=["Recorded baseline"]))
     gid = goal["id"]
@@ -31,6 +33,7 @@ def delivery(facade, aid, goal=None, *, passed=True):
             state="succeeded" if passed else "failed",
             objective=goal["objective"],
             acceptance=goal["acceptance"],
+            acceptance_criteria=goal["acceptance_criteria"],
             session_id=sid,
             terminal_run_id=rid,
             run_ids=[rid],
@@ -45,6 +48,9 @@ def delivery(facade, aid, goal=None, *, passed=True):
             (2, "acceptance.gate.passed" if passed else "acceptance.gate.blocked", {}),
         ]:
             db.execute("INSERT OR REPLACE INTO events VALUES(?,?,?)", (sid, seq, json.dumps(dict(seq=seq, run_id=rid, type=kind, payload=payload))))
+        work["acceptance_result"] = verdict(work, rid, sid, 2, dict(seq=2, type="acceptance.gate.passed" if passed else "acceptance.gate.blocked"),
+                                            pinned=contract_key(work["acceptance_criteria"]))
+        store.put(db, "agent_work_packages", work)
     return goal
 
 

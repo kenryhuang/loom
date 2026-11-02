@@ -93,10 +93,14 @@ def test_human_stage_revision_is_preserved_by_replanning(agent_service):
         ),
         stage_command=True,
     )
-    facade.supervisor.stages.advance(aid)  # Old fixture proposal does not preserve the requested contract.
+    facade.supervisor.stages.advance(aid)  # Host propagates the human-revised contract by ID.
     snap = facade.store.snapshot(aid)
-    assert snap["objective_planning"][0]["state"] == "blocked"
-    assert "human-revised" in snap["objective_planning"][0]["reason"]
+    assert snap["objective_planning"][0]["state"] == "active"
+    current = next(s for s in snap["stages"] if s["state"] == "active")
+    assert current["expected_outcome"] == "Camera only"
+    assert "Navigation checks pass" in current["acceptance"]
+    goal = next(g for g in snap["goals"] if g["id"] == current["goal_ids"][-1])
+    assert {c["id"] for c in current["acceptance_criteria"]} <= {c["id"] for c in goal["acceptance_criteria"]}
 
 
 def test_role_form_disable_and_enable_pause_same_stage_without_duplicate_delivery(agent_service):

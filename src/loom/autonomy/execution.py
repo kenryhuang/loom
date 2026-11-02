@@ -3,6 +3,7 @@
 import json
 from datetime import datetime
 
+from loom.autonomy.blockers import instructions, manual_required
 from loom.autonomy.contracts import learning_policy, scheduling_policy
 
 
@@ -123,11 +124,12 @@ def report(store, service, db, agent):
     for state in agent.get("objective_planning", []):
         if state["state"] in {"blocked", "awaiting_input", "deferred"}:
             block(
-                "STAGE_" + state["state"].upper(),
+                (state.get("blocker") or {}).get("code") or "STAGE_" + state["state"].upper(),
                 state["id"],
                 state.get("reason") or state["state"],
                 [f"长期目标：{state['objective_id']}", f"阶段：{state.get('stage_id') or '尚未生成'}"],
-                ["到目标页回答具体问题或检查原始规划错误。", "补充变化原因后重新规划；保留原验收与累计预算。"],
+                instructions(state["blocker"]) if state.get("blocker") else ["检查旧版状态并手动重试。"],
+                automatic=bool(state.get("blocker")) and not manual_required(state["blocker"]),
             )
     for work in works:
         if work["state"] == "pending":

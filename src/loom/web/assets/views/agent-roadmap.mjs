@@ -48,9 +48,9 @@ function stageDetail(root,stage,d,view,isCurrent) {
   const goalSet=new Set(stage.goal_ids || []),works=d.work_packages.filter(w=>goalSet.has(w.goal_id));
   const done=d.goals.filter(g=>goalSet.has(g.id)&&g.state==='completed').length;
   root.append(element('p','muted',`目标已验收 ${done} / ${goalSet.size} · 工作包已验收 ${works.filter(w=>w.state==='succeeded').length} / ${works.length}`));
-  const issues=(d.selection || []).filter(s=>goalSet.has(s.goal_id)&&s.eligible===false && !['Await required goals','Goal is completed'].includes(s.reason));
-  const changed=d.goals.some(g=>goalSet.has(g.id)&&g.source_changed);
-  const reasons=[...new Set(issues.map(s=>s.reason==='Refresh required source routes'?'所需来源尚未刷新或已失效，工作包暂未派发。':s.reason).filter(Boolean))];
+  const issues=(d.selection || []).filter(s=>goalSet.has(s.goal_id)&&s.eligible===false && !['DEPENDENCY_WAIT'].includes(s.blocker?.code) && !d.goals.some(g=>g.id===s.goal_id&&terminal.has(g.state)));
+  const changed=d.goals.some(g=>goalSet.has(g.id)&&g.source_changed&&!terminal.has(g.state));
+  const reasons=[...new Set(issues.map(s=>s.blocker?.code==='SOURCE_UNAVAILABLE'?'所需来源尚未刷新或已失效，工作包暂未派发。':s.reason).filter(Boolean))];
   if(changed) reasons.unshift('来源在规划后发生变化，等待复核阶段。');
   if(reasons.length && !terminal.has(stage.state)) root.append(element('p','notice',`当前卡点：${reasons.join('；')}`));
   const goals=section(root,'阶段目标');stageGoals(goals,stage,d,view);

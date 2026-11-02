@@ -225,11 +225,15 @@ async def request_structured(*, protocol, payload, send, validate=lambda value: 
                 if isinstance(normalized, dict):
                     try:
                         validate(normalized)
+                    except ProtocolError as exc:
+                        issues.extend(exc.issues)
                     except (ValueError, TypeError) as exc:
                         issues.append({"path": "/", "message": str(exc)})
                 raise ProtocolError("invalid_schema", issues)
             try:
                 value = validate(normalized)
+            except ProtocolError:
+                raise
             except (ValueError, TypeError) as exc:
                 raise ProtocolError("invalid_domain", [{"path": "/", "message": str(exc)}]) from exc
             await emit("completed")

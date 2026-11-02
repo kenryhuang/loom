@@ -288,6 +288,22 @@ test('Overview shows effective learning allowance and audited expansion',async()
  finally{view.close();dom.window.close();}
 });
 
+test('Completed Goals retain source-change history without a dispatch blocker',async()=>{
+ const data=fixture();data.role.long_term_objectives=[{id:'quality',desired_outcome:'Deliver navigation',stage_planning:{mode:'autonomous'}}];
+ data.objective_planning=[{objective_id:'quality',state:'ready',revision:3,stage_id:'current'}];
+ data.stages=[{id:'current',objective_id:'quality',state:'active',title:'Navigation',goal_ids:['g'],acceptance:['tests'],revision:2}];
+ data.goals=[{id:'g',stage_id:'current',objective:'Verify navigation',state:'completed',acceptance:['tests'],revision:2,source_changed:'event'}];
+ const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');view.tab='Goals';view.render();
+  assert.match(view.root.textContent,/历史记录：来源在规划后发生过变化/);
+  assert.doesNotMatch(view.root.textContent,/当前卡点：来源|后续派发已等待目标复核/);
+  data.goals[0].state='active';view.render();
+  assert.match(view.root.textContent,/当前卡点：来源/);
+  assert.match(view.root.textContent,/后续派发已等待目标复核/);
+ } finally {view.close();dom.window.close();}
+});
+
 test('Profile shows shared scope, conflicts, review and versioned adoption controls',async()=>{
  const data=fixture(),calls=[];
  data.shared_roles=[{id:'a',name:'Research'},{id:'b',name:'Writer'}];
@@ -309,7 +325,7 @@ test('Roadmap updates tentative directions, separates replaced stages and falls 
  data.stages=[{id:'replaced',objective_id:'quality',roadmap_id:'r1',state:'superseded',title:'Old approach',goal_ids:[],acceptance:[]},
   {id:'current',objective_id:'quality',roadmap_id:'r2',state:'active',title:'Current delivery',goal_ids:['g'],acceptance:['tests'],revision:2}];
  data.goals=[{id:'g',stage_id:'current',objective:'Concrete implementation',state:'queued',acceptance:['tests'],revision:1}];
- data.selection=[{goal_id:'g',eligible:false,reason:'Refresh required source routes'}];
+ data.selection=[{goal_id:'g',eligible:false,reason:'Refresh required source routes',blocker:{code:'SOURCE_UNAVAILABLE'}}];
  data.roadmaps=[{id:'r1',objective_id:'quality',revision:1,baseline:'Old baseline',reason:'Old evidence',future:[{key:'abandoned',title:'Abandoned direction'}]},
   {id:'r2',objective_id:'quality',revision:2,baseline:'Verified baseline',reason:'New evidence',future:[{key:'next',title:'Galaxy',expected_outcome:'Larger scale',depends_on:['current']}]}];
  const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
@@ -383,7 +399,7 @@ test('Execution shows concrete blockers, recovery steps, slices and bounded back
 test('Work package details show task binding source and recovery exhaustion',async()=>{
  const data=fixture();
  data.work_packages=[
-  {id:'w1',goal_id:'g',objective:'Bound work',state:'blocked',blocked_reason:'recovery_exhausted',recovery:{attempts:5,pending:null},execution_budget:{tokens:1000},binding:{source:'recommended',rationale:'需要浏览器截图'}},
+  {id:'w1',goal_id:'g',objective:'Bound work',state:'blocked',blocked_reason:'recovery_exhausted',recovery:{exhausted:true,attempts:5,pending:null},execution_budget:{tokens:1000},binding:{source:'recommended',rationale:'需要浏览器截图'}},
   {id:'w2',goal_id:'g',objective:'Fallback work',state:'pending',binding:{source:'fallback',reason:'推荐服务不可用'}}];
  const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
  try{

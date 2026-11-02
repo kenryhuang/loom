@@ -1,7 +1,6 @@
 """Bounded work/objective allocations; cumulative usage and daily/Goal caps remain authoritative."""
 
 import json
-import re
 from zoneinfo import ZoneInfo
 
 from loom.autonomy.contracts import scheduling_policy
@@ -49,53 +48,20 @@ def expand_objective(store, db, agent, goal, block):
 
 
 def execution_block(store, db, agent, work, state):
-    """Use current host denials, with a strict migration for pre-typed failures."""
+    """Use a host denial bound to this run; display messages are irrelevant."""
     owner = state.get("autonomy") or {}
     if any(owner.get(k) != v for k, v in dict(agent_id=agent["id"], goal_id=work["goal_id"], work_package_id=work["id"]).items()):
         return None
     run = state.get("run") or {}
-    failure = run.get("failure") or {}
-    reason = run.get("reason") or failure.get("message") or ""
     binding = dict(agent_id=agent["id"], goal_id=work["goal_id"], work_package_id=work["id"], run_id=run.get("id"))
+    if (run.get("failure") or {}).get("code") != "AGENT_BUDGET":
+        return None
     row = db.execute("SELECT body FROM agent_budget_blocks WHERE id=?", ("execution:" + work["id"],)).fetchone()
     if row:
         saved = json.loads(row[0])
-        if saved["reason"] == reason and all(saved["binding"].get(k) == v for k, v in binding.items()):
+        if all(saved["binding"].get(k) == v for k, v in binding.items()):
             return saved
-    if failure.get("code") not in {"LLM_FAILED", "AGENT_BUDGET"} or reason != failure.get("message"):
-        return None
-    goal = store.get(db, "agent_goals", work["goal_id"], agent["id"])
-    pattern = (r"Agent (objective|work|goal|daily) token budget exhausted: limit=(\d+), used=(\d+) "
-               r"\(actual=(\d+), reserved_or_unknown=(\d+)\), requested=(\d+), projected=(\d+), "
-               r"remaining=(\d+), exceeded_by=(\d+) tokens; ([^;]+), category=execution; increase \w+_tokens "
-               r"(?:\(cumulative budget; does not reset daily\)|or wait for the next daily window)")
-    scopes = []
-    for part in reason.split(" | "):
-        match = re.fullmatch(pattern, part)
-        if not match:
-            return None
-        scope, *values, context = match.groups()
-        limit, used, actual, reserved, requested, projected, remaining, excess = map(int, values)
-        if (used != actual + reserved or projected != used + requested or excess != projected - limit or excess <= 0
-                or requested <= 0 or remaining != max(0, limit - used)):
-            return None
-        expected = dict(objective="objective_id=" + goal["long_term_objective_id"], work="work_package_id=" + work["id"], goal="goal_id=" + goal["id"])
-        if scope in expected and context != expected[scope]:
-            return None
-        if scope == "daily" and not re.fullmatch(r"window=\d{4}-\d{2}-\d{2}, timezone=" + re.escape(agent["role"]["timezone"]), context):
-            return None
-        scopes.append(dict(scope=scope, limit=limit, used=used, requested=requested, projected=projected))
-    if not scopes or len({s["requested"] for s in scopes}) != 1:
-        return None
-    from loom.autonomy.store import digest
-
-    block = dict(id="legacy:" + digest([binding, reason]), binding=binding, category="execution", reason=reason,
-                 requested=scopes[0]["requested"], scopes=scopes, origin="legacy_host_budget_failure", at=store.now())
-    from loom.service.contracts import canonical
-
-    db.execute("INSERT INTO agent_budget_blocks VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
-               ("execution:" + work["id"], agent["id"], canonical(block)))
-    return block
+    return None
 
 
 def restore_budget_stage(store, db, agent, goal):
@@ -114,11 +80,12 @@ def restore_budget_stage(store, db, agent, goal):
             or stage.get("role_signature") != role_signature(agent["role"]) or goal["id"] not in stage["goal_ids"]):
         return False
     siblings = [g for g in store.rows(db, "agent_goals", agent["id"]) if g["id"] in stage["goal_ids"] and g["id"] != goal["id"]]
-    if any(g["state"] in {"blocked", "paused", "cancelled", "superseded"} or g.get("source_changed") for g in siblings):
+    if any(g["state"] in {"blocked", "paused", "cancelled", "superseded"}
+           or (g.get("source_changed") and g["state"] != "completed") for g in siblings):
         return False
     stage.update(state="active", revision=stage["revision"] + 1)
     planning.update(state="active", reason="Budget-stopped execution returned to the scheduler", revision=planning["revision"] + 1,
-                    last_input=None, retry_after="", next_review_at="")
+                    last_input=None, retry_after="", next_review_at="", blocker=None)
     store.put(db, "agent_stages", stage)
     store.put(db, "agent_objective_planning", planning)
     store.event(db, agent["id"], "schedule.budget_stage.restored", dict(stage_id=stage["id"], goal_id=goal["id"]))

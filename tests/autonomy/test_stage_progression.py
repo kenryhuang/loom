@@ -156,7 +156,8 @@ def test_learning_backpressure_is_visible_and_does_not_call_stage_model(agent_se
     assert "backlog" in state["reason"] and not facade.store.snapshot(aid)["stages"]
 
 
-def test_required_source_revocation_blocks_stage_without_duplicate_goal(agent_service):
+@pytest.mark.parametrize("goal_state", ["queued", "active"])
+def test_required_source_revocation_blocks_stage_without_duplicate_goal(agent_service, goal_state):
     from loom.autonomy.events import ingest
     from loom.autonomy.stages import runnable
 
@@ -171,6 +172,10 @@ def test_required_source_revocation_blocks_stage_without_duplicate_goal(agent_se
 
     facade.supervisor.stages.planner.provider = source_plan
     facade.supervisor.stages.advance(aid)
+    with facade.store.sessions.transaction() as db:
+        goal = next(g for g in facade.store.rows(db, "agent_goals", aid) if g.get("stage_id"))
+        goal["state"] = goal_state
+        facade.store.put(db, "agent_goals", goal)
     ingest(
         facade.store,
         aid,
@@ -192,3 +197,62 @@ def test_required_source_revocation_blocks_stage_without_duplicate_goal(agent_se
     assert len(snap["stages"]) == 1
     with facade.store.sessions.transaction() as db:
         assert not runnable(facade.store, db, snap, next(g for g in snap["goals"] if g.get("stage_id")))
+
+
+@pytest.mark.parametrize("cached_block", [False, True])
+def test_completed_source_changed_goal_enters_review_and_clears_scheduler_intervention(agent_service, cached_block):
+    from loom.autonomy.blockers import Code, make
+    from loom.autonomy.events import ingest
+    from loom.autonomy.stages import signature
+
+    _, facade, aid, _ = agent_service
+    snap = setup_plan(facade, aid)
+    with facade.store.sessions.transaction() as db:
+        goal = next(g for g in snap["goals"] if g.get("stage_id"))
+        goal.update(state="active", required_source_ids=["code"])
+        facade.store.put(db, "agent_goals", goal)
+    event = ingest(facade.store, aid, dict(
+        command_id="changed", source_id="code", event_id="changed", object_id="src", version=1,
+        occurred_at=facade.store.now(), cursor="1", type="changed", summary="Implementation changed during execution",
+    ))
+    snap = facade.store.snapshot(aid)
+    goal = next(g for g in snap["goals"] if g.get("stage_id"))
+    assert goal["source_changed"] == event["id"]
+    delivery(facade, aid, goal)
+    if cached_block:
+        snap = facade.store.snapshot(aid)
+        with facade.store.sessions.transaction() as db:
+            state = snap["objective_planning"][0]
+            objective = snap["role"]["long_term_objectives"][0]
+            facade.supervisor.stages.save(
+                db, state, state="blocked", reason="Display wording can change",
+                blocker=make(Code.SOURCE_CHANGED, state["id"], "Unrelated translated display text"),
+                last_input=signature(snap, objective, snap["goals"], [], [], []),
+            )
+        # Simulate loading an already-stuck planning record without any new inputs.
+        from loom.autonomy.supervisor import AgentSupervisor
+
+        facade.supervisor = AgentSupervisor(facade.service, facade.store, facade.background)
+    calls = []
+
+    def review(agent, payload):
+        calls.append(payload)
+        assert payload["stage"]["state"] == "reviewing"
+        assert payload["source_changes"] == [event]
+        assert next(g for g in payload["existing_goals"] if g["id"] == goal["id"])["source_changed"] == event["id"]
+        return decision(agent, payload)
+
+    facade.supervisor.stages.planner.provider = review
+    with facade.store.sessions.transaction() as db:
+        agent = facade.store.get(db, "agents", aid)
+        agent["scheduler"] = dict(state="intervention", manual_required=True, reason="Previous source blocker")
+        facade.store.put(db, "agents", agent)
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    snap = facade.store.snapshot(aid)
+    assert len(calls) == 1
+    assert snap["stages"][0]["state"] == "completed"
+    assert snap["objective_planning"][0]["state"] == "ready"
+    assert snap["scheduler"]["state"] == "idle"
+    assert not snap["scheduler"]["manual_required"]
+    assert next(g for g in snap["goals"] if g["id"] == goal["id"])["source_changed"] == event["id"]
+    assert len(snap["goals"]) == 2

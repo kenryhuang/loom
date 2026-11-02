@@ -34,11 +34,15 @@ def record_session_state(db, state):
         return
     cursor = state["event_cursor"]
     gate = db.execute(
-        "SELECT json_extract(body,'$.type') FROM events WHERE session_id=? AND seq<=? AND json_extract(body,'$.run_id')=? "
+        "SELECT body FROM events WHERE session_id=? AND seq<=? AND json_extract(body,'$.run_id')=? "
         "AND json_extract(body,'$.type') IN ('acceptance.gate.passed','acceptance.gate.blocked') ORDER BY seq DESC LIMIT 1",
         (state["session_id"], cursor, rid),
     ).fetchone()
-    passed = gate is not None and gate[0] == "acceptance.gate.passed"
+    from loom.autonomy.acceptance import verdict
+
+    work["acceptance_result"] = verdict(work, rid, state["session_id"], cursor, json.loads(gate[0]) if gate else None,
+                                        pinned=binding.get("acceptance_contract"))
+    passed = work["acceptance_result"]["status"] == "passed"
     work.update(
         state="succeeded" if status == "completed" and passed else ("cancelled" if status == "stopped" else "failed"),
         blocked_reason=None if status == "completed" and passed else (run.get("reason") or ("Acceptance did not pass" if status == "completed" else status)),
@@ -46,6 +50,8 @@ def record_session_state(db, state):
         outcome=dict(run_state=status, reason=run.get("reason"), acceptance="passed" if passed else "unknown", event_cursor=cursor,
                      artifacts=state.get("output_artifacts", [])),
     )
+    if work["state"] == "succeeded":
+        work["blocker"] = None
     if work.get("slice"):
         work["slice"]["phase"] = "finished"
     for usage in db.execute("SELECT id,body FROM agent_memory_uses WHERE run_id=?", (rid,)).fetchall():

@@ -1,3 +1,4 @@
+from loom.autonomy.acceptance import refs
 from loom.service.controller import LoomService
 from tests.autonomy.helpers import evaluation_provider, role, single_package, solver_provider
 from tests.autonomy.test_execution_flow import until
@@ -13,7 +14,7 @@ def configured_role(workspace):
 
 
 def decision(agent, payload):
-    refs = [e["id"] for e in payload["evidence"]]
+    evidence_refs = [e["id"] for e in payload["evidence"]]
     if payload.get("stage"):
         stage = payload["stage"]
         own = [e["id"] for e in payload["evidence"] if e["goal_id"] in stage["goal_ids"]]
@@ -22,15 +23,15 @@ def decision(agent, payload):
             reason="Original criteria verified",
             source_refs=own,
             result="completed",
-            checks=[dict(criterion=c, source_refs=own) for c in stage["acceptance"]],
+            checks=[dict(c, source_refs=own) for c in refs(stage["acceptance_criteria"])],
         )
     completed = [s for s in payload["history"] if s["state"] == "completed"]
     if len(completed) == 2:
         return dict(
             action="complete_objective",
             reason="All final criteria have recorded evidence",
-            source_refs=refs,
-            checks=[dict(criterion=c, source_refs=refs) for c in payload["objective"]["stage_planning"]["completion_criteria"]],
+            source_refs=evidence_refs,
+            checks=[dict(c, source_refs=evidence_refs) for c in refs(payload["objective"]["acceptance_criteria"])],
         )
     title, criterion = (
         ("Document rendering structure", "Rendering structure evidenced")
@@ -40,10 +41,11 @@ def decision(agent, payload):
     return dict(
         action="propose_stage",
         reason="Concrete remaining implementation gap",
-        source_refs=refs,
+        source_refs=evidence_refs,
         baseline="Recorded notes.txt baseline",
         stage=dict(
             title=title,
+            covers=refs(payload["objective"].get("acceptance_criteria", [])) if len(completed) == 1 else [],
             expected_outcome=title,
             expected_contribution=title,
             delivery_key=title,

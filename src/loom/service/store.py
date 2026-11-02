@@ -414,24 +414,25 @@ class SessionStore:
                 kind in {"pause", "stop_run"} and task["state"] == "paused"
             ):
                 self.applied(db, state, cid)
-            if kind in {"resume", "restart_task"} and not cid.startswith("schedule_resume"):
-                # Human intervention re-arms scheduler recovery for the linked work package.
-                if db.execute("SELECT 1 FROM sqlite_master WHERE name='agent_sessions'").fetchone():
-                    link = db.execute("SELECT agent_id, work_package_id FROM agent_sessions WHERE session_id=?", (sid,)).fetchone()
-                    row = link and link["work_package_id"] and db.execute(
-                        "SELECT body FROM agent_work_packages WHERE id=?", (link["work_package_id"],)
-                    ).fetchone()
-                    if row:
-                        package = json.loads(row[0])
-                        recovery = package.get("recovery") or {}
-                        if recovery.get("attempts") or package.get("blocked_reason") == "recovery_exhausted":
-                            package["recovery"] = {"attempts": 0, "pending": None}
-                            if package.get("blocked_reason") == "recovery_exhausted":
-                                package["blocked_reason"] = None
-                            db.execute(
-                                "INSERT INTO agent_work_packages VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
-                                (package["id"], package["agent_id"], canonical(package)),
-                            )
+            # Human intervention re-arms scheduler recovery for the linked work package.
+            if (kind in {"resume", "restart_task"} and not cid.startswith("schedule_resume")
+                    and db.execute("SELECT 1 FROM sqlite_master WHERE name='agent_sessions'").fetchone()):
+                link = db.execute("SELECT agent_id, work_package_id FROM agent_sessions WHERE session_id=?", (sid,)).fetchone()
+                row = link and link["work_package_id"] and db.execute(
+                    "SELECT body FROM agent_work_packages WHERE id=?", (link["work_package_id"],)
+                ).fetchone()
+                if row:
+                    package = json.loads(row[0])
+                    recovery = package.get("recovery") or {}
+                    if recovery.get("attempts") or recovery.get("exhausted"):
+                        package["recovery"] = {"attempts": 0, "pending": None}
+                        package["blocker"] = None
+                        if recovery.get("exhausted"):
+                            package["blocked_reason"] = None
+                        db.execute(
+                            "INSERT INTO agent_work_packages VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
+                            (package["id"], package["agent_id"], canonical(package)),
+                        )
             if after is not None:
                 after(state, lambda kind, payload: self.append(db, state, kind, payload), db)
             self._save(db, state)

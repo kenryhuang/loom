@@ -3,10 +3,12 @@
 import asyncio
 import json
 
+from loom.autonomy.acceptance import ref_key, support, validate_completion
 from loom.autonomy.budget import BudgetLedger, BudgetProvider
 from loom.autonomy.contracts import strict, strings
+from loom.core import thaw_json
 from loom.llm.api import LlmMessage
-from loom.llm.structured import StructuredProtocol, UnsupportedFormat, output_mode, protocol_provider, request_structured, unsupported_format
+from loom.llm.structured import ProtocolError, StructuredProtocol, UnsupportedFormat, output_mode, protocol_provider, request_structured, unsupported_format
 from loom.service.contracts import ServiceError, text
 from loom.tasks.config import load_task_config
 from loom.tasks.runner import _create_provider
@@ -19,6 +21,10 @@ def obj(properties, required):
     return dict(type="object", properties=properties, required=required, additionalProperties=False)
 
 
+CRITERION_REF = obj({"criterion_id": TEXT, "criterion_revision": {"type": "integer", "minimum": 1}},
+                    ["criterion_id", "criterion_revision"])
+
+
 GOAL = obj(
     {
         "objective": TEXT,
@@ -26,6 +32,7 @@ GOAL = obj(
         "depends_on": {**TEXTS, "description": "Only keys of earlier Goals in this stage, without duplicates. Use [] for no dependencies."},
         "key": TEXT,
         "reuse_goal_id": TEXT,
+        "reuse_contract_revision": {"type": "integer", "minimum": 1},
     },
     ["key", "objective", "acceptance", "depends_on"],
 )
@@ -34,6 +41,7 @@ STAGE = obj(
         **{k: TEXT for k in ("title", "expected_outcome", "expected_contribution", "estimated_cost", "delivery_key")},
         **{k: TEXTS for k in ("scope", "non_goals", "assumptions", "acceptance", "stop_conditions", "required_source_ids")},
         "goals": {"type": "array", "items": GOAL, "minItems": 1, "maxItems": 3},
+        "covers": {"type": "array", "items": CRITERION_REF, "maxItems": 30},
     },
     [
         "title",
@@ -67,7 +75,8 @@ SCHEMA = obj(
         "result": {"enum": ["completed", "repair", "blocked"]},
         "remaining_gap": TEXT,
         "change": TEXT,
-        "checks": {"type": "array", "maxItems": 30, "items": obj({"criterion": TEXT, "source_refs": TEXTS}, ["criterion", "source_refs"])},
+        "checks": {"type": "array", "maxItems": 60, "items": obj(
+            {**CRITERION_REF["properties"], "source_refs": TEXTS}, ["criterion_id", "criterion_revision", "source_refs"])},
         "question": TEXT,
         "options": TEXTS,
         "objective": TEXT,
@@ -90,6 +99,16 @@ def validate_dependencies(key, dependencies, seen, path):
         )
     if len(dependencies) != len(set(dependencies)):
         raise ServiceError(f"{path}/depends_on: dependencies must not contain duplicate entries")
+
+
+acceptance_support = support
+
+
+def validate_ref(ref):
+    strict(ref, {"criterion_id", "criterion_revision"})
+    text(ref.get("criterion_id"), "criterion_id")
+    if type(ref.get("criterion_revision")) is not int or ref["criterion_revision"] < 1:
+        raise ServiceError("criterion_revision must be a positive integer", code="ACCEPTANCE_REFERENCE")
 
 
 def validate(value, payload):
@@ -115,6 +134,11 @@ def validate(value, payload):
             items = strings(stage.get(key, []), key)
             if key in {"scope", "acceptance", "stop_conditions"} and not items:
                 raise ServiceError(f"Stage requires {key}")
+        available_criteria = {(c["id"], c["revision"]) for c in payload["objective"].get("acceptance_criteria", [])}
+        for ref in stage.get("covers", []):
+            validate_ref(ref)
+            if ref_key(ref) not in available_criteria:
+                raise ServiceError("Stage covers an unknown objective criterion or revision", code="ACCEPTANCE_REFERENCE")
         required = strings(stage.get("required_source_ids", []), "required_source_ids")
         bound = {r["id"] for r in payload.get("context", {}).get("source_routes", [])}
         if not set(required) <= bound:
@@ -135,6 +159,10 @@ def validate(value, payload):
             deliveries.add(description)
             if goal.get("reuse_goal_id"):
                 reused.add(text(goal["reuse_goal_id"], "reuse_goal_id", max_length=200))
+                old = next((g for g in payload.get("existing_goals", []) if g["id"] == goal["reuse_goal_id"]), None)
+                if (not old or type(goal.get("reuse_contract_revision")) is not int
+                        or goal["reuse_contract_revision"] != old.get("contract_revision")):
+                    raise ServiceError("Reused Goal requires its current contract revision", code="ACCEPTANCE_REFERENCE")
             if goal["objective"].strip() == payload["objective"]["desired_outcome"].strip():
                 raise ServiceError("Stage Goal must be more specific than the long-term objective")
             if not strings(goal.get("acceptance", []), "Goal acceptance"):
@@ -158,13 +186,15 @@ def validate(value, payload):
             text(value.get("change"), "changed method", max_length=4000)
             text(value.get("remaining_gap"), "remaining_gap", max_length=4000)
         checks = value.get("checks", [])
-        if not isinstance(checks, list) or len(checks) > 30:
+        if not isinstance(checks, list) or len(checks) > 60:
             raise ServiceError("Invalid review checks")
         for check in checks:
-            strict(check, {"criterion", "source_refs"})
-            text(check.get("criterion"), "criterion")
+            strict(check, {"criterion_id", "criterion_revision", "source_refs"})
+            validate_ref({k: v for k, v in check.items() if k != "source_refs"})
             if not strings(check.get("source_refs", []), "check evidence") or not set(check["source_refs"]) <= available:
                 raise ServiceError("Review needs recorded evidence for every check")
+        if action == "complete_objective" or value.get("result") == "completed":
+            validate_completion(value, payload)
     elif action == "request_input":
         text(value.get("question"), "question", max_length=4000)
         strings(value.get("options", []), "options", 5)
@@ -198,7 +228,7 @@ class StagePlanner:
             if not self.service.config_path:
                 raise ServiceError("Configure a planning model before stage planning", 409)
             provider = _create_provider(load_task_config(self.service.config_path).unwrap(), model_name=agent["role"]["model"]).unwrap()
-            protocol = StructuredProtocol(name="agent_stage_review" if payload.get("stage") else "agent_stage_plan", version=1, schema=SCHEMA)
+            protocol = StructuredProtocol(name="agent_stage_review" if payload.get("stage") else "agent_stage_plan", version=2, schema=SCHEMA)
 
             async def send(body, _attempt, mode):
                 bounded = BudgetProvider(
@@ -219,6 +249,14 @@ class StagePlanner:
                             "or request_input/wait if necessary. Completed reviews must cover every original acceptance criterion "
                             "with passed delivery evidence from the stage's Goals. Semantic overlap with existing/completed deliveries "
                             "must be avoided; reuse_goal_id may reference an exact compatible existing Goal. "
+                            "For each completed check, return criterion_id and criterion_revision from acceptance_support and cite "
+                            "at least one of its source_refs. Descriptions are not identifiers; never match or invent IDs from text. "
+                            "When proposing a stage that delivers objective completion criteria, explicitly put their IDs and revisions "
+                            "in stage.covers; the host propagates these obligations to the final integration Goal and work package. "
+                            "Related partial contracts alone do not satisfy this check. Inspect the evidence before claiming completion; "
+                            "use repair, blocked or request_input when an acceptance gap remains. "
+                            "Review recorded source_changes against delivery evidence and current source_status; "
+                            "completed Goals may retain historical change markers. Request repair or input if a change leaves an acceptance gap. "
                             "Every final Goal integrates and verifies the whole stage. Future stages are tentative. "
                             "Goal depends_on contains only earlier Goal keys. Future stage keys are unique and never 'current'; "
                             "their depends_on contains only 'current' for the proposed stage or earlier future stage keys. "
@@ -234,7 +272,12 @@ class StagePlanner:
                 )
                 if not result.ok and unsupported_format(result.error):
                     raise UnsupportedFormat()
-                return result.unwrap()
+                if not result.ok:
+                    error = ServiceError(result.error.message, 409, code=result.error.code)
+                    if result.error.code == "AGENT_BUDGET":
+                        error.budget_block = thaw_json(result.error.cause) or {}
+                    raise error
+                return result.value
 
             def validate_response(value):
                 try:
@@ -242,7 +285,8 @@ class StagePlanner:
                 except ServiceError as exc:
                     # Adapt only response validation errors; budget/transport failures
                     # happen in send() and must not be mistaken for model mistakes.
-                    raise ValueError(str(exc)) from exc
+                    raise ProtocolError("invalid_domain", [dict(path="/", code=exc.code, message=str(exc),
+                                                                details=getattr(exc, "details", {}))]) from exc
 
             result = asyncio.run(
                 request_structured(

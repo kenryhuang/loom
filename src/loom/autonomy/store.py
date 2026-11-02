@@ -39,6 +39,13 @@ class AgentStore:
 
     def put(self, db, table, body):
         assert table in TABLES
+        from loom.autonomy.acceptance import initialize, sync_objectives
+
+        if table in {"agent_goals", "agent_stages", "agent_work_packages"}:
+            initialize(body)
+        elif table == "agents":
+            prior = db.execute("SELECT body FROM agents WHERE id=?", (body["id"],)).fetchone()
+            sync_objectives(body, json.loads(prior[0]) if prior else None)
         db.execute(f"INSERT INTO {table} VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body", (body["id"], body["agent_id"], canonical(body)))
         if "revision" in body:
             db.execute("INSERT OR IGNORE INTO agent_revisions VALUES(?,?,?,?)", (table, body["id"], body["revision"], canonical(body)))
@@ -165,6 +172,12 @@ class AgentStore:
                 # A manual check must not invalidate an in-flight planning response.
                 busy = agent.get("scheduler", {}).get("state") in {"checking", "planning"}
                 if not busy and agent["state"] == "enabled":
+                    from loom.autonomy.blockers import retryable
+
+                    for planning in self.rows(db, "agent_objective_planning", aid):
+                        if not planning.get("manual_pause") and retryable(planning.get("blocker")):
+                            planning.update(retry_requested=True, revision=planning["revision"] + 1)
+                            self.put(db, "agent_objective_planning", planning)
                     agent.update(revision=agent["revision"] + 1, schedule_requested=True, next_schedule_at=self.now(), learning_schedule_requested=True)
                     self.put(db, "agents", agent)
                 self.event(db, aid, "schedule.manual", dict(outcome="busy" if busy else "queued" if agent["state"] == "enabled" else "paused"))

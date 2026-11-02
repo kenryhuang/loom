@@ -68,7 +68,7 @@ export function renderExecution(root,d,view) {
     state.append(badge(label(w.state),w.state));
     if(live)state.append(element('span','muted small',`${live.steps || 0} 步 · ${Math.floor(live.active_seconds || 0)} 秒`));
     const issues=blockers.filter(b=>b.scope_id===w.id || b.scope_id===w.goal_id);
-    const reason=w.state==='succeeded'?'验收通过':(w.blocked_reason==='recovery_exhausted'?'已挂起，等待人工恢复':w.blocked_reason) || issues[0]?.reason;
+    const reason=w.state==='succeeded'?'验收通过':(w.recovery?.exhausted || w.blocker?.code==='RECOVERY_EXHAUSTED'?'已挂起，等待人工恢复':w.blocked_reason) || issues[0]?.reason;
     if(reason && !['running','dispatched'].includes(w.state))result.append(compact(reason,w.state==='succeeded'?'muted':''));
     const detail=roadmapDisclosure(view,result,d,`execution:${w.id}`,'详情');
     detail.append(element('p','',w.objective),element('code','agent-roadmap-id',w.id));

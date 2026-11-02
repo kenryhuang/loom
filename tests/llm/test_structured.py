@@ -145,3 +145,19 @@ async def test_truncated_retry_can_be_delegated_to_smaller_work_scheduler():
         with pytest.raises(ProtocolExhausted) as error:
             await request_structured(protocol=PROTOCOL, payload={}, send=send, retry_truncated=retry)
         assert error.value.code == 'truncated' and calls == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('schema_valid', [False, True])
+async def test_domain_error_identity_and_details_survive_protocol_exhaustion(schema_valid):
+    issue = dict(path='/checks', code='ACCEPTANCE_EVIDENCE', message='任意展示文字', details=dict(criterion_id='c1', criterion_revision=2))
+
+    async def send(payload, attempt, mode):
+        return LlmResponse(content=json.dumps({'answer': 'ok' if schema_valid else 1}))
+
+    def validate(value):
+        raise ProtocolError('invalid_domain', [issue])
+
+    with pytest.raises(ProtocolExhausted) as error:
+        await request_structured(protocol=PROTOCOL, payload={}, send=send, validate=validate)
+    assert issue in error.value.issues

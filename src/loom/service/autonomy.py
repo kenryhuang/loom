@@ -159,6 +159,13 @@ class AutonomyService:
                     if any(w["state"] in {"dispatched", "running", "blocked"} and w.get("session_id") for w in works):
                         raise ServiceError("Pause and finish or cancel current work before revising its contract", 409)
                     goal.update(goal_contract(body.get("payload", {}), agent["role"]))
+                    from loom.autonomy.acceptance import inherit, revise
+
+                    revise(goal)
+                    if goal.get("stage_id"):
+                        stage = self.store.get(db, "agent_stages", goal["stage_id"], aid)
+                        if stage["goal_ids"] and stage["goal_ids"][-1] == gid:
+                            inherit(goal, stage["acceptance_criteria"])
                     goal.pop('source_changed', None)
                     for work in works:
                         work["superseded_contract"] = True

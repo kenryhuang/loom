@@ -167,7 +167,7 @@ def test_renewed_time_budget_still_interrupts_at_the_next_limit(tmp_path, kind):
         if kind == "check_control":
             assert result is True
         else:
-            assert result == {"kind": "paused", "reason": "Active time budget exceeded"}
+            assert result == {"kind": "paused", "reason": "Active time budget exceeded", "code": "ACTIVE_TIME_BUDGET_EXCEEDED"}
     finally:
         service.close()
 

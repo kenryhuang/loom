@@ -118,24 +118,26 @@ def materialize(store, aid):
 
 
 def rank(store, db, agent, goals, packages):
+    from loom.autonomy.blockers import Code, make
+
     done = {g["id"] for g in goals if g["state"] == "completed"}
     ranked, reasons = [], []
     for goal in goals:
         from loom.autonomy.stages import runnable
 
-        reason = None
+        reason, code = None, None
         if goal["state"] != "queued":
-            reason = "Goal is " + goal["state"]
+            reason, code = "Goal is " + goal["state"], Code.GOAL_STATE
         elif not runnable(store, db, agent, goal):
-            reason = "Stage is paused, blocked or automatic planning is disabled"
+            reason, code = "Stage is paused, blocked or automatic planning is disabled", Code.STAGE_STATE
         elif not set(goal["depends_on"]) <= done:
-            reason = "Await required goals"
+            reason, code = "Await required goals", Code.DEPENDENCY_WAIT
         elif goal.get("not_before", "") > store.now():
-            reason = "Failure backoff; wait until " + goal["not_before"]
+            reason, code = "Failure backoff; wait until " + goal["not_before"], Code.RETRY_BACKOFF
         elif not sources_ready(store, db, agent, goal):
-            reason = "Refresh required source routes"
+            reason, code = "Refresh required source routes", Code.SOURCE_UNAVAILABLE
         elif any(w["goal_id"] == goal["id"] and not w.get("superseded_contract") for w in packages):
-            reason = "Existing execution contract"
+            reason, code = "Existing execution contract", Code.WORK_EXISTS
         age = max(0, (store.clock() - datetime.fromisoformat(goal["created_at"])).total_seconds())
         blocked = sum(goal["id"] in g["depends_on"] for g in goals if g["state"] == "queued")
         deadline = datetime.fromisoformat(goal["deadline"]).timestamp() if goal.get("deadline") else float("inf")
@@ -145,13 +147,14 @@ def rank(store, db, agent, goals, packages):
             dict(
                 goal_id=goal["id"],
                 reason=reason or "Ready: priority, deadline, dependent goals and waiting time",
-                eligible=reason is None,
+                eligible=code is None,
+                blocker=make(code, goal["id"], reason, phase="goal_selection") if code else None,
                 score=score,
                 blocked_goals=blocked,
                 waiting_seconds=int(age),
             )
         )
-        if not reason:
+        if code is None:
             ranked.append((-score, deadline, goal["created_at"], goal))
     ranked.sort(key=lambda row: row[:3])
     return [row[-1] for row in ranked], reasons
@@ -223,7 +226,8 @@ def retry(store, aid, gid, body):
                 if dependent['id'] in stage['goal_ids'] and gid in dependent['depends_on'] and dependent['state'] == 'queued':
                     dependent.update(depends_on=[new['id'] if value == gid else value for value in dependent['depends_on']], revision=dependent['revision'] + 1)
                     store.put(db, 'agent_goals', dependent)
-            state.update(state='active', last_input=None, no_progress=state['no_progress'] + 1, retry_after=new['not_before'], revision=state['revision'] + 1)
+            state.update(state='active', last_input=None, blocker=None, no_progress=state['no_progress'] + 1,
+                         retry_after=new['not_before'], revision=state['revision'] + 1)
             store.put(db, 'agent_objective_planning', state)
         elif goal.get('stage_discovery'):
             from loom.autonomy.stages import planning_state
@@ -232,7 +236,7 @@ def retry(store, aid, gid, body):
             state = planning_state(store, db, agent, objective)
             if state.get('discovery_id') != gid:
                 raise ServiceError('Only the current baseline investigation can be retried', 409)
-            state.update(discovery_id=new['id'], state='discovering', last_input=None, revision=state['revision'] + 1)
+            state.update(discovery_id=new['id'], state='discovering', last_input=None, blocker=None, revision=state['revision'] + 1)
             store.put(db, 'agent_objective_planning', state)
         agent.update(generation=agent["generation"] + 1, next_wake_at=new["not_before"])
         store.put(db, "agents", agent)

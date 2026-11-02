@@ -59,7 +59,7 @@ class Dispatcher:
         siblings = self.store.rows(db, "agent_work_packages", aid)
         if any(
             w["state"] in {"dispatched", "running", "blocked"}
-            and w.get("blocked_reason") != "recovery_exhausted"
+            and not w.get("recovery", {}).get("exhausted")
             and w["id"] != work["id"]
             and w.get("session_id")
             for w in siblings
@@ -113,16 +113,22 @@ class Dispatcher:
                 goal = self.store.get(db, "agent_goals", work["goal_id"], aid)
                 if self._quiet_block(db, aid, agent, work, goal):
                     return
+                from loom.autonomy.blockers import Code, make
+
                 if goal.get('source_changed'):
                     work['blocked_reason'] = 'Source changed after planning; review or revise the goal before dispatch'
+                    work['blocker'] = make(Code.SOURCE_CHANGED, wid, work['blocked_reason'], phase='dispatch',
+                                           details=dict(event_id=goal['source_changed']))
                     self.store.put(db, 'agent_work_packages', work)
                     return
                 if not sources_ready(self.store, db, agent, goal):
                     work['blocked_reason'] = 'Required current source must be refreshed before dispatch'
+                    work['blocker'] = make(Code.SOURCE_UNAVAILABLE, wid, work['blocked_reason'], phase='dispatch')
                     self.store.put(db, 'agent_work_packages', work)
                     return
                 if work["role_revision"] != agent["role_revision"]:
                     work.update(state="blocked", blocked_reason="role_changed; revise or replace work contract")
+                    work["blocker"] = make(Code.ROLE_CHANGED, wid, work["blocked_reason"], phase="dispatch")
                     self.store.put(db, "agent_work_packages", work)
                     return
                 candidates = []
@@ -190,6 +196,9 @@ class Dispatcher:
                     stage_id=goal.get("stage_id"),
                     roadmap_id=goal.get("roadmap_id"),
                 )
+                from loom.autonomy.acceptance import contract_key
+
+                binding["acceptance_contract"] = contract_key(work["acceptance_criteria"])
                 state["autonomy"] = binding
                 state["task"]["objective"] = payload["objective"]
                 state["task"]["goal_revision"] += 1
@@ -199,7 +208,7 @@ class Dispatcher:
                 )
                 if dynamic is not None:
                     work["binding"] = dynamic["record"]
-                work.update(state="dispatched", session_id=sid, dispatch_command_id=cid)
+                work.update(state="dispatched", session_id=sid, dispatch_command_id=cid, blocker=None, blocked_reason=None)
                 self.store.put(db, "agent_work_packages", work)
                 db.execute("UPDATE agent_outbox SET state='delivered' WHERE id=?", (wid,))
                 self.store.event(db, aid, "work.dispatched", dict(work_package_id=wid, session_id=sid, route=route["action"]))

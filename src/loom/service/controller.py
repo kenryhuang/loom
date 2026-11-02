@@ -449,7 +449,7 @@ class LoomService:
                     answer = {"request_id": request["id"], "answer": request["answer"], "superseded": request["state"] == "superseded"}
                 control = state["control"]
                 if not control and _time_budget_exceeded(state):
-                    control = {"kind": "paused", "reason": "Active time budget exceeded"}
+                    control = {"kind": "paused", "reason": "Active time budget exceeded", "code": "ACTIVE_TIME_BUDGET_EXCEEDED"}
                 response = {"control": control, "inputs": inputs, "input_answer": answer, "goal_revision": state["task"]["goal_revision"],
                             "active_seconds": run["active_seconds"] - run.get("time_budget_start_seconds", 0), "run_steps": run["steps"]}
             elif kind == "operation_start":
@@ -569,7 +569,7 @@ class LoomService:
             elif kind == "poll_control":
                 response = state["control"]
                 if not response and _time_budget_exceeded(state):
-                    response = {"kind": "paused", "reason": "Active time budget exceeded"}
+                    response = {"kind": "paused", "reason": "Active time budget exceeded", "code": "ACTIVE_TIME_BUDGET_EXCEEDED"}
             elif kind == "status":
                 response = {"input_cursor": state["input_cursor"]}
             elif kind == "result":
@@ -582,7 +582,8 @@ class LoomService:
                 control = value.control
                 pending_control = state["control"]
                 if pending_control and control.kind in {"continue", "completed", "waiting_input", "paused"}:
-                    control = replace(control, kind=pending_control["kind"], reason=pending_control.get("reason", ""))
+                    control = replace(control, kind=pending_control["kind"], reason=pending_control.get("reason", ""),
+                                      reason_code=pending_control.get("code"))
                     cp = self._checkpoint_value(state)
                     if cp:
                         base = cp["context"]
@@ -596,7 +597,7 @@ class LoomService:
                     run["steps"] += 1
                     run["checkpoint"] = None
                 if control.kind == "continue" and run["steps"] >= state["task"]["limits"]["max_steps"]:
-                    control = replace(control, kind="paused", reason="Step budget exceeded")
+                    control = replace(control, kind="paused", reason="Step budget exceeded", reason_code="STEP_BUDGET_EXCEEDED")
                 if control.kind == "completed":
                     run["state"] = "completed"
                     state["task"]["state"] = "queued" if any(m["state"] == "accepted" and m["role"] == "user" for m in state["messages"]) else "idle"
@@ -618,7 +619,8 @@ class LoomService:
                         request["state"] = "cancelled"
                         emit("input.cancelled", request)
                 run["reason"] = control.reason
-                emit("run.state.changed", {"state": run["state"], "reason": control.reason})
+                run["stop_code"] = control.reason_code
+                emit("run.state.changed", {"state": run["state"], "reason": control.reason, "code": control.reason_code})
                 state["task"]["revision"] += 1
                 emit("task.state.changed", {"state": state["task"]["state"], "revision": state["task"]["revision"]})
                 response = {"continue": control.kind == "continue"}

@@ -123,7 +123,7 @@ class ManagedStep:
         cp["terminal"] = {"kind": "completed", "parsed": parsed}
         return await self._terminal(cp, runtime)
 
-    async def _wrap_up(self, cp, runtime, reason, *, allow_model=True):
+    async def _wrap_up(self, cp, runtime, reason, *, allow_model=True, reason_code=None):
         """One bounded, tool-free synthesis attempt; partial work never claims completion."""
         saved_phase = cp["phase"]
         if saved_phase != "after_llm" or allow_model:
@@ -205,9 +205,9 @@ class ManagedStep:
                     poll = getattr(self.execution, "poll_control", None)
                     control = poll() if poll else None
                     if control:
-                        if control.get("reason") == "Active time budget exceeded":
+                        if control.get("code") == "ACTIVE_TIME_BUDGET_EXCEEDED":
                             raise TimeoutError
-                        return self._result(cp, runtime, control["kind"], control.get("reason", ""))
+                        return self._result(cp, runtime, control["kind"], control.get("reason", ""), reason_code=control.get("code"))
                 response = await request
                 if response.ok:
                     usage, previous = response.value.usage, cp["usage"]
@@ -241,11 +241,11 @@ class ManagedStep:
             ledger["stale"] = 0  # Explicit resume gets another chance; retained evidence still prevents blind repetition.
         directive = self._checkpoint(cp)
         control = directive.get("control")
-        if control and control.get("reason") != "Active time budget exceeded":
-            return self._result(cp, runtime, control["kind"], control.get("reason", ""))
+        if control and control.get("code") != "ACTIVE_TIME_BUDGET_EXCEEDED":
+            return self._result(cp, runtime, control["kind"], control.get("reason", ""), reason_code=control.get("code"))
         parsed = _parse_decision("", cp["trace_id"])
         parsed.update(output=report, parse_fallback=False)
-        return self._result(cp, runtime, "paused", reason, parsed=parsed)
+        return self._result(cp, runtime, "paused", reason, parsed=parsed, reason_code=reason_code)
 
     def _context(self, cp, *, parsed=None):
         base = cp["context"]
@@ -281,7 +281,7 @@ class ManagedStep:
                 context = replace(context, state=replace(context.state, scratch=scratch))
         return context
 
-    def _result(self, cp, runtime, kind, reason="", request_id=None, *, parsed=None):
+    def _result(self, cp, runtime, kind, reason="", request_id=None, *, parsed=None, reason_code=None):
         context = self._context(cp, parsed=parsed)
         scratch = dict(context.state.scratch or {})
         if cp.get("progress"):
@@ -311,7 +311,7 @@ class ManagedStep:
                 else {"prompt_tokens": cp["usage"].prompt_tokens, "completion_tokens": cp["usage"].completion_tokens, "total_tokens": cp["usage"].total_tokens}
             },
         )
-        return ok(StepResult(context, trace, output=parsed["output"] if parsed else None, control=StepControl(kind, reason, request_id)))
+        return ok(StepResult(context, trace, output=parsed["output"] if parsed else None, control=StepControl(kind, reason, request_id, reason_code)))
 
     async def _interrupt_batch(self, cp, runtime, reason):
         calls = cp.get("calls", [])
@@ -386,13 +386,13 @@ class ManagedStep:
             directive = self._checkpoint(cp)
         control = directive.get("control")
         if control:
-            if control.get("reason") == "Active time budget exceeded":
-                return await self._wrap_up(cp, runtime, control["reason"], allow_model=False)
-            return self._result(cp, runtime, control["kind"], control.get("reason", ""))
+            if control.get("code") == "ACTIVE_TIME_BUDGET_EXCEEDED":
+                return await self._wrap_up(cp, runtime, control["reason"], allow_model=False, reason_code=control["code"])
+            return self._result(cp, runtime, control["kind"], control.get("reason", ""), reason_code=control.get("code"))
         if cp.get("pending_input"):
             return self._result(cp, runtime, "waiting_input", request_id=cp["pending_input"]["request_id"])
         if cp["usage"].total_tokens > self.limits["max_tokens"]:
-            return await self._wrap_up(cp, runtime, "Token budget exceeded", allow_model=False)
+            return await self._wrap_up(cp, runtime, "Token budget exceeded", allow_model=False, reason_code="TOKEN_BUDGET_EXCEEDED")
         return None
 
     async def __call__(self, context, runtime):
@@ -586,9 +586,9 @@ class ManagedStep:
                             with contextlib.suppress(asyncio.CancelledError):
                                 await request
                             self._checkpoint(cp)
-                            if control.get("reason") == "Active time budget exceeded":
-                                return await self._wrap_up(cp, runtime, control["reason"], allow_model=False)
-                            return self._result(cp, runtime, control["kind"], control.get("reason", ""))
+                            if control.get("code") == "ACTIVE_TIME_BUDGET_EXCEEDED":
+                                return await self._wrap_up(cp, runtime, control["reason"], allow_model=False, reason_code=control["code"])
+                            return self._result(cp, runtime, control["kind"], control.get("reason", ""), reason_code=control.get("code"))
                     response = await request
                 finally:
                     if not request.done():

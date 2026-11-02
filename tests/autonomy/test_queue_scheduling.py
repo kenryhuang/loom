@@ -79,14 +79,15 @@ def test_running_worker_is_never_preempted_by_timer_or_manual_check(tmp_path):
         service.close()
 
 
-def paused_work(agent_service, reason="Active time budget exceeded", control=None):
+def paused_work(agent_service, reason="Active time budget exceeded", control=None, *, stop_code=None):
     service, facade, aid, _ = agent_service
     work = prepare(facade, aid)
     facade.supervisor.dispatcher.dispatch(aid, work["id"])
     sid = facade.snapshot(aid)["work_packages"][0]["session_id"]
 
     def pause(state, emit, db):
-        state["run"] = dict(id="r1", state="suspended", reason=reason, active_seconds=3601, steps=2, checkpoint={"saved": True})
+        state["run"] = dict(id="r1", state="suspended", reason=reason, active_seconds=3601, steps=2, checkpoint={"saved": True},
+                            stop_code=stop_code or ("ACTIVE_TIME_BUDGET_EXCEEDED" if reason == "Active time budget exceeded" else None))
         state["task"]["state"] = "paused"
         state["control"] = control
 
@@ -105,9 +106,9 @@ def test_budget_recovery_grows_only_work_allocation_and_resumes_once(agent_servi
     binding = dict(agent_id=aid, goal_id=work["goal_id"], work_package_id=work["id"], run_id="r1")
     ledger.reserve("old", binding, 90, "execution")
     ledger.settle("old", 90)
-    with pytest.raises(ServiceError) as error:
+    with pytest.raises(ServiceError):
         ledger.reserve("denied", binding, 50, "execution")
-    service.store.update(sid, lambda s, e, db: s["run"].update(reason=str(error.value)))
+    service.store.update(sid, lambda s, e, db: s["run"].update(reason="可翻译的预算说明", failure=dict(code="AGENT_BUDGET", message="可翻译的预算说明")))
     facade.supervisor.scheduler.advance(aid, manual=True)
     saved = facade.snapshot(aid)
     assert saved["scheduler"]["state"] == "recovered", saved["scheduler"]
@@ -149,9 +150,9 @@ def test_parent_budget_cannot_be_raised_by_work_recovery(agent_service):
     ledger = BudgetLedger(service.store.path)
     binding = dict(agent_id=aid, goal_id=work["goal_id"], work_package_id=work["id"], run_id="r1")
     ledger.reserve("used", binding, 90, "execution")
-    with pytest.raises(ServiceError) as error:
+    with pytest.raises(ServiceError):
         ledger.reserve("denied", binding, 50, "execution")
-    service.store.update(sid, lambda s, e, db: s["run"].update(reason=None, failure=dict(code="LLM_FAILED", message=str(error.value))))
+    service.store.update(sid, lambda s, e, db: s["run"].update(reason=None, failure=dict(code="AGENT_BUDGET", message="Typed admission denial")))
     facade.supervisor.scheduler.advance(aid, manual=True)
     saved = facade.snapshot(aid)
     assert saved["scheduler"]["manual_required"] and "目标 Token 总预算不足" in saved["scheduler"]["reason"]

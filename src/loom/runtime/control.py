@@ -8,6 +8,7 @@ class StepControl:
     kind: str
     reason: str = ""
     request_id: str | None = None
+    reason_code: str | None = None
 
     def __post_init__(self):
         if self.kind not in {"continue", "completed", "paused", "waiting_input", "stopped"}:

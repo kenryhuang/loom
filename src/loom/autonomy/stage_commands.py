@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 
+from loom.autonomy.acceptance import criteria
 from loom.autonomy.contracts import role_contract, stage_enabled, strict
 from loom.autonomy.control import drain, enqueue
 from loom.autonomy.stages import TERMINAL, planning_state
@@ -31,7 +32,8 @@ def reconcile_role_change(store, db, agent, previous_role, cid):
             stage["revision"] += 1
             store.put(db, "agent_stages", stage)
         state.update(
-            manual_pause=kind == "pause", state="paused" if kind == "pause" else "ready", revision=state["revision"] + 1, last_input=None, next_review_at=""
+            manual_pause=kind == "pause", state="paused" if kind == "pause" else "ready", blocker=None, retry_requested=False,
+            revision=state["revision"] + 1, last_input=None, next_review_at=""
         )
         store.put(db, "agent_objective_planning", state)
 
@@ -128,11 +130,12 @@ def command(facade, aid, identifier, body, *, stage_command=False):
                     agent.update(role_revision=agent["role_revision"] + 1, revision=agent["revision"] + 1)
                     store.put(db, "agent_roles", dict(id=f"{aid}:{agent['role_revision']}", agent_id=aid, revision=agent["role_revision"], role=agent["role"]))
                 state.pop("question", None)
-                state.update(state="ready", last_input=None, next_review_at="")
+                state.update(state="ready", last_input=None, next_review_at="", blocker=None, retry_requested=False)
             elif kind in {"pause", "resume"}:
                 if kind == "resume" and current_stage and current_stage["state"] == "blocked":
                     raise ServiceError("Blocked stage needs changed input and replan", 409)
-                state.update(manual_pause=kind == "pause", state="paused" if kind == "pause" else "ready", last_input=None, next_review_at="")
+                state.update(manual_pause=kind == "pause", state="paused" if kind == "pause" else "ready", blocker=None,
+                             retry_requested=False, last_input=None, next_review_at="")
                 goal_ids = current_stage["goal_ids"] if current_stage and current_stage["state"] not in TERMINAL else []
                 if state.get("discovery_id"):
                     goal_ids = [*goal_ids, state["discovery_id"]]
@@ -157,8 +160,10 @@ def command(facade, aid, identifier, body, *, stage_command=False):
                     if not strings(payload.get("acceptance", []), "revised acceptance"):
                         raise ServiceError("Revised stage requires acceptance")
                     text(payload.get("expected_outcome"), "expected_outcome", max_length=4000)
-                    state["required_revision"] = payload
-                state.update(state="cancelled" if kind == "cancel" else "ready", manual_pause=False, last_input=None, next_review_at="")
+                    state["required_revision"] = dict(payload, acceptance_criteria=criteria(
+                        state["id"] + ":revision", payload["acceptance"], state["revision"] + 1))
+                state.update(state="cancelled" if kind == "cancel" else "ready", manual_pause=False, last_input=None, next_review_at="",
+                             blocker=None, retry_requested=False)
                 # Explicit new input permits another bounded attempt, but neither paid usage nor daily stage counters reset.
                 state["no_progress"] = max(0, state["no_progress"] - 1)
             state["revision"] += 1

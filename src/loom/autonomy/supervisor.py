@@ -219,6 +219,11 @@ class AgentSupervisor:
                         roadmap_id=goal.get("roadmap_id"),
                         objective_id=goal["long_term_objective_id"],
                     )
+                    from loom.autonomy.acceptance import inherit, initialize
+
+                    initialize(work)
+                    if order == len(proposal) - 1:
+                        inherit(work, goal["acceptance_criteria"])
                     self.store.put(db, "agent_work_packages", work)
                     db.execute("INSERT INTO agent_outbox VALUES(?,?,?,?,?)", (wid, aid, "dispatch", "pending", canonical(work)))
                     refs.append(wid)

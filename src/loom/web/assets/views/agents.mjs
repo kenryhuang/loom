@@ -322,7 +322,8 @@ export class AgentsView {
     if (selection) row.append(element('p','muted',selection.reason));
     if (goal.proposal) row.append(element('p','muted',`提案依据：${goal.proposal.reason} · 来源：${goal.proposal.source}`));
     if (goal.not_before) row.append(element('p','muted',`最早重试：${goal.not_before}`));
-    if (goal.source_changed) row.append(element('p','notice','来源在规划后发生变化，后续派发已等待目标复核。'));
+    if (goal.source_changed) row.append(element('p','notice',['completed','cancelled','superseded'].includes(goal.state)
+      ? '历史记录：来源在规划后发生过变化。' : '来源在规划后发生变化，后续派发已等待目标复核。'));
     if (goal.state === 'blocked') {
       const retry = element('form','agent-form');
       const kind = element('select'); kind.name='change_kind';

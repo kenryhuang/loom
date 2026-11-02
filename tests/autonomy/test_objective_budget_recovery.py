@@ -9,7 +9,7 @@ from loom.service.contracts import ServiceError
 from tests.autonomy.test_queue_scheduling import paused_work
 
 
-def stopped_objective(agent_service, *, legacy=True, reviewing=True):
+def stopped_objective(agent_service, *, legacy=False, reviewing=True):
     service, facade, aid, _ = agent_service
     agent = facade.store.snapshot(aid)
     role = deepcopy(agent["role"])
@@ -37,7 +37,7 @@ def stopped_objective(agent_service, *, legacy=True, reviewing=True):
         ledger.reserve("denied", binding, 50, "execution")
 
     def fail(state, emit, db):
-        state["run"].update(state="failed", reason=None, failure=dict(code="LLM_FAILED", message=str(error.value)))
+        state["run"].update(state="failed", reason=None, failure=dict(code="LLM_FAILED" if legacy else "AGENT_BUDGET", message=str(error.value)))
         state["task"]["state"] = "failed"
         emit("run.failed", state["run"]["failure"])
 
@@ -51,6 +51,11 @@ def stopped_objective(agent_service, *, legacy=True, reviewing=True):
         planning = planning_state(facade.store, db, agent, agent["role"]["long_term_objectives"][0])
         planning.update(stage_id=stage["id"], state="deferred" if reviewing else "active", reason=str(error.value))
         facade.store.put(db, "agent_objective_planning", planning)
+    if legacy:
+        from loom.autonomy.migration_v5 import migrate
+
+        with service.store.transaction() as db:
+            migrate(db)
     return service, facade, aid, work, sid, ledger, binding
 
 
@@ -103,7 +108,13 @@ def test_objective_recovery_is_bounded_and_does_not_override_other_blocks(agent_
             stage["state"] = "paused"
             facade.store.put(db, "agent_stages", stage)
     if case == "invalid_legacy":
-        service.store.update(sid, lambda s, e, db: s["run"]["failure"].update(message=s["run"]["failure"]["message"].replace("projected=130", "projected=129")))
+        service.store.update(sid, lambda s, e, db: s["run"]["failure"].update(
+            code="LLM_FAILED", message=s["run"]["failure"]["message"].replace("projected=130", "projected=129")))
+        from loom.autonomy.migration_v5 import migrate
+
+        with service.store.transaction() as db:
+            db.execute("DELETE FROM agent_budget_blocks")
+            migrate(db)
     if case == "control":
         service.store.update(sid, lambda s, e, db: s.update(control=dict(command_id="human", kind="paused")))
     facade.supervisor.scheduler.advance(aid, manual=True)

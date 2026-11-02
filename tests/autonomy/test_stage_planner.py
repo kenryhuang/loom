@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from loom.autonomy.acceptance import criteria, objective_view, refs
 from loom.autonomy.stage_planner import validate
 from loom.autonomy.stages import evidence
 from loom.service.contracts import ServiceError
@@ -14,7 +15,7 @@ def payload(facade, aid):
     agent = facade.store.snapshot(aid)
     with facade.store.sessions.transaction() as db:
         records = evidence(facade.store, db, aid, agent["goals"])
-    return dict(objective=agent["role"]["long_term_objectives"][0], evidence=records, history=[])
+    return dict(objective=objective_view(agent, agent["role"]["long_term_objectives"][0]), evidence=records, history=[])
 
 
 def test_stage_contract_requires_actual_refs_specific_delivery_and_acyclic_goals(agent_service):
@@ -196,3 +197,87 @@ def test_semantic_correction_is_bounded_without_partial_commits(agent_service, m
     with facade.store.sessions.transaction() as db:
         run = facade.store.rows(db, "agent_runs", aid)[-1]
     assert run["state"] == "failed" and "decision" not in run
+
+
+@pytest.mark.parametrize("outcome", ["corrected", "exhausted", "budget"])
+def test_review_contract_citation_correction_is_metered_bounded_and_preserves_stage(agent_service, monkeypatch, outcome):
+    from tests.autonomy.test_planner import reply
+
+    facade, aid, provider, plan = model_fixture(agent_service, monkeypatch)
+    plan["stage"]["goals"].insert(0, dict(
+        key="component", objective="Verify a component before integration", acceptance=["Component tests pass"], depends_on=[],
+    ))
+    provider.replies = iter([reply(json.dumps(plan))])
+    facade.supervisor.stages.advance(aid)
+    snap = facade.store.snapshot(aid)
+    stage = snap["stages"][0]
+    for goal in snap["goals"]:
+        if goal["id"] in stage["goal_ids"]:
+            delivery(facade, aid, goal)
+    value = payload(facade, aid)
+    value["stage"] = stage
+    valid = decision(None, value)
+    invalid = copy.deepcopy(valid)
+    component_ref = "delivery:work-" + stage["goal_ids"][0]
+    integration_ref = "delivery:work-" + stage["goal_ids"][-1]
+    invalid["checks"][0]["source_refs"] = [component_ref]
+    provider.payloads.clear()
+    provider.replies = iter([reply(json.dumps(invalid)), reply(json.dumps(valid if outcome == "corrected" else invalid))])
+    if outcome == "budget":
+        with facade.store.sessions.transaction() as db:
+            agent = facade.store.get(db, "agents", aid)
+            agent["role"]["budget"]["max_calls"] = 2  # Stage plan plus initial review; no room for correction.
+            facade.store.put(db, "agents", agent)
+    facade.supervisor.stages.advance(aid)
+    if outcome != "corrected":
+        facade.supervisor.stages.advance(aid)  # A timer tick cannot repeatedly pay for rejected responses.
+    snap = facade.snapshot(aid)
+    assert len(snap["stages"]) == 1 and snap["stages"][0]["id"] == stage["id"]
+    assert len(snap["goals"]) == 3 and all(g["state"] == "completed" for g in snap["goals"])
+    assert provider.payloads[0]["acceptance_support"] == [dict(refs(stage["acceptance_criteria"])[0],
+                                                              description=stage["acceptance"][0], source_refs=[integration_ref])]
+    assert len(provider.payloads) == (1 if outcome == "budget" else 2)
+    if outcome != "budget":
+        error = provider.payloads[1]["repair"]["validation_error"]
+        assert "No passed execution contract" in error and stage["acceptance_criteria"][0]["id"] in error and integration_ref in error
+        assert provider.payloads[1]["repair"]["previous_proposal"] == invalid
+        assert provider.payloads[1]["evidence"] == provider.payloads[0]["evidence"]
+    usage = next(r for r in snap["budget"] if r["category"] == "stage_planning")
+    assert usage["calls"] == (2 if outcome == "budget" else 3)
+    assert usage["tokens"] == (60 if outcome == "budget" else 90)
+    if outcome == "corrected":
+        assert snap["stages"][0]["state"] == "completed"
+        assert snap["stage_reviews"][0]["decision"] == valid
+    else:
+        assert snap["stage_reviews"] == [] and snap["stages"][0]["state"] == "reviewing"
+        assert snap["objective_planning"][0]["state"] == ("deferred" if outcome == "budget" else "blocked")
+        with facade.store.sessions.transaction() as db:
+            run = facade.store.rows(db, "agent_runs", aid)[-1]
+        assert run["state"] == "failed" and "decision" not in run
+
+
+@pytest.mark.parametrize("action", ["review_stage", "complete_objective"])
+@pytest.mark.parametrize("invalid_evidence", ["failed", "partial", "observation"])
+def test_completion_cannot_use_unpassed_or_partial_evidence_even_with_supplied_support(action, invalid_evidence):
+    criterion = "Tests, build and lint pass"
+    definitions = criteria("stage", [criterion])
+    evidence_row = dict(id="delivery:integration", kind="delivery", goal_id="goal", passed=True,
+                        acceptance=[criterion], verified_criteria=refs(definitions))
+    if invalid_evidence == "failed":
+        evidence_row["passed"] = False
+    elif invalid_evidence == "partial":
+        evidence_row["acceptance"] = ["Tests pass", "Build and lint pass"]
+        evidence_row["verified_criteria"] = refs(criteria("partial", evidence_row["acceptance"]))
+    else:
+        evidence_row["kind"] = "observation"
+    value = dict(
+        objective=dict(mode="finite", stage_planning=dict(completion_criteria=[criterion]), acceptance_criteria=definitions),
+        evidence=[evidence_row],
+        acceptance_support=[dict(refs(definitions)[0], source_refs=[evidence_row["id"]])],
+    )
+    if action == "review_stage":
+        value["stage"] = dict(acceptance=[criterion], acceptance_criteria=definitions, goal_ids=["goal"])
+    proposal = dict(action=action, reason="Claimed completion", result="completed", source_refs=[evidence_row["id"]],
+                    checks=[dict(refs(definitions)[0], source_refs=[evidence_row["id"]])])
+    with pytest.raises(ServiceError, match="eligible source_refs=\\[\\]"):
+        validate(proposal, value)

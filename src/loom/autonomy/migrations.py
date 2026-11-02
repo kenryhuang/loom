@@ -64,3 +64,9 @@ def migrate(db):
                    "AND json_extract(body,'$.blocked_reason') IS NOT NULL")
         db.execute("INSERT INTO autonomy_migrations VALUES(4)")
     db.execute("INSERT OR IGNORE INTO memory_versions VALUES('effective',0)")
+
+    if not db.execute("SELECT 1 FROM autonomy_migrations WHERE version=5").fetchone():
+        from loom.autonomy.migration_v5 import migrate as migrate_v5
+
+        migrate_v5(db)
+        db.execute("INSERT INTO autonomy_migrations VALUES(5)")

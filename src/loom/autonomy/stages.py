@@ -5,6 +5,9 @@ from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 
+from loom.autonomy.acceptance import inherit, initialize, objective_view, recorded_verdict, ref_key
+from loom.autonomy.acceptance import key as criterion_key
+from loom.autonomy.blockers import RECONCILED, Code, from_exception, holds, make
 from loom.autonomy.contracts import goal_contract, stage_enabled
 from loom.autonomy.execution_budget import execution_block, objective_limit
 from loom.autonomy.store import digest
@@ -37,6 +40,8 @@ def planning_state(store, db, agent, objective):
         next_review_at="",
         answers=[],
         manual_pause=False,
+        blocker=None,
+        retry_requested=False,
     )
 
 
@@ -57,11 +62,9 @@ def evidence(store, db, aid, goals):
             "ORDER BY seq DESC LIMIT 12",
             (sid, cursor, rid),
         ).fetchall()
-        outputs, gate = [], False
+        outputs = []
         for event_row in reversed(events):
             event = json.loads(event_row[0])
-            if event["type"] == "acceptance.gate.passed":
-                gate = True
             if event["type"] != "tool.completed":
                 continue
             payload = event["payload"]
@@ -83,7 +86,9 @@ def evidence(store, db, aid, goals):
                     session_id=sid,
                     event_cursor=cursor,
                     acceptance=work["acceptance"],
-                    passed=gate and work["state"] == "succeeded",
+                    passed=recorded_verdict(db, work),
+                    verified_criteria=work.get("acceptance_result", {}).get("criteria", []),
+                    acceptance_criteria=work.get("acceptance_criteria", []),
                     outcome=work["outcome"],
                     created_at=work.get("created_at"),
                     recorded_outputs=outputs[-4:],
@@ -98,9 +103,10 @@ def signature(agent, objective, goals, observations, sources, habits):
             role_revision=agent["role_revision"],
             objective=objective,
             guidance=agent["guidance_version"],
-            goals=[(g["id"], g["revision"], g["state"]) for g in goals],
+            goals=[(g["id"], g["revision"], g["state"], g.get("source_changed"),
+                    [(c["id"], c["revision"]) for c in g.get("acceptance_criteria", [])]) for g in goals],
             observations=observations,
-            sources=[(s["id"], s.get("version"), s.get("state")) for s in sources],
+            sources=[(s["id"], s.get("revision"), s.get("digest"), s.get("state")) for s in sources],
             habits=habits,
         )
     )
@@ -139,10 +145,61 @@ class StageCoordinator:
         self.service, self.store, self.planner = service, store, planner
 
     def save(self, db, record, **changes):
+        if changes.get("state") not in {None, "blocked", "deferred", "awaiting_input"}:
+            changes.setdefault("blocker", None)
         if all(record.get(key) == value for key, value in changes.items()):
             return
         record.update(**changes, revision=record["revision"] + 1)
         self.store.put(db, "agent_objective_planning", record)
+
+    def block(self, db, state, code, message, fingerprint=None, **changes):
+        blocker = make(code, state["id"], message, dependency_key=fingerprint, details=changes.pop("details", None))
+        self.save(db, state, state="blocked", reason=message, blocker=blocker, last_input=fingerprint, **changes)
+
+    def reconcile_state(self, db, agent, state, stage, own, fingerprint):
+        if state["manual_pause"] or state["state"] in {"awaiting_input", "cancelled", "completed"}:
+            return False
+        if stage and stage["state"] == "paused":
+            return False
+        if stage and stage["state"] not in TERMINAL:
+            missing = set(stage["goal_ids"]) - {g["id"] for g in own}
+            if missing:
+                self.block(db, state, Code.GOAL_MISSING, "Stage references missing Goals", fingerprint, details=dict(goal_ids=sorted(missing)))
+                return False
+            changed = [g for g in own if g.get("source_changed") and g["state"] not in TERMINAL]
+            if changed:
+                self.block(db, state, Code.SOURCE_CHANGED, "Required source changed; review or replace the affected contract", fingerprint,
+                           details=dict(goals=[dict(goal_id=g["id"], event_id=g["source_changed"]) for g in changed]))
+                return False
+            if stage.get("role_signature") != role_signature(agent["role"]):
+                self.block(db, state, Code.ROLE_CHANGED, "Role changed; review the active stage contract", fingerprint)
+                return False
+            if any(g["state"] in {"cancelled", "superseded"} for g in own):
+                self.block(db, state, Code.GOAL_TERMINAL, "Stage Goal failed or was cancelled; changed input is required", fingerprint)
+                return False
+        blocker = state.get("blocker")
+        if blocker and blocker["code"] in RECONCILED:
+            self.save(db, state, state="active" if stage and stage["state"] not in TERMINAL else "ready", last_input=None)
+            if stage and stage["state"] == "blocked":
+                stage.update(state="active", revision=stage["revision"] + 1)
+                self.store.put(db, "agent_stages", stage)
+        return True
+
+    def reconcile(self, aid):
+        """No model calls: reconcile structural facts before queue recovery/dispatch."""
+        with self.store.sessions.transaction() as db:
+            agent = self.store.get(db, "agents", aid)
+            if agent["state"] != "enabled" or agent.get("planner_lease"):
+                return
+            for state in self.store.rows(db, "agent_objective_planning", aid):
+                objective = next((o for o in agent["role"]["long_term_objectives"] if o["id"] == state["objective_id"]), None)
+                if not objective or not stage_enabled(objective):
+                    continue
+                goals = [g for g in self.store.rows(db, "agent_goals", aid) if g["long_term_objective_id"] == objective["id"]]
+                stage = self.store.get(db, "agent_stages", state["stage_id"], aid) if state.get("stage_id") else None
+                own = [g for g in goals if stage and g["id"] in stage["goal_ids"]]
+                fingerprint = digest([agent["role_revision"], [(g["id"], g["revision"], g["state"], g.get("source_changed")) for g in own]])
+                self.reconcile_state(db, agent, state, stage, own, fingerprint)
 
     def discovery(self, db, agent, objective, state, reason, task=None):
         gap = digest(
@@ -204,7 +261,7 @@ class StageCoordinator:
         store = self.store
         with store.sessions.transaction() as db:
             agent = store.get(db, "agents", aid)
-            objective = next(o for o in agent["role"]["long_term_objectives"] if o["id"] == oid)
+            objective = objective_view(agent, next(o for o in agent["role"]["long_term_objectives"] if o["id"] == oid))
             if agent["state"] != "enabled" or agent.get("planner_lease"):
                 return False
             state = planning_state(store, db, agent, objective)
@@ -222,34 +279,32 @@ class StageCoordinator:
                     store.clock().astimezone(ZoneInfo(agent["role"]["timezone"])).date().isoformat(),
                 ]
             )
-            if state["state"] == "completed" and state.get("objective_contract") == digest(objective):
+            if state["state"] == "completed":
+                if state.get("objective_contract") == digest(objective):
+                    return False
+                self.save(db, state, state="ready", last_input=None)
+            stage = store.get(db, "agent_stages", state["stage_id"], aid) if state.get("stage_id") else None
+            own = [g for g in goals if stage and g["id"] in stage["goal_ids"]]
+            if not self.reconcile_state(db, agent, state, stage, own, fingerprint):
                 return False
-            if state["last_input"] == fingerprint:
-                if state["state"] == "blocked" or state["state"] == "deferred" and state.get("budget_key") == budget_key:
-                    return False
-                if state.get("next_review_at", "") > store.now():
-                    return False
+            blocker = state.get("blocker")
+            if holds(blocker, fingerprint, budget_key, retry_requested=state.get("retry_requested", False)):
+                return False
+            if blocker:
+                # Structural predicates were checked above. Every recovery uses typed policy,
+                # dependency versions or an explicit retry, never the display reason.
+                self.save(db, state, state="active" if stage else "ready", last_input=None, retry_requested=False)
+                if stage and stage["state"] == "blocked" and blocker["code"] in RECONCILED:
+                    stage.update(state="active", revision=stage["revision"] + 1)
+                    store.put(db, "agent_stages", stage)
+            if state["last_input"] == fingerprint and state.get("next_review_at", "") > store.now():
+                return False
             if state.get("retry_after", "") > store.now():
                 return False
-            stage = store.get(db, "agent_stages", state["stage_id"], aid) if state.get("stage_id") else None
-            if stage and (stage["state"] == "paused" or stage["state"] == "blocked" and state["last_input"] == fingerprint):
+            if stage and stage["state"] == "blocked" and state["last_input"] == fingerprint:
                 return False
             if stage and stage["state"] not in TERMINAL:
-                own = [g for g in goals if g["id"] in stage["goal_ids"]]
-                if any(g.get("source_changed") for g in own):
-                    self.save(db, state, state="blocked", reason="Required source changed; review or replace the affected contract", last_input=fingerprint)
-                    return False
-                if stage.get("role_signature") != role_signature(agent["role"]):
-                    self.save(db, state, state="blocked", reason="Role changed; review the active stage contract", last_input=fingerprint)
-                    return False
-                if state["state"] == "blocked" and state["last_input"] != fingerprint:
-                    self.save(db, state, state="active", reason="Changed stage inputs are ready for re-evaluation", last_input=None)
                 failed = any(g["state"] == "blocked" for g in own)
-                if any(g["state"] in {"cancelled", "superseded"} for g in own):
-                    stage.update(state="blocked", reason="Stage Goal failed or was cancelled; changed input is required", revision=stage["revision"] + 1)
-                    store.put(db, "agent_stages", stage)
-                    self.save(db, state, state="blocked", reason=stage["reason"], last_input=fingerprint, no_progress=state["no_progress"] + 1)
-                    return False
                 if failed:
                     for work in store.rows(db, "agent_work_packages", aid):
                         if work["goal_id"] in stage["goal_ids"] and work["state"] == "failed" and work.get("session_id"):
@@ -287,7 +342,7 @@ class StageCoordinator:
             if state["no_progress"] >= objective["stage_planning"]["max_replans_without_progress"] and (
                 not stage or any(g["state"] == "blocked" for g in goals if g["id"] in stage["goal_ids"])
             ):
-                self.save(db, state, state="blocked", reason="No-progress limit reached; provide new input", last_input=fingerprint)
+                self.block(db, state, Code.NO_PROGRESS, "No-progress limit reached; provide new input", fingerprint)
                 return False
             if not stage and objective["mode"] != "finite":
                 day = store.clock().astimezone(ZoneInfo(agent["role"]["timezone"])).date().isoformat()
@@ -320,6 +375,7 @@ class StageCoordinator:
                     state,
                     state="awaiting_input",
                     reason="Finite objective needs final completion criteria",
+                    blocker=make(Code.INPUT_REQUIRED, state["id"], "Finite objective needs final completion criteria"),
                     question=dict(
                         id="question_" + digest([state["id"], state["revision"]])[:24],
                         revision=1,
@@ -335,17 +391,19 @@ class StageCoordinator:
                 else:
                     discovery = next(g for g in goals if g["id"] == state["discovery_id"])
                     if discovery["state"] in TERMINAL | {"blocked"}:
-                        self.save(
-                            db, state, state="blocked", reason="Baseline investigation has no recorded tool evidence; resolve its Goal", last_input=fingerprint
+                        self.block(
+                            db, state, Code.BASELINE_MISSING, "Baseline investigation has no recorded tool evidence; resolve its Goal", fingerprint
                         )
                 return False
             review_goals = stage["goal_ids"] if stage else []
             cycles = [c for c in store.rows(db, "agent_learning_cycles", aid) if c["goal_id"] in review_goals]
+            goal_fields = ("id", "objective", "acceptance", "state", "stage_id", "source_changed", "acceptance_criteria", "contract_revision")
             payload = dict(
                 objective=objective,
                 stage=stage,
                 evidence=[*records, *[dict(id="observation:" + o["id"], kind="observation", record=o) for o in observations[-10:]]],
-                existing_goals=[{k: g.get(k) for k in ("id", "objective", "acceptance", "state", "stage_id")} for g in goals][-30:],
+                existing_goals=[{k: g.get(k) for k in goal_fields} for g in goals][-30:],
+                source_changes=[e for e in store.rows(db, "agent_external_events", aid) if e["id"] in {g.get("source_changed") for g in own}],
                 observations=observations[-10:],
                 habits=habits[-5:],
                 source_status=sources,
@@ -356,6 +414,9 @@ class StageCoordinator:
                 repair=state.get("repair"),
                 learning=[{k: c.get(k) for k in ("id", "goal_id", "state", "coverage", "blocked_reason")} for c in cycles],
             )
+            from loom.autonomy.stage_planner import acceptance_support
+
+            payload["acceptance_support"] = acceptance_support(payload)
             kind = "stage_review" if stage else "stage_plan"
             key = digest([aid, oid, fingerprint, stage and stage["revision"], state["revision"]])
             rid = "agent_run_stage_" + key[:32]
@@ -379,6 +440,7 @@ class StageCoordinator:
                     db,
                     state,
                     state="blocked",
+                    blocker=make(Code.UNKNOWN_RESPONSE, state["id"], "Previous response was not recorded; usage may be unknown", dependency_key=fingerprint),
                     reason="Previous planning response was not recorded; usage may be unknown. Replan with an explanation.",
                     last_input=fingerprint,
                 )
@@ -420,6 +482,8 @@ class StageCoordinator:
                 if valid:
                     self.commit(db, latest, objective, current, payload, decision, rid)
                     current.update(last_input=fingerprint, objective_contract=digest(objective))
+                    if current.get("blocker") and current["blocker"].get("dependency_key") is None:
+                        current["blocker"]["dependency_key"] = fingerprint
                     store.put(db, "agent_objective_planning", current)
                     run["state"] = "committed"
                 else:
@@ -436,18 +500,20 @@ class StageCoordinator:
                 if latest.get("planner_lease") == rid:
                     latest["planner_lease"] = None
                     store.put(db, "agents", latest)
-                    deferred = "budget" in str(exc).lower()
+                    blocker = from_exception(exc, current["id"], fingerprint, budget_key)
+                    deferred = blocker["code"] == Code.PLANNING_BUDGET
                     self.save(
                         db,
                         current,
                         state="deferred" if deferred else "blocked",
                         reason=str(exc),
+                        blocker=blocker,
                         last_input=fingerprint,
                         budget_key=budget_key,
                         no_progress=current["no_progress"] + (0 if deferred else 1),
                     )
                 run = store.get(db, "agent_runs", rid, aid)
-                run.update(state="failed", reason=str(exc))
+                run.update(state="failed", reason=str(exc), failure=from_exception(exc, current["id"], fingerprint, budget_key))
                 store.put(db, "agent_runs", run)
                 store.event(db, aid, "stage.planning.failed", dict(agent_run_id=rid, reason=str(exc)))
         return True
@@ -463,18 +529,9 @@ class StageCoordinator:
         changes = dict(reason=decision["reason"], next_review_at="")
         if action in {"review_stage", "complete_objective"}:
             stage = payload.get("stage")
-            criteria = stage["acceptance"] if stage else policy["completion_criteria"]
-            passing = {e["id"]: e for e in payload["evidence"] if e.get("passed") and (not stage or e["goal_id"] in stage["goal_ids"])}
             completed = action == "complete_objective" or decision["result"] == "completed"
-            if completed:
-                if stage and any(g["state"] != "completed" for g in payload["existing_goals"] if g["id"] in stage["goal_ids"]):
-                    raise ServiceError("Stage still has unfinished or failed Goals")
-                checks = {c["criterion"]: c["source_refs"] for c in decision.get("checks", [])}
-                if not criteria or not set(criteria) <= set(checks):
-                    raise ServiceError("Review does not cover all original acceptance criteria")
-                for criterion in criteria:
-                    if not any(ref in passing and criterion in passing[ref]["acceptance"] for ref in checks[criterion]):
-                        raise ServiceError("Acceptance claim is not supported by a passed execution contract")
+            if completed and stage and any(g["state"] != "completed" for g in payload["existing_goals"] if g["id"] in stage["goal_ids"]):
+                raise ServiceError("Stage still has unfinished or failed Goals")
             review = dict(
                 id="review_" + digest(run_id)[:32],
                 agent_id=aid,
@@ -494,14 +551,15 @@ class StageCoordinator:
                 store.put(db, "agent_stages", stage)
             changes.update(
                 state="completed" if action == "complete_objective" else "ready" if completed else "blocked",
+                blocker=None if completed else make(Code.REVIEW_GAP, state["id"], decision["reason"], details=dict(review_id=review["id"])),
                 no_progress=0 if completed else state["no_progress"] + 1,
             )
             self.wake(db, agent)
         elif action == "propose_stage":
             stage = dict(decision["stage"])
             requested = state.get("required_revision")
-            if requested and (stage["expected_outcome"] != requested["expected_outcome"] or not set(requested["acceptance"]) <= set(stage["acceptance"])):
-                raise ServiceError("Proposed stage must preserve the human-revised delivery and acceptance")
+            if requested:
+                stage["expected_outcome"] = requested["expected_outcome"]
             existing = [s for s in store.rows(db, "agent_stages", aid) if s["objective_id"] == objective["id"]]
             if (
                 state["daily_stages"].get(store.clock().astimezone(ZoneInfo(agent["role"]["timezone"])).date().isoformat(), 0)
@@ -518,6 +576,12 @@ class StageCoordinator:
                 if old["state"] not in {"cancelled", "superseded"} and (old["delivery_key"] == stage["delivery_key"] or similarity > 0.85):
                     raise ServiceError("Proposed stage repeats an existing delivery; provide a concrete different contribution")
             sid = "stage_" + digest(run_id)[:32]
+            stage["id"] = sid
+            initialize(stage)
+            covered = {ref_key(r) for r in stage.get("covers", [])}
+            inherit(stage, [c for c in objective["acceptance_criteria"] if criterion_key(c) in covered])
+            if requested:
+                inherit(stage, requested["acceptance_criteria"])
             roadmap = dict(
                 id="roadmap_" + digest(run_id)[:32],
                 agent_id=aid,
@@ -537,7 +601,7 @@ class StageCoordinator:
             original = store.rows(db, "agent_goals", aid)
             for index, item in enumerate(stage.pop("goals")):
                 # Integration Goal inherits every stage criterion, not a model's weaker subset.
-                criteria = list(dict.fromkeys([*item["acceptance"], *(stage["acceptance"] if index == len(decision["stage"]["goals"]) - 1 else [])]))
+                criteria = item["acceptance"]
                 gid = item.get("reuse_goal_id") or "goal_stage_" + digest([sid, item["key"]])[:32]
                 if item.get("reuse_goal_id"):
                     goal = store.get(db, "agent_goals", gid, aid)
@@ -545,7 +609,9 @@ class StageCoordinator:
                         goal.get("stage_id")
                         or goal["long_term_objective_id"] != objective["id"]
                         or goal["state"] != "completed"
-                        or not set(criteria) <= set(goal["acceptance"])
+                        or goal["contract_revision"] != item.get("reuse_contract_revision")
+                        or index == len(decision["stage"]["goals"]) - 1
+                        and not {criterion_key(c) for c in stage["acceptance_criteria"]} <= {criterion_key(c) for c in goal["acceptance_criteria"]}
                     ):
                         raise ServiceError("Only compatible completed unassigned Goals can be reused")
                 else:
@@ -576,6 +642,9 @@ class StageCoordinator:
                         stage_id=sid,
                         roadmap_id=roadmap["id"],
                     )
+                    initialize(goal)
+                    if index == len(decision["stage"]["goals"]) - 1:
+                        inherit(goal, stage["acceptance_criteria"])
                     store.put(db, "agent_goals", goal)
                 mapping[item["key"]] = gid
                 goal_ids.append(gid)
@@ -603,6 +672,7 @@ class StageCoordinator:
         elif action == "request_input":
             changes.update(
                 state="awaiting_input",
+                blocker=make(Code.INPUT_REQUIRED, state["id"], decision["reason"]),
                 question=dict(id="question_" + digest(run_id)[:24], revision=1, text=decision["question"], options=decision.get("options", [])),
             )
         elif action == "investigate":
@@ -643,7 +713,7 @@ class StageCoordinator:
                 not_before=retry_at,
                 objective=target["objective"] + "\nChanged method: " + decision["change"] + "\nRemaining gap: " + decision["remaining_gap"],
             )
-            new["acceptance"] = list(dict.fromkeys([*new["acceptance"], *stage["acceptance"]]))
+            inherit(new, stage["acceptance_criteria"])
             new.pop("source_changed", None)
             store.put(db, "agent_goals", new)
             replacements[target["id"]] = new["id"]
