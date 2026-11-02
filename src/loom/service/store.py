@@ -195,7 +195,7 @@ class SessionStore:
         state["messages"].append(message)
         return message
 
-    def _restart_configuration(self, task, changes):
+    def _restart_configuration(self, task, changes, *, relocation=None):
         if "workspace" in changes:
             requested = str(Path(changes["workspace"]).expanduser().resolve()) if changes["workspace"] is not None else None
             if requested != task["workspace"]:
@@ -215,7 +215,7 @@ class SessionStore:
         self.knowledge.validate_ids(value.get("knowledge_base_ids") or [])
         updated = validate_create(value, plugin_registry=self.plugin_registry_factory() if self.plugin_registry_factory else None,
                                   external_bindings=self.external_tools.resolve(value.get("external_tool_ids") or []))
-        if updated["workspace"] != task["workspace"]:
+        if updated["workspace"] != task["workspace"] and updated['workspace'] != relocation:
             raise ServiceError("Workspace is fixed for this session. Create a new session to use another directory.")
         return updated
 
@@ -286,7 +286,21 @@ class SessionStore:
                     raise ServiceError('Enter a task before restarting', 409)
                 if task['state'] not in {'idle', 'paused', 'failed', 'completed'} or (state['run'] and state['run']['state'] == 'running'):
                     raise ServiceError('Pause or stop active execution before restarting', 409)
-                updated_task = self._restart_configuration(task, payload.get("task", {}))
+                reassembly = state.get('pending_reassembly') or {}
+                relocation = None
+                from loom.tasks.workspace_probe import digest
+
+                reassembly_valid = (reassembly.get('command_id') == cid
+                                    and reassembly.get('source_run_id') == (state.get('run') or {}).get('id')
+                                    and reassembly.get('task_key') == digest(payload.get('task', {})))
+                if reassembly.get('command_id') == cid and not reassembly_valid:
+                    raise ServiceError('Recovery command does not match its prepared task', 409, code='EXECUTION_CONTRACT')
+                if reassembly_valid:
+                    copy = reassembly.get('workspace_copy') or {}
+                    expected = self.directory / 'recovery_workspaces' / reassembly['source_key']
+                    if copy.get('path') == str(expected) and copy.get('source') == task['workspace']:
+                        relocation = str(expected)
+                updated_task = self._restart_configuration(task, payload.get("task", {}), relocation=relocation)
             elif kind in {"pause", "stop_run"} and task["state"] == "completed":
                 raise ServiceError("Task is completed", 409)
             self.append(db, state, "command.accepted", {"type": kind}, command_id=cid)
@@ -340,6 +354,12 @@ class SessionStore:
                 task["state"] = "idle"
             elif kind == 'restart_task':
                 previous_run = state['run']
+                reassembly = state.pop('pending_reassembly', None)
+                if reassembly_valid:
+                    state['recovery_context'] = reassembly
+                    self.append(db, state, 'task.reassembled', reassembly, command_id=cid)
+                else:
+                    state.pop('recovery_context', None)
                 state['restart_episode_id'] = ((previous_run or {}).get('task_episode_id')
                                                if updated_task['objective'] == task['objective'] else None)
                 if updated_task["objective"] != task["objective"]:

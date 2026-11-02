@@ -37,15 +37,37 @@ else
     LAUNCH=(uv run loom)
 fi
 
-# Print the service PID if it is recorded, alive, and really a `loom serve` process.
+# Recover an unrecorded process only when the listener also owns this data
+# directory's supervisor lock. Never stop an arbitrary HTTP server on our port.
+discover_pid() {
+    command -v lsof >/dev/null 2>&1 || return 1
+    [[ -f "$DATA_DIR/supervisor.lock" ]] || return 1
+    local listener owner found=""
+    local owners
+    owners="$(lsof -t "$DATA_DIR/supervisor.lock" 2>/dev/null)" || return 1
+    for listener in $(lsof -t -a -u "$(id -un)" -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null); do
+        for owner in $owners; do
+            [[ "$listener" == "$owner" ]] || continue
+            ps -p "$listener" -o command= 2>/dev/null | grep -q "loom.*serve" || continue
+            [[ -z "$found" || "$found" == "$listener" ]] || return 1
+            found="$listener"
+        done
+    done
+    [[ -n "$found" ]] || return 1
+    echo "$found" >"$PID_FILE"
+    echo "$found"
+}
+
+# Print a recorded live service PID, or recover its missing/stale PID file.
 running_pid() {
-    [[ -f "$PID_FILE" ]] || return 1
     local pid
-    pid="$(cat "$PID_FILE" 2>/dev/null)" || return 1
-    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-    kill -0 "$pid" 2>/dev/null || return 1
-    ps -p "$pid" -o command= 2>/dev/null | grep -q "loom.*serve" || return 1
-    echo "$pid"
+    pid="$(cat "$PID_FILE" 2>/dev/null)" || pid=""
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null &&
+        ps -p "$pid" -o command= 2>/dev/null | grep -q "loom.*serve"; then
+        echo "$pid"
+    else
+        discover_pid
+    fi
 }
 
 # Any HTTP response (even 401) means the server is answering on the port.

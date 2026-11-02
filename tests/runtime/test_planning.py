@@ -571,3 +571,20 @@ def test_off_mode_returns_exact_legacy_definition_and_handlers():
 
     assert planning.wrap_loop(definition) is definition
     assert planning.wrap_tools(handlers) is handlers
+
+
+def test_missing_capability_is_blocked_not_skipped_and_survives_restore():
+    from loom.runtime.planning import plan_state_dict, plan_state_from_mapping
+
+    controller = _controller()
+    controller.enter('verification')
+    controller.submit('Run validation', ['Run required tests'])
+    item = dict(id='step_1', content='Run required tests', status='skipped', note='No shell available')
+    assert controller.update('cannot run', [item]).error.code == 'PLAN_SKIP_KIND_REQUIRED'
+    item.update(status='blocked', blocker=dict(code='TOOLS_UNAVAILABLE', tool_ids=['process_execute']))
+    assert controller.update('missing capability', [item]).ok
+    assert controller.complete().error.code == 'PLAN_INCOMPLETE'
+    restored = plan_state_from_mapping(plan_state_dict(controller.state))
+    assert restored.items[0].blocker == item['blocker']
+    item.update(status='pending', blocker=None)
+    assert controller.update('capability restored', [item]).ok

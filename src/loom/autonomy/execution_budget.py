@@ -54,7 +54,9 @@ def execution_block(store, db, agent, work, state):
         return None
     run = state.get("run") or {}
     binding = dict(agent_id=agent["id"], goal_id=work["goal_id"], work_package_id=work["id"], run_id=run.get("id"))
-    if (run.get("failure") or {}).get("code") != "AGENT_BUDGET":
+    if (all(code != 'AGENT_BUDGET' for code in (
+            (run.get('failure') or {}).get('code'), (state.get('acceptance') or {}).get('cause_code'),
+            (work.get('recovery') or {}).get('last_failure', {}).get('error_code')))):
         return None
     row = db.execute("SELECT body FROM agent_budget_blocks WHERE id=?", ("execution:" + work["id"],)).fetchone()
     if row:
@@ -124,23 +126,30 @@ def parent_block(store, db, agent, work, requested):
     window = store.clock().astimezone(ZoneInfo(agent["role"]["timezone"])).date().isoformat()
     goal = store.get(db, "agent_goals", work["goal_id"], aid)
     objective = next((o for o in agent["role"]["long_term_objectives"] if o["id"] == goal["long_term_objective_id"]), {})
-    checks = [("每日", "window=?", (window,), budget["daily_tokens"]), ("目标", "goal_id=?", (goal["id"],), budget["goal_tokens"])]
+    checks = [("daily", "每日", "window=?", (window,), budget["daily_tokens"]),
+              ("goal", "目标", "goal_id=?", (goal["id"],), budget["goal_tokens"])]
     if objective.get("stage_planning"):
         checks.append(
             (
-                "长期目标",
+                "objective", "长期目标",
                 "(id IN (SELECT call_id FROM agent_budget_objectives WHERE agent_id=? AND objective_id=?) "
                 "OR goal_id IN (SELECT id FROM agent_goals WHERE agent_id=? AND json_extract(body,'$.long_term_objective_id')=?))",
                 (aid, objective["id"], aid, objective["id"]),
                 objective_limit(agent, objective),
             )
         )
-    reasons = []
-    for name, where, args, limit in checks:
+    reasons, scopes = [], []
+    for scope, name, where, args, limit in checks:
         used = db.execute(f"SELECT COALESCE(SUM(COALESCE(actual,reserved)),0) FROM agent_budget_calls WHERE agent_id=? AND {where}", (aid, *args)).fetchone()[0]
         if used + requested > limit:
             reasons.append(f"{name} Token 总预算不足：已用及预留 {used}，本次需要 {requested}，上限 {limit}")
+            scopes.append(dict(scope=scope, limit=limit, used=used, requested=requested, projected=used + requested))
     calls = db.execute("SELECT COUNT(*) FROM agent_budget_calls WHERE agent_id=? AND window=?", (aid, window)).fetchone()[0]
     if calls >= budget["max_calls"]:
         reasons.append(f"每日调用次数不足：{calls}/{budget['max_calls']}")
-    return "；".join(reasons)
+        scopes.append(dict(scope='calls', limit=budget['max_calls'], used=calls, requested=1, projected=calls + 1))
+    if not scopes:
+        return None
+    error = ServiceError('；'.join(reasons), 409, code='EXECUTION_BUDGET')
+    error.details = dict(scopes=scopes, window=window)
+    return error

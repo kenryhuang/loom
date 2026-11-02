@@ -82,13 +82,13 @@ def test_repair_without_additions_counts_and_reports_unrecoverable(agent_service
         assert db.execute("SELECT 1 FROM commands WHERE id LIKE 'schedule_resume%'").fetchone() is None
 
 
-def test_read_only_work_is_not_repaired(agent_service):
+def test_read_only_work_enters_repair_and_recommender_failures_are_bounded(agent_service):
     service, facade, aid, work, sid = acceptance_blocked_work(agent_service)
     called = []
 
     def recommender(text, *, model, scope, extra=None):
         called.append(scope)
-        raise AssertionError("read_only 工作包不应触发修复推荐")
+        raise RuntimeError("推荐服务不可用")
 
     service.setup_recommender = recommender
     with service.store.transaction() as db:
@@ -99,7 +99,7 @@ def test_read_only_work_is_not_repaired(agent_service):
     snap = facade.snapshot(aid)
     assert snap["scheduler"]["state"] == "intervention"
     assert snap["work_packages"][0]["recovery"]["attempts"] == 1
-    assert not called
+    assert called == ["repair"]
 
 
 class RepairProvider:

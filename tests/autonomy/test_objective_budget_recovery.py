@@ -119,13 +119,13 @@ def test_objective_recovery_is_bounded_and_does_not_override_other_blocks(agent_
         service.store.update(sid, lambda s, e, db: s.update(control=dict(command_id="human", kind="paused")))
     facade.supervisor.scheduler.advance(aid, manual=True)
     result = facade.snapshot(aid)
-    assert result["scheduler"]["manual_required"]
+    assert result["scheduler"]["manual_required"] == (case != 'daily')
     assert not result.get("objective_budgets")
     # Decision-level failures (budget ceilings, unrecognized reasons) consume a
     # recovery attempt; premise failures (manual control, paused stage, exhausted
     # ceiling) never do. A malformed legacy budget message parses to no block, so
     # the reviewing stage cannot be restored and recovery stops at that premise.
-    expected = 1 if case in {"ceiling", "disabled", "daily", "goal"} else None
+    expected = 1 if case in {"ceiling", "disabled"} else None
     assert (result["work_packages"][0].get("recovery") or {}).get("attempts") == expected
     if case == "attempts":
         assert result["work_packages"][0]["blocked_reason"] == "recovery_exhausted"

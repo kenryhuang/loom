@@ -947,7 +947,7 @@ class TaskAssembly:
         token_limit = self.acceptance_limits.get("max_tokens") or (self.context.goal.budget.max_tokens if self.context else None)
         reserved = getattr(self.workflow, "reserved_tokens", 0)
         if (token_limit is not None and usage.total_tokens + reserved >= token_limit) or calls >= self.acceptance_limits.get("max_llm_calls", 10000):
-            raise AcceptanceBlocked("Task model budget exhausted before acceptance verification")
+            raise AcceptanceBlocked("Task model budget exhausted before acceptance verification", code='TOKEN_BUDGET_EXCEEDED')
         image_input = 0
         if images:
             from loom.llm.context_budget import estimate_message_tokens
@@ -955,7 +955,7 @@ class TaskAssembly:
 
             image_input = estimate_message_tokens(prompt, content) + image_tokens(images, selected_provider)
             if token_limit is not None and usage.total_tokens + reserved + image_input >= token_limit:
-                raise AcceptanceBlocked("Task token budget insufficient for visual input")
+                raise AcceptanceBlocked("Task token budget insufficient for visual input", code='TOKEN_BUDGET_EXCEEDED')
         if self.execution and (poll := getattr(self.execution, "poll_control", None)) and (directive := poll()):
             raise AcceptanceBlocked(directive.get("reason", "Task interrupted"))
         identifier = f"{runtime.trace_id}:acceptance:{uuid.uuid4().hex}"
@@ -1013,7 +1013,8 @@ class TaskAssembly:
             if not response.ok and protocol and mode != "text" and unsupported_format(response.error):
                 raise UnsupportedFormat()
             if timer.expired() or not response.ok:
-                raise AcceptanceBlocked("Acceptance model request timed out" if timer.expired() else response.error.message)
+                raise AcceptanceBlocked("Acceptance model request timed out" if timer.expired() else response.error.message,
+                                        code="ACCEPTANCE_TIMEOUT" if timer.expired() else response.error.code)
             returned = response.value.usage
             updated = TokenUsage(*(getattr(usage, k) + getattr(returned, k) for k in ("prompt_tokens", "completion_tokens", "total_tokens")))
             if cp:
@@ -1029,10 +1030,11 @@ class TaskAssembly:
             timed_out = isinstance(exc, TimeoutError) or timer.expired()
             message = (f"Acceptance {stage} request timed out after {timeout:.1f}s "
                        f"(model={selected_provider.model}, output_limit={cap} tokens)" if timed_out else str(exc) or type(exc).__name__)
-            error = {"code": "TIMEOUT" if timed_out else "ACCEPTANCE_FAILED", "message": message,
+            code = "ACCEPTANCE_TIMEOUT" if timed_out else getattr(exc, 'code', 'ACCEPTANCE_FAILED')
+            error = {"code": code, "message": message,
                      "model": selected_provider.model, "stage": stage, "timeout_seconds": timeout, "output_tokens": cap}
             (await runtime.trace_sink.emit({"type": "llm.failed", **metadata, "error": error, "at": now_iso()})).unwrap()
-            raise AcceptanceBlocked(message) from exc
+            raise AcceptanceBlocked(message, code=code) from exc
         finally:
             if cp:
                 cp["plugin_states"] = self.snapshot()

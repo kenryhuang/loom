@@ -15,6 +15,7 @@ class Code(StrEnum):
     INPUT_REQUIRED = "INPUT_REQUIRED"
     REVIEW_GAP = "REVIEW_GAP"
     PLANNING_BUDGET = "PLANNING_BUDGET"
+    EXECUTION_BUDGET = "EXECUTION_BUDGET"
     MODEL_PROTOCOL = "MODEL_PROTOCOL"
     CONTRACT_INVALID = "CONTRACT_INVALID"
     UNKNOWN_RESPONSE = "UNKNOWN_RESPONSE"
@@ -57,6 +58,7 @@ POLICY = {
     Code.INPUT_REQUIRED: Recovery.ANSWER,
     Code.REVIEW_GAP: Recovery.CHANGE_INPUT,
     Code.PLANNING_BUDGET: Recovery.WAIT_BUDGET,
+    Code.EXECUTION_BUDGET: Recovery.WAIT_BUDGET,
     Code.MODEL_PROTOCOL: Recovery.MANUAL_RETRY,
     Code.CONTRACT_INVALID: Recovery.MANUAL_RETRY,
     Code.UNKNOWN_RESPONSE: Recovery.CHANGE_INPUT,
@@ -84,7 +86,7 @@ RECONCILED = {Code.SOURCE_CHANGED, Code.ROLE_CHANGED, Code.GOAL_TERMINAL, Code.G
 def make(code, scope_id, message, *, dependency_key=None, details=None, phase="stage_planning"):
     code = Code(code)
     recovery = POLICY[code]
-    if code == Code.PLANNING_BUDGET:
+    if code in {Code.PLANNING_BUDGET, Code.EXECUTION_BUDGET}:
         scopes = {s["scope"] for s in (details or {}).get("scopes", [])}
         recovery = Recovery.WAIT_BUDGET if scopes and scopes <= {"daily", "calls", "learning"} else Recovery.ADJUST_BUDGET
     return dict(schema_version=1, code=code.value, scope_id=scope_id, phase=phase,

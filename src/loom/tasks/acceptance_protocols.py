@@ -32,6 +32,7 @@ def normalize_plan(value):
             default(row, "scope", [], path)
             default(row, "check", {}, path)
             default(row, "required", True, path)
+            default(row, "required_tools", [], path)
             if isinstance(row["scope"], str):
                 row["scope"] = [row["scope"]]
                 changes.append({"path": path + "/scope", "rule": "single_path_to_array"})
@@ -57,7 +58,8 @@ def plan_protocol(assembly):
 
     def criterion(kind, check):
         variants.append(obj({"id": STRING, "description": STRING, "verifier": {"type": "string", "enum": [kind]},
-                             "scope": STRINGS, "required": {"type": "boolean", "enum": [True]}, "check": check}))
+                             "scope": STRINGS, "required": {"type": "boolean", "enum": [True]}, "check": check,
+                             "required_tools": STRINGS}))
 
     criterion("semantic", obj({}))
     if "browser_capture" in assembly.bindings:

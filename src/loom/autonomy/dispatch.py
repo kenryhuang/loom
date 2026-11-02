@@ -190,6 +190,7 @@ class Dispatcher:
                     goal_id=work["goal_id"],
                     work_package_id=wid,
                     role_revision=agent["role_revision"],
+                    required_tools=work.get('required_tools', []),
                     output_tokens=agent["role"]["budget"]["output_tokens"],
                     previous_run_id=(state.get("run") or {}).get("id"),
                     objective_id=goal["long_term_objective_id"],

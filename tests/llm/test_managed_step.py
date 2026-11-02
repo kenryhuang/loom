@@ -69,6 +69,39 @@ async def run_managed(tmp_path, provider, execution, tools=None, planning=None, 
     return result
 
 
+def test_direct_completion_cannot_bypass_unfinished_plan(tmp_path):
+    async def scenario():
+        planning = PlanningRuntime('force')
+        planning.controller.submit('Required verification', ('Run tests',)).unwrap()
+        provider = Provider([final('Claimed done'), final('Still claimed done')])
+        result = await run_managed(tmp_path, provider, Execution(), planning=planning)
+        assert result.ok and result.value.control.kind == 'paused'
+        assert 'unfinished' in result.value.control.reason
+        assert planning.controller.state.items[0].status.value == 'pending'
+        assert len(provider.calls) == 2
+    asyncio.run(scenario())
+
+
+def test_structured_plan_block_stops_remaining_tool_batch(tmp_path):
+    async def scenario():
+        planning = PlanningRuntime('force')
+        planning.controller.submit('Required verification', ('Run tests',)).unwrap()
+        item = planning.controller.state.items[0]
+        calls = []
+        async def effect(value, _options):
+            calls.append(value)
+            return ok(Observation('o', 'shell_execute', {}, 'now'))
+        update = dict(explanation='Missing execution capability', items=[dict(id=item.id, content=item.content,
+            status='blocked', blocker=dict(code='TOOLS_UNAVAILABLE', tool_ids=['process_execute']))])
+        provider = Provider([LlmResponse('', (LlmToolCall('block', 'update_plan', json.dumps(update)),
+                                               LlmToolCall('later', 'shell_execute', '{}')))])
+        result = await run_managed(tmp_path, provider, Execution(), {'shell_execute': effect}, planning=planning)
+        assert result.ok and result.value.control.kind == 'paused'
+        assert not calls
+        assert planning.execution_blockers()[0]['code'] == 'TOOLS_UNAVAILABLE'
+    asyncio.run(scenario())
+
+
 def test_pause_after_tool_resume_preserves_results_without_replaying(tmp_path):
     async def scenario():
         calls = []

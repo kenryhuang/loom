@@ -157,7 +157,8 @@ def test_parent_budget_cannot_be_raised_by_work_recovery(agent_service):
     saved = facade.snapshot(aid)
     assert saved["scheduler"]["manual_required"] and "目标 Token 总预算不足" in saved["scheduler"]["reason"]
     assert saved["role"]["budget"]["goal_tokens"] == 100
-    assert saved["work_packages"][0]["recovery"]["attempts"] == 1
+    assert not saved["work_packages"][0].get("recovery", {}).get("attempts")
+    assert saved['scheduler']['blockers'][0]['code'] == 'EXECUTION_BUDGET'
     assert service.snapshot(sid)["task"]["state"] == "paused"
 
 

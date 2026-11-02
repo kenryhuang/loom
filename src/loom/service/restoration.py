@@ -15,6 +15,7 @@ class RestoreIntent:
     task_episode_id: str | None
     manifest: dict | None = None
     schema_version: int = 1
+    recovery: dict | None = None
 
     def snapshot(self):
         return asdict(self)
@@ -25,7 +26,9 @@ def prepare_restore(state, checkpoint, *, restarting=False):
     old = state.get("run")
     new_input = any(m["role"] == "user" and m["seq"] > state["input_cursor"] for m in state["messages"])
     if restarting or not old or old["state"] == "completed" or old["state"] == "stopped" and new_input:
-        return RestoreIntent("restart" if restarting else "new_task", old["id"] if old else None, None)
+        recovery = state.get('recovery_context')
+        return RestoreIntent("restart" if restarting else "new_task", old["id"] if old else (recovery or {}).get('source_run_id'), None,
+                             recovery=recovery)
     context = checkpoint["context"] if checkpoint else decode(state["context"]) if state.get("context") else None
     if context is None:
         return RestoreIntent("same_task", old["id"], old.get("task_episode_id"))

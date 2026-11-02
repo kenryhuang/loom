@@ -469,3 +469,15 @@ test('Execution focuses two tabular queues, collapses reverse chronological hist
   assert.equal(view.root.querySelector('.agent-queue-panel [data-queue-table="current"] [data-queue-id]').dataset.queueId,'failed');
  }finally{view.close();dom.window.close();}
 });
+
+test('Execution reassessment submits the exact work and agent revision',async()=>{
+ const data=fixture();data.state='enabled';data.work_packages=[{id:'blocked-work',goal_id:'g',state:'blocked',objective:'Verify delivery',recovery:{attempts:3,exhausted:true}}];
+ let sent;
+ const {dom,view}=setup({json:async(path,options)=>{if(options?.body)sent={path,body:options.body};return path==='/v1/agents'?{agents:[data]}:data;}});
+ try{
+  await view.open();await view.select('a');view.tab='Work';view.render();
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='重新评估恢复').click();await tick();
+  assert.equal(sent.path,'/v1/agents/a/commands');assert.equal(sent.body.type,'recover');
+  assert.equal(sent.body.expected_revision,data.revision);assert.equal(sent.body.payload.work_package_id,'blocked-work');
+ }finally{view.close();dom.window.close();}
+});

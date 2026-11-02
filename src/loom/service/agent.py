@@ -41,7 +41,7 @@ async def execute(state, bridge, config_path, provider_factory, plugin_registry_
                   "knowledge_config_path": config_path, "external_tool_bindings": task.get("external_tool_bindings", []),
                   "external_tools_directory": state.get("external_tools_directory"),
                   "memory_database": state.get("memory_database"), "autonomy": state.get('autonomy'),
-                  "task_episode_id": state["run"].get("task_episode_id") },
+                  "task_episode_id": state["run"].get("task_episode_id"), "recovery_context": state.get('recovery_context') },
     )
     assembly = TaskAssembly(
         request,

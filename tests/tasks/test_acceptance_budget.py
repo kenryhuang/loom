@@ -218,7 +218,7 @@ async def test_acceptance_timeout_records_nonempty_failure_and_effective_request
         with pytest.raises(AcceptanceBlocked, match=r'Acceptance verify request timed out after 0.0s'):
             await assembly.acceptance_model_request(runtime, 'verify', 'Return JSON', '{}', 0.01)
         failed = next(e for e in runtime.trace_sink.events if e['type'] == 'llm.failed')
-        assert failed['error']['code'] == 'TIMEOUT'
+        assert failed['error']['code'] == 'ACCEPTANCE_TIMEOUT'
         assert failed['error']['timeout_seconds'] == 0.01
         assert 'model=slow-judge' in failed['error']['message']
         assert 'output_limit=4096 tokens' in failed['error']['message']

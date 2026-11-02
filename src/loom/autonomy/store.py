@@ -155,7 +155,7 @@ class AgentStore:
 
     def command(self, aid, cid, kind, revision, payload=None):
         payload = payload or {}
-        if payload:
+        if payload and kind != 'recover':
             raise ServiceError("Agent controls accept an empty payload")
         value = dict(agent_id=aid, type=kind, expected_revision=revision, payload=payload)
         with self.sessions.transaction() as db:
@@ -164,10 +164,31 @@ class AgentStore:
                 return replay
             agent = self.get(db, "agents", aid)
             self.expect(agent, revision)
-            if kind not in {"enable", "pause", "resume", "archive", "wake"}:
+            if kind not in {"enable", "pause", "resume", "archive", "wake", "recover"}:
                 raise ServiceError("Unknown Agent command")
             if agent["state"] == "archived":
                 raise ServiceError("Archived Agent cannot run", 409)
+            if kind == 'recover':
+                from loom.autonomy.contracts import scheduling_policy, strict
+
+                strict(payload, {'work_package_id', 'reason'})
+                reason = text(payload.get('reason'), 'reason')
+                work = self.get(db, 'agent_work_packages', text(payload.get('work_package_id'), 'work_package_id'), aid)
+                if agent['state'] != 'enabled' or work['state'] not in {'blocked', 'failed'}:
+                    raise ServiceError('只能重新评估已启用 Agent 的阻塞或失败工作包', 409)
+                recovery = work.setdefault('recovery', {})
+                if recovery.get('pending') or agent.get('scheduler', {}).get('state') in {'checking', 'planning'}:
+                    raise ServiceError('恢复检查正在进行，请等待当前检查结束', 409)
+                before = max(recovery.get('attempt_limit', 0), scheduling_policy(agent['role'])['max_recovery_attempts'])
+                after = max(before, recovery.get('attempts', 0) + 1)
+                recovery.update(exhausted=False, attempt_limit=after,
+                                manual_grants=[*recovery.get('manual_grants', []), dict(command_id=cid, reason=reason, before=before, after=after)])
+                work.update(blocker=None, blocked_reason=None)
+                self.put(db, 'agent_work_packages', work)
+                agent.update(revision=agent['revision'] + 1, schedule_requested=True, next_schedule_at=self.now())
+                self.put(db, 'agents', agent)
+                self.event(db, aid, 'schedule.recovery.reassessment', dict(work_package_id=work['id'], command_id=cid, reason=reason))
+                return self.receipt(db, cid, value, agent)
             if kind == "wake":
                 # A manual check must not invalidate an in-flight planning response.
                 busy = agent.get("scheduler", {}).get("state") in {"checking", "planning"}

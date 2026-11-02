@@ -72,6 +72,9 @@ def decide(controller, *, origin="completion", completion_id=None):
             code = "ACCEPTANCE_EVIDENCE_VIEW" if "insufficient_evidence_view" in kinds else "ACCEPTANCE_UNKNOWN_GAP"
         elif not _capable(assembly, gaps):
             code = "ACCEPTANCE_CAPABILITY_UNAVAILABLE"
+            missing = sorted({t['value'] for g in gaps for t in g.get('targets', [])
+                              if t['kind'] == 'tool' and t['value'] not in assembly.bindings})
+            reason = 'Required execution capabilities are unavailable: ' + (', '.join(missing) or 'workflow feedback support')
         elif feedback and feedback["state"] == "applied" and feedback["progress_baseline"] == binding:
             code = "ACCEPTANCE_NO_PROGRESS"
             reason = "Acceptance repair produced no new relevant evidence or candidate; unresolved: " + data["reason"]

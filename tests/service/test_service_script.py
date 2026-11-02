@@ -35,6 +35,15 @@ def launcher(tmp_path):
     )
     fake.chmod(0o755)
     curl.chmod(0o755)
+    lsof = bindir / "lsof"
+    lsof.write_text(
+        f"#!{sys.executable}\nimport json,os,sys\nfrom pathlib import Path\n"
+        'try: pid=json.loads(Path(os.environ["TEST_LAUNCH"]).read_text())["pid"]; os.kill(pid,0)\n'
+        'except (OSError,ValueError): sys.exit(1)\n'
+        'if sys.argv[-1].endswith("supervisor.lock") and os.environ.get("TEST_WRONG_OWNER"): print(pid+100000)\n'
+        'else: print(pid)\n'
+    )
+    lsof.chmod(0o755)
     env = {k: v for k, v in os.environ.items() if not k.startswith("LOOM_")}
     env.update(PATH=str(bindir) + os.pathsep + env["PATH"], LOOM_BIN=str(fake), TEST_LAUNCH=str(record), LOOM_STOP_TIMEOUT="3")
 
@@ -82,3 +91,23 @@ def test_config_override_precedence(launcher, explicit):
         assert "--config" not in forwarded
     else:
         assert forwarded[-2:] == ["--config", str(root / "environment.yaml")]
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_restart_recovers_missing_or_stale_pid_only_for_same_listener_and_data_directory(launcher, stale):
+    root, record, run = launcher
+    assert run("start").returncode == 0
+    before = json.loads(record.read_text())
+    data = root / "runs/service"
+    (data / "supervisor.lock").touch()
+    if stale:
+        (data / "loom.pid").write_text("99999999")
+    else:
+        (data / "loom.pid").unlink()
+    refused = run("restart", TEST_WRONG_OWNER="1")
+    assert refused.returncode != 0
+    assert json.loads(record.read_text()) == before
+    os.kill(before["pid"], 0)
+    result = run("restart")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(record.read_text())["pid"] != before["pid"]

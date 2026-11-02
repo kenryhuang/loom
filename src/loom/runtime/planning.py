@@ -73,6 +73,7 @@ class PlanItemStatus(StrEnum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     SKIPPED = "skipped"
+    BLOCKED = "blocked"
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +82,8 @@ class PlanItem:
     content: str
     status: PlanItemStatus = PlanItemStatus.PENDING
     note: str | None = None
+    blocker: dict | None = None
+    skip_kind: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,7 +178,7 @@ class PlanController:
             return self._error("PLAN_ITEMS_REQUIRED", "A plan must contain at least one item")
 
         current_by_id = {item.id: item for item in self._state.items}
-        normalized: list[tuple[str | None, str, PlanItemStatus, str | None]] = []
+        normalized = []
         seen_ids: set[str] = set()
         active_count = 0
         for raw in items:
@@ -205,9 +208,23 @@ class PlanController:
             note = note.strip() if isinstance(note, str) else None
             if status is PlanItemStatus.SKIPPED and not note:
                 return self._error("PLAN_SKIP_REASON_REQUIRED", "Skipped plan items require a reason")
+            blocker, skip_kind = raw.get('blocker'), raw.get('skip_kind')
+            old = current_by_id.get(item_id)
+            if status is PlanItemStatus.BLOCKED:
+                from loom.tasks.recovery import validate_plan_blocker
+
+                try:
+                    blocker = validate_plan_blocker(blocker)
+                except ValueError as exc:
+                    return self._error('PLAN_BLOCKER_REQUIRED', str(exc))
+            elif blocker is not None:
+                return self._error('PLAN_BLOCKER_INVALID', 'Only blocked items carry a blocker')
+            if (status is PlanItemStatus.SKIPPED and skip_kind not in {'not_applicable', 'superseded'}
+                    and not (old and old.status is PlanItemStatus.SKIPPED)):
+                return self._error('PLAN_SKIP_KIND_REQUIRED', 'Use blocked for missing tools, budget or evidence; skip requires not_applicable or superseded')
             if status is PlanItemStatus.IN_PROGRESS:
                 active_count += 1
-            normalized.append((item_id, content.strip(), status, note))
+            normalized.append((item_id, content.strip(), status, note, blocker, skip_kind))
 
         if active_count > 1:
             return self._error("PLAN_MULTIPLE_ACTIVE_ITEMS", "At most one plan item may be in progress")
@@ -218,7 +235,7 @@ class PlanController:
                 continue
             if index >= len(normalized):
                 return self._error("PLAN_TERMINAL_HISTORY_IMMUTABLE", "Completed and skipped plan items cannot be removed")
-            new_id, content, status, note = normalized[index]
+            new_id, content, status, note, blocker, skip_kind = normalized[index]
             if (new_id, content, status, note) != (
                 old_item.id,
                 old_item.content,
@@ -230,7 +247,8 @@ class PlanController:
                     "Completed and skipped plan items cannot be changed or reordered",
                 )
 
-        updated_items = tuple(PlanItem(item_id or self._id_factory("step_"), content, status, note) for item_id, content, status, note in normalized)
+        updated_items = tuple(PlanItem(item_id or self._id_factory("step_"), content, status, note, blocker, skip_kind)
+                              for item_id, content, status, note, blocker, skip_kind in normalized)
         at = self._now()
         self._state = replace(
             self._state,
@@ -375,6 +393,10 @@ class PlanningRuntime:
                     "enum": [status.value for status in PlanItemStatus],
                 },
                 "note": {"type": ["string", "null"]},
+                "skip_kind": {"type": ["string", "null"], "enum": ["not_applicable", "superseded", None]},
+                "blocker": {"type": ["object", "null"], "properties": {
+                    "code": {"enum": ["TOOLS_UNAVAILABLE", "TOKEN_BUDGET", "ACCEPTANCE_CONTRACT", "EXTERNAL_DEPENDENCY", "EXECUTION_UNKNOWN"]},
+                    "tool_ids": {"type": "array", "items": {"type": "string"}}}, "required": ["code"], "additionalProperties": False},
             },
             "required": ["content", "status"],
             "additionalProperties": False,
@@ -421,7 +443,8 @@ class PlanningRuntime:
                 "update_plan",
                 "Submit the complete checklist snapshot to update progress or revise future "
                 "non-terminal steps. Include every item that must remain; omitted non-terminal "
-                "items are removed.",
+                "items are removed. Missing tools, budget or dependencies must use status blocked with blocker.code and tool_ids. "
+                "Use skipped only for not_applicable or superseded steps, with skip_kind and a note. Never skip a required unmet operation.",
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -723,6 +746,16 @@ class PlanningRuntime:
             affordances=replace(context.affordances, tools=visible),
         )
 
+    def completion_ready(self):
+        state = self.controller.state
+        return state.phase in {PlanPhase.INACTIVE, PlanPhase.COMPLETED} or (
+            state.phase is PlanPhase.EXECUTING and bool(state.items)
+            and all(i.status in {PlanItemStatus.COMPLETED, PlanItemStatus.SKIPPED} for i in state.items))
+
+    def execution_blockers(self):
+        return [dict(item_id=i.id, **i.blocker) for i in self.controller.state.items
+                if i.status is PlanItemStatus.BLOCKED and i.blocker]
+
     def _workflow_description(self, state: PlanState) -> str:
         if state.phase is PlanPhase.INACTIVE:
             route = self._route.state
@@ -983,6 +1016,8 @@ def plan_state_dict(state: PlanState) -> dict[str, Any]:
                 "content": item.content,
                 "status": item.status.value,
                 "note": item.note,
+                **({"blocker": item.blocker} if item.blocker else {}),
+                **({"skip_kind": item.skip_kind} if item.skip_kind else {}),
             }
             for item in state.items
         ],
@@ -1004,7 +1039,7 @@ def plan_state_from_mapping(value: Mapping[str, Any]) -> PlanState:
                 id=str(item["id"]),
                 content=str(item["content"]),
                 status=PlanItemStatus(item.get("status", PlanItemStatus.PENDING.value)),
-                note=item.get("note"),
+                note=item.get("note"), blocker=item.get("blocker"), skip_kind=item.get("skip_kind"),
             )
             for item in value.get("items", ())
         ),

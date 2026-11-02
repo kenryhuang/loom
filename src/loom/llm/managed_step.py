@@ -473,10 +473,10 @@ class ManagedStep:
             try:
                 await self.assembly.acceptance.prepare(cp["context"], runtime)
             except (ValueError, RuntimeError) as exc:
-                self.assembly.acceptance.data.update(state="blocked", reason=str(exc))
+                self.assembly.acceptance.data.update(state="blocked", reason=str(exc), cause_code=getattr(exc, 'code', 'ACCEPTANCE_PROTOCOL'))
                 await self.assembly.acceptance.emit(runtime, "acceptance.gate.blocked")
                 self._checkpoint(cp)
-                return self._result(cp, runtime, "paused", str(exc))
+                return self._result(cp, runtime, "paused", str(exc), reason_code=getattr(exc, 'code', 'ACCEPTANCE_PROTOCOL'))
             if self.assembly.acceptance.data.get("resume_feedback_pending"):
                 return await self.assembly.resume_feedback_result(self._context(cp), runtime)
             cp["context"] = self.assembly.project_acceptance(cp["context"])
@@ -661,6 +661,13 @@ class ManagedStep:
                 )
                 finished = any(o.source == "finish" and thaw_json(o.value).get("completed") for o in cp["observations"]) or not parsed["parse_fallback"]
                 completion_due = not hasattr(self.planning, "is_final_node") or self.planning.is_final_node()
+                if finished and hasattr(self.planning, 'completion_ready') and not self.planning.completion_ready():
+                    if cp.get('plan_completion_retries', 0) >= 1:
+                        return self._result(cp, runtime, 'paused', 'Plan still has unfinished required work', reason_code='PLAN_INCOMPLETE')
+                    cp['plan_completion_retries'] = cp.get('plan_completion_retries', 0) + 1
+                    cp['messages'].append(LlmMessage('user', 'Plan is unfinished. Continue execution or update the item as blocked with a structured cause.'))
+                    cp['phase'] = 'before_llm'
+                    continue
                 if finished and completion_due and self.assembly:
                     suspended = await self._boundary(cp, runtime)
                     if suspended is not None:
@@ -791,6 +798,11 @@ class ManagedStep:
                     )
                 )
                 cp["tool_index"] += 1
+                if hasattr(self.planning, 'execution_blockers') and self.planning.execution_blockers():
+                    await self._interrupt_batch(cp, runtime, 'Plan has a structured execution blocker')
+                    cp['phase'] = 'before_llm'
+                    self._checkpoint(cp)
+                    return self._result(cp, runtime, 'paused', 'Plan requires recovery before further execution', reason_code='PLAN_BLOCKED')
                 finish_value = thaw_json(observation.value)
                 if (
                     call.name == "finish"

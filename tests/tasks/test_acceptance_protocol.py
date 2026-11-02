@@ -132,3 +132,44 @@ def test_native_schema_fallback_is_budgeted_cached_and_visible(tmp_path):
         await assembly.close()
 
     asyncio.run(exercise())
+
+
+def test_required_tool_preflight_blocks_before_solver_or_verifier_execution(tmp_path):
+    async def exercise():
+        request = TaskRequest('Run tests', workspace=tmp_path, task_spec={
+            'session_environment': {'plugin': 'session', 'resources': [dict(id='workspace', kind='directory', uri=str(tmp_path), access='read-only')]},
+            'tools': {'collections': ['filesystem', 'task_control']}})
+        assembly = TaskAssembly(request)
+        judge = Judge([dict(id='tests', description='Actual test output', verifier='semantic', scope=[], check={}, required_tools=['process_execute'])])
+        assembly.configure_acceptance(judge)
+        context = make_task_context(request, assembly=assembly).unwrap()
+        runtime = SimpleNamespace(run_id='r', loop_id='l', trace_id='t', trace_sink=Sink(), cancellation=None)
+        with pytest.raises(AcceptanceBlocked) as error:
+            await assembly.acceptance.prepare(context, runtime)
+        assert error.value.code == 'ACCEPTANCE_CAPABILITY_UNAVAILABLE'
+        assert assembly.acceptance.data['results'][0]['gap']['targets'] == [dict(kind='tool', value='process_execute')]
+        assert assembly.acceptance.data['attempts'] == 0 and len(judge.calls) == 1
+        await assembly.close()
+    asyncio.run(exercise())
+
+
+def test_reassembled_acceptance_uses_reviewed_contract_and_fresh_verification(tmp_path):
+    async def exercise():
+        reviewed = dict(criteria=[dict(id='preserve', description='Preserve initial files', verifier='semantic', scope=[], check={})],
+                        unresolved_requirements=[])
+        request = TaskRequest('Do not change files', workspace=tmp_path,
+                              metadata=dict(recovery_context=dict(acceptance_plan=reviewed, audit=dict(id='review'))))
+        assembly = TaskAssembly(request, plan_mode='off')
+        judge = Judge()
+        assembly.configure_acceptance(judge)
+        context = make_task_context(request, assembly=assembly, plan_mode='off').unwrap()
+        runtime = SimpleNamespace(run_id='r', loop_id='l', trace_id='t', trace_sink=Sink(), cancellation=None)
+        await assembly.acceptance.prepare(context, runtime)
+        assert not judge.calls
+        assert assembly.acceptance.data['state'] != 'passed'
+        assert assembly.acceptance.data['plan']['origin'] == 'reviewed_recovery_contract'
+        assert await assembly.acceptance.verify(context, runtime, 'Preserved initial files')
+        assert len(judge.calls) == 1
+        assert assembly.acceptance.data['results'][-1]['criterion_id'] == 'goal'
+        await assembly.close()
+    asyncio.run(exercise())
