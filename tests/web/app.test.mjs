@@ -152,6 +152,7 @@ test("browser app connects to real service, answers input, creates sessions, con
     assert.equal($("run-failure").hidden, true);
     assert.doesNotMatch($("notice").textContent, /WORKFLOW_ROUTE_FAILED/);
     $("new-session").click();
+    await until(() => !$("create-page").hidden && !$("create-submit").disabled);
     assert.equal($("create-title"), null);
     $("create-objective").value = "Created in browser";
     submit("create-form");
@@ -206,6 +207,7 @@ test("browser app connects to real service, answers input, creates sessions, con
     assert.equal($("event-feed").querySelectorAll(".result").length, 2);
     assert.match(document.querySelector('[data-panel="budget"]').textContent, /600,000/);
     $("new-session").click();
+    await until(() => !$("create-page").hidden && !$("create-submit").disabled);
     assert.equal($("create-workspace").readOnly, false);
     $("cancel-create").click();
     $("disconnect").click();

@@ -19,6 +19,38 @@ class AgentStore:
         self.clock = clock or (lambda: datetime.now(UTC))
         with self.sessions.transaction() as db:
             migrate(db)
+            if not db.execute('SELECT 1 FROM autonomy_migrations WHERE version=6').fetchone():
+                for row in db.execute("SELECT id FROM sessions WHERE json_extract(body,'$.autonomy.agent_id') IS NOT NULL").fetchall():
+                    state = self.sessions._load(db, row['id'])
+                    if state['task']['limits'].get('max_tokens') is None:
+                        continue
+                    state['task']['limits']['max_tokens'] = None
+                    state['task']['revision'] += 1
+                    self.sessions.append(db, state, 'task.budget.changed', dict(max_tokens=None, mode='daily', revision=state['task']['revision']))
+                    self.sessions._save(db, state)
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='semantic_jobs'").fetchone():
+                    for row in db.execute("SELECT body FROM agent_learning_cycles WHERE json_extract(body,'$.state') "
+                                          "IN ('deferred','incomplete')").fetchall():
+                        cycle = json.loads(row['body'])
+                        if (cycle.get('budget_decision') or {}).get('outcome') not in {'wait', 'stop'}:
+                            continue
+                        denial = db.execute('SELECT body FROM agent_budget_blocks WHERE id=?', (cycle.get('evaluation_id'),)).fetchone()
+                        job_row = db.execute('SELECT body FROM semantic_jobs WHERE id=?', (cycle.get('evaluation_id'),)).fetchone()
+                        if not denial or not job_row:
+                            continue
+                        block, job = json.loads(denial['body']), json.loads(job_row['body'])
+                        if (any(block.get('binding', {}).get(key) != cycle.get(key)
+                                for key in ('agent_id', 'goal_id', 'work_package_id', 'evaluation_id'))
+                                or not any(s.get('scope') in {'objective', 'goal', 'work', 'learning', 'calls'} for s in block.get('scopes', []))
+                                or job.get('state') in {'completed', 'running', 'queued'}
+                                or not any(e.get('provider_code') == 'AGENT_BUDGET' for e in job.get('error_details', []))):
+                            continue
+                        # Reassess with the new policy; progress/attempt/control
+                        # guards still run before any model call is admitted.
+                        cycle.update(state='pending', auto_resume=True, budget_policy_seen=0, retry_after='', blocked_reason=None)
+                        self.put(db, 'agent_learning_cycles', cycle)
+                        self.event(db, cycle['agent_id'], 'learning.budget.policy_reassessed', dict(cycle_id=cycle['id'], mode='daily'))
+                db.execute('INSERT INTO autonomy_migrations VALUES(6)')
 
     def now(self):
         return self.clock().isoformat()

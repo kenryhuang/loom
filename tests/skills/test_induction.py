@@ -331,3 +331,18 @@ def test_oversize_does_not_mask_invalid_evidence_or_preserve_it_during_repair(tm
     _, store, _, catalog = ready(tmp_path)
     result = asyncio.run(Induction(store, catalog, InvalidJudge()).run(job(store, store.all_cases(str(tmp_path)))))
     assert result['state'] == 'completed'
+
+
+@pytest.mark.parametrize('agent_bound', [False, True])
+def test_agent_induction_uses_daily_admission_instead_of_job_token_cap(tmp_path, agent_bound):
+    _, store, _, catalog = ready(tmp_path)
+    body = job(store, store.all_cases(str(tmp_path)), max_tokens=1)
+    judge = Judge()
+    if agent_bound:
+        body['agent_binding'] = dict(agent_id='agent-owner')
+        result = asyncio.run(Induction(store, catalog, judge).run(body))
+        assert result['version_id'] and len(judge.calls) == 4
+    else:
+        with pytest.raises(BudgetStop):
+            asyncio.run(Induction(store, catalog, judge).run(body))
+        assert not judge.calls

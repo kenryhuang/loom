@@ -16,7 +16,7 @@ def task_payload(agent, work, binding=None):
         knowledge_base_ids=role["knowledge_base_ids"],
         external_tool_ids=role["external_tool_ids"],
         **({"task_spec": role["task_spec"]} if role["task_spec"] else {}),
-        limits={"max_tokens": work.get("execution_budget", {}).get("tokens", role["budget"]["work_tokens"]), "max_duration_seconds": 3600},
+        limits={"max_tokens": None, "max_duration_seconds": 3600},
     )
     if binding is not None:
         # Normalize so the reuse-compatibility comparison and session creation

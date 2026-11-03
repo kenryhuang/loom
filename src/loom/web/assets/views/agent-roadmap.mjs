@@ -90,7 +90,7 @@ function controls(root,d,objective,state,view) {
   const form=element('form','agent-form');field(form,'reason','有哪些新信息或条件变化');
   form.append(button('根据新信息重新规划',()=>send('replan',{reason:form.elements.reason.value})));manage.append(form);
   const usage=d.objective_budget?.objectives?.find(b=>b.objective_id===objective.id);
-  if(usage) manage.append(element('p','muted',`累计 Token：${number(usage.actual_tokens)} · 预留或未知：${number(usage.reserved_or_unknown)} · 上限：${number(usage.limit)} · 调用：${number(usage.calls)}`));
+  if(usage) manage.append(element('p','muted',`累计 Token：${number(usage.actual_tokens)} · 预留或未知：${number(usage.reserved_or_unknown)} · 无累计上限 · 调用：${number(usage.calls)}`));
   if(d.objective_budget?.unattributed_historical_calls) manage.append(element('p','muted',`另有 ${d.objective_budget.unattributed_historical_calls} 次历史调用无法归属到具体长期目标，其用量不能当作零。`));
   if(state.next_review_at) manage.append(element('p','muted',`下次复查：${time(state.next_review_at)}`));
 }
@@ -112,8 +112,7 @@ export function renderRoadmaps(root,d,view) {
     if(roadmap?.baseline) block.append(element('p','agent-roadmap-baseline',`当前基线 · ${roadmap.baseline}`));
     if(!enabled) {
       block.append(element('p','muted','自动阶段规划未开启。开启后将核实现状，并在既有范围与预算内生成阶段目标、拆分执行。'));
-      const effective=d.objective_budget?.objectives?.find(b=>b.objective_id===objective.id)?.limit;
-      block.append(element('p','muted',`该长期目标当前累计额度：${number(effective ?? objective.stage_planning?.objective_tokens ?? 10000000)} tokens，包含可归属的历史用量。`));
+      block.append(element('p','muted','长期目标无累计 Token 上限，所有任务共用 Agent 的每日总额。'));
       if(objective.id) block.append(button('开启该目标的阶段规划',()=>view.act(()=>view.api.post(d.id,`objectives/${encodeURIComponent(objective.id)}/planning/commands`,
         {command_id:crypto.randomUUID(),expected_revision:d.revision,type:'enable'}))));
     }

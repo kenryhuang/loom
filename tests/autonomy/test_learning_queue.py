@@ -46,8 +46,8 @@ def test_running_head_excludes_later_jobs_even_when_unchanged(tmp_path):
     assert all(c["state"] == "completed" for c in store.snapshot(cycle["agent_id"])["learning"])
 
 
-def test_budget_wait_is_bounded_and_retains_memory_before_next_job(tmp_path):
-    store, clock, ledger, cycle, job = setup(tmp_path, policy={"auto_expand": False, "max_attempts": 2})
+def test_daily_budget_wait_retains_memory_and_fifo_until_next_window(tmp_path):
+    store, clock, ledger, cycle, job = setup(tmp_path, policy={"auto_expand": False, "max_attempts": 2}, budget={"daily_tokens":100})
     other = second(store, cycle)
     job["checkpoint"]["memory"]["records"] = {"accepted": {"kind": "facts", "publication_state": "published"}}
     original = deepcopy(job["checkpoint"])
@@ -59,11 +59,11 @@ def test_budget_wait_is_bounded_and_retains_memory_before_next_job(tmp_path):
     clock.advance(61)
     coordinator.advance(cycle["agent_id"])
     result = store.snapshot(cycle["agent_id"])["learning"][0]
-    assert result["state"] == "incomplete" and result["budget_waits"] == 2
+    assert result["state"] == "deferred" and result["budget_waits"] == 1
     assert result["memory_result"]["accepted"] == 1 and result["coverage"] == "partial"
-    assert not result["auto_resume"] and not result["retry_after"]
+    assert result["auto_resume"] and result["retry_after"] > store.now()
     coordinator.advance(cycle["agent_id"])
-    assert store.snapshot(cycle["agent_id"])["learning"][1]["state"] == "completed"
+    assert store.snapshot(cycle["agent_id"])["learning"][1]["state"] == "pending"
     assert job["checkpoint"] == original and not starts
 
 

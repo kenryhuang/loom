@@ -17,7 +17,7 @@ class SessionProjection:
         budget["limit"] = self.snapshot["task"].get("limits", {}).get("max_tokens", LIMITS["max_tokens"])
         if used is not None:
             budget["used"] = used
-        budget["remaining"] = max(0, budget["limit"] - budget["used"])
+        budget["remaining"] = max(0, budget["limit"] - budget["used"]) if budget['limit'] is not None else None
 
     def apply(self, event):
         if event["session_id"] != self.snapshot["session_id"] or event["seq"] <= self.cursor:

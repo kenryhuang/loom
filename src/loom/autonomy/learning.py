@@ -269,10 +269,10 @@ class LearningCoordinator:
             elif decision["outcome"] == "wait":
                 cycle["budget_waits"] = cycle.get("budget_waits", 0) + 1
                 cycle.update(
-                    state="incomplete" if cycle["budget_waits"] >= policy["max_attempts"] else "deferred",
+                    state="deferred",
                     auto_resume=True,
                     blocked_reason=decision["reason"],
-                    retry_after=(self.store.clock() + timedelta(seconds=scheduling_policy(agent["role"])["tick_seconds"])).isoformat(),
+                    retry_after=BudgetLedger(self.store.sessions.path, clock=self.store.clock).next_window(agent["id"]),
                 )
             else:
                 cycle.update(
@@ -324,12 +324,12 @@ class LearningCoordinator:
             else:
                 cycle["budget_waits"] = cycle.get("budget_waits", 0) + 1
                 cycle.update(
-                    state="incomplete" if cycle["budget_waits"] >= policy["max_attempts"] else "deferred",
+                    state="deferred",
                     auto_resume=True,
                     coverage="partial" if published else "none",
                     blocked_reason=budget_reason or "Learning budget exhausted; resume the same evaluation in the next budget window",
                     budget_window_retry=BudgetLedger(self.store.sessions.path, clock=self.store.clock).next_window(agent["id"]),
-                    retry_after=(self.store.clock() + timedelta(seconds=scheduling_policy(agent["role"])["tick_seconds"])).isoformat(),
+                    retry_after=BudgetLedger(self.store.sessions.path, clock=self.store.clock).next_window(agent["id"]),
                 )
         elif job["state"] in {"completed", "incomplete"}:
             public = self.background.semantic._public(job)

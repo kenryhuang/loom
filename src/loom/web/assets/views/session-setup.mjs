@@ -83,6 +83,9 @@ export class SessionSetupView {
     toolChoices(this.get("create-external-tools"), [...tools, ...unavailable], selected);
     this.get("restart-plan-mode").value = task.plan_mode;
     for (const [key, value] of Object.entries(task.limits)) this.get(`restart-${key}`).value = value;
+    const tokenInput = this.get('restart-max_tokens');
+    tokenInput.required = task.limits.max_tokens !== null;
+    tokenInput.placeholder = task.limits.max_tokens === null ? 'Shared daily allowance' : '';
     const cap = task.task_spec?.context?.max_window_chars;
     const effective = Math.min(task.limits.max_window_chars, cap ?? task.limits.max_window_chars);
     this.get("restart-context-note").textContent = `Currently effective: ${effective.toLocaleString()} characters${cap < task.limits.max_window_chars ? " (limited by the context plugin)" : ""}. Save & restart applies the value above to both task and built-in context plugin limits.`;
@@ -101,6 +104,10 @@ export class SessionSetupView {
     payload.plan_mode = this.get("restart-plan-mode").value;
     payload.limits = {};
     for (const input of this.get("restart-settings").querySelectorAll("input")) {
+      if(input.id === 'restart-max_tokens' && input.value === '' && !input.required) {
+        payload.limits.max_tokens = null;
+        continue;
+      }
       const value = Number(input.value);
       if (!Number.isSafeInteger(value) || value <= 0) throw new Error("Execution limits must be positive integers.");
       payload.limits[input.id.replace("restart-", "")] = value;

@@ -95,8 +95,8 @@ def paused_work(agent_service, reason="Active time budget exceeded", control=Non
     return service, facade, aid, work, sid
 
 
-def test_budget_recovery_grows_only_work_allocation_and_resumes_once(agent_service):
-    service, facade, aid, work, sid = paused_work(agent_service)
+def test_historical_task_token_stop_resumes_under_shared_daily_budget_once(agent_service):
+    service, facade, aid, work, sid = paused_work(agent_service, stop_code="TOKEN_BUDGET_EXCEEDED")
     with service.store.transaction() as db:
         agent = facade.store.get(db, "agents", aid)
         agent["role"]["budget"].update(work_tokens=100, goal_tokens=10000, daily_tokens=10000)
@@ -106,13 +106,10 @@ def test_budget_recovery_grows_only_work_allocation_and_resumes_once(agent_servi
     binding = dict(agent_id=aid, goal_id=work["goal_id"], work_package_id=work["id"], run_id="r1")
     ledger.reserve("old", binding, 90, "execution")
     ledger.settle("old", 90)
-    with pytest.raises(ServiceError):
-        ledger.reserve("denied", binding, 50, "execution")
-    service.store.update(sid, lambda s, e, db: s["run"].update(reason="可翻译的预算说明", failure=dict(code="AGENT_BUDGET", message="可翻译的预算说明")))
     facade.supervisor.scheduler.advance(aid, manual=True)
     saved = facade.snapshot(aid)
     assert saved["scheduler"]["state"] == "recovered", saved["scheduler"]
-    assert saved["work_packages"][0]["execution_budget"]["tokens"] == 200
+    assert saved["work_packages"][0]["execution_budget"]["tokens"] is None
     assert saved["role"]["budget"]["work_tokens"] == 100
     assert service.snapshot(sid)["task"]["state"] == "queued"
     assert service.snapshot(sid)["run"]["id"] == "r1"
@@ -141,11 +138,11 @@ def test_lost_resume_ack_reconciles_without_another_recovery_attempt(agent_servi
     assert service.snapshot(sid)["task"]["state"] == "queued"
 
 
-def test_parent_budget_cannot_be_raised_by_work_recovery(agent_service):
+def test_daily_budget_waits_without_allocating_or_consuming_recovery(agent_service):
     service, facade, aid, work, sid = paused_work(agent_service)
     with service.store.transaction() as db:
         agent = facade.store.get(db, "agents", aid)
-        agent["role"]["budget"].update(work_tokens=100, goal_tokens=100, daily_tokens=1000)
+        agent["role"]["budget"].update(work_tokens=100, goal_tokens=100, daily_tokens=100)
         facade.store.put(db, "agents", agent)
     ledger = BudgetLedger(service.store.path)
     binding = dict(agent_id=aid, goal_id=work["goal_id"], work_package_id=work["id"], run_id="r1")
@@ -155,7 +152,7 @@ def test_parent_budget_cannot_be_raised_by_work_recovery(agent_service):
     service.store.update(sid, lambda s, e, db: s["run"].update(reason=None, failure=dict(code="AGENT_BUDGET", message="Typed admission denial")))
     facade.supervisor.scheduler.advance(aid, manual=True)
     saved = facade.snapshot(aid)
-    assert saved["scheduler"]["manual_required"] and "目标 Token 总预算不足" in saved["scheduler"]["reason"]
+    assert not saved["scheduler"]["manual_required"] and "每日 Token 总预算不足" in saved["scheduler"]["reason"]
     assert saved["role"]["budget"]["goal_tokens"] == 100
     assert not saved["work_packages"][0].get("recovery", {}).get("attempts")
     assert saved['scheduler']['blockers'][0]['code'] == 'EXECUTION_BUDGET'

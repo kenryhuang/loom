@@ -7,6 +7,7 @@ import time
 from copy import deepcopy
 from dataclasses import replace
 
+from loom.core import thaw_json
 from loom.llm.api import LlmMessage
 from loom.service.contracts import ServiceError, object_value, text
 from loom.tasks.acceptance import DEFAULTS as ACCEPTANCE_DEFAULTS
@@ -218,7 +219,8 @@ def validate(proposal, catalog, *, scope="session", extra=None):
     return proposal
 
 
-def recommend_setup(service, objective, *, model=None, scope="session", extra=None, provider_factory=None, timeout=60, templates=None, out=None):
+def recommend_setup(service, objective, *, model=None, scope="session", extra=None, provider_factory=None, timeout=60, templates=None, out=None,
+                    budget_binding=None):
     """Recommend a task setup. scope: session (full), dispatch (per-task binding),
     repair (minimal collection additions for a blocked task). Returns the validated
     proposal; out, when given, receives {catalog, model, usage, elapsed_seconds}."""
@@ -254,6 +256,10 @@ def recommend_setup(service, objective, *, model=None, scope="session", extra=No
         if not created.ok:
             raise ServiceError(created.error.message, 422)
         provider = created.value
+    if budget_binding:
+        from loom.autonomy.budget import BudgetLedger, BudgetProvider
+
+        provider = BudgetProvider(provider, BudgetLedger(service.store.path), budget_binding, category='setup', output_tokens=4096)
     types = [{k: row[k] for k in ("id", "label", "description", "requires_workspace", "task_spec") if k in row} for row in catalog["templates"]]
     system = _SYSTEM_PROMPT + _SCOPE_PROMPTS[scope]
     request = {"task_description": objective, "task_types": types, "tool_collections": catalog["tool_collections"], "plugins": catalog["plugins"],
@@ -277,6 +283,10 @@ def recommend_setup(service, objective, *, model=None, scope="session", extra=No
     except Exception as exc:
         raise ServiceError("Setup model request failed; retry or configure manually", 502) from exc
     if not response.ok:
+        if budget_binding and response.error.code in {'AGENT_BUDGET', 'AGENT_CONTROL', 'AGENT_ADMISSION'}:
+            failure = ServiceError(response.error.message, 409, code=response.error.code)
+            failure.budget_block = thaw_json(response.error.cause)
+            raise failure
         raise ServiceError("Setup model request failed; check the model configuration or configure manually", 502)
     content = response.value.content or ""
     if response.value.tool_calls or len(content) > 20000:

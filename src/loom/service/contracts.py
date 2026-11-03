@@ -78,7 +78,10 @@ def validate_create(payload: Any, *, plugin_registry=None, external_bindings=())
     if not isinstance(mode, str) or mode not in {"auto", "force", "off"}:
         raise ServiceError("Invalid plan_mode")
     limits = {**LIMITS, **object_value(payload.get("limits", {}), "limits")}
-    if set(limits) != set(LIMITS) or any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in limits.values()):
+    if set(limits) != set(LIMITS) or any(
+        not (key == 'max_tokens' and value is None)
+        and (isinstance(value, bool) or not isinstance(value, int) or value <= 0) for key, value in limits.items()
+    ):
         raise ServiceError("Invalid execution limits")
     model = payload.get("model")
     if model is not None:

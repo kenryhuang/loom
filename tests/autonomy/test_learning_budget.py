@@ -50,31 +50,48 @@ def setup(tmp_path, *, policy=None, budget=None):
 
 
 def deny(store, ledger, job, tokens=30, identifier="denial"):
-    with pytest.raises(ServiceError) as error:
-        ledger.reserve(identifier, job["autonomy_budget"], tokens, "learning")
-    job.update(state="failed", error=str(error.value), error_details=[{"provider_code": "AGENT_BUDGET", "reason": str(error.value)}])
+    # Reproduce a persisted learning-subquota denial from the retired policy.
+    from loom.service.contracts import canonical
+
+    aid = job['autonomy_budget']['agent_id']
+    with store.sessions.transaction() as db:
+        window = store.now()[:10]
+        actual, reserved = db.execute(
+            "SELECT COALESCE(SUM(actual),0),COALESCE(SUM(CASE WHEN actual IS NULL THEN reserved ELSE 0 END),0) "
+            "FROM agent_budget_calls WHERE agent_id=?", (aid,),
+        ).fetchone()
+        used = actual + reserved
+        message = (f'Agent learning token budget exhausted: limit=100, used={used} (actual={actual}, reserved_or_unknown={reserved}), '
+                   f'requested={tokens}, projected={used + tokens}, remaining={max(0,100-used)}, exceeded_by={used + tokens - 100} tokens; '
+                   f'window={window}, timezone=UTC, category=learning; increase learning_tokens')
+        block = dict(id=identifier, schema_version=1, binding=job['autonomy_budget'], category='learning', window=window,
+                     requested=tokens, reason=message, scopes=[dict(scope='learning', used=used, limit=100, requested=tokens)])
+        db.execute('INSERT INTO agent_budget_blocks VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body',
+                   (job['id'], aid, canonical(block)))
+    job.update(state='failed', error=message, error_details=[dict(provider_code='AGENT_BUDGET', reason=message)])
+
     return current_block(store, job)
 
 
-def test_expansion_is_daily_allocation_and_replays_without_changing_contract(tmp_path):
+def test_historical_learning_stop_resumes_without_suballocation_and_replays_once(tmp_path):
     store, clock, ledger, cycle, job = setup(tmp_path)
     block = deny(store, ledger, job)
     first = admit_resume(store, cycle["agent_id"], cycle, job, block)
-    assert first["outcome"] == "resume" and first["resume"]["after"] == 200
+    assert first["outcome"] == "resume" and first["resume"]["after"] == 1000
     restarted = AgentStore(store.sessions, clock=clock)
     assert admit_resume(restarted, cycle["agent_id"], cycle, job, block) == first
     snapshot = store.snapshot(cycle["agent_id"])
     assert snapshot["role"]["budget"]["learning_tokens"] == 100
-    assert len(snapshot["learning_allocations"][0]["grants"]) == 1
+    assert not snapshot["learning_allocations"]
     ledger.reserve("resumed", job["autonomy_budget"], 30, "learning")
     ledger.settle("resumed", 30)
     assert ledger.summary(cycle["agent_id"])[0]["tokens"] == 110
     clock.advance(86400)
-    assert ledger.learning_summary(cycle["agent_id"])["effective_tokens"] == 100
+    assert ledger.learning_summary(cycle['agent_id'])['effective_tokens'] is None
 
 
-@pytest.mark.parametrize("scope,outcome", [("daily_tokens", "wait"), ("goal_tokens", "stop"), ("max_calls", "wait")])
-def test_hard_parent_limits_are_not_expanded(tmp_path, scope, outcome):
+@pytest.mark.parametrize("scope,outcome", [("daily_tokens", "wait"), ("goal_tokens", "resume"), ("max_calls", "resume")])
+def test_only_daily_parent_limit_gates_learning(tmp_path, scope, outcome):
     store, _, ledger, cycle, job = setup(tmp_path)
     with store.sessions.transaction() as db:
         agent = store.get(db, "agents", cycle["agent_id"])
@@ -85,7 +102,7 @@ def test_hard_parent_limits_are_not_expanded(tmp_path, scope, outcome):
     assert not store.snapshot(cycle["agent_id"])["learning_allocations"]
 
 
-def test_objective_limit_stops_before_granting_learning_expansion(tmp_path):
+def test_historical_objective_limit_does_not_gate_learning(tmp_path):
     store, _, ledger, cycle, job = setup(tmp_path)
     with store.sessions.transaction() as db:
         agent = store.get(db, "agents", cycle["agent_id"])
@@ -93,23 +110,22 @@ def test_objective_limit_stops_before_granting_learning_expansion(tmp_path):
         store.put(db, "agents", agent)
         store.put(db, "agent_goals", dict(id="goal", agent_id=agent["id"], long_term_objective_id="quality", state="active"))
     decision = admit_resume(store, cycle["agent_id"], cycle, job, deny(store, ledger, job))
-    assert decision["outcome"] == "stop"
-    assert "Objective budget insufficient" in decision["reason"]
-    assert "used=80" in decision["reason"]
+    assert decision["outcome"] == "resume"
     assert not store.snapshot(cycle["agent_id"])["learning_allocations"]
 
 
 @pytest.mark.parametrize(
-    "policy,outcome", [({"auto_expand": False}, "wait"), ({"max_expansions": 0}, "wait"), ({"max_learning_tokens": 100}, "wait"), ({"max_resumes": 0}, "stop")]
+    "policy,outcome", [({"auto_expand": False}, "resume"), ({"max_expansions": 0}, "resume"),
+                        ({"max_learning_tokens": 100}, "resume"), ({"max_resumes": 0}, "stop")]
 )
-def test_configured_expansion_and_resume_limits_are_enforced(tmp_path, policy, outcome):
+def test_legacy_expansion_fields_are_ignored_but_resume_guard_remains(tmp_path, policy, outcome):
     store, _, ledger, cycle, job = setup(tmp_path, policy=policy)
     decision = admit_resume(store, cycle["agent_id"], cycle, job, deny(store, ledger, job))
     assert decision["outcome"] == outcome
     assert not store.snapshot(cycle["agent_id"])["learning_allocations"]
 
 
-def test_no_progress_stops_new_denial_and_progress_allows_second_bounded_grant(tmp_path):
+def test_no_progress_stops_retries_and_completed_progress_permits_resume(tmp_path):
     store, _, ledger, cycle, job = setup(tmp_path)
     admit_resume(store, cycle["agent_id"], cycle, job, deny(store, ledger, job))
     block = deny(store, ledger, job, 130, "second-denial")
@@ -117,11 +133,11 @@ def test_no_progress_stops_new_denial_and_progress_allows_second_bounded_grant(t
     job["checkpoint"]["memory"]["cursor"] = 2
     assert admit_resume(store, cycle["agent_id"], cycle, job, block)["reason"].startswith("LEARNING_NO_PROGRESS")
     job["checkpoint"]["memory"]["units"] = {"finished-1": {"complete": True}}
-    assert admit_resume(store, cycle["agent_id"], cycle, job, block)["resume"]["after"] == 400
+    assert admit_resume(store, cycle["agent_id"], cycle, job, block)["resume"]["after"] == 1000
     job["checkpoint"]["memory"]["units"]["finished-2"] = {"complete": True}
     decision = admit_resume(store, cycle["agent_id"], cycle, job, deny(store, ledger, job, 330, "third-denial"))
-    assert decision["outcome"] == "wait"
-    assert len(store.snapshot(cycle["agent_id"])["learning_allocations"][0]["grants"]) == 2
+    assert decision["outcome"] == "resume"
+    assert not store.snapshot(cycle["agent_id"])["learning_allocations"]
 
 
 def test_legacy_typed_denial_is_migrated_but_free_text_is_not(tmp_path):
@@ -158,6 +174,49 @@ def test_coordinator_resumes_existing_evaluation_without_retrying_settled_qualit
     assert len(starts) == 1
     assert starts[0][2] == {"resume_id": "evaluation"}
     assert store.snapshot(cycle["agent_id"])["learning"][0]["state"] == "running"
+
+
+def test_daily_wait_does_not_exhaust_retries_and_resumes_automatically_next_day(tmp_path):
+    store, clock, ledger, cycle, job = setup(tmp_path, budget=dict(daily_tokens=100))
+    deny(store, ledger, job)
+    starts = []
+    def start(sid, analysis_id, options, **kwargs):
+        starts.append(kwargs)
+        job.update(state='queued', host_resume_requests=[kwargs['resume_request_id']])
+    background = SimpleNamespace(
+        trajectory=SimpleNamespace(get=lambda *args: dict(state='completed')),
+        semantic=SimpleNamespace(_load=lambda *args: job, _public=lambda job: dict(retryable_work=True), start=start),
+    )
+    coordinator = LearningCoordinator(store, background)
+    for _ in range(10):
+        coordinator.advance(cycle['agent_id'])
+    waiting = store.snapshot(cycle['agent_id'])['learning'][0]
+    assert waiting['state'] == 'deferred' and not starts
+    assert waiting['retry_after'] == ledger.next_window(cycle['agent_id'])
+    clock.advance(86400)
+    coordinator.advance(cycle['agent_id'])
+    assert len(starts) == 1
+    assert store.snapshot(cycle['agent_id'])['learning'][0]['state'] == 'running'
+
+
+def test_daily_policy_upgrade_reassesses_old_quota_stop_without_rewriting_checkpoint(tmp_path):
+    import json
+
+    store, clock, ledger, cycle, job = setup(tmp_path)
+    deny(store, ledger, job)
+    cycle.update(state='incomplete', auto_resume=False, budget_decision=dict(outcome='stop'))
+    with store.sessions.transaction() as db:
+        store.put(db, 'agent_learning_cycles', cycle)
+        db.execute('CREATE TABLE semantic_jobs(id TEXT PRIMARY KEY,body TEXT)')
+        db.execute('INSERT INTO semantic_jobs VALUES(?,?)', (job['id'], json.dumps(job)))
+        db.execute('DELETE FROM autonomy_migrations WHERE version=6')
+    before = deepcopy(job['checkpoint'])
+    AgentStore(store.sessions, clock=clock)
+    saved = store.snapshot(cycle['agent_id'])['learning'][0]
+    assert saved['state'] == 'pending' and saved['auto_resume']
+    assert saved['attempts'] == cycle['attempts']
+    with store.sessions.read() as db:
+        assert json.loads(db.execute('SELECT body FROM semantic_jobs').fetchone()[0])['checkpoint'] == before
 
 
 def test_resume_intent_survives_lost_acknowledgement_after_evaluation_finishes(tmp_path):
@@ -239,15 +298,15 @@ async def test_paused_provider_has_control_code_and_never_calls_model(tmp_path):
     assert not result.ok and result.error.code == "AGENT_CONTROL"
 
 
-def test_unknown_usage_reservations_remain_charged_after_expansion(tmp_path):
+def test_unknown_usage_remains_charged_to_shared_daily_allowance(tmp_path):
     store, _, ledger, cycle, job = setup(tmp_path)
     ledger.reserve("unknown", job["autonomy_budget"], 15, "learning")
     ledger.settle("unknown", None)
     block = deny(store, ledger, job)
     admit_resume(store, cycle["agent_id"], cycle, job, block)
-    assert store.snapshot(cycle["agent_id"])["learning_allocations"][0]["grants"][0]["used"] == 95
-    ledger.reserve("fits", job["autonomy_budget"], 105, "learning")
-    with pytest.raises(ServiceError, match="limit=200, used=200"):
+    assert not store.snapshot(cycle["agent_id"])["learning_allocations"]
+    ledger.reserve("fits", job["autonomy_budget"], 905, "learning")
+    with pytest.raises(ServiceError, match="limit=1000, used=1000"):
         ledger.reserve("over", job["autonomy_budget"], 1, "learning")
 
 

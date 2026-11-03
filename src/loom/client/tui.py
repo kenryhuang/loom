@@ -306,7 +306,8 @@ class SessionTuiApp(LoomTuiApp):
         )
         budget = state.get("token_budget", {})
         limit = task.get("limits", {}).get("max_tokens", LIMITS["max_tokens"])
-        self.query_one("#budget", Static).update(Text(f"Tokens: {budget.get('used', 0):,} / {limit:,} — /budget 20M to change"))
+        label = f'{limit:,}' if limit is not None else 'Agent shared daily budget'
+        self.query_one("#budget", Static).update(Text(f"Tokens: {budget.get('used', 0):,} / {label} — /budget 20M to change"))
 
     def _notice(self, content):
         self.query_one("#notice", Static).update(Text(content))

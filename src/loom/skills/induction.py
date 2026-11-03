@@ -51,7 +51,8 @@ class Induction:
         if len(prompt) > settings['max_prompt_chars']:
             raise BudgetStop('Prompt exceeds the frozen character budget; create a smaller cohort')
         reservation = len((SYSTEM + prompt).encode('utf-8')) + settings['output_tokens']  # Conservative multilingual upper bound.
-        if (usage['calls'] >= settings['max_calls'] or usage['tokens'] + reservation > settings['max_tokens']
+        if (usage['calls'] >= settings['max_calls']
+                or not job.get('agent_binding') and usage['tokens'] + reservation > settings['max_tokens']
                 or usage['seconds'] >= settings['max_seconds']):
             raise BudgetStop('Induction budget exhausted; completed stages are retained')
         request = dict(stage=stage, input_digest=identity, reserved_tokens=reservation, state='reserved', at=now_iso())

@@ -35,7 +35,9 @@ def bind_for_dispatch(service, agent, work):
     at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     try:
         recommender = getattr(service, "setup_recommender", None) or (
-            lambda text, *, model, scope, extra=None: recommend_setup(service, text, model=model, scope=scope, extra=extra)
+            lambda text, *, model, scope, extra=None: recommend_setup(service, text, model=model, scope=scope, extra=extra,
+                provider_factory=getattr(service, 'setup_provider_factory', None),
+                budget_binding=dict(agent_id=agent['id'], goal_id=work['goal_id'], work_package_id=work['id']))
         )
         proposal = recommender(objective, model=role["model"], scope="dispatch")
         return {
@@ -51,7 +53,7 @@ def bind_for_dispatch(service, agent, work):
         }
 
 
-def repair_collections(service, *, objective, model, unresolved, current_collections):
+def repair_collections(service, *, objective, model, unresolved, current_collections, budget_binding=None):
     """Recommend the minimum collection additions for an acceptance-blocked task.
 
     Re-raises recommender failures (the caller counts them as decision-level
@@ -62,6 +64,7 @@ def repair_collections(service, *, objective, model, unresolved, current_collect
         lambda text, *, model, scope, extra=None: recommend_setup(
             service, text, model=model, scope=scope, extra=extra,
             provider_factory=getattr(service, "setup_provider_factory", None),
+            budget_binding=budget_binding,
         )
     )
     proposal = recommender(

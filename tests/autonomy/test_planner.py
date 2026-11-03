@@ -95,12 +95,17 @@ def test_refusal_and_transport_errors_do_not_trigger_format_retry(agent_service,
     assert len(provider.payloads) == 2
 
 
-def test_correction_cannot_bypass_call_budget(agent_service, monkeypatch):
+def test_correction_cannot_bypass_shared_daily_budget(agent_service, monkeypatch):
     facade, agent, goal, provider = configure(agent_service, monkeypatch, [reply("invalid"), reply(json.dumps(PROPOSAL))])
-    with facade.store.sessions.transaction() as db:
-        stored = facade.store.get(db, "agents", agent["id"])
-        stored["role"]["budget"]["max_calls"] = 1
-        facade.store.put(db, "agents", stored)
-    with pytest.raises(Exception, match="call budget exhausted"):
+    chat = provider.chat
+    async def exhaust_daily(*args, **kwargs):
+        result = await chat(*args, **kwargs)
+        with facade.store.sessions.transaction() as db:
+            stored = facade.store.get(db, 'agents', agent['id'])
+            stored['role']['budget']['daily_tokens'] = 30
+            facade.store.put(db, 'agents', stored)
+        return result
+    provider.chat = exhaust_daily
+    with pytest.raises(Exception, match="daily token budget exhausted"):
         facade.supervisor.planner.propose(agent, goal, {})
     assert len(provider.payloads) == 1

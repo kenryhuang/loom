@@ -39,6 +39,14 @@ from loom.host_environment import format_execution_environment, inspect_executio
 from loom.llm.request_options import materialize_request_options, normalize_request_options
 
 
+class LlmProviderError(Exception):
+    """Carry an already classified provider/admission failure through a stream."""
+
+    def __init__(self, error: LoomError):
+        super().__init__(error.message)
+        self.error = error
+
+
 @dataclass(frozen=True, slots=True)
 class LlmMessage:
     role: str
@@ -932,6 +940,8 @@ async def _consume_streaming_chat(
             emitted = await _emit_stream_delta_event(emit_event, event, metadata, now)
             if not emitted.ok:
                 return emitted
+    except LlmProviderError as exc:
+        return err(exc.error)
     except Exception as exc:
         timed_out = isinstance(exc, TimeoutError) or (isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, TimeoutError))
         message = str(exc) or ("LLM request timed out" if timed_out else type(exc).__name__)

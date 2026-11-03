@@ -141,7 +141,7 @@ class ManagedStep:
             "Evidence excerpts below are not a completed conclusion. Remaining work needs targeted verification, not repeated searches.\n"
         )
         report += "\n".join(f"- {item['source']}: {item['text']}" for item in evidence[-12:])
-        remaining = self.limits["max_tokens"] - cp["usage"].total_tokens
+        remaining = self.limits['max_tokens'] - cp['usage'].total_tokens if self.limits['max_tokens'] is not None else float('inf')
         seconds = self.limits["max_duration_seconds"] - cp.get("active_seconds", 0)
         await self._emit(runtime, "run.wrapping_up", reason=reason, partial=True,
                          token_budget=token_budget_status(cp["usage"].total_tokens, self.limits["max_tokens"], cp.get("last_call_tokens", 0)))
@@ -391,7 +391,7 @@ class ManagedStep:
             return self._result(cp, runtime, control["kind"], control.get("reason", ""), reason_code=control.get("code"))
         if cp.get("pending_input"):
             return self._result(cp, runtime, "waiting_input", request_id=cp["pending_input"]["request_id"])
-        if cp["usage"].total_tokens > self.limits["max_tokens"]:
+        if self.limits['max_tokens'] is not None and cp["usage"].total_tokens > self.limits["max_tokens"]:
             return await self._wrap_up(cp, runtime, "Token budget exceeded", allow_model=False, reason_code="TOKEN_BUDGET_EXCEEDED")
         return None
 
@@ -518,7 +518,7 @@ class ManagedStep:
                     cp["messages"].extend(m for m in build_messages(cp["context"], include_history=False)
                                           if m.name in {"deep_eval_memory", "task_skills", "agent_context"})
                 reserved = getattr(self.planning, "reserved_tokens", 0)
-                if reserved and cp["usage"].total_tokens + reserved >= self.limits["max_tokens"]:
+                if reserved and self.limits['max_tokens'] is not None and cp["usage"].total_tokens + reserved >= self.limits["max_tokens"]:
                     return self._result(cp, runtime, "paused", "Unreported branch usage reserves the remaining token budget")
                 reason = stop_reason(cp, self.limits)
                 if reason:

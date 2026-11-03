@@ -189,7 +189,6 @@ def test_plan_token_block_reassembles_with_the_granted_task_budget(agent_service
     from tests.autonomy.test_queue_scheduling import paused_work
 
     service, facade, aid, work, sid = paused_work(agent_service)
-    before = service.store.snapshot(sid)['task']['limits']['max_tokens']
     def update(state, emit, db):
         state.pop('acceptance', None)
         state['run']['stop_code'] = 'PLAN_BLOCKED'
@@ -198,7 +197,7 @@ def test_plan_token_block_reassembles_with_the_granted_task_budget(agent_service
     facade.supervisor.scheduler.advance(aid, manual=True)
     assert facade.snapshot(aid)['scheduler']['state'] == 'recovered'
     state = service.store.snapshot(sid)
-    assert state['task']['limits']['max_tokens'] > before
+    assert state['task']['limits']['max_tokens'] is None
     assert 'plan' not in state
 
 

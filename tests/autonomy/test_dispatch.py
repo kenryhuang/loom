@@ -79,7 +79,7 @@ def test_budget_only_revision_preserves_pending_work_contract(agent_service, bud
     if budget_only:
         assert current['state'] == 'dispatched'
         assert current['role_revision'] == updated['role_revision']
-        assert service.store.snapshot(current['session_id'])['task']['limits']['max_tokens'] == 1000000
+        assert service.store.snapshot(current['session_id'])['task']['limits']['max_tokens'] is None
     else:
         assert current['state'] == 'blocked'
         assert 'role_changed' in current['blocked_reason']

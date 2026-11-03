@@ -63,6 +63,8 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
         guidance_version=agent["guidance_version"],
         workspace=pinned["working_directory"],
         role_text=role["role_text"],
+        token_policy=dict(mode='daily', daily_tokens=role['budget']['daily_tokens'], timezone=role['timezone'],
+                          cumulative_limits=False, learning_subquota=False),
         long_term_objectives=role["long_term_objectives"],
         source_routes=pinned["source_routes"],
         source_status=source_status,

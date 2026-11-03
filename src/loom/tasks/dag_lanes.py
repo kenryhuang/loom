@@ -148,7 +148,8 @@ async def run_lanes(policy, context, runtime, candidates):
                     await emit(lane, "context.compacted", **compacted)
                 reserve = estimate_message_tokens(canonical([asdict(m) for m in messages]), canonical(tools)) + policy.parallel["max_output_tokens"]
                 if (cp["llm_calls"] + 3 > limits["max_llm_calls"] or
-                        cp["usage"].total_tokens + cp["dag_reserved_tokens"] + reserve + 4096 > limits["max_tokens"]):
+                        limits['max_tokens'] is not None
+                        and cp["usage"].total_tokens + cp["dag_reserved_tokens"] + reserve + 4096 > limits["max_tokens"]):
                     raise LaneInterrupted("continue", "Shared budget reserved for main integration and acceptance")
                 call_id = lane["id"] + ":model:" + str(lane["calls"] + 1)
                 cp["llm_calls"] += 1

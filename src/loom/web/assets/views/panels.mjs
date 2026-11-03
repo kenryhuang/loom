@@ -163,7 +163,9 @@ export function builtinPanels() {
         element: root,
         update(state) {
           const budget = state.token_budget || {};
-          text.textContent = `${(budget.used || 0).toLocaleString()} used / ${(budget.limit || state.task.limits.max_tokens).toLocaleString()} total`;
+          const limit = budget.limit ?? state.task.limits.max_tokens;
+          text.textContent = `${(budget.used || 0).toLocaleString()} used / ${limit == null ? "Agent shared daily budget" : limit.toLocaleString() + " total"}`;
+          form.hidden = Boolean(state.autonomy);
         },
       };
     })

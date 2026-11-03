@@ -25,11 +25,11 @@ export class SessionProjection {
     this.origins = structuredClone(snapshot.stream_origins || {});
   }
   budget(used = this.snapshot.token_budget?.used || 0) {
-    const limit = this.snapshot.task.limits?.max_tokens || 10000000;
+    const limit = this.snapshot.task.limits?.max_tokens === null ? null : this.snapshot.task.limits?.max_tokens || 10000000;
     this.snapshot.token_budget = {
       used,
       limit,
-      remaining: Math.max(0, limit - used),
+      remaining: limit === null ? null : Math.max(0, limit - used),
     };
   }
   apply(event) {

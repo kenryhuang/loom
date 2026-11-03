@@ -183,10 +183,15 @@ def test_semantic_correction_is_bounded_without_partial_commits(agent_service, m
     invalid["future"][0]["depends_on"] = ["unknown"]
     provider.replies = iter([reply(json.dumps(invalid))] * 3)
     if budget_limited:
-        with facade.store.sessions.transaction() as db:
-            agent = facade.store.get(db, "agents", aid)
-            agent["role"]["budget"]["max_calls"] = 1
-            facade.store.put(db, "agents", agent)
+        chat = provider.chat
+        async def exhaust_daily(*args, **kwargs):
+            result = await chat(*args, **kwargs)
+            with facade.store.sessions.transaction() as db:
+                agent = facade.store.get(db, 'agents', aid)
+                agent['role']['budget']['daily_tokens'] = 30
+                facade.store.put(db, 'agents', agent)
+            return result
+        provider.chat = exhaust_daily
     facade.supervisor.stages.advance(aid)
     facade.supervisor.stages.advance(aid)
     snap = facade.snapshot(aid)
@@ -223,11 +228,16 @@ def test_review_contract_citation_correction_is_metered_bounded_and_preserves_st
     invalid["checks"][0]["source_refs"] = [component_ref]
     provider.payloads.clear()
     provider.replies = iter([reply(json.dumps(invalid)), reply(json.dumps(valid if outcome == "corrected" else invalid))])
-    if outcome == "budget":
-        with facade.store.sessions.transaction() as db:
-            agent = facade.store.get(db, "agents", aid)
-            agent["role"]["budget"]["max_calls"] = 2  # Stage plan plus initial review; no room for correction.
-            facade.store.put(db, "agents", agent)
+    if outcome == 'budget':
+        chat = provider.chat
+        async def exhaust_daily(*args, **kwargs):
+            result = await chat(*args, **kwargs)
+            with facade.store.sessions.transaction() as db:
+                agent = facade.store.get(db, 'agents', aid)
+                agent['role']['budget']['daily_tokens'] = 60
+                facade.store.put(db, 'agents', agent)
+            return result
+        provider.chat = exhaust_daily
     facade.supervisor.stages.advance(aid)
     if outcome != "corrected":
         facade.supervisor.stages.advance(aid)  # A timer tick cannot repeatedly pay for rejected responses.

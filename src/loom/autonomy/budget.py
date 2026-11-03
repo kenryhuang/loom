@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from loom.core import err, make_loom_error
+from loom.llm.api import LlmProviderError
 from loom.service.contracts import ServiceError
 
 
@@ -82,56 +83,24 @@ class BudgetLedger:
                     and objective.get("stage_planning", {}).get("mode") != "autonomous"):
                 raise ServiceError("Automatic stage planning is disabled; new calls are deferred", 409, "AGENT_CONTROL")
             window = self.clock().astimezone(ZoneInfo(agent["role"]["timezone"])).date().isoformat()
-            clauses = [("daily", "agent_id=? AND window=?", (agent["id"], window), f"window={window}, timezone={agent['role']['timezone']}")]
-            if objective.get("stage_planning"):
-                # Include attributable legacy Goal calls without rewriting original ledger rows.
-                clauses.append(("objective", "agent_id=? AND (id IN (SELECT call_id FROM agent_budget_objectives WHERE agent_id=? AND objective_id=?) "
-                                "OR goal_id IN (SELECT id FROM agent_goals WHERE agent_id=? AND json_extract(body,'$.long_term_objective_id')=?))",
-                                (agent["id"], agent["id"], objective_id, agent["id"], objective_id), f"objective_id={objective_id}"))
-            if binding.get("goal_id"):
-                clauses.append(("goal", "agent_id=? AND goal_id=?", (agent["id"], binding["goal_id"]), f"goal_id={binding['goal_id']}"))
-            if binding.get("work_package_id") and category not in {"learning", "method_learning"}:
-                clauses.append(
-                    ("work", "agent_id=? AND work_package_id=? AND category NOT IN (?,?)",
-                     (agent["id"], binding["work_package_id"], "learning", "method_learning"),
-                     f"work_package_id={binding['work_package_id']}")
-                )
-            if category in {"learning", "method_learning"}:
-                clauses.append(("learning", "agent_id=? AND window=? AND category IN (?,?)", (agent["id"], window, "learning", "method_learning"),
-                                f"window={window}, timezone={agent['role']['timezone']}"))
+            # Every category shares this local-day allocation. Legacy objective,
+            # Goal, work, learning and call-count fields are compatibility data.
+            maximum = policy["daily_tokens"]
+            actual, reserved = db.execute(
+                "SELECT COALESCE(SUM(actual),0), COALESCE(SUM(CASE WHEN actual IS NULL THEN reserved ELSE 0 END),0) "
+                "FROM agent_budget_calls WHERE agent_id=? AND window=?", (agent["id"], window),
+            ).fetchone()
+            used = actual + reserved
             failures, scopes = [], []
-            from loom.autonomy.execution_budget import objective_limit
-            from loom.autonomy.learning_budget import allowance
-
-            effective_learning = allowance(db, agent, window)
-            work_row = db.execute("SELECT body FROM agent_work_packages WHERE id=? AND agent_id=?", (binding.get("work_package_id"), agent["id"])).fetchone()
-            work_limit = (json.loads(work_row[0]).get("execution_budget") or {}).get("tokens", policy["work_tokens"]) if work_row else policy["work_tokens"]
-            for scope, where, args, context in clauses:
-                maximum = (objective_limit(agent, objective) if scope == "objective"
-                           else effective_learning if scope == "learning" else work_limit if scope == "work" else policy[f"{scope}_tokens"])
-                actual, reserved = db.execute(
-                    f"SELECT COALESCE(SUM(actual),0), COALESCE(SUM(CASE WHEN actual IS NULL THEN reserved ELSE 0 END),0) "
-                    f"FROM agent_budget_calls WHERE {where}", args,
-                ).fetchone()
-                used = actual + reserved
-                if used + tokens > maximum:
-                    scopes.append(dict(scope=scope, limit=maximum, used=used, actual=actual, reserved=reserved,
-                                       requested=tokens, projected=used + tokens, remaining=max(0, maximum - used)))
-                    remedy = ("or wait for the next daily window" if scope in {"daily", "learning"}
-                              else "(cumulative budget; does not reset daily)")
-                    failures.append(
-                        f"Agent {scope} token budget exhausted: limit={maximum}, used={used} "
-                        f"(actual={actual}, reserved_or_unknown={reserved}), requested={tokens}, "
-                        f"projected={used + tokens}, remaining={max(0, maximum - used)}, exceeded_by={used + tokens - maximum} tokens; "
-                        f"{context}, category={category}; increase {scope}_tokens {remedy}"
-                    )
-            calls = db.execute("SELECT COUNT(*) FROM agent_budget_calls WHERE agent_id=? AND window=?", (agent["id"], window)).fetchone()[0]
-            if calls >= policy["max_calls"]:
-                scopes.append(dict(scope="calls", limit=policy["max_calls"], used=calls, requested=1, projected=calls + 1))
+            if used + tokens > maximum:
+                scopes.append(dict(scope="daily", limit=maximum, used=used, actual=actual, reserved=reserved,
+                                   requested=tokens, projected=used + tokens, remaining=max(0, maximum - used)))
                 failures.append(
-                    f"Agent daily call budget exhausted: limit={policy['max_calls']}, used={calls}, requested=1, "
-                    f"projected={calls + 1}, remaining=0, exceeded_by={calls + 1 - policy['max_calls']} calls; "
-                    f"window={window}, timezone={agent['role']['timezone']}, category={category}; increase max_calls or wait for the next daily window"
+                    f"Agent daily token budget exhausted: limit={maximum}, used={used} "
+                    f"(actual={actual}, reserved_or_unknown={reserved}), requested={tokens}, "
+                    f"projected={used + tokens}, remaining={max(0, maximum - used)}, exceeded_by={used + tokens - maximum} tokens; "
+                    f"window={window}, timezone={agent['role']['timezone']}, category={category}; "
+                    "increase daily_tokens or wait for the next daily window"
                 )
             if failures:
                 block = dict(schema_version=1, binding=dict(binding), category=category, window=window,
@@ -202,15 +171,27 @@ class BudgetLedger:
                 )
             ]
 
+    def daily_summary(self, aid):
+        with self.read() as db:
+            agent = json.loads(db.execute("SELECT body FROM agents WHERE id=?", (aid,)).fetchone()[0])
+            window = self.clock().astimezone(ZoneInfo(agent["role"]["timezone"])).date().isoformat()
+            actual, reserved, calls = db.execute(
+                "SELECT COALESCE(SUM(actual),0),COALESCE(SUM(CASE WHEN actual IS NULL THEN reserved ELSE 0 END),0),COUNT(*) "
+                "FROM agent_budget_calls WHERE agent_id=? AND window=?", (aid, window),
+            ).fetchone()
+            limit = agent['role']['budget']['daily_tokens']
+            return dict(mode='daily', window=window, timezone=agent['role']['timezone'], limit=limit,
+                        actual=actual, reserved_or_unknown=reserved, used=actual + reserved,
+                        remaining=max(0, limit - actual - reserved), calls=calls, resets_at=self.next_window(aid))
+
     def learning_summary(self, aid):
         from loom.autonomy.contracts import learning_policy
-        from loom.autonomy.learning_budget import allowance
 
         with self.read() as db:
             agent = json.loads(db.execute("SELECT body FROM agents WHERE id=?", (aid,)).fetchone()[0])
             window = self.clock().astimezone(ZoneInfo(agent["role"]["timezone"])).date().isoformat()
-            return dict(window=window, initial_tokens=agent["role"]["budget"]["learning_tokens"],
-                        effective_tokens=allowance(db, agent, window), policy=learning_policy(agent["role"]))
+            return dict(window=window, initial_tokens=None,
+                        effective_tokens=None, shared_daily_limit=agent['role']['budget']['daily_tokens'], mode='daily', policy=learning_policy(agent["role"]))
 
     def objective_summary(self, aid):
         with self.read() as db:
@@ -227,7 +208,7 @@ class BudgetLedger:
                 from loom.autonomy.execution_budget import objective_limit
 
                 result.append(dict(objective_id=objective['id'], limit=objective_limit(agent, objective),
-                                   initial_limit=objective['stage_planning']['objective_tokens'], calls=row[0],
+                                   initial_limit=None, mode='daily', calls=row[0],
                                    actual_tokens=row[1], reserved_or_unknown=row[2], unknown_calls=row[3]))
             unattributed = db.execute("SELECT COUNT(*) FROM agent_budget_calls WHERE agent_id=? AND goal_id IS NULL "
                                       "AND id NOT IN (SELECT call_id FROM agent_budget_objectives)", (aid,)).fetchone()[0]
@@ -279,8 +260,7 @@ class BudgetProvider:
         try:
             identifier = self._reserve(messages, tools)
         except ServiceError as exc:
-            code = exc.code if exc.code in {"AGENT_BUDGET", "AGENT_CONTROL"} else "AGENT_ADMISSION"
-            return err(make_loom_error(code, str(exc), retryable=code != "AGENT_ADMISSION", cause=getattr(exc, "budget_block", None)))
+            return err(self._admission_error(exc))
         kwargs = dict(tools=tools, cancellation=cancellation)
         if tool_choice is not None and "tool_choice" in inspect.signature(self.provider.chat).parameters:
             kwargs["tool_choice"] = tool_choice
@@ -292,8 +272,16 @@ class BudgetProvider:
             self.ledger.settle(identifier, None)
             raise
 
+    @staticmethod
+    def _admission_error(exc):
+        code = exc.code if exc.code in {"AGENT_BUDGET", "AGENT_CONTROL"} else "AGENT_ADMISSION"
+        return make_loom_error(code, str(exc), retryable=code != "AGENT_ADMISSION", cause=getattr(exc, "budget_block", None))
+
     async def _stream_chat(self, messages, tools=None, cancellation=None, tool_choice=None):
-        identifier = self._reserve(messages, tools)
+        try:
+            identifier = self._reserve(messages, tools)
+        except ServiceError as exc:
+            raise LlmProviderError(self._admission_error(exc)) from exc
         settled = False
         kwargs = dict(tools=tools, cancellation=cancellation)
         if tool_choice is not None:

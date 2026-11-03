@@ -17,6 +17,16 @@ def final(report="done"):
     return LlmResponse(json.dumps({"reasoning": "verified", "action": {"kind": "none", "description": "Complete", "input": {"report": report}}}))
 
 
+def test_unlimited_task_tokens_do_not_wrap_up_before_shared_daily_admission(tmp_path):
+    from dataclasses import replace
+
+    async def scenario():
+        response = replace(final(), usage=TokenUsage(200_000_000, 10, 200_000_010))
+        result = await run_managed(tmp_path, Provider([response]), Execution(), limits=dict(max_tokens=None))
+        assert result.ok and result.value.control.kind == 'completed'
+    asyncio.run(scenario())
+
+
 class Provider:
     model = "fake"
 

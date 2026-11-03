@@ -74,6 +74,7 @@ class AgentPlanner:
                         'Plan bounded work for this explicit goal. Return only a complete JSON object {"work_packages":'
                         '[{"objective":"...","acceptance":["..."],"reason":"..."}]}, without Markdown or commentary. '
                         "Use 1–3 concise sequential packages. Preserve the supplied goal and acceptance. "
+                        "Token admission uses one shared daily quota; legacy objective, Goal, work and learning quotas are inactive. "
                         "Estimate active execution time for each package as estimated_seconds (30–14400); this is an estimate, not a deadline. "
                         "Also estimate total model tokens for execution and verification as estimated_tokens (1000–100000000). "
                         "Declare required_tools as runtime tool IDs needed to execute the package: read_file, process_execute, "

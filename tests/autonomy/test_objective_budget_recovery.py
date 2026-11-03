@@ -5,11 +5,10 @@ import pytest
 from loom.autonomy.budget import BudgetLedger
 from loom.autonomy.execution_budget import objective_limit
 from loom.autonomy.stages import planning_state, role_signature
-from loom.service.contracts import ServiceError
 from tests.autonomy.test_queue_scheduling import paused_work
 
 
-def stopped_objective(agent_service, *, legacy=False, reviewing=True):
+def stopped_objective(agent_service, *, legacy=False, wrapped=False, reviewing=True):
     service, facade, aid, _ = agent_service
     agent = facade.store.snapshot(aid)
     role = deepcopy(agent["role"])
@@ -33,11 +32,19 @@ def stopped_objective(agent_service, *, legacy=False, reviewing=True):
     binding = dict(agent_id=aid, goal_id=work["goal_id"], work_package_id=work["id"], run_id="r1")
     ledger.reserve("used", binding, 80, "execution")
     ledger.settle("used", 80)
-    with pytest.raises(ServiceError) as error:
-        ledger.reserve("denied", binding, 50, "execution")
+    # Historical host denial from before the daily-only policy.
+    from loom.service.contracts import canonical
+
+    message = ('Agent objective token budget exhausted: limit=100, used=80 (actual=80, reserved_or_unknown=0), '
+               'requested=50, projected=130, remaining=20, exceeded_by=30 tokens; objective_id=quality, category=execution; '
+               'increase objective_tokens (cumulative budget; does not reset daily)')
+    block = dict(schema_version=1, id='denied', binding=binding, requested=50, category='execution', at=ledger.clock().isoformat(),
+                 window='2026-10-30', reason=message, scopes=[dict(scope='objective', used=80, limit=100, requested=50, projected=130)])
+    with service.store.transaction() as db:
+        db.execute('INSERT INTO agent_budget_blocks VALUES(?,?,?)', ('execution:' + work['id'], aid, canonical(block)))
 
     def fail(state, emit, db):
-        state["run"].update(state="failed", reason=None, failure=dict(code="LLM_FAILED" if legacy else "AGENT_BUDGET", message=str(error.value)))
+        state["run"].update(state="failed", reason=None, failure=dict(code="LLM_FAILED" if legacy or wrapped else "AGENT_BUDGET", message=message))
         state["task"]["state"] = "failed"
         emit("run.failed", state["run"]["failure"])
 
@@ -49,7 +56,7 @@ def stopped_objective(agent_service, *, legacy=False, reviewing=True):
             stage.update(state="reviewing")
             facade.store.put(db, "agent_stages", stage)
         planning = planning_state(facade.store, db, agent, agent["role"]["long_term_objectives"][0])
-        planning.update(stage_id=stage["id"], state="deferred" if reviewing else "active", reason=str(error.value))
+        planning.update(stage_id=stage["id"], state="deferred" if reviewing else "active", reason=message)
         facade.store.put(db, "agent_objective_planning", planning)
     if legacy:
         from loom.autonomy.migration_v5 import migrate
@@ -59,17 +66,19 @@ def stopped_objective(agent_service, *, legacy=False, reviewing=True):
     return service, facade, aid, work, sid, ledger, binding
 
 
-@pytest.mark.parametrize("legacy", [True, False])
-def test_budget_stopped_goal_restores_stage_expands_objective_and_resumes_once(agent_service, legacy):
-    service, facade, aid, work, sid, ledger, binding = stopped_objective(agent_service, legacy=legacy)
+@pytest.mark.parametrize('legacy,wrapped', [(True, False), (False, False), (False, True)])
+def test_historical_objective_stop_restores_stage_without_expansion_and_resumes_once(agent_service, legacy, wrapped):
+    service, facade, aid, work, sid, ledger, binding = stopped_objective(agent_service, legacy=legacy, wrapped=wrapped)
+    if wrapped:
+        service.store.update(sid, lambda s, e, db: s['run']['failure'].update(message='Opaque provider failure'))
     facade.supervisor.scheduler.advance(aid, manual=True)
     result = facade.snapshot(aid)
     assert result["scheduler"]["state"] == "recovered", result["scheduler"]
-    assert result["objective_budgets"]["quality"]["tokens"] == 200
-    assert len(result["objective_budgets"]["quality"]["grants"]) == 1
+    assert not result.get("objective_budgets")
+    assert not result.get("objective_budgets")
     assert result["role"]["long_term_objectives"][0]["stage_planning"]["objective_tokens"] == 100
     assert result["role"]["budget"]["goal_tokens"] == 10000
-    assert result["objective_budget"]["objectives"][0]["limit"] == 200
+    assert result["objective_budget"]["objectives"][0]["limit"] is None
     assert result["objective_budget"]["objectives"][0]["actual_tokens"] == 80
     with service.store.transaction() as db:
         assert facade.store.get(db, "agent_stages", "budget-stage")["state"] == "active"
@@ -81,8 +90,22 @@ def test_budget_stopped_goal_restores_stage_expands_objective_and_resumes_once(a
     assert ledger.summary(aid)[0]["tokens"] == 130
     facade.supervisor.scheduler.advance(aid, manual=True)
     result = facade.snapshot(aid)
-    assert len(result["objective_budgets"]["quality"]["grants"]) == 1
+    assert not result.get("objective_budgets")
     assert result["work_packages"][0]["recovery"]["attempts"] == 1
+
+
+@pytest.mark.parametrize('stale', ['later_admission', 'different_run'])
+def test_wrapped_failure_does_not_reuse_stale_host_budget_denial(agent_service, stale):
+    service, facade, aid, work, sid, ledger, binding = stopped_objective(agent_service, wrapped=True)
+    if stale == 'later_admission':
+        ledger.reserve('later-admitted-call', binding, 1, 'execution')
+    else:
+        service.store.update(sid, lambda s, e, db: s['run'].update(id='different-run'))
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    snap = facade.snapshot(aid)
+    assert snap['scheduler']['manual_required']
+    assert not snap.get('objective_budgets')
+    assert service.snapshot(sid)['task']['state'] == 'failed'
 
 
 @pytest.mark.parametrize("case", ["ceiling", "disabled", "daily", "goal", "manual_pause", "stage_paused", "invalid_legacy", "control", "attempts"])
@@ -119,19 +142,19 @@ def test_objective_recovery_is_bounded_and_does_not_override_other_blocks(agent_
         service.store.update(sid, lambda s, e, db: s.update(control=dict(command_id="human", kind="paused")))
     facade.supervisor.scheduler.advance(aid, manual=True)
     result = facade.snapshot(aid)
-    assert result["scheduler"]["manual_required"] == (case != 'daily')
+    recoverable = case in {'ceiling', 'disabled', 'goal'}
+    assert result['scheduler']['manual_required'] == (not recoverable and case != 'daily')
     assert not result.get("objective_budgets")
-    # Decision-level failures (budget ceilings, unrecognized reasons) consume a
-    # recovery attempt; premise failures (manual control, paused stage, exhausted
-    # ceiling) never do. A malformed legacy budget message parses to no block, so
-    # the reviewing stage cannot be restored and recovery stops at that premise.
-    expected = 1 if case in {"ceiling", "disabled"} else None
+    # Old quota ceilings and expansion flags no longer gate recovery. Manual
+    # controls, exhausted retries and daily admission remain authoritative.
+    expected = 1 if recoverable else None
     assert (result["work_packages"][0].get("recovery") or {}).get("attempts") == expected
     if case == "attempts":
         assert result["work_packages"][0]["blocked_reason"] == "recovery_exhausted"
-    assert service.snapshot(sid)["task"]["state"] == "failed"
+    assert service.snapshot(sid)['task']['state'] == ('queued' if recoverable else 'failed')
     with service.store.transaction() as db:
-        assert facade.store.get(db, "agent_stages", "budget-stage")["state"] == ("paused" if case == "stage_paused" else "reviewing")
+        expected_stage = 'active' if recoverable else 'paused' if case == 'stage_paused' else 'reviewing'
+        assert facade.store.get(db, 'agent_stages', 'budget-stage')['state'] == expected_stage
 
 
 def test_stage_review_waits_for_budget_recovery_instead_of_reviewing_failed_work(agent_service):
@@ -143,16 +166,16 @@ def test_stage_review_waits_for_budget_recovery_instead_of_reviewing_failed_work
     assert facade.snapshot(aid)["scheduler"]["state"] == "recovered"
 
 
-def test_effective_limit_honors_lowered_policy_and_initial_explicit_budget():
+def test_objective_has_no_cumulative_limit_even_with_legacy_policy():
     objective = dict(id="quality", stage_planning=dict(objective_tokens=100))
     agent = dict(role=dict(budget=dict(goal_tokens=1000), scheduling_policy=dict(max_objective_tokens=150)),
                  objective_budgets=dict(quality=dict(tokens=200)))
-    assert objective_limit(agent, objective) == 150
+    assert objective_limit(agent, objective) is None
     agent["role"]["scheduling_policy"]["max_objective_tokens"] = 50
-    assert objective_limit(agent, objective) == 100
+    assert objective_limit(agent, objective) is None
 
 
-def test_lost_recovery_reply_does_not_grant_objective_budget_twice(agent_service, monkeypatch):
+def test_lost_recovery_reply_resumes_once_without_granting_objective_budget(agent_service, monkeypatch):
     service, facade, aid, _, sid, _, _ = stopped_objective(agent_service)
     submit = service.submit
 
@@ -166,6 +189,6 @@ def test_lost_recovery_reply_does_not_grant_objective_budget_twice(agent_service
     monkeypatch.setattr(service, "submit", submit)
     facade.supervisor.scheduler.advance(aid, manual=True)
     result = facade.snapshot(aid)
-    assert result["objective_budgets"]["quality"]["tokens"] == 200
-    assert len(result["objective_budgets"]["quality"]["grants"]) == 1
+    assert not result.get("objective_budgets")
+    assert not result.get("objective_budgets")
     assert result["work_packages"][0]["recovery"]["attempts"] == 1

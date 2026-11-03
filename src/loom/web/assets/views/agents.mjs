@@ -170,20 +170,12 @@ export class AgentsView {
       ['评估模型',d.role.evaluation_model || '服务默认模型']]);
     const budget = panel(root,'预算与用量',true);
     budget.firstChild.append(button('调整预算',()=>this.createForm(d,'budget')));
-    cards(budget,[['每日 token 上限',number(d.role.budget.daily_tokens)],['单工作包上限',number(d.role.budget.work_tokens)],
-      ['单目标累计上限',number(d.role.budget.goal_tokens)],['每日调用次数上限',number(d.role.budget.max_calls)],['累计模型调用',number(d.budget.reduce((sum,r) => sum+r.calls,0))],
+    const daily = d.daily_budget;
+    cards(budget,[['每日 token 上限',number(d.role.budget.daily_tokens)],['今日已用及预留',number(daily?.used ?? 0)],
+      ['今日剩余',number(daily?.remaining ?? d.role.budget.daily_tokens)],['累计模型调用',number(d.budget.reduce((sum,r) => sum+r.calls,0))],
       ['未知用量调用',number(d.budget.reduce((sum,r) => sum+(r.unknown_calls || 0),0))]]);
-    if (d.learning_budget) {
-      const learning = d.learning_budget;
-      const learningSection = element('section','agent-learning-budget');
-      learningSection.append(element('h4','','学习额度'));
-      budget.append(learningSection);
-      cards(learningSection,[['每日初始学习额度',number(learning.initial_tokens)],['今日学习额度',number(learning.effective_tokens)],
-        ['学习自动扩容',learning.policy.auto_expand ? `开启，最多 ${number(learning.policy.max_learning_tokens)} token` : '关闭']]);
-      const grants = (d.learning_allocations || []).flatMap(a => a.grants.map(g => [a.window,number(g.before),number(g.after),g.reason]));
-      if (grants.length) table(this.budgetDisclosure(learningSection,`学习窗口调整记录 · ${number(grants.length)} 条`,d.id,'learning'),
-        ['预算窗口','扩容前','扩容后','原因'],grants);
-    }
+    budget.append(element('p','muted',`所有任务共用每日额度；按 ${d.role.timezone || 'UTC'} 每天零点重新计数，历史账本保留。长期目标、Goal、工作包和学习无独立 Token 配额。`));
+    if(daily?.resets_at) budget.append(element('p','muted',`当前窗口：${daily.window} · 下次重置：${new Date(daily.resets_at).toLocaleString()}`));
     this.renderBudgetUsage(budget,d);
     const history = panel(root,'编排记录',true);
     history.firstChild.append(button('查看最近编排原因',()=>this.act(async()=>{const {runs}=await this.api.get(d.id,'runs');

@@ -280,12 +280,16 @@ test('Overview distinguishes paused, disabled, unscheduled and invalid schedulin
  }finally{view.close();dom.window.close();}
 });
 
-test('Overview shows effective learning allowance and audited expansion',async()=>{
- const data=fixture();data.learning_budget={initial_tokens:250000,effective_tokens:500000,policy:{auto_expand:true,max_learning_tokens:1000000}};
- data.learning_allocations=[{window:'2026-10-31',grants:[{before:250000,after:500000,reason:'Learning request exceeded allowance by 1509'}]}];
+test('Overview shows one daily allowance and local reset instead of cumulative quotas',async()=>{
+ const data=fixture();data.role.timezone='Asia/Shanghai';
+ data.daily_budget={window:'2026-11-03',used:250000,remaining:750000,resets_at:'2026-11-03T16:00:00+00:00'};
+ data.learning_budget={initial_tokens:null,effective_tokens:null,mode:'daily'};
  const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
- try{await view.open();await view.select('a');assert.match(view.root.textContent,/今日学习额度/);assert.match(view.root.textContent,/500,000/);assert.match(view.root.textContent,/exceeded allowance by 1509/);}
- finally{view.close();dom.window.close();}
+ try{await view.open();await view.select('a');const text=view.root.textContent;
+  assert.match(text,/今日已用及预留/);assert.match(text,/250,000/);assert.match(text,/750,000/);
+  assert.match(text,/Asia\/Shanghai/);assert.match(text,/下次重置/);
+  assert.doesNotMatch(text,/单目标累计上限|单工作包上限|今日学习额度|每日调用次数上限/);
+ }finally{view.close();dom.window.close();}
 });
 
 test('Completed Goals retain source-change history without a dispatch blocker',async()=>{

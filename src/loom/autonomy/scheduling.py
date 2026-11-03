@@ -5,7 +5,7 @@ from datetime import timedelta
 
 from loom.autonomy.blockers import Code, from_exception, instructions, make, manual_required
 from loom.autonomy.contracts import scheduling_policy
-from loom.autonomy.execution_budget import allocate, execution_block, expand_objective, parent_block, restore_budget_stage
+from loom.autonomy.execution_budget import allocate, execution_block, parent_block, restore_budget_stage
 from loom.autonomy.goals import sources_ready
 from loom.autonomy.stages import role_signature, runnable
 from loom.service.contracts import ServiceError, new_id
@@ -201,7 +201,7 @@ class QueueScheduler:
             with self.store.sessions.transaction() as db:
                 current = self.store.get(db, "agent_work_packages", work["id"], aid)
             if current["state"] == "dispatched":
-                return self.finish(aid, "dispatched", "已按工作量分配预算并派发一个工作包，本次执行时间上限 1 小时。", work=work["id"])
+                return self.finish(aid, "dispatched", "已派发一个工作包，共享每日 Token 额度，本次执行时间上限 1 小时。", work=work["id"])
         self.finish(
             aid,
             "intervention",
@@ -281,20 +281,13 @@ class QueueScheduler:
                             f"自动恢复次数已达 {recovery.get('attempts', 0)}/{attempt_limit}，需要手工介入", exhausted=True
                         )
                     if block:
-                        try:
-                            expand_objective(store, db, agent, goal, block)
-                        except ServiceError as exc:
-                            raise _Decision(str(exc)) from exc
                         if parent := parent_block(store, db, agent, work, block["requested"]):
                             raise parent
-                        scope = next((s for s in block["scopes"] if s["scope"] == "work"), None)
-                        if scope:
-                            allocate(store, db, agent, work, requested=scope["projected"])
                     elif (run.get("stop_code") == "TOKEN_BUDGET_EXCEEDED" or (run.get("failure") or {}).get("code") == "TOKEN_BUDGET_EXCEEDED"
                           or any(c['code'] == 'TOKEN_BUDGET' for c in (recovery_report or {}).get('causes', []))):
                         if parent := parent_block(store, db, agent, work, agent["role"]["budget"]["output_tokens"]):
                             raise parent
-                        allocate(store, db, agent, work, requested=state["task"]["limits"]["max_tokens"] + 1)
+                        allocate(store, db, agent, work, requested=(state['task']['limits'].get('max_tokens') or 0) + 1)
                     if acceptance_repair:
                         # Acceptance repair is two-phase: the recommendation is an
                         # LLM call and must run outside the service lock. Phase 1
@@ -321,7 +314,7 @@ class QueueScheduler:
                     if intent["run_id"] != run["id"]:
                         raise ServiceError("恢复意图与当前 run 不匹配，请检查执行历史", 409)
                     state["task"]["limits"].update(
-                        max_duration_seconds=3600, max_tokens=work.get("execution_budget", {}).get("tokens", state["task"]["limits"]["max_tokens"])
+                        max_duration_seconds=3600, max_tokens=None
                     )
                     if run["state"] == "failed":
                         run["time_budget_start_seconds"] = run.get("active_seconds", 0)
@@ -441,7 +434,7 @@ class QueueScheduler:
             from loom.tasks.workspace_probe import digest
 
             prepared['task']['limits'] = dict(state['task']['limits'], max_duration_seconds=3600,
-                max_tokens=work.get('execution_budget', {}).get('tokens', state['task']['limits']['max_tokens']))
+                max_tokens=None)
             prepared['report']['result_key'] = digest(prepared['task'])
             intent = dict(id=new_id('schedule_resume'), run_id=run['id'], reason=repair['reason'] or 'Structured task recovery',
                           kind='restart', task=prepared['task'], report=prepared['report'], task_revision=state['task']['revision'])

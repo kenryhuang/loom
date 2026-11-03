@@ -84,7 +84,10 @@ def test_scheduled_windows_coalesce_and_never_duplicate_active_work(agent_servic
 
 
 @pytest.mark.asyncio
-async def test_budget_refuses_provider_before_request_and_learning_has_separate_slice(agent_service):
+@pytest.mark.parametrize('stream', [False, True])
+async def test_budget_refuses_provider_before_request_and_learning_has_separate_slice(agent_service, stream):
+    from loom.llm.api import request_llm_response
+
     service, facade, aid, _ = agent_service
 
     class Provider:
@@ -95,6 +98,11 @@ async def test_budget_refuses_provider_before_request_and_learning_has_separate_
             self.calls += 1
             raise AssertionError("Request must not be sent")
 
+        async def stream_chat(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError("Request must not be sent")
+            yield
+
     with service.store.transaction() as db:
         agent = facade.store.get(db, "agents", aid)
         agent["role"]["budget"].update(daily_tokens=100, work_tokens=1, learning_tokens=100)
@@ -104,9 +112,11 @@ async def test_budget_refuses_provider_before_request_and_learning_has_separate_
     ledger.reserve("learning-independent", binding, 20, "learning")
     provider = Provider()
     wrapped = BudgetProvider(provider, ledger, binding, output_tokens=200)
-    result = await wrapped.chat([])
+    result = await request_llm_response(wrapped, [], stream=stream)
     assert not result.ok and result.error.code == "AGENT_BUDGET"
+    assert {s['scope'] for s in result.error.cause['scopes']} == {'daily'}
     assert provider.calls == 0
+    assert sum(row['tokens'] for row in ledger.summary(aid)) == 20
 
 
 def test_learning_daily_budget_defers_then_resumes_same_evaluation(agent_service):
@@ -115,7 +125,8 @@ def test_learning_daily_budget_defers_then_resumes_same_evaluation(agent_service
     facade.store.clock = clock
     job = dict(state="incomplete", error="AGENT_BUDGET: Agent daily token budget exhausted", checkpoint={})
     calls = []
-    semantic = SimpleNamespace(_load=lambda *args: job, _public=lambda job: {"retryable_work": True}, start=lambda *args, **kwargs: calls.append((args, kwargs)))
+    semantic = SimpleNamespace(_load=lambda *args: job, _public=lambda job: {"retryable_work": True},
+                               start=lambda *args, **kwargs: calls.append((args, kwargs)))
     background = SimpleNamespace(semantic=semantic, trajectory=SimpleNamespace(get=lambda *args: {"state": "completed"}))
     coordinator = LearningCoordinator(facade.store, background)
     cycle = dict(

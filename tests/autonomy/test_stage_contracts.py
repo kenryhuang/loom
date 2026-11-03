@@ -75,12 +75,12 @@ def test_objective_budget_includes_legacy_planning_execution_learning_and_unknow
     ledger.settle("planning", None)
     ledger.reserve("learning", dict(agent_id=aid, goal_id=goal["id"]), 30, "learning")
     facade.store.clock.advance(86400)
-    with pytest.raises(ServiceError, match="objective token budget"):
-        ledger.reserve("over", dict(agent_id=aid, objective_id="quality"), 21, "stage_planning")
+    ledger.reserve("over", dict(agent_id=aid, objective_id="quality"), 21, "stage_planning")
     with pytest.raises(ServiceError, match="identity conflict"):
         ledger.reserve("planning", dict(agent_id=aid, objective_id="other"), 40, "stage_planning")
     summary = ledger.objective_summary(aid)["objectives"][0]
-    assert summary["actual_tokens"] == 10 and summary["reserved_or_unknown"] == 70 and summary["calls"] == 3
+    assert summary["actual_tokens"] == 10 and summary["reserved_or_unknown"] == 91 and summary["calls"] == 4
+    assert summary["limit"] is None
 
 
 def test_stage_sources_and_schedules_do_not_duplicate_goals(agent_service):
@@ -108,5 +108,5 @@ def test_method_induction_shares_learning_allowance_with_deep_eval(agent_service
     facade.store.revise_role(aid, "learning-cap", agent["revision"], role_value)
     ledger = BudgetLedger(facade.store.sessions.path, clock=facade.store.clock)
     ledger.reserve("method", dict(agent_id=aid, objective_id="quality"), 80, "method_learning")
-    with pytest.raises(ServiceError, match="learning token budget"):
-        ledger.reserve("eval", dict(agent_id=aid, objective_id="quality"), 21, "learning")
+    ledger.reserve("eval", dict(agent_id=aid, objective_id="quality"), 21, "learning")
+    assert ledger.daily_summary(aid)["used"] == 101

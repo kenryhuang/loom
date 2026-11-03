@@ -130,7 +130,8 @@ def build(service, state, report):
 
         additions = repair_collections(service, objective=report['original_objective'], model=task.get('model'),
             unresolved=(state.get('acceptance') or {}).get('plan', {}).get('unresolved_requirements', []),
-            current_collections=spec.get('tools', {}).get('collections', []))
+            current_collections=spec.get('tools', {}).get('collections', []),
+            budget_binding={**state['autonomy'], 'run_id': state['run']['id']} if state.get('autonomy') else None)
         if not additions:
             raise ServiceError('旧验收阻塞没有可验证的配置修复', 409, code='EXECUTION_CONTRACT')
     tools = spec.setdefault('tools', {})

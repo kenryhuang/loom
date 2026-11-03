@@ -98,7 +98,7 @@ class LoomService:
         counters = decode((state["run"] or {}).get("counters", encode({})))
         used = getattr(counters.get("usage"), "total_tokens", 0)
         limit = state["task"]["limits"]["max_tokens"]
-        state["token_budget"] = {"limit": limit, "used": used, "remaining": max(0, limit - used)}
+        state["token_budget"] = {"limit": limit, "used": used, "remaining": max(0, limit - used) if limit is not None else None}
         # Checkpoints/model prompts are internal. Artifacts remain separately accessible.
         state.pop("context", None)
         state.pop("control", None)
@@ -200,6 +200,8 @@ class LoomService:
 
     def prepare_attempt(self, sid):
         def prepare(state, emit, db):
+            if state.get('autonomy'):
+                state['task']['limits']['max_tokens'] = None
             if state.get("workspace_blocked"):
                 raise ServiceError("Previous processes have not exited", 409)
             old = state["run"]

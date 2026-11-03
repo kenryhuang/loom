@@ -47,10 +47,9 @@ test('Agent setup shares Session blocks and loads named model/resource choices',
     assert.equal(role.scheduling_policy.enabled,true);
     assert.equal(role.scheduling_policy.tick_seconds,60);
     assert.equal(role.scheduling_policy.max_recovery_attempts,3);
-    assert.equal(role.scheduling_policy.auto_expand_objective_budget,true);
-    f.view.objectiveCeiling.choice.value='custom';f.change(f.view.objectiveCeiling.choice);
-    f.view.form.elements.objective_ceiling_custom.value='20000000';
-    assert.equal(f.view.payload().scheduling_policy.max_objective_tokens,20000000);
+    assert.equal(role.scheduling_policy.auto_expand_objective_budget,undefined);
+    assert.equal(f.view.form.elements.objective_ceiling,undefined);
+    assert.equal(f.view.form.elements.stage_budget,undefined);
     assert.equal(f.view.form.elements.slice_default,undefined);
     f.view.queueTick.choice.value='custom';f.change(f.view.queueTick.choice);
     f.view.form.elements.queue_tick_custom.value='180';
@@ -59,7 +58,7 @@ test('Agent setup shares Session blocks and loads named model/resource choices',
     f.view.form.elements.stage_constraints.value='先设计，再修改';
     f.view.form.elements.stage_completion.value='可复现验收通过';
     const planning=f.view.payload().long_term_objectives[0].stage_planning;
-    assert.equal(planning.mode,'autonomous'); assert.equal(planning.objective_tokens,10000000);
+    assert.equal(planning.mode,'autonomous'); assert.equal(planning.objective_tokens,undefined);
     assert.deepEqual(planning.constraints,['先设计，再修改']);
     assert.deepEqual(planning.completion_criteria,['可复现验收通过']);
   } finally {f.close();}
@@ -128,28 +127,19 @@ test('Closing while loading prevents a stale form update',async () => {
 });
 
 
-test('Work budget defaults to a tenth of daily allowance with selectable overrides and 2000 calls',async()=>{
+test('Only the shared daily token allowance is configurable, including custom values',async()=>{
  const f=fixture();
  try{
   await f.view.load();
-  assert.equal(f.view.work.choice.tagName,'SELECT');assert.equal(f.view.work.choice.value,'daily_fraction');
-  assert.equal(f.view.payload().budget.work_tokens,100000);assert.equal(f.view.payload().budget.max_calls,2000);
-  assert.equal(f.view.payload().budget.goal_tokens,100000000);
+  assert.deepEqual(f.view.payload().budget,{daily_tokens:1000000});
+  for(const name of ['work','goal_budget','learning','max_calls','stage_budget','work_ceiling','objective_ceiling'])
+   assert.equal(f.view.form.elements[name],undefined);
+  assert.match(f.view.form.textContent,/每天零点重新计数/);
   f.view.daily.choice.value='100000000';f.change(f.view.daily.choice);
-  assert.equal(f.view.payload().budget.work_tokens,10000000);
-  assert.doesNotMatch(f.view.form.querySelector('[data-budget-summary]').textContent,/单目标累计上限限制/);
-  f.view.goalBudget.choice.value='1000000';f.change(f.view.goalBudget.choice);
-  assert.match(f.view.form.querySelector('[data-budget-summary]').textContent,/单目标累计上限限制/);
-  f.view.work.choice.value='500000';f.change(f.view.work.choice);
-  f.view.daily.choice.value='5000000';f.change(f.view.daily.choice);
-  assert.equal(f.view.payload().budget.work_tokens,500000);
-  f.view.work.choice.value='custom';f.change(f.view.work.choice);f.view.form.elements.work_custom.value='2345678';
-  f.view.maxCalls.choice.value='custom';f.change(f.view.maxCalls.choice);f.view.form.elements.max_calls_custom.value='3000';
-  assert.equal(f.view.payload().budget.work_tokens,2345678);assert.equal(f.view.payload().budget.max_calls,3000);
-  f.view.work.choice.value='daily_fraction';f.change(f.view.work.choice);
+  assert.deepEqual(f.view.payload().budget,{daily_tokens:100000000});
   f.view.daily.choice.value='custom';f.change(f.view.daily.choice);f.view.form.elements.daily_custom.value='1234567';
   f.view.form.elements.daily_custom.dispatchEvent(new f.dom.window.Event('input',{bubbles:true}));
-  assert.equal(f.view.payload().budget.work_tokens,123456);
+  assert.deepEqual(f.view.payload().budget,{daily_tokens:1234567});
  }finally{f.close();}
 });
 
@@ -274,21 +264,18 @@ test('Saving preserves unknown task_spec keys while editing the managed ones',as
  }finally{f.close();}
 });
 
-test('Learning policy uses selectable bounds and preserves explicit settings on edit',async()=>{
-  const f=fixture();
-  try {
-    await f.view.load();
-    assert.equal(f.view.payload().budget.learning_tokens,250000);
-    assert.deepEqual(f.view.payload().learning_policy,{auto_expand:true,max_learning_tokens:1000000,max_expansions:2,max_resumes:3,max_attempts:6,max_evaluation_calls:500});
-    f.view.daily.choice.value='250000';f.change(f.view.daily.choice);
-    assert.equal(f.view.payload().learning_policy.max_learning_tokens,250000);
-    f.view.learningAuto.value='false';
-    f.view.learningExpansions.choice.value='0';f.change(f.view.learningExpansions.choice);
-    assert.equal(f.view.payload().learning_policy.auto_expand,false);
-    assert.equal(f.view.payload().learning_policy.max_expansions,0);
-    const saved=f.view.payload();
-    const edit=fixture({edit:{role:saved}});
-    try {await edit.view.load();assert.deepEqual(edit.view.payload().learning_policy,saved.learning_policy);}
-    finally {edit.close();}
-  } finally {f.close();}
+test('Learning shares the daily quota and retains only execution recovery controls',async()=>{
+ const f=fixture();
+ try{
+  await f.view.load();
+  assert.equal(f.view.payload().budget.learning_tokens,undefined);
+  assert.deepEqual(f.view.payload().learning_policy,{max_resumes:3,max_attempts:6,max_evaluation_calls:500});
+  f.view.daily.choice.value='250000';f.change(f.view.daily.choice);
+  assert.equal(f.view.payload().learning_policy.max_learning_tokens,undefined);
+  f.view.learningAttempts.choice.value='10';f.change(f.view.learningAttempts.choice);
+  const saved=f.view.payload();
+  const edit=fixture({edit:{role:saved}});
+  try{await edit.view.load();assert.deepEqual(edit.view.payload().learning_policy,saved.learning_policy);}
+  finally{edit.close();}
+ }finally{f.close();}
 });

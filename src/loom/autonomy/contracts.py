@@ -7,6 +7,8 @@ from loom.service.contracts import ServiceError, object_value, text
 
 SCHEMA_VERSION = 1
 TERMINAL = {"completed", "failed", "stopped"}
+# Legacy subquota fields remain readable for stored-role compatibility.
+# Admission enforces daily_tokens only; output_tokens bounds each response.
 BUDGET_DEFAULTS = dict(daily_tokens=1000000, goal_tokens=100000000, work_tokens=100000, learning_tokens=250000, max_calls=2000, output_tokens=8192)
 ROLE_FIELDS = {
     "name",

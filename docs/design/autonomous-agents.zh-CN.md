@@ -2,7 +2,7 @@
 
 更新日期：2026-11-01。本文按当前实现整理，是自主 Agent 的运行契约与调度设计；历史方案、实施过程分别见[原始设计](2026-10-25-autonomous-agent-design.zh-CN.md)与[实施计划](../plan/2026-10-30-autonomous-agent-implementation.zh-CN.md)。本文不把历史提案中的未来能力视为已经实现。
 
-系统将长期目标转成可验收的阶段与工作包，通过执行队列推进交付，通过独立的分析队列提取记忆。调度器负责检查事实、分配额度、恢复和派发，Session 内核负责具体执行。业务验收、分析完成、记忆发布和人工确认分别记录。
+系统将长期目标转成可验收的阶段与工作包，通过执行队列推进交付，通过独立的分析队列提取记忆。调度器负责检查事实、每日预算准入、恢复和派发，Session 内核负责具体执行。业务验收、分析完成、记忆发布和人工确认分别记录。
 
 阅读入口：[调度总览](#定时队列调度与后台分析) · [阶段规划](#4-从长期目标生成阶段与工作包) · [执行恢复](#6-执行阻塞与自动恢复) · [预算](#预算与恢复) · [分析队列](#8-分析队列固定证据有界续跑与退出) · [配置](#13-配置与启动)。
 
@@ -217,12 +217,12 @@ Goal 选择检查：queued、阶段可运行、前序 Goal 已完成、退避已
 | 分类 | 例子 | 处理 |
 | --- | --- | --- |
 | 前提不满足 | 人工接管/暂停、Agent 未启用、worker 未退出、待答问题、未知副作用、Goal/Stage 人工暂停、来源或合同变化、缺少恢复上下文 | 解释原因并保留现场，不消耗一次恢复决策额度 |
-| 已归类的恢复决策失败 | 长期目标扩容失败、父级硬预算不足、未知自动恢复原因、验收修复推荐失败/无新增工具/装配不合法 | 消耗一次恢复决策尝试，提示干预，后续检查仍受次数上限约束 |
-| 恢复已提交 | 分配额度并提交 resume，或保存修复后的 restart 意图 | 消耗一次；意图重放、命令回执丢失不重复计数 |
+| 已归类的恢复决策失败 | 未知自动恢复原因、验收修复推荐失败/无新增工具/装配不合法 | 消耗一次恢复决策尝试，提示干预，后续检查仍受次数上限约束 |
+| 恢复已提交 | 提交 resume，或保存修复后的 restart 意图 | 消耗一次；意图重放、命令回执丢失不重复计数 |
 
 `max_recovery_attempts` 当前默认 **5**，范围 0～10；旧 Role 中显式保存的 3 等值继续生效。普通“手动调度”不重置此计数。
 
-计数对应代码中的 `_Decision` 分支。工作包分配器的部分直接拒绝仍返回普通 ServiceError，尚未统一归入该计数；不能把“所有预算报错均已按同一规则耗尽重试”当作当前保证。
+计数对应代码中的 `_Decision` 分支。每日额度不足是等待条件，不消耗恢复尝试；宿主准备期间的预算拒绝同样处理。
 
 达到上限后记录 `blocked_reason=recovery_exhausted` 和 `schedule.recovery.exhausted`，后续不再反复尝试；该工作包不算验收成功。其他已经排队且独立、满足依赖的任务仍可派发，但不能因此认定整个 Goal/阶段已经完成并重建一轮目标。人工在原 Session 执行 resume 会清除耗尽标记并重置恢复计数；调度器自己的 resume 不会重置。
 
@@ -230,9 +230,8 @@ Goal 选择检查：queued、阶段可运行、前序 Goal 已完成、退避已
 
 | 当前原因 | 自动动作 | 不能覆盖的约束 |
 | --- | --- | --- |
-| 宿主工作包额度拒绝 | 在 `max_work_tokens` 内增配并恢复原工作包 | 每日、Goal、长期目标有效额度与 Calls 准入 |
-| 宿主长期目标额度拒绝 | 在 `max_objective_tokens` 内提高长期目标分配额，再检查其余预算 | 自动扩容关闭或到达上限时停止 |
-| 运行时 Token 上限 | 增配工作包并同步 Session max_tokens | 相同的父级预算检查 |
+| 每日 Token 总额耗尽 | 等待 Agent 本地时区的下一自然日，自动续跑 | 不清空账本，不消耗执行重试次数 |
+| 历史子额度或运行时 Token 上限 | 重新检查每日额度，移除 Session 累计上限后恢复 | 人工控制、未知副作用与合同约束 |
 | Active time budget exceeded | 将本次活动时间预算续为 3600 秒后恢复 | 计数、总 Token 和工具事实保留 |
 | 旧自动时间片 checkpoint | 识别旧暂停命令后兼容恢复，退休 slice 状态 | 不能把人工 pause 当作旧自动暂停 |
 | 非只读任务 acceptance blocked | 推荐最小工具集合增量，验证合并后 `restart_task` | 原验收、Role 绑定、所有权、人工控制和副作用检查 |
@@ -260,33 +259,17 @@ resume 路径要求 checkpoint 或持久恢复上下文；acceptance repair 走�
 
 ## 7. 预算与恢复
 
-### 7.1 同时生效的额度
+### 7.1 每日唯一 token 配额
 
-| 额度 | 默认值 | 统计与自动变更规则 |
-| --- | --- | --- |
-| `budget.daily_tokens` | 1,000,000 | Agent 按配置时区的日总额，硬限制 |
-| `budget.goal_tokens` | 100,000,000 | 单个 Goal 跨工作包、规划、执行、验收与学习的累计额度，硬限制 |
-| `budget.work_tokens` | 未显式填写时为 daily_tokens / 10，向下取整且至少 1 | 工作包初始执行/验收额度，学习不计入工作包额度 |
-| `stage_planning.objective_tokens` | 10,000,000 | 长期目标初始累计额度；覆盖可归属的阶段规划、执行、验收和学习 |
-| `budget.learning_tokens` | 250,000 | 当天学习子额度，独立分配但仍属于 Agent 日总额 |
-| `budget.max_calls` | 2000 | Agent 每日调用数硬限制，不是一个 evaluation 的 Calls 上限 |
-| `budget.output_tokens` | 8192 | 请求输出估计/配置，不是目标总余额 |
+`budget.daily_tokens` 是 Agent 唯一的累计 token 上限，默认 1,000,000。规划、阶段规划、执行、验收、自动评估、方法学习，以及自动派发/修复的配置推荐共用这份额度。每次请求仍受输出长度限制，默认 `output_tokens=8192`；时间、步骤、无进展和模型单次调用等运行约束保持。
 
-所有适用限制同时检查；它们不是互相独立的免费余额。跨日只更换日窗口和当天学习分配，不重置 Goal、工作包或长期目标的累计使用量。
+`goal_tokens`、`work_tokens`、`learning_tokens`、`objective_tokens`、每日 `max_calls` 及对应自动扩容字段只为旧 Role 的读取兼容保留，不参与预算准入。长期目标、Goal、工作包和学习不再有独立累计额度，也不再申请子额度扩容。已有 Agent Session 迁移为 `limits.max_tokens=null`；独立人工 Session 的原限制保留。
 
-### 7.2 三类分配与扩容
+### 7.2 本地自然日重置与账本
 
-| 类型 | 初次分配 / 增配公式 | 持久位置与上限 |
-| --- | --- | --- |
-| 工作包 | 模型估算加 25% 余量，至少 Role work_tokens；恢复取旧额翻倍或本次所需量较大者 | `WorkPackage.execution_budget`；受 max_work_tokens 约束，已有明确初始额度不被更小的自动上限收回 |
-| 长期目标 | 超过当前有效额时，取旧额翻倍或累计已用加本次申请的较大者 | `Agent.objective_budgets[objective_id]`；受 max_objective_tokens 约束，Role 初始值不被改写 |
-| 学习 | 单次最多翻倍；必须容纳当前申请，同时符合剩余每日/Goal 额度 | 按 Agent + 本地日保存 `agent_learning_allocations`；受 max_learning_tokens 和 max_expansions 约束 |
+按 Agent 的 `timezone` 每天零点切换日窗口，新窗口当日用量从零开始。历史账本保留，未知回复按预留计入发起当天；跨日迟到的结算仍更新原窗口，不占用新一天的额度。事务内统一预留，防止并发请求重复占用每日余额。
 
-工作包/长期目标分配、审计和恢复意图在事务中保存。恢复无法成立时回滚分配；恢复命令丢失确认时按意图 ID 和 commands 表对账，不重复加额。
-
-长期目标有效额度由 `objective_limit` 统一读取。执行、阶段规划和 Deep Eval 都使用这个额度。**当前主动申请长期目标扩容的入口是执行恢复**；分析队列只读取有效额度，超出它时不能自行提高 Objective 或 Goal 硬约束。
-
-执行预算举例：长期目标初始额 10M，累计已用与预留接近 10M，下一请求会越界，而自动扩容上限为 100M。执行调度可分配到 20M 后继续原工作包；旧账本和初始配置保留。达到 100M、每日或 Goal 累计硬限制、或恢复次数上限后仍需处理具体原因。
+每日额度耗尽后，执行和分析保留 checkpoint，等待下一窗口自动恢复。等待配额本身不消耗执行重试次数，也不会让学习任务因等待天数变成失败；无进展、人工控制和未知副作用等恢复约束继续校验。
 
 ### 7.3 请求预留与错误分类
 
@@ -302,9 +285,9 @@ resume 路径要求 checkpoint 或持久恢复上下文；acceptance repair 走�
 
 优先使用与当前 run / evaluation 匹配的结构化拒绝。旧版 `LLM_FAILED` 等错误只有在宿主格式、归属及算术都能严格校验时才迁移；旧 checkpoint 的历史错误和普通模型文字不能直接触发加额。
 
-TaskSpec 自身时间、步数、调用和验收阶段限制仍生效。验收输出及时限与 Goal 总量不同；显式模型设置优先。模型思考预算、最终判定输出预留等细节由原验收内核控制，不由扩大 Goal 总额替代。
+TaskSpec 自身时间、步数、调用和验收阶段限制仍生效。验收输出及时限属于执行边界，模型单次输出设置继续生效；它们不构成长期目标累计 Token 配额。
 
-配置推荐链路 `recommend_setup` 使用独立 provider / recommender；当前不能把已进入 Agent BudgetLedger 的用量报告解释为自动包含所有初始化、派发推荐和验收工具修复推荐调用。
+Agent 自动派发与验收修复的 `recommend_setup` 调用携带归属并计入每日账本；用户在尚未创建 Agent 时手动调用的初始化推荐没有 Agent 归属。
 
 ## 8. 分析队列：固定证据、有界续跑与退出
 
@@ -344,9 +327,8 @@ stateDiagram-v2
 
 | 情况 | 动作 |
 | --- | --- |
-| 学习子额度不足且允许新分配 | 原子提交当天 grant 与 resume 意图，续跑同一 evaluation |
-| 每日额度/Calls 不足，学习扩容关闭或到达当天扩容上限 | deferred，按调度间隔有限重查；不是无限等到下一天 |
-| Goal 累计或长期目标当前有效额不足 | 停止本轮，保留具体原因和 memory；分析本身不提高父级额度 |
+| 每日总额不足 | deferred，保存 checkpoint 并等待下一本地自然日，自动续跑同一 evaluation |
+| 历史子额度拒绝 | 按每日总额重新评估；不再申请扩容 |
 | evaluator Calls 耗尽 | 扩到翻倍或已用加一，最高 max_evaluation_calls；默认首次 min(48, 上限) |
 | evaluator 时间耗尽 | 同一评估增配，最高 7200 秒；不套用执行 Session 的单次一小时限制 |
 | 有 settled 可重试质量缺口 | Retry failed items；检查完成单元与已发布记录指纹，重复无进展则停止 |
@@ -359,9 +341,8 @@ stateDiagram-v2
 
 | 配置 / 计数 | 默认值与范围 |
 | --- | --- |
-| `max_attempts` | 每轮最多 6 次分析启动/续跑尝试，范围 1～20；初次启动也计入。预算无法扩容的等待检查另以 budget_waits 计数，同样以此值为上限 |
-| `max_resumes` | 每个分析任务本重试轮次最多 3 次自动预算续跑，范围 0～10；不是“每天重置” |
-| `max_expansions` | 同 Agent 当天最多 2 次学习子额度扩容，范围 0～10 |
+| `max_attempts` | 每轮最多 6 次分析启动/续跑尝试，范围 1～20；初次启动也计入。等待每日额度只记录 budget_waits，不因等待次数耗尽重试 |
+| `max_resumes` | 每个分析任务本重试轮次在同一本地日内最多 3 次自动预算续跑，范围 0～10 |
 | `max_evaluation_calls` | 一个 evaluation 的 Calls 最多自动扩到 500，范围 1～500；跨 resume 累计 |
 
 达到次数、无进展或不可恢复条件后，任务置 incomplete 并退出活动队列；不会删除已经接受的 memory。普通控制异常/事实分析失败也有有限重试，避免一个损坏任务永久占住队首。
@@ -473,7 +454,7 @@ uv run loom serve --data-dir .loom/service --config /absolute/path/to/config.yam
 
 沿用模型配置和服务凭据，连接输出的 `/web/` 地址进入 Agents。省略 --enable-agents 时可查看和编辑历史，但不启动自主编排、学习或已排队的自主执行；普通 Session 和手动 Analysis 仍可使用。更新代码后的服务需沿用原数据目录、模型配置和启动参数重启。
 
-下面是完整 Role 示例。5M 学习额度、每日 100M 和 15 分钟检查均为显式示例，不能当成系统默认值：
+下面是完整 Role 示例。每日 100M 和 15 分钟检查均为显式示例，不能当成系统默认值：
 
 ```json
 {
@@ -491,7 +472,6 @@ uv run loom serve --data-dir .loom/service --config /absolute/path/to/config.yam
       "mode": "ongoing",
       "stage_planning": {
         "mode": "autonomous",
-        "objective_tokens": 10000000,
         "horizon_stages": 3,
         "max_goals_per_stage": 3,
         "max_new_stages_per_day": 3,
@@ -513,25 +493,14 @@ uv run loom serve --data-dir .loom/service --config /absolute/path/to/config.yam
     "interval_seconds": 86400,
     "budget": {
       "daily_tokens": 100000000,
-      "goal_tokens": 100000000,
-      "work_tokens": 10000000,
-      "learning_tokens": 250000,
-      "max_calls": 2000,
       "output_tokens": 8192
     },
     "scheduling_policy": {
       "enabled": true,
       "tick_seconds": 900,
-      "max_recovery_attempts": 5,
-      "auto_expand_work_budget": true,
-      "max_work_tokens": 20000000,
-      "auto_expand_objective_budget": true,
-      "max_objective_tokens": 100000000
+      "max_recovery_attempts": 5
     },
     "learning_policy": {
-      "auto_expand": true,
-      "max_learning_tokens": 5000000,
-      "max_expansions": 5,
       "max_resumes": 6,
       "max_attempts": 6,
       "max_evaluation_calls": 500
@@ -546,8 +515,7 @@ uv run loom serve --data-dir .loom/service --config /absolute/path/to/config.yam
 | --- | --- |
 | scheduling enabled / tick_seconds | true / 60；间隔 1～31536000 秒 |
 | max_recovery_attempts | 5；0～10，显式旧值保留 |
-| auto_expand_work_budget / max_work_tokens | true / min(daily_tokens, goal_tokens) |
-| auto_expand_objective_budget / max_objective_tokens | true / goal_tokens |
+| daily_tokens | 1,000,000；唯一累计 token 上限，按 Agent 时区每天重置 |
 | stage planning mode | off；显式 autonomous 才开启 |
 | 阶段每日新增 / 无进展上限 | 3 / 2，分别可配置 1～10 / 1～5 |
 | learning auto_expand / max_learning_tokens | true / min(daily_tokens, learning_tokens × 4) |
@@ -610,5 +578,5 @@ smoke 使用真实 HTTP、SQLite、worker 与 Deep Eval 管线，模型响应由
 - 当前实现是持续运行的本地服务，没有分布式队列租约或跨主机执行保证。
 - 调度是到期检查和安全边界恢复，不提供准点运行承诺，也不按短时间片抢占正在运行的任务。
 - 执行恢复、分析重试、阶段修复与 Goal 后继 attempt 有不同上限；“自动恢复”不表示自动解决任意错误。
-- Goal/每日硬预算与自动扩容上限仍可使工作停止；未知 usage、证据缺口和人工选择不会因等待或加额而变成已解决。
+- 每日硬预算、无进展和运行边界仍可使工作暂停；未知 usage、证据缺口和人工选择不会因等待或加额而变成已解决。
 - 规划与分析的结构校验、引用校验和无进展检测不能保证路线最优、结论真实或持续交付必然成功。

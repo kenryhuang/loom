@@ -38,6 +38,8 @@ def record(cp, name, arguments, observation):
 
 
 def token_budget_status(used, limit, last_call_tokens=0):
+    if limit is None:
+        return dict(used=used, limit=None, last_call_tokens=last_call_tokens, reserve_tokens=0, wrap_up_at=None)
     reserve = min(limit * 0.8, max(limit * 0.15, 2048, last_call_tokens * 2))
     threshold = math.ceil(limit - reserve)
     return {"used": used, "limit": limit, "last_call_tokens": last_call_tokens,
@@ -49,7 +51,7 @@ def stop_reason(cp, limits):
         return "Model call budget is nearly exhausted"
     used = cp["usage"].total_tokens
     budget = token_budget_status(used, limits["max_tokens"], cp.get("last_call_tokens", 0))
-    if used and used >= budget["wrap_up_at"]:
+    if used and budget['wrap_up_at'] is not None and used >= budget["wrap_up_at"]:
         return (f"Token budget is nearly exhausted: used {used:,}/{budget['limit']:,}; "
                 f"wrap-up threshold {budget['wrap_up_at']:,}; reserved {budget['reserve_tokens']:,} "
                 f"(last model call {budget['last_call_tokens']:,})")

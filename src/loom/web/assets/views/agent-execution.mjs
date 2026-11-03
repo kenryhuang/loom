@@ -75,14 +75,12 @@ export function renderExecution(root,d,view) {
     if(w.reason)detail.append(element('p','',`编排依据：${w.reason}`));
     if(reason && w.state!=='succeeded')detail.append(element('p','',`当前阻塞：${reason}`));
     if(w.binding)detail.append(element('p','',`绑定：${w.binding.source==='recommended'?'推荐':'兜底'}${w.binding.rationale?` · ${w.binding.rationale}`:w.binding.reason?` · ${w.binding.reason}`:''}`));
-    if(w.execution_budget)detail.append(element('p','',`Token 预算 ${number(w.execution_budget.tokens)} · 累计恢复 ${w.recovery?.attempts || 0}/${Math.max(w.recovery?.attempt_limit || 0,policy.max_recovery_attempts ?? 3)} 次`));
+    detail.append(element('p','',`共享每日 Token 额度 · 累计恢复 ${w.recovery?.attempts || 0}/${Math.max(w.recovery?.attempt_limit || 0,policy.max_recovery_attempts ?? 3)} 次`));
     if(d.state==='enabled' && ['blocked','failed'].includes(w.state))refs.append(button('重新评估恢复',()=>view.act(()=>view.api.post(d.id,'commands',{
       command_id:globalThis.crypto.randomUUID(),type:'recover',expected_revision:d.revision,
       payload:{work_package_id:w.id,reason:'用户请求按当前结构化阻塞重新评估恢复配置'}
     }))));
-    const objectiveId=w.objective_id || d.goals.find(g=>g.id===w.goal_id)?.long_term_objective_id,objectiveBudget=d.objective_budgets?.[objectiveId];
-    const effectiveBudget=d.objective_budget?.objectives?.find(b=>b.objective_id===objectiveId);
-    if(objectiveBudget)detail.append(element('p','',`长期目标额度 ${number(effectiveBudget?.limit ?? objectiveBudget.tokens)} · 自动扩容上限 ${number(Math.max(effectiveBudget?.initial_limit || 0,policy.max_objective_tokens ?? objectiveBudget.ceiling))} · 已扩容 ${objectiveBudget.grants?.length || 0} 次`));
+
     if(live)detail.append(element('p','',`Session：${live.task_state} · run：${live.run_state || '—'} · ${live.checkpoint_available?'已有 checkpoint / 恢复上下文':'等待恢复点'}`));
     if(w.slice?.phase)detail.append(element('p','muted',`历史时间片 #${w.slice.number} · ${label(w.slice.phase)}`));
     if(context){detail.append(element('p','',`${context.memory_refs?.length || 0} 条相关记忆 · ${context.guidance_ids?.length || 0} 条指导 · ${context.completed_learning_ids?.length || 0} 个已完成分析`));view.showRows(detail,(context.memory_refs || []).map(r=>JSON.stringify(r)));}

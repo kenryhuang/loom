@@ -62,9 +62,10 @@ def test_budget_reserves_unknown_and_keeps_goal_across_days(tmp_path):
     ledger.reserve("two", binding, 30, "execution")
     ledger.settle("two", 20)
     ledger.settle("two", 20)
-    with pytest.raises(ServiceError, match="budget exhausted"):
-        ledger.reserve("three", binding, 60, "execution")
-    assert sum(r["tokens"] for r in ledger.summary(agent["id"])) == 100
+    ledger.reserve("three", binding, 60, "execution")
+    with pytest.raises(ServiceError, match="daily token budget exhausted"):
+        ledger.reserve("four", binding, 21, "execution")
+    assert sum(r["tokens"] for r in ledger.summary(agent["id"])) == 160
 
 
 @pytest.mark.parametrize('daily,expected', [(1000000, 100000), (100000000, 10000000), (1234567, 123456), (9, 1)])
@@ -84,7 +85,7 @@ def test_work_budget_derivation_does_not_accept_invalid_daily_limit(tmp_path, va
         role_contract({**role(tmp_path), 'budget': {'daily_tokens': value}})
 
 
-@pytest.mark.parametrize('scope,category', [('daily', 'execution'), ('goal', 'execution'), ('work', 'execution'), ('learning', 'learning')])
+@pytest.mark.parametrize('scope,category', [('daily', 'execution'), ('daily', 'acceptance'), ('daily', 'learning'), ('daily', 'method_learning')])
 def test_budget_error_identifies_scope_and_reservation_arithmetic(tmp_path, scope, category):
     clock = Clock()
     store = AgentStore(SessionStore(tmp_path / 'data'), clock=clock)
@@ -125,7 +126,6 @@ def test_budget_reports_all_exceeded_limits_and_daily_calls(tmp_path):
     with pytest.raises(ServiceError) as caught:
         ledger.reserve('two', binding, 1, 'execution')
     message = str(caught.value)
-    for scope in ('daily', 'goal', 'work'):
-        assert f'Agent {scope} token budget exhausted' in message
-    assert 'Agent daily call budget exhausted: limit=1, used=1, requested=1, projected=2, remaining=0, exceeded_by=1 calls' in message
-    assert 'increase max_calls' in message
+    assert 'Agent daily token budget exhausted' in message
+    assert [scope['scope'] for scope in caught.value.budget_block['scopes']] == ['daily']
+    assert 'call budget exhausted' not in message
