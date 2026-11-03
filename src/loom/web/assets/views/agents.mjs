@@ -7,6 +7,7 @@ import {agentResourceChoices} from './agent-resources.mjs';
 import {selectedTools} from './external-tools.mjs';
 import {renderRoadmaps, roadmapDisclosure} from './agent-roadmap.mjs';
 import {renderExecution} from './agent-execution.mjs';
+import {AgentConfigurationEditor, configurationTitles, configuredRole} from './agent-configuration.mjs';
 
 const status = {draft:'未启用', enabled:'已启用', paused:'已暂停', archived:'已归档', idle:'空闲', waiting:'等待',
   working:'执行中', planning:'编排中', degraded:'需要处理', pending:'待处理', running:'进行中', completed:'已完成',
@@ -42,6 +43,7 @@ export class AgentsView {
   close() {
     ++this.generation; this.abort?.abort(); clearInterval(this.timer); this.learningView?.close();
     this.setup?.close(); this.setup = null; this.creating = false; this.root.classList.remove('agent-setup-page');
+    this.configurationEditor?.close(); this.configurationEditor = null;
   }
   async open() {
     this.close(); this.abort = new AbortController();
@@ -88,25 +90,42 @@ export class AgentsView {
     const editing = this.root.contains(document.activeElement) && /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName);
     const resourceEditing = this.resourceEditor?.form.isConnected && (this.resourceEditor.dirty || this.resourceEditor.saving);
     const learningEditing = this.learningView?.current && this.learningView.dirty;
-    if (!editing && !resourceEditing && !learningEditing && !this.creating && this.renderedDetail !== JSON.stringify(detail)) this.render();
+    const configurationEditing = this.configurationEditor?.form.isConnected;
+    if (!editing && !resourceEditing && !learningEditing && !configurationEditing && !this.creating && this.renderedDetail !== JSON.stringify(detail)) this.render();
     else if (!this.creating) this.updateSchedule(detail);
   }
-  async select(id) { this.learningView?.close(); this.renderedDetail = null; this.setup?.close(); this.setup = null; this.root.classList.remove('agent-setup-page'); this.selected = id; this.creating = false; this.tab = 'Overview'; await this.refresh(); }
+  async select(id) { this.learningView?.close(); this.configurationEditor?.close(); this.configurationEditor=null; this.renderedDetail = null; this.setup?.close(); this.setup = null; this.root.classList.remove('agent-setup-page'); this.selected = id; this.creating = false; this.tab = 'Overview'; await this.refresh(); }
   async act(action) {
     try { await action(); await this.refresh(); }
     catch (error) { this.showError(error); }
   }
   createForm(edit = null, section = null) {
+    if(edit) {
+      this.detail=edit;this.selected=edit.id;this.tab='Overview';this.creating=false;
+      this.setup?.close();this.setup=null;this.root.classList.remove('agent-setup-page');this.render();
+      return this.editConfiguration(edit,section || 'identity');
+    }
+    const returnTo=this.selected;
+    this.configurationEditor?.close();this.configurationEditor=null;
     this.learningView?.close();
-    this.renderedDetail = null; this.setup?.close(); this.creating = true; if (!edit) this.selected = null;
+    this.renderedDetail = null; this.setup?.close(); this.creating = true; this.selected = null;
     this.root.classList.add('agent-setup-page');
     if (this.heading) this.heading.hidden = true;
     const setup = new AgentSetupView(this.root, {
-      api:this.apiSource(), edit,
-      cancel:() => {setup.close(); this.setup = null; this.creating = false; this.root.classList.remove('agent-setup-page'); this.refresh().catch(e => this.showError(e));},
+      api:this.apiSource(),
+      cancel:() => {
+        setup.close();this.setup=null;this.creating=false;this.renderedDetail=null;
+        this.root.classList.remove('agent-setup-page');this.root.replaceChildren();
+        if(this.heading)this.heading.hidden=false;
+        if(returnTo && this.detail?.id===returnTo){this.selected=returnTo;this.render();}
+        else {
+          if(this.heading)this.renderHeading(this.heading,'选择一个 Agent');
+          this.root.append(element('p','empty-state','已取消创建。选择一个 Agent 查看配置。'));
+        }
+        this.refresh().catch(e=>this.showError(e));
+      },
       save:async role => {
-        const result = await this.api.post(edit?.id || null, edit ? 'role/revisions' : '',
-          {command_id:uuid(), role, ...(edit ? {expected_revision:edit.revision} : {})});
+        const result = await this.api.post(null,'',{command_id:uuid(),role});
         if (this.setup !== setup || setup.closed) return;
         document.activeElement?.blur(); setup.close(); this.setup = null;
         this.root.classList.remove('agent-setup-page'); this.selected = result.id; this.creating = false; this.tab = 'Overview';
@@ -114,9 +133,34 @@ export class AgentsView {
       },
     });
     this.setup = setup;
-    return setup.load().then(() => {
-      if (this.setup === setup && section === 'budget') setup.form.querySelector('#agent-budget-settings')?.scrollIntoView?.({block:'start'});
-    });
+    return setup.load();
+  }
+  async editConfiguration(detail,section) {
+    this.configurationEditor?.close();this.configurationEditor=null;
+    const target=this.root.querySelector(`[data-configuration-section="${section}"]`);
+    if(!target)return;
+    let commandId,signature;
+    const editor=new AgentConfigurationEditor(target,{detail,section,api:this.apiSource(),
+      cancel:()=>{
+        if(this.configurationEditor!==editor)return;
+        this.configurationEditor=null;this.renderedDetail=null;this.render();
+      },
+      save:async changes=>{
+        const next=JSON.stringify(changes);if(next!==signature){signature=next;commandId=uuid();}
+        await this.api.post(detail.id,`configuration/${section}`,{command_id:commandId,expected_revision:detail.revision,changes},editor.abort.signal);
+        if(this.configurationEditor!==editor || editor.closed || this.selected!==detail.id)return;
+        editor.close();this.configurationEditor=null;this.renderedDetail=null;await this.refresh();
+      }});
+    this.configurationEditor=editor;
+    await editor.load();
+    if(!editor.closed)editor.form.querySelector('input,textarea,select')?.focus();
+  }
+  configurationPanel(root,detail,section,rows,wide=false) {
+    const node=panel(root,configurationTitles[section],wide);node.dataset.configurationSection=section;
+    const edit=button('编辑',()=>this.editConfiguration(detail,section));edit.setAttribute('aria-label',`编辑${configurationTitles[section]}`);
+    edit.disabled=detail.state==='archived';node.firstChild.append(edit);
+    if(detail.pending_configuration?.sections?.[section])node.firstChild.append(badge('待新任务生效'));
+    table(node,['参数','新任务配置'],rows);return node;
   }
   renderHeading(head, title, d = null) {
     head.hidden = false; head.replaceChildren();
@@ -135,6 +179,7 @@ export class AgentsView {
     }
   }
   render() {
+    this.configurationEditor?.close();this.configurationEditor=null;
     this.learningView?.close();
     const d = this.detail, head = this.heading || element('header', 'workspace-header');
     this.renderedDetail = JSON.stringify(d); this.renderHeading(head, d.role.name, d);
@@ -163,19 +208,37 @@ export class AgentsView {
     cards(summary, [['待处理目标',number(d.goals.filter(g => !['completed','cancelled','superseded'].includes(g.state)).length)],
       ['活动工作包',number(d.work_packages.filter(w => ['dispatched','running'].includes(w.state)).length)],
       ['关联 Session',number(d.sessions.length)], ['学习待办',number(d.learning.filter(l => !['completed','cancelled','failed','incomplete'].includes(l.state)).length)]]);
-    const goals = panel(root,'长期目标');
-    this.showRows(goals,d.role.long_term_objectives.map(g => g.desired_outcome));
-    const runtime = panel(root,'运行配置');
-    table(runtime,['配置','当前值'],[['工作目录',d.role.working_directory || '无本地目录'],['执行与规划模型',d.role.model || '服务默认模型'],
-      ['评估模型',d.role.evaluation_model || '服务默认模型']]);
-    const budget = panel(root,'预算与用量',true);
-    budget.firstChild.append(button('调整预算',()=>this.createForm(d,'budget')));
-    const daily = d.daily_budget;
-    cards(budget,[['每日 token 上限',number(d.role.budget.daily_tokens)],['今日已用及预留',number(daily?.used ?? 0)],
-      ['今日剩余',number(daily?.remaining ?? d.role.budget.daily_tokens)],['累计模型调用',number(d.budget.reduce((sum,r) => sum+r.calls,0))],
-      ['未知用量调用',number(d.budget.reduce((sum,r) => sum+(r.unknown_calls || 0),0))]]);
-    budget.append(element('p','muted',`所有任务共用每日额度；按 ${d.role.timezone || 'UTC'} 每天零点重新计数，历史账本保留。长期目标、Goal、工作包和学习无独立 Token 配额。`));
-    if(daily?.resets_at) budget.append(element('p','muted',`当前窗口：${daily.window} · 下次重置：${new Date(daily.resets_at).toLocaleString()}`));
+    const r=configuredRole(d);
+    root.append(element('p','muted dashboard-wide','配置修改用于后续新调度任务。已派发任务及其恢复沿用原配置；长期目标请在目标页面管理，工作目录固定。'));
+    if(d.configuration?.pending)root.append(element('p','notice dashboard-wide','新配置已保存，等待已派发任务与分析结束后，在下一次新任务调度前生效。'));
+    const goals = panel(root,'长期目标（只读）');
+    this.showRows(goals,d.role.long_term_objectives.map(g=>g.desired_outcome));
+    goals.append(button('前往目标页面',()=>{this.tab='Goals';this.render();}));
+    const workspace=panel(root,'工作目录（固定）');
+    table(workspace,['配置','当前值'],[['Workspace',d.role.workspace || d.role.working_directory || '无本地目录'],
+      ['工作目录',d.role.working_directory || '无本地目录']]);
+    this.configurationPanel(root,d,'identity',[['名称',r.name],['角色说明',r.role_text],['默认方法',(r.methods || []).join('；') || '未设置']]);
+    this.configurationPanel(root,d,'models',[['执行与规划模型',r.model || '服务默认模型'],['评估模型',r.evaluation_model || '服务默认模型']]);
+    this.configurationPanel(root,d,'execution',[['规划模式',({auto:'自动',force:'强制规划',off:'直接执行'})[r.plan_mode] || '自动'],
+      ['上下文插件',r.task_spec?.context?.plugin || '服务默认'],['工作流插件',r.task_spec?.workflow?.plugin || '服务默认'],
+      ['工具集合',r.task_spec?.tools?.collections?.join('、') || '服务默认']]);
+    const scheduling=r.scheduling_policy || {};
+    this.configurationPanel(root,d,'scheduling',[['目标检查间隔',`${r.interval_seconds || 86400} 秒`],
+      ['定时调度',scheduling.enabled===false?'仅手动':'开启'],['调度检查间隔',`${scheduling.tick_seconds || 60} 秒`],
+      ['每任务自动恢复次数',scheduling.max_recovery_attempts ?? 5],['时区',r.timezone || 'UTC']]);
+    const learning=r.learning_policy || {};
+    this.configurationPanel(root,d,'learning',[['每个评估每日自动续跑次数',learning.max_resumes ?? 3],
+      ['每轮分析尝试次数',learning.max_attempts ?? 6],['评估调用次数上限',learning.max_evaluation_calls ?? 500],
+      ['自动方法学习',r.method_learning?'开启':'关闭']]);
+    this.configurationPanel(root,d,'resources',[['资料路径',(r.source_routes || []).flatMap(route=>route.paths || []).join('、') || '未设置'],
+      ['知识库',(r.knowledge_base_ids || []).join('、') || '未设置'],['外部工具',(r.external_tool_ids || []).join('、') || '未设置']]);
+    const budget=this.configurationPanel(root,d,'budget',[['每日 token 上限',number(r.budget.daily_tokens)]],true);
+    const daily=d.daily_budget;
+    cards(budget,[['当前每日上限',number(daily?.limit ?? d.role.budget.daily_tokens)],['今日已用及预留',number(daily?.used ?? 0)],
+      ['今日剩余',number(daily?.remaining ?? d.role.budget.daily_tokens)],['累计模型调用',number(d.budget.reduce((sum,row)=>sum+row.calls,0))],
+      ['未知用量调用',number(d.budget.reduce((sum,row)=>sum+(row.unknown_calls || 0),0))]]);
+    budget.append(element('p','muted',`所有任务共用每日额度；当前按 ${d.role.timezone || 'UTC'} 每天零点重新计数，历史账本保留。长期目标、Goal、工作包和学习无独立 Token 配额。`));
+    if(daily?.resets_at)budget.append(element('p','muted',`当前窗口：${daily.window} · 下次重置：${new Date(daily.resets_at).toLocaleString()}`));
     this.renderBudgetUsage(budget,d);
     const history = panel(root,'编排记录',true);
     history.firstChild.append(button('查看最近编排原因',()=>this.act(async()=>{const {runs}=await this.api.get(d.id,'runs');
@@ -352,7 +415,7 @@ export class AgentsView {
   }
   renderProfile(root, d) {
     const role = panel(root,'角色定位',true);
-    role.firstChild.append(button('修订角色与预算', () => this.createForm(d)));
+    role.firstChild.append(button('编辑角色', () => this.createForm(d,'identity')));
     role.append(element('p','',d.role.role_text));
     role.append(button('管理学习与人工方法',()=>{this.tab='Learning';this.render();}));
     const preferences = panel(root,'偏好与习惯',true);
@@ -388,7 +451,7 @@ export class AgentsView {
   }
   renderKnowledge(root,d) {
     const sources = panel(root,'资料获取位置',true);
-    table(sources,['用途','资料位置','知识库','外部工具'],d.role.source_routes.map(s=>[s.topic,(s.paths || []).join('、'),
+    table(sources,['用途','资料位置','知识库','外部工具'],configuredRole(d).source_routes.map(s=>[s.topic,(s.paths || []).join('、'),
       (s.knowledge_base_ids || []).join('、'),(s.external_tool_ids || []).join('、')]));
     const resources = panel(root,'知识库与外部工具',true), form = element('form','agent-resource-form'); resources.append(form);
     const grid = element('div','trace-dashboard'); form.append(grid);
@@ -422,7 +485,7 @@ export class AgentsView {
           this.apiSource().json('/v1/web/catalog',{signal}), this.apiSource().json('/v1/knowledge-bases',{signal}),
         ]);
         if (!current()) return;
-        agentResourceChoices(toolList,knowledgeList,catalog,bases,d.role);
+        agentResourceChoices(toolList,knowledgeList,catalog,bases,configuredRole(d));
         editor.loaded = true; summarize();
       } catch (error) {
         if (!current() || error.name === 'AbortError') return;
@@ -433,13 +496,14 @@ export class AgentsView {
       event.preventDefault(); if (save.disabled) return;
       editor.saving = true; save.disabled = true; message.hidden = true;
       form.querySelectorAll('input').forEach(input => input.disabled = true);
-      const role = structuredClone(d.role); delete role.schema_version;
+      const role = structuredClone(configuredRole(d)); delete role.schema_version;
       role.knowledge_base_ids = selectedTools(knowledgeList); role.external_tool_ids = selectedTools(toolList);
       for (const route of role.source_routes || []) for (const key of ['knowledge_base_ids','external_tool_ids']) {
         if (route[key]) route[key] = route[key].filter(id => role[key].includes(id));
       }
       try {
-        await this.api.post(d.id,'role/revisions',{command_id:uuid(),expected_revision:d.revision,role});
+        await this.api.post(d.id,'configuration/resources',{command_id:uuid(),expected_revision:d.revision,changes:{
+          knowledge_base_ids:role.knowledge_base_ids,external_tool_ids:role.external_tool_ids,source_routes:role.source_routes}});
         if (!current()) return;
         editor.dirty = false; editor.saving = false; this.renderedDetail = null;
         document.activeElement?.blur(); await this.refresh();

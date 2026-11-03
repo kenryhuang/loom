@@ -36,6 +36,7 @@ from loom.core.models import (
     thaw_json,
 )
 from loom.host_environment import format_execution_environment, inspect_execution_environment
+from loom.llm.failures import provider_failure
 from loom.llm.request_options import materialize_request_options, normalize_request_options
 
 
@@ -943,21 +944,7 @@ async def _consume_streaming_chat(
     except LlmProviderError as exc:
         return err(exc.error)
     except Exception as exc:
-        timed_out = isinstance(exc, TimeoutError) or (isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, TimeoutError))
-        message = str(exc) or ("LLM request timed out" if timed_out else type(exc).__name__)
-        cause = {"name": type(exc).__name__, "message": message}
-        status = getattr(exc, "status", None)
-        if isinstance(status, int):
-            cause["status"] = status
-            cause["body"] = getattr(exc, "body", {})
-        return err(
-            make_loom_error(
-                "TIMEOUT" if timed_out else "LLM_FAILED",
-                message,
-                retryable=status is None or status == 429 or status >= 500,
-                cause=cause,
-            )
-        )
+        return err(provider_failure(exc))
 
     if final_response is None:
         return err(make_loom_error("LLM_FAILED", "Streaming provider returned no completed response", retryable=True))
@@ -1063,16 +1050,7 @@ class OpenAIProvider:
         try:
             response = await self._send(url, request)
         except Exception as exc:
-            timed_out = isinstance(exc, TimeoutError) or (isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, TimeoutError))
-            message = str(exc) or ("LLM request timed out" if timed_out else type(exc).__name__)
-            return err(
-                make_loom_error(
-                    "TIMEOUT" if timed_out else "LLM_FAILED",
-                    message,
-                    retryable=True,
-                    cause={"name": type(exc).__name__, "message": message},
-                )
-            )
+            return err(provider_failure(exc))
 
         if not response.get("ok", False):
             status = int(response.get("status", 0))

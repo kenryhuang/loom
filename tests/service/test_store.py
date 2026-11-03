@@ -163,7 +163,7 @@ def test_resume_renews_time_allowance_durably_without_resetting_usage_or_checkpo
     store = SessionStore(tmp_path / "data")
     assert store.submit(sid, command) == receipt
     after = store.snapshot(sid)
-    assert after["run"] == {**before["run"], "time_budget_start_seconds": 1800.84}
+    assert after["run"] == {**before["run"], "time_budget_start_seconds": 1800.84, "acceptance_budget_request": "resume"}
     assert after["task"]["limits"] == before["task"]["limits"]
     assert after["task"]["state"] == "queued"
     assert sum(event["type"] == "run.time_budget.renewed" for event in store.events(sid)) == 1

@@ -1,6 +1,6 @@
 # 自主 Agent：完整运行与调度设计
 
-更新日期：2026-11-01。本文按当前实现整理，是自主 Agent 的运行契约与调度设计；历史方案、实施过程分别见[原始设计](2026-10-25-autonomous-agent-design.zh-CN.md)与[实施计划](../plan/2026-10-30-autonomous-agent-implementation.zh-CN.md)。本文不把历史提案中的未来能力视为已经实现。
+更新日期：2026-11-03。本文按当前实现整理，是自主 Agent 的运行契约与调度设计；历史方案、实施过程分别见[原始设计](2026-10-25-autonomous-agent-design.zh-CN.md)与[实施计划](../plan/2026-10-30-autonomous-agent-implementation.zh-CN.md)。本文不把历史提案中的未来能力视为已经实现。
 
 系统将长期目标转成可验收的阶段与工作包，通过执行队列推进交付，通过独立的分析队列提取记忆。调度器负责检查事实、每日预算准入、恢复和派发，Session 内核负责具体执行。业务验收、分析完成、记忆发布和人工确认分别记录。
 
@@ -448,6 +448,10 @@ Session 链接定位执行记录；Analysis 和 Deep Eval 链接携带 analysis 
 
 ## 13. 配置与启动
 
+Overview 按角色与方法、模型、执行配置、运行与调度、每日预算、学习与评估、资料与资源分别展示参数。每个板块独立编辑和取消；取消立即退出，不提交修改，也不受后台轮询影响。长期目标在概览只读，新增目标与修改干涉仍在 Goals 页面操作；Agent 创建后 workspace 和 working_directory 固定。
+
+`POST configuration/{section}` 使用 `command_id`、`expected_revision`、`changes` 提交该板块白名单内的字段。每日预算只能提交 `budget.daily_tokens`；禁止跨板块字段以及目标、目录字段。保存产生 `configuration.saved`，展示待生效预览，不改当前 Role。已有派发、阻塞恢复、在途规划、分析或模型调用继续使用原版本。等这些任务结束，在下一次新派发/规划/分析前生成 Role 新版本并记录 `configuration.activated`；未派发工作包绑定新配置，交付与验收合同保持原样。待生效配置持久化，服务重启后仍能继续切换。
+
 ```bash
 uv run loom serve --data-dir .loom/service --config /absolute/path/to/config.yaml --enable-agents
 ```
@@ -530,6 +534,7 @@ uv run loom serve --data-dir .loom/service --config /absolute/path/to/config.yam
 | `POST /v1/agents`、`POST /v1/agents/setup/recommend` | 创建 Agent / 推荐初始化配置 |
 | `POST commands` | enable / pause / resume / archive / wake |
 | `POST role/revisions`、`GET role-revisions` | 提交完整 Role / 查看版本 |
+| `POST configuration/{section}` | 保存单个板块配置，后续新任务生效；Overview 展示待生效预览 |
 | `POST goals`、`POST goals/{goal}/commands`、`POST goals/{goal}/retry` | 显式交付、合同/状态控制、有变化依据的后继 attempt |
 | `GET objectives/{objective}/roadmap`、`GET stages`、`GET stages/{stage}` | planning、路线、阶段和复盘 |
 | `POST objectives/{objective}/planning/commands` | enable/disable 使用 Agent revision；pause/resume/replan/answer 使用 planning revision |

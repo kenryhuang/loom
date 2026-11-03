@@ -1,4 +1,5 @@
 import asyncio
+import ssl
 import urllib.error
 
 import pytest
@@ -37,3 +38,30 @@ async def test_deadlines_and_cancellation_are_not_swallowed_by_provider(stream):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('wrapped', [False, True])
+@pytest.mark.parametrize(('exception', 'code', 'retryable'), [
+    (ssl.SSLEOFError, 'LLM_TRANSPORT_ERROR', True),
+    (ConnectionResetError, 'LLM_TRANSPORT_ERROR', True),
+    (ssl.SSLCertVerificationError, 'LLM_TLS_ERROR', False),
+    (ssl.SSLError, 'LLM_TLS_ERROR', False),
+])
+async def test_tls_and_connection_failures_are_classified_by_exception_type(stream, wrapped, exception, code, retryable):
+    failure = exception('arbitrary provider text')
+    if wrapped:
+        failure = urllib.error.URLError(failure)
+
+    async def transport(*args):
+        raise failure
+
+    provider = OpenAIProvider(api_key='fixture', model='fixture', http_client=transport)
+    result = await request_llm_response(provider, [LlmMessage('user', 'Test')], stream=stream)
+    assert not result.ok
+    assert result.error.code == code
+    assert result.error.retryable is retryable
+    assert result.error.cause['name'] == type(failure).__name__
+    if wrapped:
+        assert result.error.cause['reason']['name'] == exception.__name__

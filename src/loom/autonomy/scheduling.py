@@ -36,6 +36,9 @@ class QueueScheduler:
             if self.supervisor.stopped.is_set():
                 return False
             with self.store.sessions.transaction() as db:
+                from loom.autonomy.configuration import activate
+
+                activate(self.store, db, aid)
                 agent = self.store.get(db, "agents", aid)
                 policy = scheduling_policy(agent["role"])
                 requested = manual or agent.get("schedule_requested", False)
@@ -141,6 +144,9 @@ class QueueScheduler:
                     steps=["查看此工作包的具体阻塞项和原 Session。", "按原因补充输入、恢复人工暂停或调整预算上限，再点击手动调度。"],
                 )
         from loom.autonomy import goals, sources
+
+        if agent.get('pending_configuration'):
+            return self.finish(aid, 'waiting', '新配置已保存，等待已派发任务与分析结束后用于下一次调度。')
 
         sources.refresh(self.store, aid)
         if works:
@@ -259,9 +265,10 @@ class QueueScheduler:
                 # Acceptance repair restarts with a repaired spec instead of
                 # resuming the old run, so the checkpoint premise only guards
                 # the resume paths.
+                from loom.service.failures import failure_details
                 from loom.tasks.recovery import assess
 
-                recovery_report = assess(state)
+                recovery_report = assess(state, failure=failure_details(db, state))
                 acceptance_repair = recovery_report is not None and recovery_report['mode'] == 'reassemble'
                 if recovery_report and recovery_report['mode'] == 'manual':
                     raise ServiceError("恢复需要先处理外部依赖或未知执行结果", 409, code=Code.EXECUTION_INPUT)

@@ -264,11 +264,14 @@ class AgentStore:
                 return replay
             agent = self.get(db, "agents", aid)
             self.expect(agent, revision)
+            if any(role[key] != agent['role'][key] for key in ('workspace', 'working_directory')):
+                raise ServiceError('Agent workspace is fixed; create a new Agent to use another directory', 409)
             previous_role = {'owner_id': 'local', 'method_learning': False, **agent['role']}
             from loom.autonomy.stages import role_signature
 
             budget_only = role_signature(previous_role) == role_signature(role)
             previous_role_revision = agent["role_revision"]
+            agent.pop('pending_configuration', None)
             # Running contracts stay pinned; semantic role changes invalidate queued work.
             agent.update(
                 role=role,

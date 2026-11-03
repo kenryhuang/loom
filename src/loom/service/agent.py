@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 
+from loom.core import thaw_json
 from loom.llm.managed_step import ManagedStep
 from loom.runtime import create, create_runtime_registry, step
 from loom.runtime.checkpoints import decode
@@ -151,7 +152,9 @@ async def _execute_assembled(state, bridge, provider, request, assembly):
     while True:
         result = await step(handle, context, trace_sink=bridge, trace_id=(bridge.checkpoint or {}).get("trace_id"))
         if not result.ok:
-            bridge.rpc("failure", {"message": result.error.message, "code": result.error.code})
+            error = result.error
+            bridge.rpc("failure", dict(message=error.message, code=error.code, retryable=error.retryable,
+                                       cause=thaw_json(error.cause), metadata=thaw_json(error.metadata), trace_id=error.trace_id))
             return
         control = result.value.control
         directive = bridge.rpc("result", result.value)

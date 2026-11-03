@@ -220,7 +220,7 @@ def test_large_research_result_compacts_and_retains_session_artifact(tmp_path):
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Encoding", "gzip")
             self.end_headers()
-            self.wfile.write(gzip.compress(b"source facts " * 2500))
+            self.wfile.write(gzip.compress(b"source facts " * 5000))
 
         def log_message(self, *_args):
             pass
@@ -247,12 +247,13 @@ def test_large_research_result_compacts_and_retains_session_artifact(tmp_path):
                     {"id": "summary", "objective": "Summarize the source", "dependencies": ["fetch"]},
                 ],
             },
-            # Three pinned node descriptions plus tool instructions need room to fit;
-            # the 32 KB source still exceeds this window and must be compacted.
-            "context": {"plugin": "research_context", "max_window_chars": 14000},
+            "context": {"plugin": "research_context"},
             "outputs": [{"kind": "report", "require_evidence_refs": True, "require_verified_sources": True}],
         }
-        sid = service.create("source", {"objective": f"source {url}", "task_spec": spec})["session_id"]
+        # Three pinned nodes and tool instructions fit; the 64 KB source must
+        # compact against the runtime window (legacy plugin overrides are ignored).
+        sid = service.create("source", {"objective": f"source {url}", "task_spec": spec,
+                                        "limits": {"max_window_chars": 22000}})["session_id"]
         state = wait_state(service, sid, "idle")
         assert requests == ["/source"]
         events = service.events(sid, 0, limit=200)

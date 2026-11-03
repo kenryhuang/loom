@@ -18,7 +18,7 @@ function block(form, title, {folded = false, summary = false} = {}) {
   node.append(heading); if (folded) node.append(body); form.append(node);
   return {node, body, count};
 }
-function field(parent, name, title, value = '', {multiline = false, required = false} = {}) {
+export function field(parent, name, title, value = '', {multiline = false, required = false} = {}) {
   const wrap = element('div', 'agent-setup-field'), label = element('label', '', title);
   const input = element(multiline ? 'textarea' : 'input'); input.id = `agent-create-${name}`; input.name = name;
   label.htmlFor = input.id; input.value = value ?? ''; input.required = required;
@@ -32,11 +32,11 @@ function options(select, choices, selected = '') {
   }
   select.value = String(selected ?? '');
 }
-function selectField(parent, name, title, choices, selected = '') {
+export function selectField(parent, name, title, choices, selected = '') {
   const input = field(parent, name, title), select = element('select');
   select.id = input.id; select.name = name; input.replaceWith(select); options(select, choices, selected); return select;
 }
-function preset(parent, name, title, choices, value, {min = 1, max = 100000000, optional = false} = {}) {
+export function preset(parent, name, title, choices, value, {min = 1, max = 100000000, optional = false} = {}) {
   const initial = String(value ?? '');
   const choice = selectField(parent, name, title, [...choices, ['custom','自定义']], choices.some(c => c[0] === initial) ? initial : 'custom');
   const custom = field(parent, `${name}_custom`, `${title}（自定义数值）`, initial);

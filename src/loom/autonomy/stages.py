@@ -251,6 +251,11 @@ class StageCoordinator:
         self.store.put(db, "agents", agent)
 
     def advance(self, aid):
+        from loom.autonomy.configuration import activate
+
+        with self.store.sessions.transaction() as db:
+            if not activate(self.store, db, aid):
+                return
         snapshot = self.store.snapshot(aid)
         served = {s["objective_id"]: s.get("last_planned_at", "") for s in snapshot["objective_planning"]}
         for objective in sorted(snapshot["role"]["long_term_objectives"], key=lambda o: served.get(o["id"], "")):

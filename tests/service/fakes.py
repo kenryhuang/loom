@@ -75,6 +75,22 @@ def routing_failure_provider_factory(state):
     return FakeProvider(state) if state["run"].get("failure") else MissingRouteProvider()
 
 
+class TransportFailureProvider:
+    verification_provider = FixtureVerifier()
+    model = 'transport-fixture'
+
+    async def chat(self, *args, **kwargs):
+        from loom.core import err, make_loom_error
+
+        return err(make_loom_error('LLM_TRANSPORT_ERROR', 'arbitrary transport text', retryable=True,
+                                  cause=dict(name='URLError', reason=dict(name='SSLEOFError')),
+                                  metadata=dict(provider='fixture'), trace_id='failure-trace'))
+
+
+def transport_failure_provider_factory(state):
+    return FakeProvider(state) if state['run'].get('failure') else TransportFailureProvider()
+
+
 class TurnPromptProvider:
     verification_provider = FixtureVerifier()
 

@@ -2348,6 +2348,9 @@ section.setup-block { padding: 20px; }
 .dashboard-panel .agent-card { margin-top: 12px; background: var(--bg); }
 .agent-form { display: grid; gap: 12px; max-width: 760px; }
 .agent-form > button { justify-self: start; }
+.agent-configuration-form { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+.agent-configuration-form h4, .agent-configuration-form p { margin:0; }
+.agent-configuration-form .setup-collection { margin:0; }
 .agent-field { display: grid; gap: 6px; margin: 0; }
 .agent-field input, .agent-field textarea, .agent-card textarea { width: 100%; box-sizing: border-box; }
 .agent-error { color: var(--danger); white-space: pre-wrap; }

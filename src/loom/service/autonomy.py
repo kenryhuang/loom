@@ -33,6 +33,10 @@ class AutonomyService:
         result = self.store.snapshot(aid)
         result["service_enabled"] = self.service.autonomy_enabled
         result["service_error"] = self.supervisor.last_error
+        from loom.autonomy.configuration import preview
+
+        result['configuration'] = dict(role=preview(result), pending=bool(result.get('pending_configuration')),
+                                       effective_role_revision=result['role_revision'])
         result["budget"] = BudgetLedger(self.store.sessions.path).summary(aid)
         result['daily_budget'] = BudgetLedger(self.store.sessions.path, clock=self.store.clock).daily_summary(aid)
         result["objective_budget"] = BudgetLedger(self.store.sessions.path).objective_summary(aid)
@@ -446,6 +450,11 @@ class AutonomyService:
         if route == ["role", "revisions"] and method == "POST":
             strict(body, {"command_id", "expected_revision", "role"})
             return self.store.revise_role(aid, body.get("command_id"), body.get("expected_revision"), body.get("role"))
+        if len(route) == 2 and route[0] == 'configuration' and method == 'POST':
+            from loom.autonomy.configuration import revise
+
+            strict(body, {'command_id', 'expected_revision', 'changes'})
+            return revise(self.store, aid, body.get('command_id'), body.get('expected_revision'), route[1], body.get('changes'))
         if route == ["goals"] and method == "POST":
             strict(body, {"command_id", "goal"})
             return self.store.add_goal(aid, body.get("command_id"), body.get("goal"))

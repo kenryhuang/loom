@@ -6,7 +6,7 @@ import pytest
 
 from loom.runtime.checkpoints import encode
 from loom.service.controller import LoomService
-from tests.service.fakes import provider_factory, routing_failure_provider_factory
+from tests.service.fakes import provider_factory, routing_failure_provider_factory, transport_failure_provider_factory
 
 
 def wait_state(service, sid, wanted, timeout=10):
@@ -33,6 +33,29 @@ def resume_provider_factory(state):
     if state["run"].get("time_budget_start_seconds", 0):
         provider.objective = "Maintain"
     return provider
+
+
+def test_worker_preserves_retryable_failure_and_nested_cause_across_restart(tmp_path):
+    service = LoomService(tmp_path / 'data', provider_factory=transport_failure_provider_factory).start()
+    try:
+        sid = create(service, tmp_path / 'workspace')
+        state = wait_state(service, sid, 'failed')
+        failure = state['run']['failure']
+        assert failure['code'] == 'LLM_TRANSPORT_ERROR'
+        assert failure['retryable'] is True
+        assert failure['cause']['reason']['name'] == 'SSLEOFError'
+        assert failure['metadata']['provider'] == 'fixture'
+        assert failure['trace_id']  # Runtime may supply its own trace identity.
+    finally:
+        service.close()
+    restored = LoomService(tmp_path / 'data', provider_factory=transport_failure_provider_factory).start()
+    try:
+        assert restored.snapshot(sid)['run']['failure'] == failure
+        command(restored, sid, 'resume')
+        done = wait_state(restored, sid, 'idle')
+        assert done['run']['id'] == state['run']['id']
+    finally:
+        restored.close()
 
 
 def test_continuous_task_has_multiple_runs_and_persistent_history(tmp_path):

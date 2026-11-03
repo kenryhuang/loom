@@ -68,7 +68,9 @@ def test_long_history_has_a_bounded_prompt_and_keeps_the_current_request():
     assert projected[-1].content == "Current request for this round:\nLatest request only"
     assert any(m.role == "assistant" for m in projected)
     assert "archive" in projected[1].content
-    compacted, _ = manager.compact(projected, 6000)
+    # Leave room for pinned instructions and retained exchange metadata while
+    # still forcing compaction of the larger transcript.
+    compacted, _ = manager.compact(projected, 8000)
     assert "- Objective: Latest request only" in compacted[0].content
     assert "archive" in compacted[1].content
 

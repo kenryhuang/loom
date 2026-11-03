@@ -36,6 +36,17 @@ def test_authenticated_agent_api_commands_and_scope(agent_service):
         assert request(f"/v1/agents/{aid}/commands", {"command_id": "pause", "type": "pause", "expected_revision": 1})[0] == 409
         assert request(f"/v1/agents/{aid}/context/missing")[0] == 404
         assert request(f"/v1/agents/{aid}/guidance", {"command_id": "guide", "text": "just this", "scope": "current_task"})[0] == 400
+        current = request(f'/v1/agents/{aid}')[1]
+        settings = dict(command_id='budget-only', expected_revision=current['revision'], changes=dict(budget=dict(daily_tokens=2000000)))
+        saved = request(f'/v1/agents/{aid}/configuration/budget', settings)
+        assert saved[0] == 200
+        assert request(f'/v1/agents/{aid}/configuration/budget', settings) == saved
+        preview = request(f'/v1/agents/{aid}')[1]
+        assert preview['role'] == current['role']
+        assert preview['configuration']['role']['budget']['daily_tokens'] == 2000000
+        assert preview['configuration']['pending']
+        invalid = dict(command_id='wrong-section', expected_revision=preview['revision'], changes=dict(workspace='/tmp'))
+        assert request(f'/v1/agents/{aid}/configuration/budget', invalid)[0] == 400
     finally:
         connection.close()
         server.shutdown()

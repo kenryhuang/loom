@@ -84,7 +84,11 @@ class Dispatcher:
         from loom.autonomy.goals import sources_ready
 
         try:
+            from loom.autonomy.configuration import activate
+
             with self.store.sessions.transaction() as db:
+                if not activate(self.store, db, aid):
+                    return
                 agent = self.store.get(db, "agents", aid)
                 work = self.store.get(db, "agent_work_packages", wid, aid)
                 if agent["state"] != "enabled" or work["state"] != "pending":
@@ -103,12 +107,13 @@ class Dispatcher:
             return
         dynamic = None if stale else bind_for_dispatch(self.service, agent, work)
         payload = task_payload(agent, work, binding=dynamic)
+        generation = agent['generation']
         # Lock order is service lock -> SessionStore lock throughout dispatch/control.
         with self.service.lock:
             with self.store.sessions.transaction() as db:
                 agent = self.store.get(db, "agents", aid)
                 work = self.store.get(db, "agent_work_packages", wid, aid)
-                if agent["state"] != "enabled" or work["state"] != "pending":
+                if agent["state"] != "enabled" or agent['generation'] != generation or work["state"] != "pending":
                     return
                 goal = self.store.get(db, "agent_goals", work["goal_id"], aid)
                 if self._quiet_block(db, aid, agent, work, goal):

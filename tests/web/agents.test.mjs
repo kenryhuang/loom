@@ -51,7 +51,8 @@ test('Details reuse Evaluation shell, dashboards and keyboard tab navigation',as
    view.tab=tab;view.render();
    assert.ok([...view.root.querySelector('.agent-content').children].every(n=>n.classList.contains('dashboard-panel') || n.classList.contains('dashboard-disclosure')));
   }
-  await view.createForm(data); assert.equal(heading.hidden,true); assert.ok(view.root.querySelector('.setup-form'));
+  await view.createForm(data); assert.equal(heading.hidden,false); assert.ok(view.root.querySelector('.agent-configuration-form'));
+  assert.equal(view.root.querySelector('[name=workspace], [name=objective]'),null);
   [...view.root.querySelectorAll('button')].find(b=>b.textContent==='取消').click();
   await new Promise(r=>setTimeout(r,0));
   assert.equal(heading.hidden,false); assert.ok(view.root.querySelector('.evaluation-tabs'));
@@ -73,6 +74,91 @@ test('Unchanged polling retains inspected records; server state changes refresh 
 });
 
 const tick = () => new Promise(resolve => setTimeout(resolve,0));
+
+test('Overview exposes scoped configuration panels and read-only goals and workspace',async()=>{
+ const data=fixture();const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');
+  const panels=[...view.root.querySelectorAll('[data-configuration-section]')];
+  assert.deepEqual(panels.map(panel=>panel.dataset.configurationSection).sort(),
+   ['budget','execution','identity','learning','models','resources','scheduling']);
+  assert.ok(panels.every(panel=>panel.querySelector('button[aria-label^="编辑"]')));
+  assert.match(view.root.textContent,/长期目标（只读）/);assert.match(view.root.textContent,/工作目录（固定）/);
+  assert.equal(view.root.querySelector('[name=workspace], [name=objective]'),null);
+  [...view.root.querySelectorAll('button')].find(button=>button.textContent==='前往目标页面').click();
+  assert.equal(view.tab,'Goals');
+ }finally{view.close();dom.window.close();}
+});
+
+test('Budget cancel closes immediately after focused editing and polling retains a blurred draft',async()=>{
+ let data=fixture(),posts=0;
+ const {dom,view}=setup({json:async(path,options)=>{
+  if(options?.body)posts++;return path==='/v1/agents'?{agents:[data]}:structuredClone(data);
+ }});
+ try{
+  await view.open();await view.select('a');await view.createForm(data,'budget');
+  const form=view.root.querySelector('.agent-configuration-form');
+  assert.deepEqual([...form.querySelectorAll('input,select,textarea')].map(input=>input.name),['daily_tokens','daily_tokens_custom']);
+  form.elements.daily_tokens.value='10000000';form.elements.daily_tokens.focus();
+  data={...data,activity:'planning'};document.activeElement.blur();await view.refresh();
+  assert.equal(view.root.querySelector('.agent-configuration-form'),form);
+  assert.equal(form.elements.daily_tokens.value,'10000000');
+  form.elements.daily_tokens.focus();[...form.querySelectorAll('button')].find(button=>button.textContent==='取消').click();
+  assert.equal(view.root.querySelector('.agent-configuration-form'),null);
+  assert.ok(view.root.querySelector('[data-configuration-section=budget]'));
+  assert.equal(posts,0);assert.equal(data.role.budget.daily_tokens,1000000);
+ }finally{view.close();dom.window.close();}
+});
+
+test('Budget save stages only daily tokens and displays the pending value',async()=>{
+ let data=fixture(),sent,pathSent;
+ const original=structuredClone(data.role);
+ const {dom,view}=setup({json:async(path,options)=>{
+  if(options?.body){sent=options.body;pathSent=path;
+   data={...data,revision:3,pending_configuration:{sections:{budget:sent.changes}},
+    configuration:{pending:true,role:{...data.role,budget:{...data.role.budget,...sent.changes.budget}}}};
+   return data;
+  }
+  return path==='/v1/agents'?{agents:[data]}:structuredClone(data);
+ }});
+ try{
+  await view.open();await view.select('a');await view.createForm(data,'budget');
+  const form=view.root.querySelector('.agent-configuration-form');form.elements.daily_tokens.value='10000000';
+  form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await tick();
+  assert.equal(pathSent,'/v1/agents/a/configuration/budget');assert.equal(sent.expected_revision,2);
+  assert.deepEqual(sent.changes,{budget:{daily_tokens:10000000}});assert.ok(sent.command_id);
+  assert.deepEqual(data.role,original);assert.equal(view.root.querySelector('.agent-configuration-form'),null);
+  const budget=view.root.querySelector('[data-configuration-section=budget]');
+  assert.match(budget.textContent,/10,000,000/);assert.match(budget.textContent,/待新任务生效/);
+ }finally{view.close();dom.window.close();}
+});
+
+test('Cancel during model loading ignores a stale catalog response',async()=>{
+ let resolve;const data=fixture();const {dom,view}=setup({json:async path=>{
+  if(path==='/v1/web/catalog')return new Promise(r=>resolve=r);
+  return path==='/v1/agents'?{agents:[data]}:data;
+ }});
+ try{
+  await view.open();await view.select('a');const loading=view.createForm(data,'models');
+  const form=view.root.querySelector('.agent-configuration-form');
+  assert.equal(form.querySelector('button[type=submit]').disabled,true);
+  [...form.querySelectorAll('button')].find(button=>button.textContent==='取消').click();
+  assert.equal(view.root.querySelector('.agent-configuration-form'),null);
+  resolve({models:[{id:'late-model'}]});await loading;
+  assert.equal(view.root.querySelector('.agent-configuration-form'),null);assert.equal(view.configurationEditor,null);
+ }finally{view.close();dom.window.close();}
+});
+
+test('Cancel creation immediately restores selected Agent even while an input is focused',async()=>{
+ const data=fixture();const {dom,view}=setup({json:async path=>path==='/v1/web/catalog'?{}:path==='/v1/knowledge-bases'?{knowledge_bases:[]}:path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');await view.createForm();
+  const form=view.root.querySelector('.setup-form');form.elements.name.focus();
+  [...form.querySelectorAll('button')].find(button=>button.textContent==='取消').click();
+  assert.equal(view.root.querySelector('.setup-form'),null);assert.ok(view.root.querySelector('.agent-tabs'));
+  assert.equal(document.querySelector('#agents-heading').hidden,false);
+ }finally{view.close();dom.window.close();}
+});
 
 test('Overview omits scheduling details while Work retains packages and Session links',async()=>{
  const data=fixture();
@@ -170,7 +256,7 @@ test('Stage planning is explicitly enabled per objective with the Agent revision
 const resourceCatalog = {external_tools:[{id:'lookup',connector_name:'Research',name:'Lookup',kind:'mcp',description:'Find references',effect_kind:'read_only'}]};
 const resourceBases = {knowledge_bases:[{id:'docs',name:'Project documents',description:'Design notes'}]};
 
-test('Knowledge tab selects resources and saves a role revision without losing advanced configuration',async()=>{
+test('Knowledge tab stages only resource settings without losing advanced configuration',async()=>{
  let data=fixture(),sent;
  Object.assign(data.role,{external_tool_ids:['old-tool'],knowledge_base_ids:['old-base'],model:'judge',task_spec:{custom:'keep'},
   source_routes:[{id:'docs',topic:'Design',paths:['docs'],knowledge_base_ids:['old-base'],external_tool_ids:['old-tool'],freshness:'latest'}]});
@@ -178,7 +264,8 @@ test('Knowledge tab selects resources and saves a role revision without losing a
  const {dom,view}=setup({json:async(path,options)=>{
   if(path==='/v1/web/catalog')return resourceCatalog;
   if(path==='/v1/knowledge-bases')return resourceBases;
-  if(options?.body){sent=options.body;data={...data,revision:data.revision+1,role:sent.role};return data;}
+  if(options?.body){assert.equal(path,'/v1/agents/a/configuration/resources');sent=options.body;
+   data={...data,revision:data.revision+1,configuration:{pending:true,role:{...data.role,...sent.changes}}};return data;}
   return path==='/v1/agents'?{agents:[data]}:structuredClone(data);
  }});
  try{
@@ -194,10 +281,10 @@ test('Knowledge tab selects resources and saves a role revision without losing a
   assert.equal(view.root.querySelector('.agent-resource-form'),form);
   form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await tick();
   assert.equal(sent.expected_revision,2);assert.ok(sent.command_id);
-  assert.deepEqual(sent.role.knowledge_base_ids,['docs']);assert.deepEqual(sent.role.external_tool_ids,['lookup']);
-  assert.equal(sent.role.model,prior.model);assert.deepEqual(sent.role.task_spec,prior.task_spec);
-  assert.deepEqual(sent.role.long_term_objectives,prior.long_term_objectives);assert.deepEqual(sent.role.budget,prior.budget);
-  assert.deepEqual(sent.role.source_routes,[{...prior.source_routes[0],knowledge_base_ids:[],external_tool_ids:[]}]);
+  assert.deepEqual(sent.changes.knowledge_base_ids,['docs']);assert.deepEqual(sent.changes.external_tool_ids,['lookup']);
+  assert.deepEqual(Object.keys(sent.changes).sort(),['external_tool_ids','knowledge_base_ids','source_routes']);
+  assert.deepEqual(data.role,prior);
+  assert.deepEqual(sent.changes.source_routes,[{...prior.source_routes[0],knowledge_base_ids:[],external_tool_ids:[]}]);
   assert.deepEqual(prior.source_routes[0].knowledge_base_ids,['old-base']);
   assert.equal(view.tab,'Knowledge');
   const saved=view.root.querySelector('.agent-resource-form');assert.notEqual(saved,form);

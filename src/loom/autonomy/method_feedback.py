@@ -160,6 +160,8 @@ def advance(store, background, aid):
                     current["method_evolution"] = outcome
                     store.put(db, "agent_learning_cycles", current)
             continue
+        if agent.get('pending_configuration'):
+            continue
         try:
             job = background.skills.start(
                 cycle["session_id"], dict(query=agent["role"]["role_text"][:4000]), agent_binding=dict(agent_id=aid, goal_id=cycle["goal_id"])

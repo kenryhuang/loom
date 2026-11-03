@@ -15,7 +15,7 @@ MANUAL_CODES = {'EXECUTION_UNKNOWN', 'ACCEPTANCE_EXTERNAL_DEPENDENCY', 'ACCEPTAN
 PLAN_CODES = {'TOOLS_UNAVAILABLE', 'TOKEN_BUDGET', 'ACCEPTANCE_CONTRACT', 'EXTERNAL_DEPENDENCY', 'EXECUTION_UNKNOWN'}
 
 
-def assess(state):
+def assess(state, *, failure=None):
     """Report every cause, including simultaneous capability and budget gaps."""
     acceptance = state.get('acceptance') or {}
     decision = acceptance.get('decision') or {}
@@ -27,6 +27,10 @@ def assess(state):
         if row not in causes:
             causes.append(row)
 
+    failure = failure if failure is not None else (state.get('run') or {}).get('failure') or {}
+    if (failure.get('code') in {'LLM_FAILED', 'LLM_TRANSPORT_ERROR', 'TIMEOUT'}
+            and failure.get('retryable') is True):
+        add('PROVIDER_TRANSIENT', failure=failure)
     budget = acceptance.get('budget') or decision.get('budget') or {}
     if code in BUDGET_CODES or any(budget.get(used, 0) >= budget.get(limit, float('inf')) for used, limit in (
             ('model_calls', 'max_model_calls'), ('elapsed_seconds', 'max_seconds'))):
@@ -67,11 +71,11 @@ def assess(state):
     if not causes:
         return None
     source = dict(run_id=(state.get('run') or {}).get('id'), task_revision=state['task'].get('revision'),
-                  task=state['task'], acceptance=acceptance, plan=state.get('plan'), autonomy=state.get('autonomy'))
+                  task=state['task'], acceptance=acceptance, plan=state.get('plan'), autonomy=state.get('autonomy'), failure=failure)
     mode = 'reassemble'
     if any(c['code'] in MANUAL_CODES | {'EXTERNAL_DEPENDENCY', 'UNKNOWN'} for c in causes):
         mode = 'manual'
-    elif ({c['code'] for c in causes} <= {'ACCEPTANCE_BUDGET', 'TOKEN_BUDGET'}
+    elif ({c['code'] for c in causes} <= {'ACCEPTANCE_BUDGET', 'TOKEN_BUDGET', 'PROVIDER_TRANSIENT'}
           and not any(c['details'].get('plan_item_id') for c in causes)
           and code not in {'ACCEPTANCE_INPUT_BUDGET', 'ACCEPTANCE_OUTPUT_BUDGET'}):
         mode = 'resume'

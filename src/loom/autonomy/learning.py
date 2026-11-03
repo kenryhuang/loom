@@ -29,6 +29,9 @@ class LearningCoordinator:
             return
         try:
             with self.store.sessions.transaction() as db:
+                from loom.autonomy.configuration import activate
+
+                activate(self.store, db, aid)
                 agent = self.store.get(db, "agents", aid)
                 policy = scheduling_policy(agent["role"])
                 requested = agent.get("learning_schedule_requested", False)
@@ -65,6 +68,8 @@ class LearningCoordinator:
         cycles = sorted(ordered(cycles), key=lambda c: c.get("requested_action") != "cancel")
         for cycle in cycles:
             action = cycle.get("requested_action")
+            if agent.get('pending_configuration') and not cycle.get('evaluation_id') and action != 'cancel':
+                continue
             if active_ids and cycle["id"] not in active_ids and action != "cancel":
                 continue  # Includes a cancellation still draining its model call.
             # Reconsider legacy next-window deferrals once when the structured
