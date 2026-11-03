@@ -73,7 +73,9 @@ class BoundedContextManager:
     def compact(self, messages, limit, *, schema_chars=0):
         """Archive full history, retain the latest complete exchange and leave headroom."""
         task_limit = limit
-        limit = min(limit, self.config.get("max_window_chars", limit))
+        # The caller supplies limits.max_window_chars (and any model capacity
+        # bound). Retain the old config key for checkpoint compatibility only;
+        # a template must not silently introduce a second, smaller window.
         reserve = min(self.config.get("reserve_chars", max(64, limit // 10)), max(1, limit // 3))
         available = limit - reserve - schema_chars
         before = self.size(messages)
@@ -171,7 +173,8 @@ class BoundedContextManager:
         after = self.size(window)
         return window, {"generation": self.generation, "artifact": ref, "before_chars": before, "after_chars": after,
                         "saved_chars": before - after, "task_limit_chars": task_limit,
-                        "plugin_limit_chars": self.config.get("max_window_chars"), "effective_limit_chars": limit,
+                        "plugin_limit_chars": None, "effective_limit_chars": limit, "window_source": "task_limits",
+                        "legacy_plugin_limit_chars": self.config.get("max_window_chars"),
                         "schema_chars": schema_chars, "reserve_chars": reserve, "available_chars": available,
                         "target_chars": target, "headroom_chars": available - after, "pinned_chars": pinned_chars,
                         "retained_exchanges": len(retained), "excerpted_messages": excerpted, "removed_messages": removed_count}

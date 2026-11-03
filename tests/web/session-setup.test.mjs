@@ -281,7 +281,7 @@ test("task editing preserves existing plugin options, unavailable bindings and v
   $("create-workspace").value = "/new";
   const payload = {objective: task.objective, task_spec: structuredClone(spec), knowledge_base_ids: ["missing-kb"]};
   view.apply(payload, {task_spec: spec}); view.restartChanges(payload);
-  assert.match($("restart-context-note").textContent, /7,000 characters \(limited by the context plugin\)/);
+  assert.match($("restart-context-note").textContent, /9,000 characters from task limits.max_window_chars/);
   assert.equal(payload.task_spec.context.max_window_chars, 9000);
   assert.equal(payload.workspace, '/old');
   assert.deepEqual(payload.task_spec.session_environment.resources, [{id: "source", kind: "directory", uri: "/old", access: "read-only"}]);

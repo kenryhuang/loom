@@ -44,7 +44,7 @@ PLAN_MODES = frozenset({"auto", "force", "off"})
 def builtin_templates():
     general = {
         "session_environment": {"plugin": "session"},
-        "context": {"plugin": "bounded_context", "max_window_chars": 24000},
+        "context": {"plugin": "bounded_context"},
         "tools": {"collections": ["task_control"]},
         "workflow": {"plugin": "dynamic"},
     }

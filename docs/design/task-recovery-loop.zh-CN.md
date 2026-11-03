@@ -28,6 +28,8 @@
 
 ## 工具与只读验证
 
+内置 `bounded_context` 和 `research_context` 的请求窗口直接使用运行时传入的 `limits.max_window_chars`。内置模板不再设置独立的 24,000 字符窗口；旧 checkpoint 中的插件 `max_window_chars` 仅保留用于配置身份兼容，不再作为额外上限。工具定义和回复预留仍在同一请求窗口内计入，固定上下文确实无法容纳时继续停止。
+
 Work 和验收条目可声明 `required_tools`。执行前检查实际工具绑定；缺少工具会生成 `ACCEPTANCE_CAPABILITY_UNAVAILABLE`，无需先执行计划再被验收拒绝。集合名称存在不代表其中的工具通过了资源权限过滤。
 
 只读工作区需要执行 shell/process 验证时，恢复会复制完整当前工作树，包括未提交内容和依赖，到服务数据目录下的独立验证目录。复制前后内容指纹必须一致；指向源树外的符号链接、链接式 Git worktree 和特殊文件不自动复制。TaskAssembly 将执行资源绑定到副本；原始约束、源路径、源指纹和执行路径记录在 recovery_context。普通 Session restart 仍不允许更换工作区，只有匹配宿主已提交重组意图的命令可切换到这个验证副本。

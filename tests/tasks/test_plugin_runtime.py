@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from loom.contexts.bounded import BoundedContextManager
+from loom.contexts.bounded import BoundedContextManager, ResearchContextManager
 from loom.core import Observation, ToolRef, now_iso, ok, thaw_json
 from loom.execution.native import NativeToolExecutionRuntime
 from loom.llm.api import LlmMessage, LlmResponse, LlmToolCall
@@ -507,6 +507,20 @@ def test_writable_directory_cannot_request_shared_lock(tmp_path):
         TaskAssembly(TaskRequest("Write", task_spec=spec))
 
 
+@pytest.mark.parametrize('manager_type', [BoundedContextManager, ResearchContextManager])
+def test_runtime_window_is_authoritative_for_legacy_context_configuration(manager_type):
+    manager = manager_type({'max_window_chars': 24000}, publish_artifact=lambda *_: pytest.fail('No archive is needed'))
+    messages = [LlmMessage('system', 'S' * 12066), LlmMessage('user', 'U' * 357),
+                LlmMessage('user', 'R' * 608, name='current_request'),
+                LlmMessage('user', 'A' * 9068, name='agent_context'),
+                LlmMessage('user', 'M' * 6229, name='deep_eval_memory'),
+                LlmMessage('user', 'P' * 770, name='execution_progress')]
+    with pytest.raises(ValueError, match='Pinned model context'):
+        manager.compact(messages, 24000, schema_chars=8583)
+    window, event = manager.compact(messages, 240000, schema_chars=8583)
+    assert window == messages and event is None
+
+
 def test_compaction_retains_latest_large_tool_result_and_progress_with_full_archive():
     artifacts = []
     manager = BoundedContextManager({'max_window_chars': 24000},
@@ -516,7 +530,7 @@ def test_compaction_retains_latest_large_tool_result_and_progress_with_full_arch
     messages = [LlmMessage('system', 'S' * 7000), LlmMessage('user', 'goal'),
                 LlmMessage('assistant', '', tool_calls=(call,)), LlmMessage('tool', content, tool_call_id='latest'),
                 LlmMessage('user', 'Continue the implementation', name='execution_progress')]
-    window, event = manager.compact(messages, 2400000, schema_chars=6420)
+    window, event = manager.compact(messages, 24000, schema_chars=6420)
     assert event['effective_limit_chars'] == 24000
     assert event['available_chars'] == 15180
     assert event['excerpted_messages'] == 1
@@ -528,7 +542,7 @@ def test_compaction_retains_latest_large_tool_result_and_progress_with_full_arch
     assert next(m for m in window if m.tool_calls).tool_calls == (call,)
     assert window[-1].name == 'execution_progress'
     assert artifacts[0]['messages'][1]['content'] == content
-    again, repeat = manager.compact(window, 2400000, schema_chars=6420)
+    again, repeat = manager.compact(window, 24000, schema_chars=6420)
     assert repeat is None and again == window
 
 
@@ -560,7 +574,7 @@ def test_compaction_retains_json_action_and_actual_shell_output():
     messages = [LlmMessage('system', 'S' * 7000), LlmMessage('user', 'goal'), action,
                 LlmMessage('user', result, name='shell_execute'),
                 LlmMessage('user', 'Continue', name='execution_progress')]
-    window, event = manager.compact(messages, 2400000, schema_chars=6420)
+    window, event = manager.compact(messages, 24000, schema_chars=6420)
     assert action in window
     output = json.loads(next(m.content for m in window if m.name == 'shell_execute'))
     assert output['exit_code'] == 0

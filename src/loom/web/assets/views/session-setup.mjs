@@ -86,9 +86,8 @@ export class SessionSetupView {
     const tokenInput = this.get('restart-max_tokens');
     tokenInput.required = task.limits.max_tokens !== null;
     tokenInput.placeholder = task.limits.max_tokens === null ? 'Shared daily allowance' : '';
-    const cap = task.task_spec?.context?.max_window_chars;
-    const effective = Math.min(task.limits.max_window_chars, cap ?? task.limits.max_window_chars);
-    this.get("restart-context-note").textContent = `Currently effective: ${effective.toLocaleString()} characters${cap < task.limits.max_window_chars ? " (limited by the context plugin)" : ""}. Save & restart applies the value above to both task and built-in context plugin limits.`;
+    const effective = task.limits.max_window_chars;
+    this.get("restart-context-note").textContent = `Currently effective: ${effective.toLocaleString()} characters from task limits.max_window_chars. Save & restart applies the value above to the built-in context window.`;
     this.get("setup-status").textContent = "Review the current task configuration. Save & restart builds a fresh plan and acceptance checks; previous messages and results remain background.";
     this.updateSummaries();
   }

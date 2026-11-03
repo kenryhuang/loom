@@ -6,7 +6,7 @@ import pytest
 from loom.core import ok
 from loom.llm.api import LlmResponse, TokenUsage
 from loom.service.contracts import ServiceError
-from loom.service.session_setup import REPAIR_ADDABLE, SessionSetup, recommend_setup
+from loom.service.session_setup import REPAIR_ADDABLE, SessionSetup, builtin_templates, recommend_setup
 from loom.tasks.config import load_task_config
 from tests.service.test_api import api  # noqa: F401
 
@@ -20,6 +20,12 @@ def proposal(**changes):
         "collection_reasons": {"filesystem": "Inspect the implementation"},
         **changes,
     }
+
+
+def test_builtin_context_templates_inherit_the_task_window():
+    templates = {row['id']: row for row in builtin_templates()}
+    for name in ('general', 'research'):
+        assert 'max_window_chars' not in templates[name]['task_spec']['context']
 
 
 class Recommender:
