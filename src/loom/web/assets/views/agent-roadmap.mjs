@@ -33,12 +33,12 @@ function goalIds(stage,d) {
   return [...new Set([...(stage.goal_ids || []),...d.goals.filter(g=>g.stage_id===stage.id).map(g=>g.id)])];
 }
 function stageGoals(root,stage,d,view) {
-  const current=stage.goal_ids || [],old=[];
+  const current=stage.goal_ids || [],old=[];let n=0;
   for(const id of goalIds(stage,d)) {
     const goal=d.goals.find(g=>g.id===id);
     if(!goal) {root.append(element('p','muted',`目标详情暂不可用：${id}`));continue;}
     if(!current.includes(id)) {old.push(goal);continue;}
-    view.renderGoal(root,d,goal);
+    view.renderGoal(root,d,goal,`G${++n}`);
   }
   if(!goalIds(stage,d).length) root.append(element('p','muted','尚未生成阶段目标。'));
   if(old.length) {
@@ -52,8 +52,15 @@ function stageDetail(root,stage,d,view,isCurrent) {
   heading.append(element('h4','',`${isCurrent?(terminal.has(stage.state)?'最近阶段':'当前阶段'):'历史阶段'}：${stage.title}`),badge(name(stage.state),stage.state));root.append(heading);
   if(stage.expected_outcome) root.append(element('p','agent-roadmap-outcome',stage.expected_outcome));
   const goalSet=new Set(stage.goal_ids || []),works=d.work_packages.filter(w=>goalSet.has(w.goal_id));
-  const done=d.goals.filter(g=>goalSet.has(g.id)&&g.state==='completed').length;
-  root.append(element('p','muted',`目标已验收 ${done} / ${goalSet.size} · 工作包已验收 ${works.filter(w=>w.state==='succeeded').length} / ${works.length}`));
+  const done=d.goals.filter(g=>goalSet.has(g.id)&&g.state==='completed').length,succeeded=works.filter(w=>w.state==='succeeded').length;
+  const progress=element('div','agent-roadmap-progress');
+  for(const [label,value,total] of [['目标验收',done,goalSet.size],['工作包验收',succeeded,works.length]]) {
+    const row=element('div','agent-roadmap-progress-row'),bar=element('progress');
+    bar.max=Math.max(total,1);bar.value=value;bar.setAttribute('aria-label',`${label} ${value} / ${total}`);
+    row.append(element('span','agent-roadmap-progress-label',label),bar,element('span','agent-roadmap-progress-count',`${value} / ${total}`));
+    progress.append(row);
+  }
+  root.append(progress);
   const issues=(d.selection || []).filter(s=>goalSet.has(s.goal_id)&&s.eligible===false && !['DEPENDENCY_WAIT'].includes(s.blocker?.code) && !d.goals.some(g=>g.id===s.goal_id&&terminal.has(g.state)));
   const changed=d.goals.some(g=>goalSet.has(g.id)&&g.source_changed&&!terminal.has(g.state));
   const reasons=[...new Set(issues.map(s=>s.blocker?.code==='SOURCE_UNAVAILABLE'?'所需来源尚未刷新或已失效，工作包暂未派发。':s.reason).filter(Boolean))];
@@ -125,9 +132,6 @@ export function renderRoadmaps(root,d,view) {
     const header=block.querySelector('header');header.append(badge(enabled?name(state?.state):'未开启自动推进',state?.state));
     if(roadmap?.revision || roadmap?.created_at) header.append(element('small','muted',`${roadmap.revision?'路线 v'+roadmap.revision:''}${roadmap.created_at?' · '+time(roadmap.created_at):''}`));
     block.append(element('h4','agent-roadmap-vision',objective.desired_outcome));
-    const completed=stages.filter(s=>s.state==='completed').length;
-    block.append(element('p','muted agent-roadmap-caption',`已交付 ${completed} 个阶段 · ${current && !terminal.has(current.state)?'1 个当前阶段':'暂无执行中阶段'} · ${roadmap?.future?.length || 0} 个暂定方向`));
-    block.append(element('p','muted small','路线随实际交付与复盘更新；暂定方向尚未派发，后续可能调整。'));
     if(roadmap?.baseline) block.append(element('p','agent-roadmap-baseline',`当前基线 · ${roadmap.baseline}`));
     if(!enabled) {
       block.append(element('p','muted','自动阶段规划未开启。开启后将核实现状，并在既有范围与预算内生成阶段目标、拆分执行。'));

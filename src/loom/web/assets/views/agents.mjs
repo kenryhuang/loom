@@ -383,17 +383,28 @@ export class AgentsView {
       for(const goal of standalone) this.renderGoal(block,d,goal);
     }
   }
-  renderGoal(root,d,goal) {
+  renderGoal(root,d,goal,ord) {
     const stage=(d.stages || []).find(s=>s.id===goal.stage_id && s.goal_ids?.includes(goal.id));
     const editable=editableStage(d,stage) && !['completed','cancelled','superseded'].includes(goal.state);
-    const row=roadmapDisclosure(this,root,d,`goal:${goal.id}`,goal.objective);
+    const row=roadmapDisclosure(this,root,d,`goal:${goal.id}`,'');
     row.classList.add('agent-roadmap-goal');row.dataset.goalId=goal.id;row.tabIndex=-1;
-    const summary=row.querySelector('summary');summary.append(badge(label(goal.state),goal.state));
-    row.append(element('code','agent-roadmap-id',goal.id));
+    const packages=d.work_packages.filter(w=>w.goal_id===goal.id && !w.superseded_contract);
+    const accepted=packages.filter(w=>w.state==='succeeded').length,total=packages.length;
+    const heading=element('span','agent-goal-heading'),name=element('span','goal-tree-title');
+    if(ord) name.append(element('span','goal-tree-id',ord));
+    name.append(document.createTextNode(goal.objective));
+    const tags=element('span','goal-tree-tags');tags.append(badge(label(goal.state),goal.state));
+    const track=element('span','agent-goal-progress-track'+(total?'':' is-unknown'));
+    track.setAttribute('role','img');track.setAttribute('aria-label',`工作包验收 ${accepted} / ${total}`);
+    if(total){const fill=element('span','agent-goal-progress-fill');fill.style.width=`${Math.round(accepted/total*100)}%`;track.append(fill);}
+    tags.append(track,element('span','agent-goal-progress-count',total?`${accepted} / ${total}`:'尚未拆分'));
+    const idcode=element('code','agent-roadmap-id',goal.id);idcode.title=goal.id;tags.append(idcode);
+    heading.append(name,tags);
+    row.querySelector('summary').append(heading);
     row.append(element('h5','','验收条件'));
     this.showRows(row, goal.acceptance);
     const selection = (d.selection || []).find(s => s.goal_id === goal.id);
-    if (selection) row.append(element('p','muted',selection.reason));
+    if (selection && selection.blocker?.code !== 'GOAL_STATE') row.append(element('p','muted',selection.reason));
     if (goal.proposal) row.append(element('p','muted',`提案依据：${goal.proposal.reason} · 来源：${goal.proposal.source}`));
     if (goal.not_before) row.append(element('p','muted',`最早重试：${goal.not_before}`));
     if (goal.source_changed) row.append(element('p','notice',['completed','cancelled','superseded'].includes(goal.state)
