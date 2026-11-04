@@ -138,6 +138,26 @@ def test_lost_resume_ack_reconciles_without_another_recovery_attempt(agent_servi
     assert service.snapshot(sid)["task"]["state"] == "queued"
 
 
+@pytest.mark.parametrize('duration', [100, 3600, 36000])
+def test_time_pause_renews_window_once_and_preserves_larger_user_limit(agent_service, duration):
+    from loom.tasks.recovery import assess
+
+    service, facade, aid, _, sid = paused_work(agent_service, 'Time budget is nearly exhausted',
+                                              stop_code='ACTIVE_TIME_BUDGET_EXCEEDED')
+    service.store.update(sid, lambda s, e, db: s['task']['limits'].update(max_duration_seconds=duration))
+    assert assess(service.snapshot(sid))['causes'] == [dict(code='ACTIVE_TIME_BUDGET', details={})]
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    resumed = service.snapshot(sid)
+    assert facade.snapshot(aid)['scheduler']['state'] == 'recovered'
+    assert resumed['task']['state'] == 'queued'
+    assert resumed['run']['id'] == 'r1'
+    assert resumed['run']['time_budget_start_seconds'] == resumed['run']['active_seconds'] == 3601
+    assert resumed['task']['limits']['max_duration_seconds'] == max(3600, duration)
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    assert facade.snapshot(aid)['work_packages'][0]['recovery']['attempts'] == 1
+    assert len([e for e in service.events(sid) if e['type'] == 'run.time_budget.renewed']) == 1
+
+
 def test_daily_budget_waits_without_allocating_or_consuming_recovery(agent_service):
     service, facade, aid, work, sid = paused_work(agent_service)
     with service.store.transaction() as db:

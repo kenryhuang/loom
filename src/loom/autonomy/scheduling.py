@@ -93,8 +93,10 @@ class QueueScheduler:
 
     def _cycle(self, aid):
         from loom.autonomy.control import drain
+        from loom.autonomy.sources import reconcile_own_changes
 
         drain(self.service, self.store, aid)
+        reconcile_own_changes(self.store, aid)
         self.supervisor.stages.reconcile(aid)
         agent = self.store.snapshot(aid)
         replaced = {g.get("predecessor_id") for g in agent["goals"] if g.get("predecessor_id")}
@@ -149,6 +151,7 @@ class QueueScheduler:
             return self.finish(aid, 'waiting', '新配置已保存，等待已派发任务与分析结束后用于下一次调度。')
 
         sources.refresh(self.store, aid)
+        self.supervisor.stages.reconcile(aid)
         if works:
             return self.dispatch_one(aid, works)
         # Existing queued goals belong to this queue. Do not invent replacements for blocked goals.
@@ -219,6 +222,7 @@ class QueueScheduler:
         from loom.autonomy import sources
 
         sources.refresh(self.store, aid)
+        self.supervisor.stages.reconcile(aid)
         store, service = self.store, self.service
         try:
             with service.lock, store.sessions.transaction() as db:
@@ -321,7 +325,7 @@ class QueueScheduler:
                     if intent["run_id"] != run["id"]:
                         raise ServiceError("恢复意图与当前 run 不匹配，请检查执行历史", 409)
                     state["task"]["limits"].update(
-                        max_duration_seconds=3600, max_tokens=None
+                        max_duration_seconds=max(3600, state["task"]["limits"]["max_duration_seconds"]), max_tokens=None
                     )
                     if run["state"] == "failed":
                         run["time_budget_start_seconds"] = run.get("active_seconds", 0)

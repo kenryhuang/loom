@@ -2,7 +2,6 @@
 
 import json
 from datetime import datetime, timedelta
-from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 
 from loom.autonomy.acceptance import inherit, initialize, objective_view, recorded_verdict, ref_key
@@ -10,6 +9,7 @@ from loom.autonomy.acceptance import key as criterion_key
 from loom.autonomy.blockers import RECONCILED, Code, from_exception, holds, make
 from loom.autonomy.contracts import goal_contract, stage_enabled
 from loom.autonomy.execution_budget import execution_block, objective_limit
+from loom.autonomy.stage_overlap import delivery_index, validate_overlap
 from loom.autonomy.store import digest
 from loom.service.contracts import ServiceError
 
@@ -418,6 +418,9 @@ class StageCoordinator:
                 required_revision=state.get("required_revision"),
                 repair=state.get("repair"),
                 learning=[{k: c.get(k) for k in ("id", "goal_id", "state", "coverage", "blocked_reason")} for c in cycles],
+                delivery_index=delivery_index(
+                    [s for s in store.rows(db, 'agent_stages', aid) if s['objective_id'] == oid],
+                    store.rows(db, 'agent_goals', aid)),
             )
             from loom.autonomy.stage_planner import acceptance_support
 
@@ -576,10 +579,8 @@ class StageCoordinator:
                     db, state, state="waiting", reason="Daily new-stage limit reached", next_review_at=next_day.astimezone(store.clock().tzinfo).isoformat()
                 )
                 return
-            for old in existing:
-                similarity = SequenceMatcher(None, stage["expected_outcome"].casefold(), old["expected_outcome"].casefold()).ratio()
-                if old["state"] not in {"cancelled", "superseded"} and (old["delivery_key"] == stage["delivery_key"] or similarity > 0.85):
-                    raise ServiceError("Proposed stage repeats an existing delivery; provide a concrete different contribution")
+            original = store.rows(db, "agent_goals", aid)
+            validate_overlap(stage, delivery_index(existing, original))
             sid = "stage_" + digest(run_id)[:32]
             stage["id"] = sid
             initialize(stage)
@@ -603,7 +604,6 @@ class StageCoordinator:
                 created_at=store.now(),
             )
             goal_ids, mapping = [], {}
-            original = store.rows(db, "agent_goals", aid)
             for index, item in enumerate(stage.pop("goals")):
                 # Integration Goal inherits every stage criterion, not a model's weaker subset.
                 criteria = item["acceptance"]
@@ -620,12 +620,6 @@ class StageCoordinator:
                     ):
                         raise ServiceError("Only compatible completed unassigned Goals can be reused")
                 else:
-                    if any(
-                        g["state"] not in {"cancelled", "superseded"}
-                        and SequenceMatcher(None, g["objective"].casefold(), item["objective"].casefold()).ratio() > 0.9
-                        for g in original
-                    ):
-                        raise ServiceError("Stage Goal overlaps existing work; reuse the delivery or change scope")
                     goal = dict(
                         **goal_contract(
                             dict(

@@ -592,8 +592,9 @@ def test_capture_deadline_covers_cold_preview_start_and_visual_narration():
     # A capture pays for: preview dev-server cold start + Chromium launch + render + assertions
     # (worker RPC) plus the bounded visual narration (~30s). The tool deadline must cover both
     # with margin, otherwise every acceptance screenshot is a race against the clock.
-    from loom.browser.tools import BrowserCollection
     from types import SimpleNamespace
+
+    from loom.browser.tools import BrowserCollection
 
     refs = {binding.ref.id: binding.ref for binding in BrowserCollection(SimpleNamespace(workspace=None)).bindings()}
     assert refs["browser_capture"].timeout_ms >= 180_000
@@ -623,3 +624,70 @@ async def test_capture_worker_call_gets_extended_timeout_for_preview_cold_start(
 
     await collection.capture({"id": "x", "url": "http://127.0.0.1:9/"})
     assert calls and calls[0] >= 120
+
+
+@pytest.mark.asyncio
+async def test_host_visual_acceptance_runs_after_all_plan_items_complete(tmp_path):
+    from types import SimpleNamespace
+
+    from loom.tasks.runner import make_task_context
+
+    pytest.importorskip('playwright')
+    (tmp_path / 'index.html').write_text('<div id="ready">Requested appearance</div>')
+    criterion = {'id': 'appearance', 'description': 'Requested scene rendered', 'verifier': 'visual',
+                 'scope': ['index.html'], 'check': {'scenario': scene()}}
+    assembly = TaskAssembly(TaskRequest('Render scene', workspace=tmp_path, task_spec=spec(tmp_path)), plan_mode='force')
+    vision, seen = vision_provider()
+    assembly.configure_acceptance(Judge([criterion]), visual_provider=vision)
+    context = make_task_context(assembly.request, assembly=assembly, plan_mode='force').unwrap()
+    plan = assembly.workflow.controller
+    plan.submit('Implement scene', ['Render scene']).unwrap()
+    item = plan.state.items[0]
+    plan.update('Implementation complete', [dict(id=item.id, content=item.content, status='completed')]).unwrap()
+    handlers = assembly.handlers()
+    runtime = SimpleNamespace(run_id='run', loop_id='loop', trace_id='trace', trace_sink=Sink(), cancellation=None)
+
+    async def call_tool(name, value, metadata=None):
+        return await handlers[name](value, {'metadata': metadata or {}})
+
+    runtime.call_tool = call_tool
+    try:
+        # Model-supplied metadata cannot bypass the plan guard.
+        rejected = await call_tool('browser_capture', scene(), {'usage_role': 'verification'})
+        assert thaw_json(rejected.value.value)['code'] == 'PLAN_ACTIVE_ITEM_REQUIRED'
+        assert await assembly.acceptance.verify(context, runtime, 'Scene delivered'), assembly.acceptance.data['reason']
+        assert len(seen) == 1
+        assert any(e['type'] == 'visual.capture.completed' for e in runtime.trace_sink.events)
+        assert all(r['status'] == 'passed' for r in assembly.acceptance.data['results'])
+    finally:
+        await assembly.close()
+
+
+@pytest.mark.asyncio
+async def test_visual_capture_without_artifact_reports_gap_instead_of_keyerror(tmp_path):
+    from types import SimpleNamespace
+
+    from loom.core import Observation
+    from loom.tasks.runner import make_task_context
+    from loom.tasks.visual_acceptance import verify_visual
+
+    assembly = TaskAssembly(TaskRequest('Render scene', workspace=tmp_path, task_spec=spec(tmp_path)), plan_mode='off')
+    vision, seen = vision_provider()
+    assembly.configure_acceptance(Judge(), visual_provider=vision)
+    assembly.acceptance.goal(make_task_context(assembly.request, assembly=assembly, plan_mode='off').unwrap())
+    runtime = SimpleNamespace(run_id='run', loop_id='loop', trace_id='trace', trace_sink=Sink())
+
+    async def rejected(*args, **kwargs):
+        return ok(Observation('o', 'planning.guard', {'accepted': False, 'message': 'Capture was rejected'}, 'now'))
+
+    runtime.call_tool = rejected
+    assembly.acceptance.data['verification_sequence'] = 1
+    try:
+        row, _ = await verify_visual(assembly.acceptance, {'id': 'appearance', 'check': {'scenario': scene()}}, runtime)
+        assert row['status'] == 'blocked'
+        assert row['reason_code'] == 'VISUAL_EVIDENCE_UNAVAILABLE'
+        assert 'Capture was rejected' in row['reason']
+        assert row['gap']['targets'] == [{'kind': 'tool', 'value': 'browser_capture'}]
+        assert not seen
+    finally:
+        await assembly.close()

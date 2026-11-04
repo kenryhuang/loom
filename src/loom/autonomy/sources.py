@@ -99,10 +99,73 @@ def inspect_route(store, role, route):
     return documents, issues
 
 
+def executed_between(db, aid, start, end):
+    """Observe execution between refreshes, including runs that failed again.
+
+    A work-package state alone loses failed -> running -> failed transitions.
+    Use host events, never the event's summary or the solver's claims.
+    """
+    if not start or not end:
+        return False
+    return db.execute(
+        "SELECT 1 FROM events WHERE session_id IN (SELECT session_id FROM agent_sessions WHERE agent_id=?) "
+        "AND json_extract(body,'$.type') IN ('run.started','tool.completed') "
+        "AND julianday(json_extract(body,'$.at')) > julianday(?) "
+        "AND julianday(json_extract(body,'$.at')) <= julianday(?) LIMIT 1",
+        (aid, start, end),
+    ).fetchone() is not None
+
+
+def reconcile_own_changes(store, aid):
+    """Repair old local-refresh attribution using its original execution interval."""
+    with store.sessions.transaction() as db:
+        goals = [g for g in store.rows(db, 'agent_goals', aid) if g['state'] not in {'completed', 'cancelled', 'superseded'}]
+        pending = {g['source_changed'] for g in goals if g.get('source_changed')}
+        if not pending:
+            return
+        for event in store.rows(db, 'agent_external_events', aid):
+            payload = event['payload']
+            if (event['id'] not in pending or event['state'] != 'accepted' or payload.get('origin') != 'bound_source'
+                    or payload.get('type') != 'changed'):
+                continue
+            source_id = 'source_' + digest([aid, payload['source_id']])[:32]
+            # Explicit external events and missing historical provenance remain blocked.
+            if payload.get('event_id') != f"{source_id}:{payload['version']}":
+                continue
+            prior = db.execute('SELECT body FROM agent_revisions WHERE kind=? AND id=? AND revision=?',
+                               ('agent_sources', source_id, payload['version'] - 1)).fetchone()
+            current = db.execute('SELECT body FROM agent_revisions WHERE kind=? AND id=? AND revision=?',
+                                 ('agent_sources', source_id, payload['version'])).fetchone()
+            if not prior or not current:
+                continue
+            before, after = json.loads(prior[0]), json.loads(current[0])
+            # Only repair the known same-state retry hole. Missing provenance,
+            # changed contracts and unavailable sources still need review.
+            if (before.get('state') != 'current' or after.get('state') != 'current'
+                    or before.get('role_revision') != after.get('role_revision')
+                    or before.get('work_states') != after.get('work_states')
+                    or not any(s in {'failed', 'blocked'} for s in after.get('work_states', {}).values())
+                    or not executed_between(db, aid, before.get('checked_at'), payload['occurred_at'])):
+                continue
+            event.update(state='suppressed', reclassified_at=store.now(), attribution='execution_between_refreshes')
+            store.put(db, 'agent_external_events', event)
+            for goal in goals:
+                if goal.get('source_changed') == event['id']:
+                    goal.pop('source_changed')
+                    goal['revision'] += 1
+                    store.put(db, 'agent_goals', goal)
+            agent = store.get(db, 'agents', aid)
+            agent.update(generation=agent['generation'] + 1, guidance_version=agent['guidance_version'] + 1,
+                         next_wake_at=store.now())
+            store.put(db, 'agents', agent)
+            store.event(db, aid, 'source.attribution.corrected', dict(event_id=event['id'], source_id=payload['source_id']))
+
+
 def refresh(store, aid, *, force=False):
     agent = store.snapshot(aid)
     if agent["state"] != "enabled":
         return []
+    reconcile_own_changes(store, aid)
     results = []
     for route in agent["role"]["source_routes"]:
         if "refresh_seconds" not in route and not force:
@@ -123,6 +186,9 @@ def refresh(store, aid, *, force=False):
         )
         fingerprint = digest(documents)
         changed = previous.get("digest") != fingerprint
+        if changed and previous and not own_change:
+            with store.sessions.read() as db:
+                own_change = executed_between(db, aid, previous.get('checked_at'), store.now())
         state = "partial" if issues else "current"
         if any(d["state"] != "current" for d in documents) or not documents:
             state = "unavailable" if not any(d["state"] == "current" for d in documents) else "partial"

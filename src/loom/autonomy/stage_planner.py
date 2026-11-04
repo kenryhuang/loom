@@ -6,6 +6,7 @@ import json
 from loom.autonomy.acceptance import ref_key, support, validate_completion
 from loom.autonomy.budget import BudgetLedger, BudgetProvider
 from loom.autonomy.contracts import strict, strings
+from loom.autonomy.stage_overlap import validate_overlap
 from loom.core import thaw_json
 from loom.llm.api import LlmMessage
 from loom.llm.structured import ProtocolError, StructuredProtocol, UnsupportedFormat, output_mode, protocol_provider, request_structured, unsupported_format
@@ -167,6 +168,8 @@ def validate(value, payload):
                 raise ServiceError("Stage Goal must be more specific than the long-term objective")
             if not strings(goal.get("acceptance", []), "Goal acceptance"):
                 raise ServiceError("Goal acceptance is required")
+        validate_overlap(stage, payload.get('delivery_index', dict(stages=payload.get('history', []),
+                                                                 goals=payload.get('existing_goals', []))))
         future = value.get("future", [])
         if not isinstance(future, list) or len(future) > policy["horizon_stages"]:
             raise ServiceError("Future horizon exceeds configured bound")
@@ -258,7 +261,9 @@ class StagePlanner:
                             "use repair, blocked or request_input when an acceptance gap remains. "
                             "Review recorded source_changes against delivery evidence and current source_status; "
                             "completed Goals may retain historical change markers. Request repair or input if a change leaves an acceptance gap. "
-                            "Every final Goal integrates and verifies the whole stage. Future stages are tentative. "
+                            "Every final Goal integrates and verifies the whole stage with fresh evidence; it cannot reuse an older stage's verification. "
+                            "A final integration Goal may share generic wording with a completed stage's integration when it follows new stage work. "
+                            "Use delivery_index to check all prior deliveries, including those outside the narrative history. Future stages are tentative. "
                             "Goal depends_on contains only earlier Goal keys. Future stage keys are unique and never 'current'; "
                             "their depends_on contains only 'current' for the proposed stage or earlier future stage keys. "
                             "Do not use delivery_key, titles, Goal keys or database IDs as future dependencies. "

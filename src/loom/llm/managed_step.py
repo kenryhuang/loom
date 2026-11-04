@@ -27,7 +27,7 @@ from loom.llm.api import (
     request_llm_response,
     to_llm_tools,
 )
-from loom.llm.progress import guidance, record, stop_reason, token_budget_status
+from loom.llm.progress import guidance, record, stop_signal, token_budget_status
 from loom.runtime.control import StepControl
 from loom.service.contracts import LIMITS, canonical
 
@@ -143,7 +143,7 @@ class ManagedStep:
         report += "\n".join(f"- {item['source']}: {item['text']}" for item in evidence[-12:])
         remaining = self.limits['max_tokens'] - cp['usage'].total_tokens if self.limits['max_tokens'] is not None else float('inf')
         seconds = self.limits["max_duration_seconds"] - cp.get("active_seconds", 0)
-        await self._emit(runtime, "run.wrapping_up", reason=reason, partial=True,
+        await self._emit(runtime, "run.wrapping_up", reason=reason, reason_code=reason_code, partial=True,
                          token_budget=token_budget_status(cp["usage"].total_tokens, self.limits["max_tokens"], cp.get("last_call_tokens", 0)))
         if allow_model and remaining >= 4096 and seconds > 2 and cp["llm_calls"] < self.limits["max_llm_calls"]:
             from dataclasses import fields, is_dataclass
@@ -520,9 +520,9 @@ class ManagedStep:
                 reserved = getattr(self.planning, "reserved_tokens", 0)
                 if reserved and self.limits['max_tokens'] is not None and cp["usage"].total_tokens + reserved >= self.limits["max_tokens"]:
                     return self._result(cp, runtime, "paused", "Unreported branch usage reserves the remaining token budget")
-                reason = stop_reason(cp, self.limits)
-                if reason:
-                    return await self._wrap_up(cp, runtime, reason)
+                signal = stop_signal(cp, self.limits)
+                if signal:
+                    return await self._wrap_up(cp, runtime, signal[0], reason_code=signal[1])
                 if cp["llm_calls"] >= self.limits["max_llm_calls"]:
                     return self._result(cp, runtime, "paused", "LLM call budget exceeded")
                 cp["messages"] = [m for m in cp["messages"] if m.name != "execution_progress"]
@@ -703,8 +703,8 @@ class ManagedStep:
                     cp["phase"] = "before_llm"
                     continue
                 call = cp["calls"][cp["tool_index"]]
-                if call.name != "finish" and (reason := stop_reason(cp, self.limits)):
-                    return await self._wrap_up(cp, runtime, reason)
+                if call.name != "finish" and (signal := stop_signal(cp, self.limits)):
+                    return await self._wrap_up(cp, runtime, signal[0], reason_code=signal[1])
                 try:
                     value = json.loads(call.arguments)
                     if not isinstance(value, dict):

@@ -146,6 +146,7 @@ def model_fixture(agent_service, monkeypatch):
         (lambda d: d["future"][0].update(depends_on=["current", "current"]), "duplicate entries"),
         (lambda d: d["stage"]["goals"][0].update(depends_on=["deliver"]), "/stage/goals/0/depends_on"),
         (lambda d: d.update(source_refs=["fabricated"]), "unavailable evidence"),
+        (lambda d: d["stage"]["goals"][0].update(objective="Baseline file inspection"), "overlaps existing work"),
     ],
 )
 def test_semantic_rejection_is_corrected_metered_and_auditable(agent_service, monkeypatch, mutate, diagnosis):

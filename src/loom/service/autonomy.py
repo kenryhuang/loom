@@ -29,29 +29,36 @@ class AutonomyService:
     def close(self):
         self.supervisor.close()
 
-    def snapshot(self, aid):
-        result = self.store.snapshot(aid)
+    def snapshot(self, aid, *, view=None):
+        from loom.autonomy.views import VIEW_FIELDS
+
+        result = self.store.snapshot(aid, fields=VIEW_FIELDS[view] if view else None, summaries=view == 'overview')
+        if view:
+            result['view'] = view
         result["service_enabled"] = self.service.autonomy_enabled
         result["service_error"] = self.supervisor.last_error
         from loom.autonomy.configuration import preview
 
         result['configuration'] = dict(role=preview(result), pending=bool(result.get('pending_configuration')),
                                        effective_role_revision=result['role_revision'])
-        result["budget"] = BudgetLedger(self.store.sessions.path).summary(aid)
-        result['daily_budget'] = BudgetLedger(self.store.sessions.path, clock=self.store.clock).daily_summary(aid)
-        result["objective_budget"] = BudgetLedger(self.store.sessions.path).objective_summary(aid)
-        result["learning_budget"] = BudgetLedger(self.store.sessions.path, clock=self.store.clock).learning_summary(aid)
+        result['budget'] = []
+        if view in {None, 'overview'}:
+            result["budget"] = BudgetLedger(self.store.sessions.path).summary(aid)
+            result['daily_budget'] = BudgetLedger(self.store.sessions.path, clock=self.store.clock).daily_summary(aid)
+            result["objective_budget"] = BudgetLedger(self.store.sessions.path).objective_summary(aid)
+            result["learning_budget"] = BudgetLedger(self.store.sessions.path, clock=self.store.clock).learning_summary(aid)
         result["pause_pending"] = result["state"] in {"paused", "archived"} and any(s["session_id"] in self.service.active for s in result["sessions"])
         result["pending_decisions"] = []
-        with self.store.sessions.transaction() as db:
+        with self.store.sessions.read() as db:
             from loom.autonomy.profile import effective
             from loom.autonomy.sources import view as source_view
 
-            result['preferences'] = effective(self.store, db, result)
+            result['preferences'] = effective(self.store, db, result) if view in {None, 'profile', 'learning'} else []
             owner = result['role'].get('owner_id', 'local')
             result['profile_entries'] = [json.loads(r[0]) for r in db.execute('SELECT body FROM agent_profile')
-                if json.loads(r[0])['agent_id'] == aid or (json.loads(r[0])['scope'] == 'owner' and json.loads(r[0])['owner_id'] == owner)]
-            result['source_status'] = source_view(self.store, db, result)
+                if json.loads(r[0])['agent_id'] == aid or (json.loads(r[0])['scope'] == 'owner' and json.loads(r[0])['owner_id'] == owner)
+                ] if view in {None, 'profile', 'learning'} else []
+            result['source_status'] = source_view(self.store, db, result) if view in {None, 'work', 'knowledge'} else []
             result['shared_roles'] = [dict(id=a['id'], name=a['role']['name']) for r in db.execute('SELECT body FROM agents')
                 if (a := json.loads(r[0]))['role'].get('owner_id', 'local') == owner]
             rows = db.execute(
@@ -63,7 +70,8 @@ class AutonomyService:
             result["pending_decisions"] = [{**dict(row), "request": json.loads(row["request"]), "taken_over": bool(row["taken_over"])} for row in rows]
             from loom.autonomy.execution import report
 
-            result['execution'] = report(self.store, self.service, db, result)
+            if view in {None, 'work'}:
+                result['execution'] = report(self.store, self.service, db, result, analysis_details=False)
         return result
 
     def control(self, aid, body):
@@ -361,17 +369,30 @@ class AutonomyService:
             if method == "POST":
                 strict(body, {"command_id", "role"})
                 return self.store.create(body.get("command_id"), body.get("role"))
-            with self.store.sessions.transaction() as db:
+            with self.store.sessions.read() as db:
                 return {"agents": [json.loads(r[0]) for r in db.execute("SELECT body FROM agents")], "service_enabled": self.service.autonomy_enabled}
         if parts == ["setup", "recommend"]:
             if method != "POST":
                 raise ServiceError("Setup recommendation supports POST", 405)
             return self.recommend_agent_setup(body)
         aid = parts[0]
-        self.store.snapshot(aid)  # All routes enforce existing Agent identity.
+        with self.store.sessions.read() as db:
+            self.store.get(db, 'agents', aid)  # Identity check without loading every collection.
         if len(parts) == 1 and method == "GET":
             return self.snapshot(aid)
         route = parts[1:]
+        if len(route) == 2 and route[0] == 'views' and method == 'GET':
+            from loom.autonomy.views import VIEW_FIELDS
+
+            if route[1] not in VIEW_FIELDS:
+                raise ServiceError('Unknown Agent view', 404)
+            return self.snapshot(aid, view=route[1])
+        if len(route) == 3 and route[0] == 'learning' and route[2] == 'diagnostics' and method == 'GET':
+            from loom.autonomy.execution import analysis_diagnostics
+
+            with self.store.sessions.read() as db:
+                cycle = self.store.get(db, 'agent_learning_cycles', route[1], aid)
+                return analysis_diagnostics(db, cycle)
         if len(route) == 3 and route[0] == 'objectives' and route[2] == 'roadmap' and method == 'GET':
             from loom.autonomy.stages import planning_state
 

@@ -40,6 +40,16 @@ class SkillStore:
             db.executescript(SCHEMA)
 
     @contextmanager
+    def read(self):
+        db = sqlite3.connect(self.path, timeout=10)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute('BEGIN')
+            yield db
+        finally:
+            db.close()
+
+    @contextmanager
     def transaction(self):
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
@@ -55,20 +65,19 @@ class SkillStore:
             db.close()
 
     def cases(self, workspace, *, after='', limit=100):
-        with self.transaction() as db:
+        with self.read() as db:
             rows = db.execute('SELECT body FROM skill_cases WHERE workspace=? AND id>? ORDER BY id LIMIT ?',
                               (workspace, after, limit + 1)).fetchall()
         values = [json.loads(row[0]) for row in rows[:limit]]
         return dict(cases=values, next_cursor=values[-1]['id'] if len(rows) > limit else None)
 
     def all_cases(self, workspace):
-        cursor, result = '', []
-        while True:
-            page = self.cases(workspace, after=cursor)
-            result.extend(page['cases'])
-            cursor = page['next_cursor']
-            if not cursor:
-                return result
+        result = []
+        with self.read() as db:
+            cursor = db.execute('SELECT body FROM skill_cases WHERE workspace=? ORDER BY id', (workspace,))
+            while rows := cursor.fetchmany(100):
+                result.extend(json.loads(row[0]) for row in rows)
+        return result
 
     def replace_session(self, session_id, cases, fingerprint):
         with self.transaction() as db:

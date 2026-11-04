@@ -103,6 +103,12 @@ async def verify_visual(controller, criterion, runtime):
             await controller.emit(runtime, "visual.capture.failed", criterion_id=criterion["id"], reason=result.error.message)
             return {"status": "blocked", "reason": result.error.message}, {}
         output = thaw_json(result.value.value)
+        if not isinstance(output, dict) or not isinstance(output.get('artifact'), dict) or not output['artifact'].get('sha256'):
+            reason = (output.get('message') or output.get('reason')) if isinstance(output, dict) else None
+            reason = 'Visual capture returned no evidence artifact' + (f': {reason}' if reason else '')
+            await controller.emit(runtime, 'visual.capture.failed', criterion_id=criterion['id'], reason=reason)
+            return {'status': 'blocked', 'reason': reason, 'reason_code': 'VISUAL_EVIDENCE_UNAVAILABLE',
+                    'gap': visual_gap({'reason': reason})}, {}
         ref = output["artifact"]
         bundle = assembly.read_artifact(ref["sha256"])
         if bundle["goal_digest"] != controller.data["goal_digest"] or bundle["scenario_digest"] != digest(scenario):

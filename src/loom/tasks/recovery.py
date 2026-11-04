@@ -28,6 +28,8 @@ def assess(state, *, failure=None):
             causes.append(row)
 
     failure = failure if failure is not None else (state.get('run') or {}).get('failure') or {}
+    if (state.get('run') or {}).get('stop_code') == 'ACTIVE_TIME_BUDGET_EXCEEDED':
+        add('ACTIVE_TIME_BUDGET')
     if (failure.get('code') in {'LLM_FAILED', 'LLM_TRANSPORT_ERROR', 'TIMEOUT'}
             and failure.get('retryable') is True):
         add('PROVIDER_TRANSIENT', failure=failure)
@@ -75,7 +77,7 @@ def assess(state, *, failure=None):
     mode = 'reassemble'
     if any(c['code'] in MANUAL_CODES | {'EXTERNAL_DEPENDENCY', 'UNKNOWN'} for c in causes):
         mode = 'manual'
-    elif ({c['code'] for c in causes} <= {'ACCEPTANCE_BUDGET', 'TOKEN_BUDGET', 'PROVIDER_TRANSIENT'}
+    elif ({c['code'] for c in causes} <= {'ACCEPTANCE_BUDGET', 'TOKEN_BUDGET', 'PROVIDER_TRANSIENT', 'ACTIVE_TIME_BUDGET'}
           and not any(c['details'].get('plan_item_id') for c in causes)
           and code not in {'ACCEPTANCE_INPUT_BUDGET', 'ACCEPTANCE_OUTPUT_BUDGET'}):
         mode = 'resume'

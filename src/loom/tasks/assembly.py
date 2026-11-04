@@ -590,7 +590,7 @@ class TaskAssembly:
         if self.agent_context:
             handlers.update(self.agent_context.handlers())
         wrapped = self.workflow.wrap_tools(handlers)
-        for name in ("process_execute", "shell_execute"):
+        for name in ("process_execute", "shell_execute", "browser_capture"):
             if name in handlers:
                 normal, checked = wrapped[name], handlers[name]
 

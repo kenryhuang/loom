@@ -151,8 +151,8 @@ class AgentStore:
             self.event(db, aid, "agent.created", {"revision": 1})
             return self.receipt(db, cid, value, agent)
 
-    def snapshot(self, aid):
-        with self.sessions.transaction() as db:
+    def snapshot(self, aid, *, fields=None, summaries=False):
+        with self.sessions.read() as db:
             agent = self.get(db, "agents", aid)
             for key, table in [
                 ("goals", "agent_goals"),
@@ -165,7 +165,13 @@ class AgentStore:
                 ("objective_planning", "agent_objective_planning"),
                 ("stage_reviews", "agent_stage_reviews"),
             ]:
-                agent[key] = self.rows(db, table, aid)
+                if fields is not None and key not in fields:
+                    agent[key] = []
+                elif summaries:
+                    agent[key] = [dict(r) for r in db.execute(
+                        f"SELECT id,json_extract(body,'$.state') AS state FROM {table} WHERE agent_id=? ORDER BY rowid", (aid,))]
+                else:
+                    agent[key] = self.rows(db, table, aid)
             agent["event_cursor"] = db.execute("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE agent_id=?", (aid,)).fetchone()[0]
             agent["sessions"] = [dict(r) for r in db.execute("SELECT * FROM agent_sessions WHERE agent_id=?", (aid,))]
             return agent

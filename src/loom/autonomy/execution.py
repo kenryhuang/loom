@@ -7,14 +7,42 @@ from loom.autonomy.blockers import instructions, manual_required
 from loom.autonomy.contracts import learning_policy, scheduling_policy
 
 
-def report(store, service, db, agent):
+def analysis_diagnostics(db, cycle):
+    """Project diagnostics in SQLite; never deserialize the evidence checkpoint."""
+    row = db.execute("SELECT json_object('state',json_extract(body,'$.state'), 'usage',json_extract(body,'$.usage'), "
+                     "'settings',json_extract(body,'$.settings'), 'error_details',json_extract(body,'$.error_details')) "
+                     "FROM semantic_jobs WHERE id=?", (cycle.get('evaluation_id'),)).fetchone()
+    result = json.loads(row[0]) if row else {}
+    for field in ('usage', 'settings'):
+        result[field] = result.get(field) or {}
+    result.update(evaluation_id=cycle.get('evaluation_id'), units=[], truncated=False)
+    errors = result.get('error_details') or []
+    result['error_details'] = errors[:20]
+    result['truncated'] = len(errors) > 20
+    for path in ('$.checkpoint.units', '$.checkpoint.memory.units'):
+        rows = db.execute("SELECT json_object('id',coalesce(json_extract(u.value,'$.id'),u.key), "
+                          "'disposition',json_extract(u.value,'$.disposition'), 'issues', "
+                          "CASE WHEN json_array_length(json_extract(u.value,'$.issues'))>0 THEN json_extract(u.value,'$.issues') "
+                          "ELSE coalesce(json_extract(u.value,'$.errors'),json('[]')) END) "
+                          "FROM semantic_jobs j,json_each(j.body,?) u WHERE j.id=? AND "
+                          "(json_array_length(json_extract(u.value,'$.issues'))>0 OR "
+                          "json_array_length(json_extract(u.value,'$.errors'))>0 OR "
+                          "json_extract(u.value,'$.disposition') IN ('abstained','quarantined','exhausted')) LIMIT 101",
+                          (path, cycle.get('evaluation_id'))).fetchall()
+        result['units'].extend(json.loads(r[0]) for r in rows[:100])
+        result['truncated'] |= len(rows) > 100
+    return result
+
+
+def report(store, service, db, agent, *, analysis_details=True):
     aid = agent["id"]
+    active = service.active.copy()
     policy = scheduling_policy(agent["role"])
     works = agent["work_packages"]
     goals = {g["id"]: g for g in agent["goals"]}
     sources = {s["route_id"]: s for s in agent.get("source_status", [])}
     routes = {r["id"]: r for r in agent["role"]["source_routes"]}
-    blocks, runtime = [], []
+    blocks, runtime, sessions = [], [], {}
 
     def block(code, scope, reason, details, steps, *, automatic=False, action=None):
         blocks.append(
@@ -161,7 +189,21 @@ def report(store, service, db, agent):
                 )
             continue
         try:
-            state = store.sessions._load(db, work["session_id"])
+            sid = work['session_id']
+            if sid not in sessions:
+                row = db.execute("SELECT json_object('session_id',id, 'task',json_object('state',json_extract(body,'$.task.state')), "
+                    "'run',json_object('id',json_extract(body,'$.run.id'),'state',json_extract(body,'$.run.state'), "
+                    "'steps',json_extract(body,'$.run.steps'),'active_seconds',json_extract(body,'$.run.active_seconds'), "
+                    "'reason',json_extract(body,'$.run.reason'),'failure',json_extract(body,'$.run.failure'), "
+                    "'checkpoint',json_type(body,'$.run.checkpoint') IS NOT NULL AND json_type(body,'$.run.checkpoint')<>'null'), "
+                    "'context',json_type(body,'$.context') IS NOT NULL AND json_type(body,'$.context')<>'null', "
+                    "'autonomy',json_extract(body,'$.autonomy'),'control',json_extract(body,'$.control'), "
+                    "'workspace_blocked',json_extract(body,'$.workspace_blocked'),'input_request',json_extract(body,'$.input_request')) "
+                    "FROM sessions WHERE id=? AND json_extract(body,'$.deleted_at') IS NULL", (sid,)).fetchone()
+                if row is None:
+                    raise ValueError('Session not found')
+                sessions[sid] = json.loads(row[0])
+            state = sessions[sid]
         except Exception as exc:
             block("SESSION_MISSING", work["id"], str(exc), [work["session_id"]], ["恢复原 Session 与数据目录，禁止将未知执行结果当作未执行。"])
             continue
@@ -182,10 +224,10 @@ def report(store, service, db, agent):
             task_state=state["task"]["state"],
             run_id=run.get("id"),
             run_state=run.get("state"),
-            steps=run.get("steps", 0),
-            active_seconds=run.get("active_seconds", 0),
+            steps=run.get("steps") or 0,
+            active_seconds=run.get("active_seconds") or 0,
             checkpoint_available=bool(run.get("checkpoint") or state.get("context")),
-            worker_active=state["session_id"] in service.active,
+            worker_active=state["session_id"] in active,
             reason=run.get("reason"),
         )
         info = work.get("slice", {})
@@ -221,7 +263,7 @@ def report(store, service, db, agent):
                 "SESSION_ADMISSION",
                 work["id"],
                 "等待 Session 执行槽位或工作目录锁",
-                [f"服务活动 worker：{len(service.active)}/{service.capacity}", f"当前活动 Session：{', '.join(service.active) or '无；等待下一次服务调度'}"],
+                [f"服务活动 worker：{len(active)}/{service.capacity}", f"当前活动 Session：{', '.join(active) or '无；等待下一次服务调度'}"],
                 ["服务在槽位空闲且资源无冲突时自动派发；不要重建同一任务。"],
                 automatic=True,
             )
@@ -250,13 +292,11 @@ def report(store, service, db, agent):
     for cycle in agent["learning"]:
         if cycle["state"] in {"failed", "deferred", "incomplete"}:
             evidence = []
-            row = db.execute("SELECT body FROM semantic_jobs WHERE id=?", (cycle.get("evaluation_id"),)).fetchone()
-            if row:
-                job = json.loads(row[0])
+            job = analysis_diagnostics(db, cycle) if analysis_details and cycle.get('evaluation_id') else {}
+            if job.get('state'):
                 evidence.append(f"Deep Eval：{job['state']}；Calls {job.get('usage', {}).get('calls', 0)}/{job.get('settings', {}).get('max_calls', '未知')}")
                 evidence += [str(e) for e in job.get("error_details", [])]
-                cp = job.get("checkpoint", {})
-                for unit in [*cp.get("units", {}).values(), *cp.get("memory", {}).get("units", {}).values()]:
+                for unit in job['units']:
                     issues = unit.get("issues") or unit.get("errors") or []
                     if issues or unit.get("disposition") in {"abstained", "quarantined", "exhausted"}:
                         evidence.append(f"{unit.get('id', '分析单元')} / {unit.get('disposition')}：{issues or '证据不足或结论为 unknown，不能视为完整完成'}")

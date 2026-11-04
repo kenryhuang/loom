@@ -46,24 +46,30 @@ def token_budget_status(used, limit, last_call_tokens=0):
             "reserve_tokens": limit - threshold, "wrap_up_at": threshold}
 
 
-def stop_reason(cp, limits):
+def stop_signal(cp, limits):
+    """Return display text and a host recovery code from the same budget check."""
     if cp["llm_calls"] >= max(1, limits["max_llm_calls"] - 1):
-        return "Model call budget is nearly exhausted"
+        return "Model call budget is nearly exhausted", None
     used = cp["usage"].total_tokens
     budget = token_budget_status(used, limits["max_tokens"], cp.get("last_call_tokens", 0))
     if used and budget['wrap_up_at'] is not None and used >= budget["wrap_up_at"]:
         return (f"Token budget is nearly exhausted: used {used:,}/{budget['limit']:,}; "
                 f"wrap-up threshold {budget['wrap_up_at']:,}; reserved {budget['reserve_tokens']:,} "
-                f"(last model call {budget['last_call_tokens']:,})")
+                f"(last model call {budget['last_call_tokens']:,})"), "TOKEN_BUDGET_EXCEEDED"
     elapsed = cp.get("active_seconds", 0)
     if elapsed >= limits["max_duration_seconds"] - min(120, limits["max_duration_seconds"] * 0.2):
-        return "Time budget is nearly exhausted"
+        return "Time budget is nearly exhausted", "ACTIVE_TIME_BUDGET_EXCEEDED"
     if limits["max_steps"] > 1 and cp.get("run_steps", 0) >= limits["max_steps"] - 1:
-        return "Execution step budget is nearly exhausted"
+        return "Execution step budget is nearly exhausted", None
     ledger = cp.get("progress", {})
     if ledger.get("stale", 0) >= 8:
-        return "Repeated retrieval produced no new readable evidence in eight consecutive calls"
+        return "Repeated retrieval produced no new readable evidence in eight consecutive calls", None
     return None
+
+
+def stop_reason(cp, limits):
+    signal = stop_signal(cp, limits)
+    return signal[0] if signal else None
 
 
 def guidance(cp, limits):

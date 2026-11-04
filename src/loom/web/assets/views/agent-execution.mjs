@@ -56,7 +56,7 @@ export function renderExecution(root,d,view) {
   const execution=d.execution || {},policy=execution.policy || d.role.scheduling_policy || {},scheduler=execution.scheduler || {},lp=execution.learning_policy || d.role.learning_policy || {};
   const works=[...d.work_packages].sort(newest),cycles=[...d.learning].sort(cycleNewest),blockers=execution.blockers || [];
   const workPanel=panel(root,'执行队列',true);workPanel.classList.add('agent-queue-panel');
-  workPanel.firstChild.append(button('调度设置',()=>view.createForm(d)));
+  workPanel.firstChild.append(button('调度设置',()=>view.createForm(d,'scheduling')));
   workPanel.append(element('p','muted small',`${policy.enabled?`定时检查队列 · 每 ${policy.tick_seconds} 秒`:'手动调度'} · 每次执行上限 1 小时${policy.enabled?' · 下次检查 '+time(execution.next_tick_at):''}`));
   const currentWork=new Set(works.filter(w=>['running','dispatched'].includes(w.state)).map(w=>w.id));
   if(!currentWork.size){const head=works.find(w=>w.id===scheduler.work_package_id && !['succeeded','cancelled'].includes(w.state)) || works.find(w=>w.state==='blocked');if(head)currentWork.add(head.id);}
@@ -112,6 +112,28 @@ export function renderExecution(root,d,view) {
     if(c.blocked_reason)detail.append(element('p','',c.blocked_reason));
     if(c.retry_after)detail.append(element('p','',`下次重试：${time(c.retry_after)}`));
     for(const id of [c.analysis_id,c.evaluation_id])if(id)detail.append(element('code','agent-roadmap-id',id));
+    if(c.evaluation_id && d.view==='work'){
+      const output=element('div');detail.append(output);let loading=false,loaded=false;
+      const load=async()=>{
+        if(!detail.open || loading || loaded)return;loading=true;output.textContent='正在加载分析诊断…';
+        try{
+          const cache=view.diagnosticsCache ||= new Map(),key=JSON.stringify([d.id,c.id,c.evaluation_id,c.state,c.attempts,c.phase]);
+          const saved=cache.get(key);
+          const data=saved && Date.now()-saved.at<10000?saved.data:
+            await view.api.get(d.id,`learning/${encodeURIComponent(c.id)}/diagnostics`,view.abort?.signal);
+          cache.set(key,{data,at:Date.now()});
+          if(!detail.isConnected)return;
+          output.replaceChildren();
+          if(data.state)output.append(element('p','',`Deep Eval：${data.state} · Calls ${data.usage?.calls || 0}/${data.settings?.max_calls || '—'}`));
+          view.showRows(output,(data.error_details || []).map(e=>typeof e==='string'?e:JSON.stringify(e)));
+          view.showRows(output,(data.units || []).map(u=>`${u.id} / ${u.disposition || '待处理'}：${JSON.stringify(u.issues || [])}`));
+          if(data.truncated)output.append(element('p','muted','诊断条目较多，请打开 Deep Eval 查看完整记录。'));
+          loaded=true;
+        }catch(error){if(error.name!=='AbortError' && detail.isConnected){output.replaceChildren(element('p','error',error.message),button('重试',load));}}
+        finally{loading=false;}
+      };
+      detail.addEventListener('toggle',load);if(detail.open)load();
+    }
     if(['incomplete','failed','cancelled','deferred'].includes(c.state))refs.append(button('重新排队分析',()=>view.act(()=>view.api.post(d.id,`learning/${encodeURIComponent(c.id)}/commands`,{command_id:globalThis.crypto.randomUUID(),type:'retry'}))));
     return [task,state,result,refs];
   },c=>['pending','deferred'].includes(c.state));

@@ -57,6 +57,7 @@ class ServiceHTTPServer(ThreadingHTTPServer):
         self.trajectory = background.trajectory
         self.semantic = background.semantic
         self.skills = background.skills
+        self.autonomy = background.autonomy
         from loom.knowledge.jobs import KnowledgeJobs
 
         self.knowledge_jobs = KnowledgeJobs(service.store.knowledge)
@@ -169,8 +170,10 @@ class SessionHandler(BaseHTTPRequestHandler):
             parts = parsed.path.strip("/").split("/")
             service = self.server.service
             if parts[:2] == ['v1', 'agents']:
+                if service.closed:
+                    raise ServiceError('Service is closed', 409)
                 try:
-                    result = service.background.autonomy.dispatch(method, parts[2:], query, self._body() if method == 'POST' else None)
+                    result = self.server.autonomy.dispatch(method, parts[2:], query, self._body() if method == 'POST' else None)
                 except (ValueError, TypeError, KeyError) as exc:
                     raise ServiceError(str(exc)) from exc
                 return self._json(200, result)

@@ -450,6 +450,8 @@ Session 链接定位执行记录；Analysis 和 Deep Eval 链接携带 analysis 
 
 Overview 按角色与方法、模型、执行配置、运行与调度、每日预算、学习与评估、资料与资源分别展示参数。每个板块独立编辑和取消；取消立即退出，不提交修改，也不受后台轮询影响。长期目标在概览只读，新增目标与修改干涉仍在 Goals 页面操作；Agent 创建后 workspace 和 working_directory 固定。
 
+页面通过 `GET views/{overview|goals|work|profile|knowledge|learning}` 按当前标签页读取只读快照。概览只取目标、工作包与学习的 id/state 计数；执行页只投影 Session 运行摘要，不解析完整上下文和历史分析 checkpoint。展开分析详情时请求 `GET learning/{cycle}/diagnostics`，返回有界错误和分析单元诊断，不传输证据 checkpoint。读接口使用 WAL 只读事务，不占用写锁。客户端并行读取列表与当前标签页，同一时刻只保留一轮刷新；切页和关闭后丢弃旧响应，编辑草稿继续保留。
+
 `POST configuration/{section}` 使用 `command_id`、`expected_revision`、`changes` 提交该板块白名单内的字段。每日预算只能提交 `budget.daily_tokens`；禁止跨板块字段以及目标、目录字段。保存产生 `configuration.saved`，展示待生效预览，不改当前 Role。已有派发、阻塞恢复、在途规划、分析或模型调用继续使用原版本。等这些任务结束，在下一次新派发/规划/分析前生成 Role 新版本并记录 `configuration.activated`；未派发工作包绑定新配置，交付与验收合同保持原样。待生效配置持久化，服务重启后仍能继续切换。
 
 ```bash

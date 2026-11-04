@@ -10,7 +10,7 @@ from loom.evaluation.memory.evidence import sanitize
 from loom.memory.store import bound_workspace
 from loom.skills.cases import project
 from loom.skills.contracts import digest
-from loom.skills.lineage import assign
+from loom.skills.lineage import LineageIndex, assign, feature_key
 
 
 class CaseCatalog:
@@ -18,6 +18,7 @@ class CaseCatalog:
         self.store, self.trajectory = store, trajectory
         self.lock = threading.RLock()
         self.last_full = {}
+        self.lineage_indexes, self.case_versions, self.statistics = {}, {}, {}
 
     def reconcile(self, workspace):
         with self.lock:
@@ -27,7 +28,7 @@ class CaseCatalog:
         full = time.monotonic() - self.last_full.get(workspace, 0) > 60
         cursor, count = '', 0
         while True:
-            with self.store.transaction() as db:
+            with self.store.read() as db:
                 sessions = db.execute('''SELECT id,json_object('session_id',id,'task',json_extract(body,'$.task'),
                     'run',json_extract(body,'$.run'),'created_at',json_extract(body,'$.created_at'),
                     'deleted_at',json_extract(body,'$.deleted_at')) AS body
@@ -38,7 +39,7 @@ class CaseCatalog:
                 cursor = row['id']
                 state = json.loads(row['body'])
                 # Historical evaluation scope is checked too: configuration may since have moved workspace.
-                with self.store.transaction() as db:
+                with self.store.read() as db:
                     tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                     previous = db.execute('SELECT digest FROM skill_source_cursors WHERE session_id=?', (cursor,)).fetchone()
                     if previous and not full and not db.execute('SELECT 1 FROM skill_dirty_sessions WHERE session_id=?', (cursor,)).fetchone():
@@ -57,7 +58,12 @@ class CaseCatalog:
                 scopes = {bound_workspace(state['task']), *[(e.get('memory_scope') or {}).get('workspace') for e in evaluations]}
                 if workspace not in scopes and not state.get('deleted_at'):
                     continue
-                fingerprint = digest([state['task'], state.get('deleted_at'), state.get('run'),
+                # Streaming counters and checkpoint offsets are not case inputs.
+                # Active workers dirty their Session often; only semantic changes
+                # should rebuild every historical case of that Session.
+                task = {k: state['task'].get(k) for k in ('id', 'objective', 'task_spec', 'workspace', 'state')}
+                run = {k: (state.get('run') or {}).get(k) for k in ('id', 'state', 'task_episode_id')}
+                fingerprint = digest([task, state.get('deleted_at'), run,
                                       [(e['id'], e.get('checkpoint', {}).get('memory'), e.get('state')) for e in evaluations]])
                 if previous and previous[0] == fingerprint:
                     with self.store.transaction() as db:
@@ -86,28 +92,54 @@ class CaseCatalog:
                     merged.append(case)
                 self.store.replace_session(cursor, merged, fingerprint)
                 count += len(merged)
+        with self.store.read() as db:
+            versions = tuple(tuple(r) for r in db.execute('SELECT id,revision FROM skill_cases WHERE workspace=? ORDER BY id', (workspace,)))
+        if versions == self.case_versions.get(workspace):
+            if full:
+                self.last_full[workspace] = time.monotonic()
+            return dict(self.statistics[workspace], updated_cases=count)
         cases = self.store.all_cases(workspace)
-        groups = assign(cases)
-        with self.store.transaction() as db:
-            for case in cases:
-                revision = digest([case.get('source_revision', case['revision']), groups[case['id']]['task_family_id'],
-                                   groups[case['id']]['split_group_id']])
-                if case.get('task_family_id') and revision != case['revision']:
-                    db.execute("UPDATE skill_versions SET state='suspended', revision=revision+1 "
-                               "WHERE state IN ('active','trial','candidate') AND id IN "
-                               '(SELECT version_id FROM skill_dependencies WHERE case_id=?)', (case['id'],))
-                case.update(groups[case['id']])
-                case['revision'] = revision
-                db.execute('UPDATE skill_cases SET revision=?,body=? WHERE id=?', (revision, json.dumps(case, ensure_ascii=False), case['id']))
-                db.execute('INSERT OR IGNORE INTO skill_case_revisions VALUES(?,?,?)', (case['id'], revision, json.dumps(case, ensure_ascii=False)))
+        index = self.lineage_indexes.setdefault(workspace, LineageIndex())
+        groups = assign(cases, index=index)
+        writes = []
+        for case in cases:
+            group = groups[case['id']]
+            revision = digest([case.get('source_revision', case['revision']), group['task_family_id'], group['split_group_id']])
+            features_digest = digest(feature_key(case))
+            if (revision == case['revision'] and case.get('lineage_features_digest') == features_digest
+                    and all(case.get(k) == v for k, v in group.items())):
+                continue
+            updated = {**case, **group, 'revision': revision, 'lineage_features_digest': features_digest}
+            writes.append((case, updated, json.dumps(updated, ensure_ascii=False)))
+        clean = True
+        if writes:
+            with self.store.transaction() as db:
+                for case, updated, body in writes:
+                    changed = db.execute('UPDATE skill_cases SET revision=?,body=? WHERE id=? AND revision=?',
+                                         (updated['revision'], body, case['id'], case['revision'])).rowcount
+                    if not changed:
+                        clean = False  # Reconcile concurrent source changes on the next pass.
+                        continue
+                    if case.get('task_family_id') and updated['revision'] != case['revision']:
+                        db.execute("UPDATE skill_versions SET state='suspended', revision=revision+1 "
+                                   "WHERE state IN ('active','trial','candidate') AND id IN "
+                                   '(SELECT version_id FROM skill_dependencies WHERE case_id=?)', (case['id'],))
+                    db.execute('INSERT OR IGNORE INTO skill_case_revisions VALUES(?,?,?)', (case['id'], updated['revision'], body))
         if full:
             self.last_full[workspace] = time.monotonic()
-        return dict(updated_cases=count, total_cases=len(cases), families=len({c['task_family_id'] for c in cases}),
-                    uncertain_cases=sum(c['quality']['boundary_uncertain'] for c in cases))
+        stats = dict(updated_cases=count, total_cases=len(cases), families=len({g['task_family_id'] for g in groups.values()}),
+                     uncertain_cases=sum(c['quality']['boundary_uncertain'] for c in cases))
+        if clean:
+            updated_versions = {old['id']: updated['revision'] for old, updated, _ in writes}
+            self.case_versions[workspace] = tuple((c['id'], updated_versions.get(c['id'], c['revision'])) for c in cases)
+            self.statistics[workspace] = stats
+        else:
+            self.case_versions.pop(workspace, None)
+        return stats
 
     def episode(self, session, evaluation):
         run = evaluation.get('run_id')
-        with self.store.transaction() as db:
+        with self.store.read() as db:
             events = [json.loads(row[0]) for row in db.execute('''SELECT body FROM events WHERE session_id=?
                 AND json_extract(body,'$.run_id')=? AND json_extract(body,'$.type') IN
                 ('run.started','task.goal.revised','skill.retrieved','memory.retrieved',

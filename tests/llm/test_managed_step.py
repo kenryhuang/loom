@@ -572,8 +572,23 @@ def test_time_reserve_uses_active_execution_time_and_reports_partial_work(tmp_pa
         result = await run_managed(tmp_path, provider, TimedExecution(), limits={"max_duration_seconds": 100})
         assert result.ok and result.value.control.kind == "paused"
         assert "Time budget" in result.value.control.reason
+        assert result.value.control.reason_code == "ACTIVE_TIME_BUDGET_EXCEEDED"
         assert "Remaining" in result.value.output
         assert len(provider.calls) == 1
+    asyncio.run(scenario())
+
+
+def test_time_reserve_in_tool_batch_keeps_recovery_code(tmp_path):
+    async def scenario():
+        class TimedExecution(Execution):
+            def boundary(self, checkpoint):
+                return {**super().boundary(checkpoint), 'active_seconds': 91 if checkpoint.get('calls') else 0}
+
+        provider = Provider([LlmResponse('', (LlmToolCall('read', 'read_file', '{}'),)), LlmResponse('Partial report')])
+        async def read(*args):
+            pytest.fail('The reserved time must not execute another tool')
+        result = await run_managed(tmp_path, provider, TimedExecution(), {'read_file': read}, limits={'max_duration_seconds': 100})
+        assert result.value.control.reason_code == 'ACTIVE_TIME_BUDGET_EXCEEDED'
     asyncio.run(scenario())
 
 

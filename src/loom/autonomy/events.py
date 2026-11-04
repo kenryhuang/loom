@@ -56,7 +56,7 @@ def ingest(store, aid, body, *, producer="external_event"):
         if state == "accepted":
             # Only pending proposals may be withdrawn; running contracts need human review.
             for goal in store.rows(db, "agent_goals", aid):
-                if goal.get('stage_id') and body['source_id'] in goal.get('required_source_ids', []) and goal['state'] in {'queued', 'active'}:
+                if goal.get('stage_id') and body['source_id'] in goal.get('required_source_ids', []) and goal['state'] in {'queued', 'active', 'blocked'}:
                     goal['source_changed'] = identifier
                     store.put(db, 'agent_goals', goal)
                 proposal = goal.get("proposal", {})

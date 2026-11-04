@@ -42,6 +42,7 @@ export class AgentsView {
   }
   close() {
     ++this.generation; this.abort?.abort(); clearInterval(this.timer); this.learningView?.close();
+    this.refreshing=null;this.loadedKey=null;this.diagnosticsCache?.clear();
     this.setup?.close(); this.setup = null; this.creating = false; this.root.classList.remove('agent-setup-page');
     this.configurationEditor?.close(); this.configurationEditor = null;
   }
@@ -61,10 +62,22 @@ export class AgentsView {
     if (!node) { node = element('p', 'agent-error'); node.setAttribute('role', 'alert'); this.root.prepend(node); }
     node.textContent = `${error.message}${error.status === 409 ? '。请刷新后核对最新版本。' : ''}`;
   }
-  async refresh() {
+  refresh({force=false}={}) {
+    const key=JSON.stringify([this.generation,this.selected,this.tab]);
+    if(this.refreshing)return this.refreshing.then(()=>{
+      if(key===JSON.stringify([this.generation,this.selected,this.tab]) && (force || this.loadedKey!==key))return this.refresh();
+    });
+    const pending=this.refreshOnce();
+    const tracked=pending.finally(()=>{if(this.refreshing===tracked)this.refreshing=null;});
+    this.refreshing=tracked;return tracked;
+  }
+  async refreshOnce() {
     const generation = this.generation, signal = this.abort?.signal;
-    const catalog = await this.api.get(null, '', signal);
-    if (generation !== this.generation || signal?.aborted) return;
+    const selected=this.selected,tab=this.tab;
+    const [catalog,detail]=await Promise.all([this.api.get(null,'',signal),
+      selected?this.api.view(selected,tab.toLowerCase(),signal):Promise.resolve(null)]);
+    if (generation !== this.generation || selected!==this.selected || tab!==this.tab || signal?.aborted) return;
+    this.loadedKey=JSON.stringify([generation,selected,tab]);
     this.catalog = catalog;
     this.listRoot.replaceChildren(button('创建 Agent', () => this.createForm(), 'primary'));
     for (const agent of catalog.agents) {
@@ -83,9 +96,6 @@ export class AgentsView {
       }
       return;
     }
-    const selected = this.selected;
-    const detail = await this.api.get(selected, '', signal);
-    if (generation !== this.generation || selected !== this.selected || signal?.aborted) return;
     this.detail = detail;
     const editing = this.root.contains(document.activeElement) && /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName);
     const resourceEditing = this.resourceEditor?.form.isConnected && (this.resourceEditor.dirty || this.resourceEditor.saving);
@@ -94,13 +104,18 @@ export class AgentsView {
     if (!editing && !resourceEditing && !learningEditing && !configurationEditing && !this.creating && this.renderedDetail !== JSON.stringify(detail)) this.render();
     else if (!this.creating) this.updateSchedule(detail);
   }
+  changeTab(tab) {
+    this.tab=tab;this.loadedKey=null;this.render();
+    return this.refresh().catch(e=>this.showError(e));
+  }
   async select(id) { this.learningView?.close(); this.configurationEditor?.close(); this.configurationEditor=null; this.renderedDetail = null; this.setup?.close(); this.setup = null; this.root.classList.remove('agent-setup-page'); this.selected = id; this.creating = false; this.tab = 'Overview'; await this.refresh(); }
   async act(action) {
-    try { await action(); await this.refresh(); }
+    try { await action(); await this.refresh({force:true}); }
     catch (error) { this.showError(error); }
   }
   createForm(edit = null, section = null) {
     if(edit) {
+      if(edit.view && edit.view!=='overview')return this.changeTab('Overview').then(()=>this.editConfiguration(this.detail,section || 'identity'));
       this.detail=edit;this.selected=edit.id;this.tab='Overview';this.creating=false;
       this.setup?.close();this.setup=null;this.root.classList.remove('agent-setup-page');this.render();
       return this.editConfiguration(edit,section || 'identity');
@@ -149,7 +164,7 @@ export class AgentsView {
         const next=JSON.stringify(changes);if(next!==signature){signature=next;commandId=uuid();}
         await this.api.post(detail.id,`configuration/${section}`,{command_id:commandId,expected_revision:detail.revision,changes},editor.abort.signal);
         if(this.configurationEditor!==editor || editor.closed || this.selected!==detail.id)return;
-        editor.close();this.configurationEditor=null;this.renderedDetail=null;await this.refresh();
+        editor.close();this.configurationEditor=null;this.renderedDetail=null;await this.refresh({force:true});
       }});
     this.configurationEditor=editor;
     await editor.load();
@@ -185,12 +200,12 @@ export class AgentsView {
     this.renderedDetail = JSON.stringify(d); this.renderHeading(head, d.role.name, d);
     const nav = element('nav', 'evaluation-tabs agent-tabs'); nav.setAttribute('role','tablist'); nav.setAttribute('aria-label','Agent 详情');
     tabs.forEach((tab, i) => {
-      const b = button(titles[i], () => {this.tab = tab; this.render(); this.root.querySelector(`[data-tab="${tab}"]`).focus();});
+      const b = button(titles[i], () => {this.changeTab(tab); this.root.querySelector(`[data-tab="${tab}"]`).focus();});
       b.dataset.tab = tab; b.id = `agent-tab-${tab}`; b.setAttribute('role','tab'); b.setAttribute('aria-selected',String(tab === this.tab));
       b.tabIndex = tab === this.tab ? 0 : -1; b.setAttribute('aria-controls','agent-tab-content');
       b.addEventListener('keydown', event => {
         const next = event.key === 'ArrowRight' ? (i+1)%tabs.length : event.key === 'ArrowLeft' ? (i+tabs.length-1)%tabs.length : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length-1 : null;
-        if (next === null) return; event.preventDefault(); this.tab = tabs[next]; this.render(); this.root.querySelector(`[data-tab="${this.tab}"]`).focus();
+        if (next === null) return; event.preventDefault(); this.changeTab(tabs[next]); this.root.querySelector(`[data-tab="${this.tab}"]`).focus();
       }); nav.append(b);
     });
     const content = element('section', 'agent-content trace-dashboard'); content.id = 'agent-tab-content'; content.setAttribute('role','tabpanel'); content.tabIndex = 0;
@@ -198,7 +213,9 @@ export class AgentsView {
     this.root.replaceChildren(...(this.heading ? [] : [head]), nav);
     if (!d.service_enabled) this.root.append(element('p','notice','自主运行尚未启用。启动服务时添加 --enable-agents；配置和历史仍可查看。'));
     if (d.error || d.service_error) this.root.append(element('p','notice error',d.error || d.service_error));
-    this.root.append(content); this[`render${this.tab}`](content,d);
+    this.root.append(content);
+    if(d.view && d.view!==this.tab.toLowerCase())content.append(element('p','empty-state','正在加载…'));
+    else this[`render${this.tab}`](content,d);
   }
   renderOverview(root, d) {
     const summary = panel(root,'运行概览',true);
@@ -213,7 +230,7 @@ export class AgentsView {
     if(d.configuration?.pending)root.append(element('p','notice dashboard-wide','新配置已保存，等待已派发任务与分析结束后，在下一次新任务调度前生效。'));
     const goals = panel(root,'长期目标（只读）');
     this.showRows(goals,d.role.long_term_objectives.map(g=>g.desired_outcome));
-    goals.append(button('前往目标页面',()=>{this.tab='Goals';this.render();}));
+    goals.append(button('前往目标页面',()=>this.changeTab('Goals')));
     const workspace=panel(root,'工作目录（固定）');
     table(workspace,['配置','当前值'],[['Workspace',d.role.workspace || d.role.working_directory || '无本地目录'],
       ['工作目录',d.role.working_directory || '无本地目录']]);
@@ -326,15 +343,20 @@ export class AgentsView {
   }
   showRows(root, values) { const list = element('ul','dashboard-file-list'); for (const value of values) list.append(element('li','',value)); root.append(list); }
   focusGoal(id) {
-    const goal=this.detail.goals.find(g=>g.id===id);
-    const stage=(this.detail.stages || []).find(s=>s.id===goal?.stage_id || s.goal_ids?.includes(id));
-    if(stage) this.roadmapSelections.set(JSON.stringify([this.detail.id,stage.objective_id]),stage.id);
-    this.stageExpansionStates.set(JSON.stringify([this.detail.id,`goal:${id}`]),true);
-    this.stageExpansionStates.set(JSON.stringify([this.detail.id,'unassigned']),true);
-    this.tab='Goals';this.render();
-    const row=[...this.root.querySelectorAll('[data-goal-id]')].find(node=>node.dataset.goalId===id);
-    if (row) {for(let node=row;node && node!==this.root;node=node.parentElement) if(node.tagName==='DETAILS') node.open=true;
-      row.focus();row.scrollIntoView?.({block:'center'});}
+    const aid=this.detail.id;
+    this.stageExpansionStates.set(JSON.stringify([aid,`goal:${id}`]),true);
+    this.stageExpansionStates.set(JSON.stringify([aid,'unassigned']),true);
+    const focus=()=>{
+      if(this.detail.id!==aid || this.tab!=='Goals' || this.detail.view && this.detail.view!=='goals')return;
+      const goal=this.detail.goals.find(g=>g.id===id);
+      const stage=(this.detail.stages || []).find(s=>s.id===goal?.stage_id || s.goal_ids?.includes(id));
+      const key=stage && JSON.stringify([aid,stage.objective_id]);
+      if(stage && this.roadmapSelections.get(key)!==stage.id){this.roadmapSelections.set(key,stage.id);this.render();}
+      const row=[...this.root.querySelectorAll('[data-goal-id]')].find(node=>node.dataset.goalId===id);
+      if(row){for(let node=row;node && node!==this.root;node=node.parentElement)if(node.tagName==='DETAILS')node.open=true;
+        row.focus();row.scrollIntoView?.({block:'center'});}
+    };
+    this.changeTab('Goals').then(focus);focus();
   }
   renderGoalWork(root,d,goal) {
     const works=d.work_packages.filter(w=>w.goal_id===goal.id).sort((a,b)=>(a.order??0)-(b.order??0));
@@ -417,7 +439,7 @@ export class AgentsView {
     const role = panel(root,'角色定位',true);
     role.firstChild.append(button('编辑角色', () => this.createForm(d,'identity')));
     role.append(element('p','',d.role.role_text));
-    role.append(button('管理学习与人工方法',()=>{this.tab='Learning';this.render();}));
+    role.append(button('管理学习与人工方法',()=>this.changeTab('Learning')));
     const preferences = panel(root,'偏好与习惯',true);
     preferences.append(element('p','muted','明确指导立即生效；推断偏好保留来源、反例和复核期限。试用只影响指导，不增加工具权限。'));
     table(preferences,['偏好','范围','状态','证据 / 复核','操作'],(d.profile_entries || []).map(p => {

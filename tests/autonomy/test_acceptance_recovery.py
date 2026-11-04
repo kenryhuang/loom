@@ -110,7 +110,7 @@ class RepairProvider:
     def __init__(self, value, during=None):
         self.value, self.during = value, during
 
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, cancellation=None):
         assert tools is None
         if self.during:
             self.during()

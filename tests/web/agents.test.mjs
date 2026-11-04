@@ -75,6 +75,61 @@ test('Unchanged polling retains inspected records; server state changes refresh 
 
 const tick = () => new Promise(resolve => setTimeout(resolve,0));
 
+test('Polling shares in-flight requests and requests list and current page concurrently',async()=>{
+ const data=fixture(),requests=[];let slow=false,releaseList,releaseDetail;
+ const {dom,view}=setup({json:async path=>{
+  requests.push(path);
+  if(!slow)return path==='/v1/agents'?{agents:[data]}:data;
+  if(path==='/v1/agents')return new Promise(resolve=>releaseList=resolve);
+  return new Promise(resolve=>releaseDetail=resolve);
+ }});
+ try{
+  await view.open();await view.select('a');requests.length=0;slow=true;
+  const pending=view.refresh(),again=view.refresh(),third=view.refresh();
+  assert.deepEqual(requests,['/v1/agents','/v1/agents/a/views/overview']);
+  assert.equal(typeof releaseDetail,'function');
+  releaseList({agents:[data]});releaseDetail(data);await Promise.all([pending,again,third]);
+  assert.equal(requests.length,2);
+ }finally{view.close();dom.window.close();}
+});
+
+test('Tab changes during polling ignore the old page and fetch the chosen page once',async()=>{
+ const data=fixture(),requests=[];let delayed=false,resolveOld;
+ const {dom,view}=setup({json:async path=>{
+  requests.push(path);
+  if(path==='/v1/agents')return {agents:[data]};
+  if(delayed && path.endsWith('/overview'))return new Promise(resolve=>resolveOld=resolve);
+  return {...structuredClone(data),view:path.split('/').at(-1)};
+ }});
+ try{
+  await view.open();await view.select('a');requests.length=0;delayed=true;
+  const old=view.refresh(),selected=view.changeTab('Knowledge');
+  assert.match(view.root.textContent,/正在加载/);
+  resolveOld({...structuredClone(data),view:'overview'});await Promise.all([old,selected]);
+  assert.equal(view.detail.view,'knowledge');
+  assert.equal(requests.filter(path=>path.endsWith('/views/knowledge')).length,1);
+  assert.equal(view.tab,'Knowledge');
+ }finally{view.close();dom.window.close();}
+});
+
+test('Analysis diagnostics are loaded only when their detail is expanded and reused across polling',async()=>{
+ const data=fixture();data.view='work';data.work_packages=[{id:'w',state:'succeeded',objective:'Finished task'}];
+ data.learning=[{id:'c',work_package_id:'w',state:'incomplete',evaluation_id:'eval',session_id:'s'}];
+ let diagnosticRequests=0;
+ const {dom,view}=setup({json:async path=>{
+  if(path.endsWith('/diagnostics')){diagnosticRequests++;return {state:'incomplete',usage:{calls:3},units:[{id:'missing',issues:['Actual source gap']}]};}
+  return path==='/v1/agents'?{agents:[data]}:data;
+ }});
+ try{
+  await view.open();await view.select('a');view.tab='Work';view.render();
+  assert.equal(diagnosticRequests,0);
+  let detail=[...view.root.querySelectorAll('details')].find(node=>node.textContent.includes('eval') && node.querySelector('summary')?.textContent==='详情');
+  assert.ok(detail);detail.open=true;detail.dispatchEvent(new dom.window.Event('toggle'));await tick();
+  assert.equal(diagnosticRequests,1);assert.match(detail.textContent,/Actual source gap/);
+  view.render();await tick();assert.equal(diagnosticRequests,1);
+ }finally{view.close();dom.window.close();}
+});
+
 test('Overview exposes scoped configuration panels and read-only goals and workspace',async()=>{
  const data=fixture();const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
  try{
