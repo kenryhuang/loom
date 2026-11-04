@@ -1,6 +1,6 @@
 # 自主 Agent：完整运行与调度设计
 
-更新日期：2026-11-03。本文按当前实现整理，是自主 Agent 的运行契约与调度设计；历史方案、实施过程分别见[原始设计](2026-10-25-autonomous-agent-design.zh-CN.md)与[实施计划](../plan/2026-10-30-autonomous-agent-implementation.zh-CN.md)。本文不把历史提案中的未来能力视为已经实现。
+更新日期：2026-11-04。本文按当前实现整理，是自主 Agent 的运行契约与调度设计；历史方案、实施过程分别见[原始设计](2026-10-25-autonomous-agent-design.zh-CN.md)与[实施计划](../plan/2026-10-30-autonomous-agent-implementation.zh-CN.md)。本文不把历史提案中的未来能力视为已经实现。
 
 系统将长期目标转成可验收的阶段与工作包，通过执行队列推进交付，通过独立的分析队列提取记忆。调度器负责检查事实、每日预算准入、恢复和派发，Session 内核负责具体执行。业务验收、分析完成、记忆发布和人工确认分别记录。
 
@@ -23,7 +23,7 @@
 | Role / Agent | 保存角色原文、长期目标、目录、模型、工具与知识库绑定、预算和调度配置；Role 按版本保存，Agent 保存运行状态 |
 | LongTermObjective | 描述长期方向及 ongoing / finite 类型，可配置周期职责、观测派生迭代或自主阶段规划 |
 | Roadmap / Stage | 保存路线版本、当前近期交付、验收要求和暂定未来方向；同一长期目标只激活当前阶段 |
-| Goal | 一次交付合同，包含验收、依赖、来源要求、停止条件；阶段可以产生多个 Goal，人工也可单独添加 |
+| Goal | 一次交付合同，包含验收、依赖、来源要求、停止条件；阶段可以产生多个 Goal，人工只能在当前未结束阶段内添加或修订 |
 | AgentRun | 记录拆包或阶段规划/复盘决策及其输入、模型响应和提交状态；不是具体执行 run |
 | WorkPackage | 一个 Goal 下按顺序执行的工作包，保存 Session、run 历史、额度分配和恢复计数 |
 | Session / SessionRun | 由现有执行内核保存执行状态、工具事实、checkpoint、输入问题和验收；失败后恢复可能产生后继 run |
@@ -113,7 +113,7 @@ flowchart TD
 
 | 模式 | 生成方式 |
 | --- | --- |
-| 显式 Goal / `schedule` | 人工交付合同；周期职责必须配置间隔与验收，错过窗口合并到最新窗口，每个职责保留一个未解决周期目标 |
+| 阶段内人工 Goal / `schedule` | 人工交付合同必须归入当前未结束阶段；周期职责必须配置间隔与验收，错过窗口合并到最新窗口，每个职责保留一个未解决周期目标 |
 | `iteration` | 根据人工 observation、绑定来源变化和明确习惯产生有来源的 GoalProposal，按对象和证据版本去重 |
 | `stage_planning.mode=autonomous` | 从长期目标、真实交付证据、来源、观测和复盘生成近期阶段，再逐阶段推进 |
 
@@ -130,6 +130,8 @@ flowchart TD
 
 暂定方向不是已派发的任务。已有有效工作包未解决时，定时检查不会重新生成目标和拆包。阶段模式关闭、手动暂停、同指纹失败、复查时间未到、每日新阶段上限或无进展上限，都可能使规划保持等待。
 
+手工新增仅支持当前 objective 的当前未结束阶段，提交阶段 expected_revision 和 `{objective, acceptance}`。新增 Goal 依赖本阶段已有 Goals，并继承阶段整体验收、来源要求与停止条件；新增后阶段仍需完成全部交付与复盘。Goal 修订只修改目标与验收，保持所属 objective、stage 和依赖不变；已完成 Goal、历史 attempt、已完成/取消/替代阶段不能改写，在途工作合同也不能直接改写。历史独立 Goal 保留，但不再提供新增、修订或人工后继 attempt。
+
 ### 4.3 规划校验与发布
 
 模型提案必须经过结构、引用、范围、顺序和依赖语义校验：
@@ -142,7 +144,7 @@ flowchart TD
 
 有效响应先保存，再校验 Agent generation、planning revision、租约与输入指纹，原子提交路线、阶段和 Goals。阶段路线版本不可变；原失败、被替代阶段和旧 attempt 保留。
 
-`goals/{goal}/retry` 要求 `change_kind=input/method/environment`、具体 `change` 和 expected revision；产生有血缘的新 attempt，首次退避 60 秒，后续指数增加。它与原工作包的 Session 恢复是不同操作。
+人工 `goals/{goal}/retry` 仅允许当前未结束阶段中的有效 Goal，要求 `change_kind=input/method/environment`、具体 `change` 和 expected revision；产生有血缘的新 attempt，首次退避 60 秒，后续指数增加。它与原工作包的 Session 恢复是不同操作。
 
 ## 5. 执行队列：检查、派发与完成
 
@@ -448,7 +450,7 @@ Session 链接定位执行记录；Analysis 和 Deep Eval 链接携带 analysis 
 
 ## 13. 配置与启动
 
-Overview 按角色与方法、模型、执行配置、运行与调度、每日预算、学习与评估、资料与资源分别展示参数。每个板块独立编辑和取消；取消立即退出，不提交修改，也不受后台轮询影响。长期目标在概览只读，新增目标与修改干涉仍在 Goals 页面操作；Agent 创建后 workspace 和 working_directory 固定。
+Overview 按角色与方法、模型、执行配置、运行与调度、每日预算、学习与评估、资料与资源分别展示参数。每个板块独立编辑和取消；取消立即退出，不提交修改，也不受后台轮询影响。长期目标在概览只读，Goals 页面仅在当前 objective 规划树的未结束 stage 下提供手工新增与修订目标；Agent 创建后 workspace 和 working_directory 固定。
 
 页面通过 `GET views/{overview|goals|work|profile|knowledge|learning}` 按当前标签页读取只读快照。概览只取目标、工作包与学习的 id/state 计数；执行页只投影 Session 运行摘要，不解析完整上下文和历史分析 checkpoint。展开分析详情时请求 `GET learning/{cycle}/diagnostics`，返回有界错误和分析单元诊断，不传输证据 checkpoint。读接口使用 WAL 只读事务，不占用写锁。客户端并行读取列表与当前标签页，同一时刻只保留一轮刷新；切页和关闭后丢弃旧响应，编辑草稿继续保留。
 
@@ -515,7 +517,7 @@ uv run loom serve --data-dir .loom/service --config /absolute/path/to/config.yam
 }
 ```
 
-首次使用：创建未启用 Agent → 校验真实目录/来源与已配置模型 → 设置自主阶段规划或添加显式 Goal → 启用 Agent → 在目标和执行页面观察。初始化配置也可通过 setup/recommend 生成建议，再由用户确认保存；不会仅凭任意自然语言宣称已可靠提取全部权限。
+首次使用：创建未启用 Agent → 校验真实目录/来源与已配置模型 → 设置自主阶段规划 → 启用 Agent → 在目标和执行页面观察。初始化配置也可通过 setup/recommend 生成建议，再由用户确认保存；不会仅凭任意自然语言宣称已可靠提取全部权限。
 
 | 配置 | 当前默认 / 范围 |
 | --- | --- |
@@ -537,7 +539,7 @@ uv run loom serve --data-dir .loom/service --config /absolute/path/to/config.yam
 | `POST commands` | enable / pause / resume / archive / wake |
 | `POST role/revisions`、`GET role-revisions` | 提交完整 Role / 查看版本 |
 | `POST configuration/{section}` | 保存单个板块配置，后续新任务生效；Overview 展示待生效预览 |
-| `POST goals`、`POST goals/{goal}/commands`、`POST goals/{goal}/retry` | 显式交付、合同/状态控制、有变化依据的后继 attempt |
+| `POST stages/{stage}/goals`、`POST goals/{goal}/commands`、`POST goals/{goal}/retry` | 阶段内手工交付、合同/状态控制、有变化依据的后继 attempt；旧 `POST goals` 拒绝独立新增 |
 | `GET objectives/{objective}/roadmap`、`GET stages`、`GET stages/{stage}` | planning、路线、阶段和复盘 |
 | `POST objectives/{objective}/planning/commands` | enable/disable 使用 Agent revision；pause/resume/replan/answer 使用 planning revision |
 | `POST stages/{stage}/commands` | pause/resume/skip/cancel/revise，使用 stage revision |

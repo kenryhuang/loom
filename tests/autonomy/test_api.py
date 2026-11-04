@@ -30,9 +30,16 @@ def test_authenticated_agent_api_commands_and_scope(agent_service):
         assert request("/v1/agents", token="wrong")[0] == 401
         assert request("/v1/agents")[1]["agents"][0]["id"] == aid
         body = {"command_id": "new-goal", "goal": goals()[0]}
-        first = request(f"/v1/agents/{aid}/goals", body)
+        assert request(f"/v1/agents/{aid}/goals", body)[0] == 409
+        from tests.autonomy.test_stage_progression import setup_plan
+
+        stage = setup_plan(facade, aid)["stages"][0]
+        body = dict(command_id="stage-goal", expected_revision=stage["revision"],
+                    goal={key: goals()[0][key] for key in ("objective", "acceptance")})
+        path = f"/v1/agents/{aid}/stages/{stage['id']}/goals"
+        first = request(path, body)
         assert first[0] == 200
-        assert request(f"/v1/agents/{aid}/goals", body) == first
+        assert request(path, body) == first
         assert request(f"/v1/agents/{aid}/commands", {"command_id": "pause", "type": "pause", "expected_revision": 1})[0] == 409
         assert request(f"/v1/agents/{aid}/context/missing")[0] == 404
         assert request(f"/v1/agents/{aid}/guidance", {"command_id": "guide", "text": "just this", "scope": "current_task"})[0] == 400

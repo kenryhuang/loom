@@ -13,6 +13,12 @@ function field(form,key,title,value='') {
 }
 const time = value => value && Number.isFinite(new Date(value).getTime()) ? new Date(value).toLocaleString(undefined,{hour12:false}) : '';
 
+export function editableStage(d,stage) {
+  return !!stage && !terminal.has(stage.state) &&
+    (d.objective_planning || []).some(s=>s.objective_id===stage.objective_id && s.stage_id===stage.id) &&
+    d.role.long_term_objectives.some(o=>o.id===stage.objective_id);
+}
+
 export function roadmapDisclosure(view,root,d,key,title,open=false) {
   const node=disclosure(root,title),identity=JSON.stringify([d.id,key]);
   node.open=view.stageExpansionStates.get(identity) ?? open;
@@ -54,6 +60,19 @@ function stageDetail(root,stage,d,view,isCurrent) {
   if(changed) reasons.unshift('来源在规划后发生变化，等待复核阶段。');
   if(reasons.length && !terminal.has(stage.state)) root.append(element('p','notice',`当前卡点：${reasons.join('；')}`));
   const goals=section(root,'阶段目标');stageGoals(goals,stage,d,view);
+  if(editableStage(d,stage)) {
+    const add=roadmapDisclosure(view,goals,d,`add-goal:${stage.id}`,'手工添加阶段目标');
+    const form=element('form','agent-form');form.dataset.stageGoalForm=stage.id;
+    field(form,'objective','本次交付目标').required=true;
+    field(form,'acceptance','验收条件（每行一条）').required=true;
+    form.append(element('p','muted','新增目标将在本阶段现有目标之后执行，并核验阶段整体验收条件。'));
+    const submit=element('button','primary','添加到当前阶段');submit.type='submit';form.append(submit);
+    form.addEventListener('submit',event=>{event.preventDefault();view.act(async()=>{
+      await view.api.post(d.id,`stages/${encodeURIComponent(stage.id)}/goals`,{command_id:crypto.randomUUID(),expected_revision:stage.revision,
+        goal:{objective:form.elements.objective.value,acceptance:lines(form.elements.acceptance.value)}});
+      form.reset();document.activeElement?.blur();
+    });});add.append(form);
+  }
   const contract=roadmapDisclosure(view,root,d,`contract:${stage.id}`,'交付范围与验收');
   if(stage.expected_contribution) section(contract,'对长期目标的贡献',stage.expected_contribution);
   for(const [title,key] of [['验收条件','acceptance'],['范围','scope'],['暂不包含','non_goals'],['假设','assumptions'],['停止条件','stop_conditions']])

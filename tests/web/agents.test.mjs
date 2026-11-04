@@ -46,7 +46,7 @@ test('Details reuse Evaluation shell, dashboards and keyboard tab navigation',as
   assert.equal(view.tab,'Goals');
   assert.equal(document.activeElement.id,'agent-tab-Goals');
   assert.equal(view.root.querySelector('[role="tabpanel"]').getAttribute('aria-labelledby'),'agent-tab-Goals');
-  assert.match(view.root.textContent,/添加目标/);
+  assert.doesNotMatch(view.root.textContent,/添加目标/);
   for(const tab of ['Work','Profile','Knowledge','Learning']){
    view.tab=tab;view.render();
    assert.ok([...view.root.querySelector('.agent-content').children].every(n=>n.classList.contains('dashboard-panel') || n.classList.contains('dashboard-disclosure')));
@@ -497,7 +497,7 @@ test('Roadmap updates tentative directions, separates replaced stages and falls 
  }finally{view.close();dom.window.close();}
 });
 
-test('Standalone goals remain editable once and stage revisions retain the selected contract version',async()=>{
+test('Standalone goals cannot be revised and stage revisions retain the selected contract version',async()=>{
  const data=fixture();data.role.long_term_objectives=[{id:'quality',desired_outcome:'Improve',stage_planning:{mode:'autonomous'}}];
  data.objective_planning=[{objective_id:'quality',state:'active',revision:3,stage_id:'s'}];
  data.stages=[{id:'s',objective_id:'quality',state:'active',title:'Current',goal_ids:['g'],acceptance:['original'],expected_outcome:'Original',revision:7}];
@@ -509,11 +509,44 @@ test('Standalone goals remain editable once and stage revisions retain the selec
   await view.open();await view.select('a');view.tab='Goals';view.render();
   assert.equal(view.root.querySelectorAll('[data-goal-id]').length,2);
   const standalone=view.root.querySelector('[data-goal-id="manual"]');assert.equal(standalone.closest('.dashboard-panel').open,false);
+  assert.doesNotMatch(standalone.textContent,/修订目标|创建有退避/);
+  assert.match(view.root.querySelector('[data-goal-id="g"]').textContent,/修订目标/);
   const form=view.root.querySelector('[name="outcome"]').form;form.elements.reason.value='New requirement';form.elements.outcome.value='Changed';form.elements.criteria.value='Keep original\nNew check';
   [...form.querySelectorAll('button')].find(b=>b.textContent==='保存修订并重新规划').click();await tick();
   assert.equal(sent.path,'/v1/agents/a/stages/s/commands');assert.equal(sent.body.expected_revision,7);
   assert.deepEqual(sent.body.payload,{expected_outcome:'Changed',acceptance:['Keep original','New check']});
   view.focusGoal('manual');assert.equal(view.root.querySelector('[data-goal-id="manual"]').open,true);
+ }finally{view.close();dom.window.close();}
+});
+
+test('Manual Goals can only be added under the current unfinished stage',async()=>{
+ const data=fixture();data.role.long_term_objectives=[{id:'quality',desired_outcome:'Improve',stage_planning:{mode:'autonomous'}}];
+ data.objective_planning=[{objective_id:'quality',state:'active',revision:3,stage_id:'s',roadmap_id:'r'}];
+ data.roadmaps=[{id:'r',future:[{key:'future',title:'Later'}]}];
+ data.stages=[{id:'s',objective_id:'quality',state:'active',title:'Current',goal_ids:['g'],acceptance:['original'],revision:7},
+  {id:'old',objective_id:'quality',state:'completed',title:'Delivered',goal_ids:['old-g'],acceptance:[],revision:2}];
+ data.goals=[{id:'g',stage_id:'s',objective:'Stage goal',state:'queued',acceptance:[],revision:2},
+  {id:'old-g',stage_id:'old',objective:'Old goal',state:'queued',acceptance:[],revision:2}];
+ let sent;const {dom,view}=setup({json:async(path,options)=>{if(options?.body){sent={path,body:options.body};return {};}
+  return path==='/v1/agents'?{agents:[data]}:data;}});
+ try{
+  await view.open();await view.select('a');view.tab='Goals';view.render();
+  assert.equal([...view.root.querySelectorAll('summary')].some(s=>s.textContent==='添加目标'),false);
+  const form=view.root.querySelector('[data-stage-goal-form="s"]');assert.ok(form);
+  form.elements.objective.value='Manual addition';form.elements.acceptance.value='First check\nSecond check';
+  form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await tick();
+  assert.equal(sent.path,'/v1/agents/a/stages/s/goals');assert.equal(sent.body.expected_revision,7);
+  assert.deepEqual(sent.body.goal,{objective:'Manual addition',acceptance:['First check','Second check']});
+  view.root.querySelector('[data-roadmap-node="old"]').click();
+  assert.equal(view.root.querySelector('[data-stage-goal-form]'),null);
+  assert.doesNotMatch(view.root.querySelector('[data-goal-id="old-g"]').textContent,/修订目标|创建有退避/);
+  view.root.querySelector('[data-roadmap-node="future:r:future"]').click();
+  assert.equal(view.root.querySelector('[data-stage-goal-form]'),null);
+  view.root.querySelector('[data-roadmap-node="s"]').click();
+  for(const state of ['completed','cancelled','superseded']) {
+   data.stages[0].state=state;view.render();assert.equal(view.root.querySelector('[data-stage-goal-form]'),null);
+   assert.doesNotMatch(view.root.querySelector('[data-goal-id="g"]').textContent,/修订目标|创建有退避/);
+  }
  }finally{view.close();dom.window.close();}
 });
 

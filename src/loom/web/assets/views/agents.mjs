@@ -5,7 +5,7 @@ import {AgentLearningView} from './agent-learning.mjs';
 import {panel, cards, table, badge, number, disclosure} from './dashboard.mjs';
 import {agentResourceChoices} from './agent-resources.mjs';
 import {selectedTools} from './external-tools.mjs';
-import {renderRoadmaps, roadmapDisclosure} from './agent-roadmap.mjs';
+import {editableStage, renderRoadmaps, roadmapDisclosure} from './agent-roadmap.mjs';
 import {renderExecution} from './agent-execution.mjs';
 import {AgentConfigurationEditor, configurationTitles, configuredRole} from './agent-configuration.mjs';
 
@@ -382,13 +382,10 @@ export class AgentsView {
       block.append(element('p','muted','未归入阶段的交付保留在这里，作为后续规划的现状依据。'));
       for(const goal of standalone) this.renderGoal(block,d,goal);
     }
-    const add=roadmapDisclosure(this,root,d,'add-goal','添加目标');add.classList.add('dashboard-panel','dashboard-wide');
-    const form = element('form','agent-form'); field(form,'objective','本次交付目标','',true); field(form,'acceptance','验收条件（每行一条）','',true);
-    const submit = element('button','primary','添加目标'); submit.type='submit'; form.append(submit);
-    form.addEventListener('submit', e => {e.preventDefault(); this.act(async () => {await this.api.post(d.id,'goals',
-      {command_id:uuid(),goal:{objective:form.elements.objective.value,acceptance:lines(form.elements.acceptance.value)}}); form.reset(); document.activeElement?.blur();});});add.append(form);
   }
   renderGoal(root,d,goal) {
+    const stage=(d.stages || []).find(s=>s.id===goal.stage_id && s.goal_ids?.includes(goal.id));
+    const editable=editableStage(d,stage) && !['completed','cancelled','superseded'].includes(goal.state);
     const row=roadmapDisclosure(this,root,d,`goal:${goal.id}`,goal.objective);
     row.classList.add('agent-roadmap-goal');row.dataset.goalId=goal.id;row.tabIndex=-1;
     const summary=row.querySelector('summary');summary.append(badge(label(goal.state),goal.state));
@@ -401,7 +398,7 @@ export class AgentsView {
     if (goal.not_before) row.append(element('p','muted',`最早重试：${goal.not_before}`));
     if (goal.source_changed) row.append(element('p','notice',['completed','cancelled','superseded'].includes(goal.state)
       ? '历史记录：来源在规划后发生过变化。' : '来源在规划后发生变化，后续派发已等待目标复核。'));
-    if (goal.state === 'blocked') {
+    if (editable && goal.state === 'blocked') {
       const retry = element('form','agent-form');
       const kind = element('select'); kind.name='change_kind';
       for (const [value,title] of [['input','输入变化'],['method','方法变化'],['environment','环境变化']]) {
@@ -412,14 +409,13 @@ export class AgentsView {
         {command_id:uuid(),expected_revision:goal.revision,change_kind:kind.value,change:retry.elements.change.value}))));
       row.append(retry);
     }
-    if (!['completed','cancelled','superseded'].includes(goal.state)) for (const type of ['pause','resume','cancel']) row.append(button(
+    if ((editable || !goal.stage_id) && !['completed','cancelled','superseded'].includes(goal.state)) for (const type of ['pause','resume','cancel']) row.append(button(
       {pause:'暂停目标',resume:'恢复目标',cancel:'取消目标'}[type], () => this.act(() => this.api.post(d.id, `goals/${encodeURIComponent(goal.id)}/commands`,
         {command_id:uuid(), type, expected_revision:goal.revision}))));
-    if (!['completed','cancelled','superseded'].includes(goal.state)) row.append(button('修订目标', () => {
+    if (editable) row.append(button('修订目标', () => {
       const form=element('form','agent-form');field(form,'objective','目标',goal.objective,true);field(form,'acceptance','验收条件',goal.acceptance.join('\n'),true);
       form.append(button('保存新合同',()=>this.act(async()=>{await this.api.post(d.id,`goals/${encodeURIComponent(goal.id)}/commands`,
-        {command_id:uuid(),type:'revise',expected_revision:goal.revision,payload:{objective:form.elements.objective.value,acceptance:lines(form.elements.acceptance.value),
-          long_term_objective_id:goal.long_term_objective_id,depends_on:goal.depends_on,priority:goal.priority,stop_conditions:goal.stop_conditions,learning_dependency:goal.learning_dependency}});
+        {command_id:uuid(),type:'revise',expected_revision:goal.revision,payload:{objective:form.elements.objective.value,acceptance:lines(form.elements.acceptance.value)}});
         document.activeElement?.blur();})));row.append(form);
     }));
     row.append(element('h5','','执行工作包'));this.renderGoalWork(row,d,goal);

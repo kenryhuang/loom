@@ -171,7 +171,7 @@ def sources_ready(store, db, agent, goal):
     return all(current(s) or any(current(f) for f in routes.get(s, {}).get("fallback_route_ids", [])) for s in goal.get("required_source_ids", []))
 
 
-def retry(store, aid, gid, body):
+def retry(store, aid, gid, body, *, stage_only=False):
     strict(body, {"command_id", "expected_revision", "change", "change_kind"})
     if body.get("change_kind") not in {"input", "method", "environment"}:
         raise ServiceError("Retry must identify input, method or environment change")
@@ -184,6 +184,10 @@ def retry(store, aid, gid, body):
         agent = store.get(db, "agents", aid)
         goal = store.get(db, "agent_goals", gid, aid)
         store.expect(goal, body.get("expected_revision"))
+        if stage_only:
+            from loom.autonomy.stage_goals import editable_stage
+
+            editable_stage(store, db, agent, goal.get("stage_id"), goal=goal)
         if goal["state"] != "blocked":
             raise ServiceError("Only blocked goals can create successor attempts", 409)
         depth = goal.get("attempt", 0) + 1

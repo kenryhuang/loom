@@ -12,6 +12,7 @@ import threading
 import time
 from pathlib import Path
 
+from loom.autonomy.stages import planning_state, role_signature
 from loom.service.api import ServiceHTTPServer
 from loom.service.controller import LoomService
 from tests.autonomy.helpers import evaluation_provider, goals, role, single_package, solver_provider
@@ -54,9 +55,28 @@ def main():
                 connection.close()
 
         try:
-            agent = request("", dict(command_id="create", role=role(path)))
+            configured = role(path)
+            configured["long_term_objectives"][0]["stage_planning"] = dict(mode="autonomous")
+            agent = request("", dict(command_id="create", role=configured))
             aid = agent["id"]
-            request("/" + aid + "/goals", dict(command_id="g1", goal=goals()[0]))
+            # Seed a current stage; this smoke exercises execution and human additions,
+            # while test_stage_end_to_end covers model-driven stage creation.
+            facade = service.background.autonomy
+            goal = facade.store.add_goal(aid, "g1", goals()[0])
+            with facade.store.sessions.transaction() as db:
+                current = facade.store.get(db, "agents", aid)
+                stage = dict(id="smoke-stage", agent_id=aid, objective_id="quality", roadmap_id="smoke-roadmap",
+                             state="active", revision=1, title="Smoke delivery", expected_outcome="Verified Session evidence",
+                             scope=["Current workspace"], non_goals=[],
+                             acceptance=["交付实现依据"], goal_ids=[goal["id"]], stop_conditions=[],
+                             role_signature=role_signature(current["role"]))
+                facade.store.put(db, "agent_stages", stage)
+                goal.update(stage_id=stage["id"], roadmap_id=stage["roadmap_id"])
+                facade.store.put(db, "agent_goals", goal)
+                state = planning_state(facade.store, db, current, current["role"]["long_term_objectives"][0])
+                state.update(stage_id=stage["id"], state="active")
+                facade.store.put(db, "agent_objective_planning", state)
+            facade.supervisor.stages.planner.provider = lambda *_: dict(action="wait", reason="Await manual smoke addition", source_refs=[])
             request("/" + aid + "/commands", dict(command_id="enable", type="enable", expected_revision=1))
             first = until(lambda: request("/" + aid), lambda s: s["learning"] and s["learning"][0]["state"] in {"completed", "incomplete"})
             memory = request("/" + aid + "/memory?query=Session")["records"][0]
@@ -73,8 +93,11 @@ def main():
                 ),
             )
             request("/" + aid + "/guidance", dict(command_id="guide", text="Distinguish implementation from proposals", scope="persistent"))
-            request("/" + aid + "/goals", dict(command_id="g2", goal=goals()[1]))
-            second = until(lambda: request("/" + aid), lambda s: len(s["learning"]) == 2 and all(c["state"] in {"completed", "incomplete"} for c in s["learning"]))
+            stage = request("/" + aid + "/stages/smoke-stage")["stage"]
+            request("/" + aid + "/stages/smoke-stage/goals", dict(command_id="g2", expected_revision=stage["revision"],
+                    goal={key: goals()[1][key] for key in ("objective", "acceptance")}))
+            second = until(lambda: request("/" + aid), lambda s: len(s["learning"]) == 2
+                           and all(c["state"] in {"completed", "incomplete"} for c in s["learning"]))
             assert len(second["sessions"]) == 1
             assert all(g["state"] == "completed" for g in second["goals"])
             assert first["work_packages"][0]["run_ids"] != second["work_packages"][1]["run_ids"]

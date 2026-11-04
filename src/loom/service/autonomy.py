@@ -167,18 +167,26 @@ class AutonomyService:
                     raise ServiceError("Goal is terminal; create a successor", 409)
                 if kind not in {"pause", "resume", "cancel", "revise"}:
                     raise ServiceError("Unknown Goal command")
+                from loom.autonomy.stage_goals import changed, editable_stage
+
+                if goal.get("stage_id") or kind == "revise":
+                    stage, planning = editable_stage(self.store, db, agent, goal.get("stage_id"), goal=goal)
                 works = [w for w in self.store.rows(db, "agent_work_packages", aid) if w["goal_id"] == gid]
                 if kind == "revise":
                     if any(w["state"] in {"dispatched", "running", "blocked"} and w.get("session_id") for w in works):
                         raise ServiceError("Pause and finish or cancel current work before revising its contract", 409)
-                    goal.update(goal_contract(body.get("payload", {}), agent["role"]))
+                    payload = strict(body.get("payload", {}), {"objective", "acceptance"})
+                    contract = {
+                        key: goal[key] for key in ("objective", "acceptance", "long_term_objective_id", "depends_on", "priority",
+                                                  "stop_conditions", "learning_dependency", "deadline", "required_source_ids") if key in goal
+                    }
+                    goal.update(goal_contract({**contract, **payload}, agent["role"]))
                     from loom.autonomy.acceptance import inherit, revise
 
                     revise(goal)
-                    if goal.get("stage_id"):
-                        stage = self.store.get(db, "agent_stages", goal["stage_id"], aid)
-                        if stage["goal_ids"] and stage["goal_ids"][-1] == gid:
-                            inherit(goal, stage["acceptance_criteria"])
+                    if stage["goal_ids"][-1] == gid:
+                        inherit(goal, stage["acceptance_criteria"])
+                    changed(self.store, db, stage, planning)
                     goal.pop('source_changed', None)
                     for work in works:
                         work["superseded_contract"] = True
@@ -417,6 +425,10 @@ class AutonomyService:
             from loom.autonomy.stage_commands import command
 
             return command(self, aid, route[1], body, stage_command=True)
+        if len(route) == 3 and route[0] == 'stages' and route[2] == 'goals' and method == 'POST':
+            from loom.autonomy.stage_goals import add
+
+            return add(self, aid, route[1], body)
         if route == ['habits'] and method == 'POST':
             from loom.autonomy.habits import configure
 
@@ -465,7 +477,7 @@ class AutonomyService:
         if len(route) == 3 and route[0] == 'goals' and route[2] == 'retry' and method == 'POST':
             from loom.autonomy.goals import retry
 
-            return retry(self.store, aid, route[1], body)
+            return retry(self.store, aid, route[1], body, stage_only=True)
         if route == ["commands"] and method == "POST":
             return self.control(aid, body)
         if route == ["role", "revisions"] and method == "POST":
@@ -477,8 +489,7 @@ class AutonomyService:
             strict(body, {'command_id', 'expected_revision', 'changes'})
             return revise(self.store, aid, body.get('command_id'), body.get('expected_revision'), route[1], body.get('changes'))
         if route == ["goals"] and method == "POST":
-            strict(body, {"command_id", "goal"})
-            return self.store.add_goal(aid, body.get("command_id"), body.get("goal"))
+            raise ServiceError("Standalone Goal creation was removed; add Goals under a current unfinished stage", 409)
         if len(route) == 3 and route[0] == "goals" and route[2] == "commands" and method == "POST":
             return self.goal_command(aid, route[1], body)
         if len(route) == 3 and route[0] == "sessions" and route[2] == "commands" and method == "POST":
