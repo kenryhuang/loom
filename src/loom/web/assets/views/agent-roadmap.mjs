@@ -67,8 +67,34 @@ function stageDetail(root,stage,d,view,isCurrent) {
   if(changed) reasons.unshift('来源在规划后发生变化，等待复核阶段。');
   if(reasons.length && !terminal.has(stage.state)) root.append(element('p','notice',`当前卡点：${reasons.join('；')}`));
   const goals=section(root,'阶段目标');stageGoals(goals,stage,d,view);
+  const contract=roadmapDisclosure(view,root,d,`contract:${stage.id}`,'交付范围与验收');
+  contract.classList.add('agent-roadmap-block');
+  if(stage.expected_contribution) section(contract,'对长期目标的贡献',stage.expected_contribution);
+  for(const [title,key] of [['验收条件','acceptance'],['范围','scope'],['暂不包含','non_goals'],['假设','assumptions'],['停止条件','stop_conditions']])
+    if(stage[key]?.length) view.showRows(section(contract,title),stage[key]);
+  if(stage.estimated_cost) contract.append(element('p','muted',`预计投入：${stage.estimated_cost}`));
+  contract.append(element('code','agent-roadmap-id',stage.id));
+  const review=(d.stage_reviews || []).find(r=>r.id===stage.review_id);
+  if(review) {
+    const box=roadmapDisclosure(view,root,d,`review:${stage.id}`,'验收复盘');
+    box.classList.add('agent-roadmap-block');
+    box.append(element('p','',review.decision?.reason || '复盘已记录'));
+    const gaps=(review.learning || []).filter(c=>c.state!=='completed'||c.coverage!=='full');
+    if(gaps.length) box.append(element('p','notice',`学习有 ${gaps.length} 项缺口；业务验收与学习状态分别记录。`));
+  }
+  if(isCurrent && !terminal.has(stage.state)) {
+    const management=roadmapDisclosure(view,root,d,`manage:${stage.id}`,'调整阶段');
+    management.classList.add('agent-roadmap-block');
+    const form=element('form','agent-form');field(form,'reason','调整原因');
+    const action=(type,payload)=>view.act(()=>view.api.post(d.id,`stages/${encodeURIComponent(stage.id)}/commands`,
+      {command_id:crypto.randomUUID(),expected_revision:stage.revision,type,reason:form.elements.reason.value,...(payload?{payload}:{})}));
+    field(form,'outcome','修订后的交付',stage.expected_outcome || '');field(form,'criteria','修订后的验收条件',(stage.acceptance || []).join('\n'));
+    form.append(button('保存修订并重新规划',()=>action('revise',{expected_outcome:form.elements.outcome.value,acceptance:lines(form.elements.criteria.value)})));
+    const actions=element('div','actions');actions.append(button('跳过阶段',()=>action('skip')),button('取消阶段',()=>action('cancel')));form.append(actions);management.append(form);
+  }
   if(editableStage(d,stage)) {
-    const add=roadmapDisclosure(view,goals,d,`add-goal:${stage.id}`,'手工添加阶段目标');
+    const add=roadmapDisclosure(view,root,d,`add-goal:${stage.id}`,'手工添加阶段目标');
+    add.classList.add('agent-roadmap-block');
     const form=element('form','agent-form');form.dataset.stageGoalForm=stage.id;
     field(form,'objective','本次交付目标').required=true;
     field(form,'acceptance','验收条件（每行一条）').required=true;
@@ -79,28 +105,6 @@ function stageDetail(root,stage,d,view,isCurrent) {
         goal:{objective:form.elements.objective.value,acceptance:lines(form.elements.acceptance.value)}});
       form.reset();document.activeElement?.blur();
     });});add.append(form);
-  }
-  const contract=roadmapDisclosure(view,root,d,`contract:${stage.id}`,'交付范围与验收');
-  if(stage.expected_contribution) section(contract,'对长期目标的贡献',stage.expected_contribution);
-  for(const [title,key] of [['验收条件','acceptance'],['范围','scope'],['暂不包含','non_goals'],['假设','assumptions'],['停止条件','stop_conditions']])
-    if(stage[key]?.length) view.showRows(section(contract,title),stage[key]);
-  if(stage.estimated_cost) contract.append(element('p','muted',`预计投入：${stage.estimated_cost}`));
-  contract.append(element('code','agent-roadmap-id',stage.id));
-  const review=(d.stage_reviews || []).find(r=>r.id===stage.review_id);
-  if(review) {
-    const box=roadmapDisclosure(view,root,d,`review:${stage.id}`,'验收复盘');
-    box.append(element('p','',review.decision?.reason || '复盘已记录'));
-    const gaps=(review.learning || []).filter(c=>c.state!=='completed'||c.coverage!=='full');
-    if(gaps.length) box.append(element('p','notice',`学习有 ${gaps.length} 项缺口；业务验收与学习状态分别记录。`));
-  }
-  if(isCurrent && !terminal.has(stage.state)) {
-    const management=roadmapDisclosure(view,root,d,`manage:${stage.id}`,'调整这个阶段');
-    const form=element('form','agent-form');field(form,'reason','调整原因');
-    const action=(type,payload)=>view.act(()=>view.api.post(d.id,`stages/${encodeURIComponent(stage.id)}/commands`,
-      {command_id:crypto.randomUUID(),expected_revision:stage.revision,type,reason:form.elements.reason.value,...(payload?{payload}:{})}));
-    field(form,'outcome','修订后的交付',stage.expected_outcome || '');field(form,'criteria','修订后的验收条件',(stage.acceptance || []).join('\n'));
-    form.append(button('保存修订并重新规划',()=>action('revise',{expected_outcome:form.elements.outcome.value,acceptance:lines(form.elements.criteria.value)})));
-    const actions=element('div','actions');actions.append(button('跳过阶段',()=>action('skip')),button('取消阶段',()=>action('cancel')));form.append(actions);management.append(form);
   }
 }
 function controls(root,d,objective,state,view) {

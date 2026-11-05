@@ -365,7 +365,6 @@ export class AgentsView {
       const destination=element('div');
       if(w.session_id) destination.append(link('打开 Session',`#/sessions/${encodeURIComponent(w.session_id)}`));
       else destination.append(element('span','muted','尚未派发'));
-      if(w.run_ids?.length) this.showRows(roadmapDisclosure(this,destination,d,`work-runs:${w.id}`,`执行记录 · ${w.run_ids.length} 次`),w.run_ids);
       const name=element('div','',w.objective);
       if(w.reason) name.append(element('p','muted',`编排依据：${w.reason}`));
       if(w.blocked_reason && !['succeeded','completed'].includes(w.state)) name.append(element('p','notice',w.blocked_reason));

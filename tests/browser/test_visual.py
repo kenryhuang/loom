@@ -571,6 +571,100 @@ def test_legacy_visual_migration_requires_independent_coverage_and_preserves_app
     asyncio.run(check())
 
 
+def test_legacy_visual_migration_preserves_existing_criteria_when_model_restructures(tmp_path):
+    """The migration model may drop or reword existing criteria despite instructions; the host
+    must preserve them verbatim and take only genuinely new criteria from the proposal."""
+    from types import SimpleNamespace
+
+    from loom.tasks.runner import make_task_context
+    from loom.tasks.workspace_probe import probe
+
+    objective = "Verify the visible diagram and keep the test suite green"
+    limitation = "Visual confirmation cannot be observed in this environment"
+    kept = {"id": "tests-pass", "description": "npm test exits 0", "verifier": "semantic", "scope": [], "check": {}}
+    visual_new = {"id": "appearance", "description": "Rendered diagram has no extra bodies", "verifier": "visual", "scope": [],
+                  "check": {"scenario": scene()}}
+
+    class RestructuringJudge(Judge):
+        async def chat(self, messages, tools=None, cancellation=None, **kwargs):
+            self.calls.append(messages)
+            if messages[0].content.startswith("You design"):
+                value = {"criteria": [visual_new], "unresolved_requirements": []}
+            else:
+                value = {"mappings": [{"requirement": limitation, "classification": "evidence_method", "criterion_id": "appearance",
+                                       "source_quote": objective, "reason": "New browser evidence covers the unchanged original outcome"}]}
+            return ok(LlmResponse(json.dumps(value)))
+
+    assembly = TaskAssembly(TaskRequest(objective, workspace=tmp_path, task_spec=spec(tmp_path)), plan_mode="off")
+    judge = RestructuringJudge()
+    assembly.configure_acceptance(judge, visual_provider=vision_provider()[0])
+    controller = assembly.acceptance
+    context = make_task_context(assembly.request, assembly=assembly).unwrap()
+    controller.goal(context)
+    controller.data.update(plan={**controller.validate_plan({"criteria": [kept], "unresolved_requirements": [limitation]}), "revision": 1},
+                           revision=1, profile=probe(tmp_path))
+    runtime = SimpleNamespace(run_id="run", loop_id="loop", trace_id="trace", trace_sink=Sink(), cancellation=None)
+
+    async def check():
+        try:
+            await controller.prepare(context, runtime)
+            plan = controller.data["plan"]
+            by_id = {c["id"]: c for c in plan["criteria"]}
+            assert set(by_id) == {"tests-pass", "appearance", "goal"}
+            assert by_id["tests-pass"]["description"] == "npm test exits 0"
+            assert by_id["appearance"]["verifier"] == "visual"
+            assert plan["unresolved_requirements"] == []
+            assert controller.data["revision"] == 2
+        finally:
+            await assembly.close()
+
+    asyncio.run(check())
+
+
+def test_legacy_visual_migration_skips_when_revision_is_structurally_rejected(tmp_path):
+    """Migration is an optional upgrade: if the merged proposal still violates the plan contract
+    (e.g. exceeds max_checks), prepare keeps the existing plan instead of faulting the run."""
+    from types import SimpleNamespace
+
+    from loom.tasks.runner import make_task_context
+    from loom.tasks.workspace_probe import probe
+
+    objective = "Verify the visible diagram"
+    limitation = "Visual confirmation cannot be observed in this environment"
+    kept = {"id": "tests-pass", "description": "npm test exits 0", "verifier": "semantic", "scope": [], "check": {}}
+    extra = [{"id": f"appearance-{tag}", "description": f"Scene {tag} is correct", "verifier": "visual", "scope": [],
+              "check": {"scenario": scene(id=f"scene-{tag}")}} for tag in ("a", "b")]
+
+    class OverflowJudge(Judge):
+        async def chat(self, messages, tools=None, cancellation=None, **kwargs):
+            self.calls.append(messages)
+            assert messages[0].content.startswith("You design")  # Review must not run for a rejected merge.
+            return ok(LlmResponse(json.dumps({"criteria": extra, "unresolved_requirements": [limitation]})))
+
+    assembly = TaskAssembly(TaskRequest(objective, workspace=tmp_path, task_spec=spec(tmp_path)), plan_mode="off")
+    judge = OverflowJudge()
+    assembly.configure_acceptance(judge, visual_provider=vision_provider()[0])
+    controller = assembly.acceptance
+    context = make_task_context(assembly.request, assembly=assembly).unwrap()
+    controller.goal(context)
+    controller.data.update(plan={**controller.validate_plan({"criteria": [kept], "unresolved_requirements": [limitation]}), "revision": 1},
+                           revision=1, profile=probe(tmp_path))
+    controller._configured_limits["max_checks"] = 2  # kept + 2 visual additions would overflow the bound.
+    runtime = SimpleNamespace(run_id="run", loop_id="loop", trace_id="trace", trace_sink=Sink(), cancellation=None)
+
+    async def check():
+        try:
+            await controller.prepare(context, runtime)
+            assert controller.data["revision"] == 1
+            assert [c["id"] for c in controller.data["plan"]["criteria"]] == ["tests-pass", "goal"]
+            assert controller.data["plan"]["unresolved_requirements"] == [limitation]
+            assert len(judge.calls) == 1
+        finally:
+            await assembly.close()
+
+    asyncio.run(check())
+
+
 def test_unclear_visual_evidence_gets_only_one_recapture(tmp_path):
     pytest.importorskip("playwright")
     (tmp_path / "index.html").write_text('<div id="ready">Unclear scene</div>')

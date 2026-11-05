@@ -61,18 +61,35 @@ async def migrate_legacy(controller, runtime):
         return
     controller.data["visual_migration_attempted"] = signature
     instruction = """Propose a migration of this legacy acceptance plan now that browser capture is available.
-Preserve every existing criterion ID, description and required status, except omit host-owned goal from your response.
+The host preserves every existing criterion verbatim; omit them and the host-owned goal from your criteria.
 Add visual criteria using browser_capture scenarios for Web/Canvas/WebGL outcomes. For workspace code use preview argv with {port}.
 Only remove an unresolved item if it describes an old inability to observe the page and new visual criteria cover the same original outcome.
 Keep all genuine human/customer approvals and uncertain requirements unresolved. The host will independently review removed items.
 Return criteria and unresolved_requirements only, using the supplied plan protocol."""
-    from loom.tasks.acceptance import PLAN_PROMPT
+    from loom.tasks.acceptance import PLAN_PROMPT, AcceptanceBlocked
 
     proposal = await controller.structured(runtime, "visual_migration_plan", PLAN_PROMPT + "\n" + instruction,
         {"goal": controller.data["goal"], "previous_plan": plan, "visual_capabilities": browser.capability(),
          "browser_schema": thaw_json(controller.assembly.bindings["browser_capture"].ref.input_schema),
          "workspace": controller.data["profile"], "max_checks": controller.config["max_checks"]},
         plan_protocol(controller.assembly), lambda value: (controller.validate_plan(value), value)[1])
-    await controller.revise({**proposal, "base_revision": controller.data["revision"],
-                             "reason": "Browser evidence capability became available; preserve user outcomes and collect fresh visual evidence"}, runtime)
+    # Preservation is a host invariant, not a prompt request: models often restructure or drop
+    # existing criteria, and revise() then rejects the whole migration. Merge instead — keep
+    # every existing criterion verbatim and take only genuinely new criteria from the proposal.
+    existing = [c for c in plan["criteria"] if c["id"] != "goal"]
+    known = {c["id"] for c in existing} | {"goal"}
+    added = [c for c in proposal["criteria"] if c["id"] not in known]
+    unresolved = proposal.get("unresolved_requirements", [])
+    if not added and unresolved == plan["unresolved_requirements"]:
+        return
+    try:
+        await controller.revise({"criteria": [*existing, *added], "unresolved_requirements": unresolved,
+                                 "base_revision": controller.data["revision"],
+                                 "reason": "Browser evidence capability became available; preserve user outcomes and collect fresh visual evidence"}, runtime)
+    except AcceptanceBlocked:
+        raise  # A denied coverage review is a human policy decision, not a structural failure.
+    except ValueError:
+        # Migration is an optional upgrade; a merged plan that still violates the contract
+        # (e.g. exceeds max_checks) keeps the existing plan instead of faulting the run.
+        return
     controller.data["visual_migration_attempted"] = digest({"plan": controller.data["plan"], **inputs})

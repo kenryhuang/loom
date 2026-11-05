@@ -2415,7 +2415,8 @@ section.setup-block { padding: 20px; }
 .agent-roadmap-section { margin:16px 0; min-width:0; }
 .agent-roadmap-section h5,.agent-roadmap-goal h5 { font-size:12px; margin:14px 0 8px; color:var(--muted); font-weight:500; }
 .agent-roadmap-section > p { line-height:1.7; margin:8px 0; }
-.agent-roadmap-goal { margin:10px 0; border:1px solid var(--line); border-radius:6px; padding:12px 14px; background:var(--panel); }
+.agent-roadmap-goal,.agent-roadmap-block { margin:10px 0; border:1px solid var(--line); border-radius:6px; padding:12px 14px; background:var(--panel); }
+.agent-roadmap-block > summary { font-size:13px; color:var(--text); padding:0; }
 .agent-roadmap-goal .base-table-scroll { background:var(--raised); border-radius:6px; padding:0 10px; }
 .agent-roadmap-goal > summary { font-size:13px; line-height:1.7; cursor:pointer; padding:0; }
 .agent-roadmap-goal > summary > .dashboard-badge { margin-left:10px; vertical-align:middle; }
