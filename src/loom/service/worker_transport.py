@@ -103,13 +103,19 @@ class WorkerTransport:
                     )
                 )
                 response = self.connection.recv()
-                if "error" in response:
+                if "error" in response and response.get("fatal", True):
                     raise RuntimeError(response["error"])
-                value = decode(response["value"])
                 with self.condition:
                     self.count -= len(batch)
                     self.bytes -= sum(r.size for r in batch)
                     self.condition.notify_all()
+                if "error" in response:
+                    # A domain rejection on an advisory record fails only its
+                    # own request; the pipe stays usable for what follows.
+                    for item in batch:
+                        item.future.set_exception(RuntimeError(response["error"]))
+                    continue
+                value = decode(response["value"])
                 for item in batch:
                     item.future.set_result(value)
         except Exception as exc:

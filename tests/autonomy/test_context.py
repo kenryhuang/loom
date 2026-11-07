@@ -10,6 +10,72 @@ from tests.autonomy.helpers import goals
 from tests.memory.helpers import seed
 
 
+def test_snapshot_lists_recent_completed_tool_calls_for_record_use_linking(agent_service):
+    _, facade, aid, _ = agent_service
+    with facade.store.sessions.transaction() as db:
+        ops = [
+            ("run_1:call_0", "sess_1", dict(call=dict(id="call_0", name="shell_execute", arguments="{}"), status="completed")),
+            ("run_1:call_1", "sess_1", dict(call=dict(id="call_1", name="edit_file", arguments="{}"), status="started")),
+            ("run_1:call_2", "sess_1", dict(call=dict(id="call_2", name="write_file", arguments="{}"), status="reconciled")),
+            ("run_2:call_3", "sess_1", dict(call=dict(id="call_3", name="read_file", arguments="{}"), status="completed")),
+            ("run_1:call_4", "sess_2", dict(call=dict(id="call_4", name="read_file", arguments="{}"), status="completed")),
+        ]
+        for oid, sid, op in ops:
+            db.execute("INSERT INTO operations VALUES(?,?,?)", (oid, sid, json.dumps(op)))
+    snapshot = build_snapshot(facade.store, aid, session_id="sess_1", run_id="run_1")
+    assert snapshot["recent_tool_calls"] == [dict(id="call_0", name="shell_execute"), dict(id="call_2", name="write_file")]
+    other_run = build_snapshot(facade.store, aid, session_id="sess_1", run_id="run_2")
+    assert other_run["recent_tool_calls"] == [dict(id="call_3", name="read_file")]
+
+
+def test_snapshot_bounds_recent_tool_calls_to_twenty(agent_service):
+    _, facade, aid, _ = agent_service
+    with facade.store.sessions.transaction() as db:
+        for i in range(25):
+            op = dict(call=dict(id=f"call_{i:02d}", name="shell_execute", arguments="{}"), status="completed")
+            db.execute("INSERT INTO operations VALUES(?,?,?)", (f"run_1:call_{i:02d}", "sess_1", json.dumps(op)))
+    snapshot = build_snapshot(facade.store, aid, session_id="sess_1", run_id="run_1")
+    assert [c["id"] for c in snapshot["recent_tool_calls"]] == [f"call_{i:02d}" for i in range(5, 25)]
+
+
+def test_record_use_rejects_empty_links_before_service_round_trip():
+    import asyncio
+
+    from loom.autonomy.context import RuntimeAgentContext
+
+    class FakeExecution:
+        def __init__(self):
+            self.calls = []
+
+        def rpc(self, kind, payload):
+            self.calls.append((kind, payload))
+            return {"id": "use_1"}
+
+    execution = FakeExecution()
+    record = RuntimeAgentContext(execution).handlers()["agent_record_use"]
+    result = asyncio.run(record({"disposition": "adopted", "tool_call_ids": [], "explanation": "adopted a memory"}))
+    assert not result.ok and result.error.code == "agent.use_invalid"
+    assert "recent_tool_calls" in result.error.message
+    assert not execution.calls  # The rejection never crosses the RPC boundary.
+    declined = asyncio.run(record({"disposition": "declined", "tool_call_ids": [], "explanation": "not used"}))
+    assert declined.ok and execution.calls == [("agent_record_use", {"disposition": "declined", "tool_call_ids": [], "explanation": "not used"})]
+
+
+def test_record_use_service_rejection_returns_tool_error_without_raising():
+    import asyncio
+
+    from loom.autonomy.context import RuntimeAgentContext
+
+    class RejectingExecution:
+        def rpc(self, kind, payload):
+            raise RuntimeError("Link at least one completed tool call")
+
+    record = RuntimeAgentContext(RejectingExecution()).handlers()["agent_record_use"]
+    result = asyncio.run(record({"disposition": "adopted", "tool_call_ids": ["call_1"], "explanation": "used"}))
+    assert not result.ok and result.error.code == "agent.use_invalid"
+    assert "Link at least one completed tool call" in result.error.message
+
+
 def test_review_confidence_reaches_context_without_rewriting_evaluation(agent_service):
     from tests.memory.helpers import fact
 

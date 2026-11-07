@@ -729,7 +729,9 @@ class AcceptanceController:
         blocked_signature = digest({"binding": self.fingerprint(candidate), "browser": self.assembly.browser.capability() if self.assembly.browser else None,
                                     "visual_options": materialize_request_options(getattr(self.assembly.visual_provider, "request_options", {}))})
         if self.data["state"] == "blocked" and self.data.get("blocked_signature") == blocked_signature:
-            raise AcceptanceBlocked(self.data["reason"])
+            # Verification already stalled on identical inputs. Skip the paid re-check and
+            # let the completion decision (repair feedback or human handoff) answer instead.
+            return False
         self.data.update(candidate=candidate, state="verifying", reason="Checking completion candidate", results=[])
         self.data["verification_sequence"] = self.data.get("verification_sequence", 0) + 1
         self.verifying = True

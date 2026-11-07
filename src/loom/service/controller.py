@@ -28,6 +28,21 @@ def _time_budget_exceeded(state):
     return elapsed > state["task"]["limits"]["max_duration_seconds"]
 
 
+# Advisory records answer a query or attach bookkeeping; their domain
+# rejections fail only that request. Every other record is execution
+# provenance: a lost trace write must stop the worker before the next tool.
+_ADVISORY_RECORDS = frozenset({
+    "agent_context", "agent_record_use", "poll_control", "check_control", "status",
+    "request_input", "publish_artifact", "read_artifact", "read_artifact_chunk",
+    "artifact_upload_start", "artifact_upload_chunk", "artifact_upload_finish",
+})
+
+
+def _record_error_response(record, exc):
+    fatal = not isinstance(exc, ServiceError) or record.get("type") not in _ADVISORY_RECORDS
+    return {"error": str(exc), "fatal": fatal}
+
+
 class LoomService:
     def __init__(self, directory, *, config_path=None, max_active_runs=2, provider_factory=None, plugin_registry_factory=None,
                  autonomy_enabled=False, agent_planner=None, evaluation_provider_factory=None, agent_stage_planner=None,
@@ -743,7 +758,7 @@ class LoomService:
                             result = self.worker_record(sid, record)
                             attempt.connection.send({"value": encode(result)})
                         except (ServiceError, sqlite3.Error) as exc:
-                            attempt.connection.send({"error": str(exc)})
+                            attempt.connection.send(_record_error_response(record, exc))
                         except (EOFError, BrokenPipeError, OSError):
                             raise
                         except Exception as exc:

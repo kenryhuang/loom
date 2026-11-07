@@ -95,20 +95,102 @@ def test_unresolved_requirements_do_not_mask_repairable_gaps(tmp_path):
     asyncio.run(assembly.close())
 
 
-def test_unresolved_requirements_alone_still_pause_for_human(tmp_path):
-    from loom.tasks.acceptance_feedback import decide
-
+def _unresolved_gate(tmp_path, unresolved=("Customer approval cannot be observed",), **overrides):
     assembly = TaskAssembly(TaskRequest("Report source", workspace=tmp_path), plan_mode="off")
     context = make_task_context(assembly.request, assembly=assembly, plan_mode="off").unwrap()
     gate = assembly.acceptance
     gate.goal(context)
     gate.data.update(
-        plan=gate.validate_plan({"criteria": [], "unresolved_requirements": ["Customer approval cannot be observed"]}),
-        state="blocked", candidate="report", reason="Acceptance blocked: Customer approval cannot be observed", results=[])
-    decision = decide(gate)
-    assert decision.outcome == "pause"
-    assert decision.reason_code == "ACCEPTANCE_EXTERNAL_DEPENDENCY"
-    asyncio.run(assembly.close())
+        plan=gate.validate_plan({"criteria": [], "unresolved_requirements": list(unresolved)}),
+        state="blocked", candidate="report", reason="Acceptance blocked: " + "; ".join(unresolved), results=[], **overrides)
+    return assembly, gate
+
+
+def test_unresolved_requirements_alone_route_to_bounded_repair(tmp_path):
+    from loom.tasks.acceptance_feedback import decide
+
+    assembly, gate = _unresolved_gate(tmp_path)
+    try:
+        decision = decide(gate)
+        assert decision.outcome == "repair"
+        assert decision.reason_code == "ACCEPTANCE_REPAIR_REQUIRED"
+        gaps = gate.data["feedback"]["gaps"]
+        assert [gap["kind"] for gap in gaps] == ["missing_evidence"]
+        assert "Customer approval cannot be observed" in gaps[0]["required_fact"]
+        assert "revise_acceptance_plan" in gaps[0]["suggested_action"]
+    finally:
+        asyncio.run(assembly.close())
+
+
+def test_unresolved_requirements_pause_for_human_once_applied_feedback_stalls(tmp_path):
+    from loom.tasks.acceptance_feedback import decide
+
+    assembly, gate = _unresolved_gate(tmp_path)
+    try:
+        assert decide(gate).outcome == "repair"
+        gate.data["feedback"]["state"] = "applied"
+        decision = decide(gate)
+        assert decision.outcome == "pause"
+        assert decision.reason_code == "ACCEPTANCE_EXTERNAL_DEPENDENCY"
+        assert "Customer approval cannot be observed" in decision.reason
+    finally:
+        asyncio.run(assembly.close())
+
+
+def test_unresolved_requirements_pause_for_human_at_repair_limit(tmp_path):
+    from loom.tasks.acceptance_feedback import decide
+
+    assembly, gate = _unresolved_gate(tmp_path, repair_rounds=2)
+    try:
+        decision = decide(gate)
+        assert decision.outcome == "pause"
+        assert decision.reason_code == "ACCEPTANCE_EXTERNAL_DEPENDENCY"
+        assert "Customer approval cannot be observed" in decision.reason
+    finally:
+        asyncio.run(assembly.close())
+
+
+def test_plan_revision_after_applied_feedback_counts_as_progress(tmp_path):
+    from loom.tasks.acceptance_feedback import decide
+
+    assembly, gate = _unresolved_gate(tmp_path)
+    try:
+        decide(gate)
+        gate.data["feedback"]["state"] = "applied"
+        gate.data["revision"] += 1  # revise() bumps the acceptance revision
+        assert decide(gate).outcome == "repair"
+    finally:
+        asyncio.run(assembly.close())
+
+
+def test_repeat_verification_with_unchanged_blocked_signature_defers_to_decision(tmp_path):
+    from loom.llm import TokenUsage
+    from loom.tasks.acceptance_feedback import decide
+
+    class UnresolvedJudge(Judge):
+        async def chat(self, messages, tools=None, cancellation=None, **kwargs):
+            if messages[0].content.startswith("You design Loom task acceptance"):
+                value = {"criteria": [], "unresolved_requirements": ["Customer approval cannot be observed"]}
+                return ok(LlmResponse(content=json.dumps(value), usage=TokenUsage(10, 5, 15)))
+            return await super().chat(messages, tools, cancellation, **kwargs)
+
+    async def exercise():
+        assembly = TaskAssembly(TaskRequest("Report source", workspace=tmp_path), plan_mode="off")
+        assembly.configure_acceptance(UnresolvedJudge())
+        context = make_task_context(assembly.request, assembly=assembly, plan_mode="off").unwrap()
+        runtime = SimpleNamespace(run_id=context.run_id, loop_id="loop", trace_id="trace", trace_sink=Sink(), cancellation=None)
+        try:
+            gate = assembly.acceptance
+            assert not await gate.verify(context, runtime, "report")
+            assert gate.data["state"] == "blocked" and gate.data.get("blocked_signature")
+            gate.data.pop("assessed_progress", None)  # renew_on_resume clears the progress cache
+            # A repeated finish on identical inputs must not raise; the decision policy answers.
+            assert not await gate.verify(context, runtime, "report")
+            assert decide(gate).outcome == "repair"
+        finally:
+            await assembly.close()
+
+    asyncio.run(exercise())
 
 
 def test_identical_report_after_repair_pauses_without_paid_reverification(tmp_path):

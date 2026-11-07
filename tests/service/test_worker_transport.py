@@ -313,3 +313,29 @@ def test_failed_evidence_publication_is_never_cached():
     finally:
         with pytest.raises(RuntimeError, match="transport failed"):
             bridge.close()
+
+
+def test_nonfatal_error_fails_only_the_request_and_the_pipe_stays_usable():
+    connection = Connection()
+    bridge = WorkerBridge(connection, state())
+    connection.response = {"error": "Link at least one completed tool call", "fatal": False}
+    connection.gate.set()
+    try:
+        with pytest.raises(RuntimeError, match="Link at least one completed tool call"):
+            bridge.rpc("agent_record_use", {"disposition": "adopted", "tool_call_ids": []})
+        connection.response = {"value": encode({"id": "ctx_1"})}
+        assert bridge.rpc("agent_context", {}) == {"id": "ctx_1"}
+        assert len(connection.sent) == 2
+        bridge.close()
+    finally:
+        connection.gate.set()
+
+
+def test_domain_rejection_is_fatal_only_for_trace_records():
+    import sqlite3
+
+    from loom.service.controller import _record_error_response
+
+    assert _record_error_response({"type": "agent_record_use"}, ServiceError("bad link", 409)) == {"error": "bad link", "fatal": False}
+    assert _record_error_response({"type": "event"}, ServiceError("bad event", 409)) == {"error": "bad event", "fatal": True}
+    assert _record_error_response({"type": "agent_record_use"}, sqlite3.OperationalError("locked")) == {"error": "locked", "fatal": True}

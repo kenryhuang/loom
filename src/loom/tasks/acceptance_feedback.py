@@ -52,9 +52,6 @@ def decide(controller, *, origin="completion", completion_id=None):
         code = "EXECUTION_UNKNOWN"
     elif data.get("cause_code"):
         pass
-    elif (data.get("plan") or {}).get("unresolved_requirements") and not blockers:
-        # Unobservable requirements alone pause for a human; repairable blockers still go to repair.
-        code = "ACCEPTANCE_EXTERNAL_DEPENDENCY"
     elif data["model_calls"] >= controller.config["max_model_calls"] or data["elapsed_seconds"] >= controller.config["max_seconds"]:
         code = "ACCEPTANCE_BUDGET_EXHAUSTED"
         reason = (f"Acceptance budget exhausted: model calls {data['model_calls']}/{controller.config['max_model_calls']}; "
@@ -65,6 +62,13 @@ def decide(controller, *, origin="completion", completion_id=None):
             gap = row.get("gap") or {"kind": "deliverable_mismatch" if row["status"] == "failed" else "unknown",
                                       "targets": [], "required_fact": row.get("reason", ""), "suggested_action": ""}
             gaps.append({"criterion_id": row["criterion_id"], "status": row["status"], **gap})
+        # Parked requirements are solvable until bounded repair proves otherwise: the solver
+        # may produce the evidence or repair the plan before the pause reaches a human.
+        unresolved = [u for u in ((data.get("plan") or {}).get("unresolved_requirements") or [])
+                      if isinstance(u, str) and u.strip()]
+        unresolved_driven = not gaps and bool(unresolved)
+        if unresolved_driven:
+            gaps = [_unresolved_gap(requirement, index) for index, requirement in enumerate(unresolved)]
         kinds = {g["kind"] for g in gaps}
         if "external_dependency" in kinds:
             code = "ACCEPTANCE_EXTERNAL_DEPENDENCY"
@@ -75,11 +79,21 @@ def decide(controller, *, origin="completion", completion_id=None):
             missing = sorted({t['value'] for g in gaps for t in g.get('targets', [])
                               if t['kind'] == 'tool' and t['value'] not in assembly.bindings})
             reason = 'Required execution capabilities are unavailable: ' + (', '.join(missing) or 'workflow feedback support')
-        elif feedback and feedback["state"] == "applied" and feedback["progress_baseline"] == binding:
-            code = "ACCEPTANCE_NO_PROGRESS"
-            reason = "Acceptance repair produced no new relevant evidence or candidate; unresolved: " + data["reason"]
+        elif (feedback and feedback["state"] == "applied" and feedback["progress_baseline"] == binding
+              and feedback.get("plan_revision") == data["revision"]):
+            if unresolved_driven:
+                code = "ACCEPTANCE_EXTERNAL_DEPENDENCY"
+                reason = "Repair attempts produced no new evidence; requirements need human review: " + "; ".join(unresolved)
+            else:
+                code = "ACCEPTANCE_NO_PROGRESS"
+                reason = "Acceptance repair produced no new relevant evidence or candidate; unresolved: " + data["reason"]
         elif not controller.can_repair():
-            code, reason = "ACCEPTANCE_REPAIR_LIMIT", controller.repair_limit_reason()
+            if unresolved_driven:
+                code = "ACCEPTANCE_EXTERNAL_DEPENDENCY"
+                reason = (f"Acceptance repair limit reached ({data.get('repair_rounds', 0)}/{controller.config['max_repairs']} repair rounds); "
+                          "requirements need human review: " + "; ".join(unresolved))
+            else:
+                code, reason = "ACCEPTANCE_REPAIR_LIMIT", controller.repair_limit_reason()
         else:
             outcome, code = "repair", "ACCEPTANCE_REPAIR_REQUIRED"
             feedback_id = "feedback:" + digest({"assessment": assessment_id, "gaps": gaps})
@@ -102,6 +116,14 @@ def decide(controller, *, origin="completion", completion_id=None):
                                   (data.get("feedback") or {}).get("id"), blockers, binding, public_budget(controller))
     data["decision"] = decision.snapshot()
     return decision
+
+
+def _unresolved_gap(requirement, index):
+    return {"criterion_id": f"unresolved:{index + 1}", "status": "blocked", "kind": "missing_evidence", "targets": [],
+            "required_fact": requirement,
+            "suggested_action": "Produce the missing evidence in the workspace (locate or reconstruct it), or convert the "
+                                "requirement into an explicit verifiable criterion with revise_acceptance_plan; keep it "
+                                "unresolved only when it genuinely requires human judgment"}
 
 
 def _capable(assembly, gaps):

@@ -4,11 +4,34 @@ import json
 import pytest
 
 from loom.autonomy.acceptance import criteria, objective_view, refs
-from loom.autonomy.stage_planner import validate
+from loom.autonomy.stage_planner import INPUT_HARD_LIMIT, INPUT_SOFT_LIMIT, StagePlanner, acceptance_support, fit_payload, validate
 from loom.autonomy.stages import evidence
 from loom.service.contracts import ServiceError
 from tests.autonomy.test_stage_contracts import configure, delivery
 from tests.autonomy.test_stage_end_to_end import decision
+
+
+def _deliveries(count, *, excerpt="", blob=""):
+    rows = []
+    for index in range(count):
+        row = dict(id=f"delivery:work_{index}", kind="delivery", goal_id=f"goal_{index}", passed=True,
+                   acceptance=[f"criterion {index}"], verified_criteria=[], acceptance_criteria=[], outcome={})
+        if excerpt:
+            row["recorded_outputs"] = [dict(seq=seq, excerpt=excerpt) for seq in range(4)]
+        if blob:
+            row["blob"] = blob
+        rows.append(row)
+    return rows
+
+
+def _payload(rows, **extra):
+    return dict(objective=dict(mode="ongoing", desired_outcome="outcome",
+                               stage_planning=dict(completion_criteria=[]), acceptance_criteria=[]),
+                evidence=rows, history=[], **extra)
+
+
+def _size(value):
+    return len(json.dumps(value, ensure_ascii=False))
 
 
 def payload(facade, aid):
@@ -292,3 +315,91 @@ def test_completion_cannot_use_unpassed_or_partial_evidence_even_with_supplied_s
                     checks=[dict(refs(definitions)[0], source_refs=[evidence_row["id"]])])
     with pytest.raises(ServiceError, match="eligible source_refs=\\[\\]"):
         validate(proposal, value)
+
+
+def test_fit_payload_shrinks_excerpts_before_dropping_evidence_rows():
+    rows = _deliveries(40, excerpt="x" * 1800)
+    value = _payload(rows)
+    assert _size(value) > INPUT_SOFT_LIMIT
+    fitted = fit_payload(value)
+    assert _size(fitted) <= INPUT_SOFT_LIMIT
+    assert [r["id"] for r in fitted["evidence"]] == [r["id"] for r in rows]
+    assert all(len(o["excerpt"]) <= 600 for r in fitted["evidence"] for o in r["recorded_outputs"])
+    assert _size(value) > INPUT_SOFT_LIMIT  # The caller's payload is never mutated.
+
+
+def test_fit_payload_drops_oldest_evidence_rows_when_excerpts_are_not_enough():
+    rows = _deliveries(20, blob="y" * 30000)
+    fitted = fit_payload(_payload(rows))
+    assert _size(fitted) <= INPUT_SOFT_LIMIT
+    assert [r["id"] for r in fitted["evidence"]] == [r["id"] for r in rows[-4:]]
+
+
+def test_fit_payload_pins_cited_evidence_and_refreshes_acceptance_support():
+    definitions = criteria("stage", ["Tests pass"])
+    cited = dict(id="delivery:work_old", kind="delivery", goal_id="goal", passed=True,
+                 acceptance=["Tests pass"], verified_criteria=refs(definitions), blob="z" * 30000)
+    value = _payload([cited] + _deliveries(20, blob="z" * 30000))
+    value["objective"]["acceptance_criteria"] = definitions
+    value["acceptance_support"] = acceptance_support(value)
+    fitted = fit_payload(value)
+    surviving = {r["id"] for r in fitted["evidence"]}
+    assert "delivery:work_old" in surviving
+    cited_refs = {ref for entry in fitted["acceptance_support"] for ref in entry["source_refs"]}
+    assert "delivery:work_old" in cited_refs and cited_refs <= surviving
+
+
+def test_fit_payload_pins_stage_goal_ids_when_trimming_existing_goals():
+    goals = [dict(id=f"goal_{index}", objective=f"o{index}", acceptance=["a"], state="completed",
+                  stage_id="s", acceptance_criteria=[], contract_revision=1, blob="b" * 15000) for index in range(30)]
+    value = _payload([], existing_goals=goals, stage=dict(id="s", goal_ids=["goal_0"], acceptance=[], acceptance_criteria=[]))
+    fitted = fit_payload(value)
+    assert _size(fitted) <= INPUT_SOFT_LIMIT
+    surviving = {g["id"] for g in fitted["existing_goals"]}
+    assert "goal_0" in surviving and len(surviving) < len(goals)
+
+
+def test_propose_compresses_oversized_input_before_calling_provider():
+    seen = []
+    planner = StagePlanner(None, None, lambda agent, value: seen.append(value) or
+                           dict(action="wait", reason="No meaningful gap remains", source_refs=[]))
+    value = _payload(_deliveries(40, excerpt="x" * 1800))
+    assert _size(value) > INPUT_HARD_LIMIT
+    checkpointed = []
+    decision = planner.propose(dict(id="agent", planner_lease=None), value, checkpointed.append)
+    assert decision["action"] == "wait" and len(checkpointed) == 1
+    assert _size(seen[0]) <= INPUT_HARD_LIMIT
+
+
+def test_propose_still_rejects_when_incompressible_input_exceeds_the_hard_limit():
+    planner = StagePlanner(None, None, lambda *args: dict(action="wait", reason="x", source_refs=[]))
+    value = _payload([])
+    value["objective"]["desired_outcome"] = "z" * (INPUT_HARD_LIMIT + 1)
+    with pytest.raises(ServiceError, match="exceeds 240000"):
+        planner.propose(dict(id="agent", planner_lease=None), value, lambda v: None)
+
+
+def test_planning_input_is_fitted_before_recording(agent_service, monkeypatch):
+    from loom.autonomy import stages as stage_module
+
+    _, facade, aid, _ = agent_service
+    configure(facade, aid)
+    delivery(facade, aid)
+    assemble = stage_module.evidence
+
+    def inflated(store, db, agent_id, goals):
+        rows = assemble(store, db, agent_id, goals)
+        for row in rows:
+            row["recorded_outputs"] = [dict(seq=seq, excerpt="x" * 1800) for seq in range(120)]
+        return rows
+
+    monkeypatch.setattr(stage_module, "evidence", inflated)
+    seen = []
+    facade.supervisor.stages.planner.provider = lambda agent, value: seen.append(value) or dict(
+        action="wait", reason="No meaningful gap remains", source_refs=[])
+    facade.supervisor.stages.advance(aid)
+    assert len(seen) == 1 and _size(seen[0]) <= INPUT_SOFT_LIMIT
+    with facade.store.sessions.transaction() as db:
+        run = facade.store.rows(db, "agent_runs", aid)[-1]
+    recorded = facade.store.read_artifact(aid, run["input_snapshot_ref"]["sha256"])
+    assert recorded == seen[0]  # The recorded input is exactly what the planner saw.

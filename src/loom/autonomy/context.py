@@ -44,6 +44,20 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
             for w in store.rows(db, "agent_work_packages", aid)
             if w.get("outcome")
         ][-4:]
+        # Content-parsed (JSON) tool calling hides call ids from the model; the
+        # snapshot must re-expose them or agent_record_use can never link.
+        recent_calls = []
+        if session_id and run_id:
+            prefix = run_id + ":"
+            rows = db.execute(
+                "SELECT body FROM operations WHERE session_id=? AND substr(id,1,?)=? "
+                "AND json_extract(body,'$.status') IN ('completed','reconciled') "
+                "ORDER BY rowid DESC LIMIT 20",
+                (session_id, len(prefix), prefix),
+            ).fetchall()
+            for (body,) in reversed(rows):
+                op = json.loads(body)
+                recent_calls.append(dict(id=op["call"]["id"], name=op["call"]["name"]))
         stage = store.get(db, 'agent_stages', goal['stage_id'], aid) if goal and goal.get('stage_id') else None
     query = (work or goal or {}).get("objective", role["role_text"])
     # Planner with no workspace may use delivery summaries, never aggregate Session memory.
@@ -83,6 +97,7 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
         methods=methods,
         memory=memory,
         prior_deliveries=recent_work,
+        recent_tool_calls=recent_calls,
         pending_learning_cycle_ids=[c["id"] for c in cycles if c["state"] not in {"completed", "cancelled", "failed", "incomplete"}],
     )
     # Never silently truncate explicit obligations. Excess guidance must be narrowed by the user.
@@ -124,7 +139,8 @@ class RuntimeAgentContext:
         return (
             ToolRef(
                 "agent_record_use",
-                "Record which historical memory or user method informed completed tool calls. "
+                "Record which historical memory or user method informed completed tool calls; "
+                "copy their ids from recent_tool_calls in the agent_context message. "
                 "This records your interpretation, not proof of causal improvement.",
                 input_schema={
                     "type": "object",
@@ -146,11 +162,22 @@ class RuntimeAgentContext:
         from loom.core import Observation, err, make_loom_error, new_trace_id, now_iso, ok, thaw_json
 
         async def record(value, _options=None):
+            payload = thaw_json(value)
+            if isinstance(payload, dict) and payload.get("disposition", "adopted") != "declined" and not payload.get("tool_call_ids"):
+                # Intercept before the RPC: in JSON mode the model cannot see
+                # call ids, so an empty link is answered with a pointer, not a
+                # service round trip that only echoes the same rejection.
+                return err(make_loom_error(
+                    "agent.use_invalid",
+                    "tool_call_ids must link at least one completed tool call from this run; "
+                    "copy ids from recent_tool_calls in the agent_context message",
+                    retryable=False,
+                ))
             try:
-                value = self.execution.rpc("agent_record_use", thaw_json(value))
+                value = self.execution.rpc("agent_record_use", payload)
                 return ok(Observation(new_trace_id(), "agent_record_use", value, now_iso()))
             except (ValueError, RuntimeError) as exc:
-                return err(make_loom_error("agent.use_invalid", str(exc)))
+                return err(make_loom_error("agent.use_invalid", str(exc), retryable=False))
 
         return {"agent_record_use": record}
 
@@ -175,7 +202,8 @@ def record_use(store, binding, run_id, payload):
         raise ServiceError('Invalid adoption disposition')
     ids = strings(payload.get("tool_call_ids", []), "tool_call_ids", 20)
     if not ids and payload.get('disposition') != 'declined':
-        raise ServiceError("Link at least one completed tool call")
+        raise ServiceError("Link at least one completed tool call from this run; "
+                           "ids are listed in recent_tool_calls of the agent_context message")
     aid = binding["agent_id"]
     with store.sessions.transaction() as db:
         agent = store.get(db, "agents", aid)

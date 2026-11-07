@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from copy import deepcopy
 
 from loom.autonomy.acceptance import ref_key, support, validate_completion
 from loom.autonomy.budget import BudgetLedger, BudgetProvider
@@ -103,6 +104,86 @@ def validate_dependencies(key, dependencies, seen, path):
 
 
 acceptance_support = support
+
+INPUT_SOFT_LIMIT = 192000  # Fit planning input below this; leaves headroom for the correction round-trip.
+INPUT_HARD_LIMIT = 240000  # Absolute ceiling; rejection only after compression cannot reach it.
+
+
+def _input_size(payload):
+    return len(json.dumps(payload, ensure_ascii=False))
+
+
+def _shrink_excerpts(width):
+    def shrink(payload):
+        for row in payload.get("evidence") or []:
+            for output in (row.get("recorded_outputs") or []) if isinstance(row, dict) else []:
+                excerpt = output.get("excerpt")
+                if isinstance(excerpt, str) and len(excerpt) > width:
+                    output["excerpt"] = excerpt[:width]
+    return shrink
+
+
+def _trim_rows(field, keep):
+    def shrink(payload):
+        rows = payload.get(field)
+        if isinstance(rows, list) and len(rows) > keep:
+            payload[field] = rows[-keep:]
+    return shrink
+
+
+def _trim_source_lists(keep):
+    def shrink(payload):
+        rows = payload.get("source_status")
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict):
+                for key, value in row.items():
+                    if isinstance(value, list) and len(value) > keep:
+                        row[key] = value[-keep:]
+    return shrink
+
+
+def _trim_evidence(keep):
+    def shrink(payload):
+        rows = payload.get("evidence")
+        if not isinstance(rows, list) or len(rows) <= keep:
+            return
+        cited = {ref for entry in payload.get("acceptance_support") or [] for ref in entry.get("source_refs", [])}
+        pinned = [row for row in rows if isinstance(row, dict) and row.get("id") in cited]
+        rest = [row for row in rows if not (isinstance(row, dict) and row.get("id") in cited)]
+        payload["evidence"] = pinned + rest[-max(0, keep - len(pinned)):]
+        payload["acceptance_support"] = acceptance_support(payload)  # Recompute so refs never point at dropped rows.
+    return shrink
+
+
+def _trim_goals(keep):
+    def shrink(payload):
+        rows = payload.get("existing_goals")
+        if not isinstance(rows, list) or len(rows) <= keep:
+            return
+        stage_ids = set((payload.get("stage") or {}).get("goal_ids") or [])
+        pinned = [row for row in rows if isinstance(row, dict) and row.get("id") in stage_ids]
+        rest = [row for row in rows if not (isinstance(row, dict) and row.get("id") in stage_ids)]
+        payload["existing_goals"] = pinned + rest[-max(0, keep - len(pinned)):]
+    return shrink
+
+
+def fit_payload(payload, limit=INPUT_SOFT_LIMIT):
+    """Fit planning input to the budget, discarding the least information first.
+
+    Excerpts shorten before any row is dropped; cited evidence and the current
+    stage's Goals are pinned, and acceptance_support is recomputed after a drop,
+    so the fitted input stays self-consistent for validation.
+    """
+    if _input_size(payload) <= limit:
+        return payload
+    fitted = deepcopy(payload)
+    for shrink in (_shrink_excerpts(600), _trim_rows("history", 4), _trim_source_lists(20),
+                   _shrink_excerpts(250), _trim_evidence(8), _trim_goals(15),
+                   _shrink_excerpts(120), _trim_evidence(4), _trim_rows("history", 2), _trim_goals(8)):
+        if _input_size(fitted) <= limit:
+            break
+        shrink(fitted)
+    return fitted
 
 
 def validate_ref(ref):
@@ -223,8 +304,10 @@ class StagePlanner:
             self.store.event(db, agent["id"], "stage.protocol." + kind, dict(agent_run_id=agent["planner_lease"], **data))
 
     def propose(self, agent, payload, checkpoint):
-        if len(json.dumps(payload, ensure_ascii=False)) > 240000:
-            raise ServiceError("Stage planning input exceeds 240000 characters; narrow the objective or explicit contracts", 409)
+        if _input_size(payload) > INPUT_HARD_LIMIT:
+            payload = fit_payload(payload, INPUT_HARD_LIMIT)  # Keep compressing before refusing the run.
+        if _input_size(payload) > INPUT_HARD_LIMIT:
+            raise ServiceError(f"Stage planning input exceeds {INPUT_HARD_LIMIT} characters; narrow the objective or explicit contracts", 409)
         if self.provider:
             value = validate(self.provider(agent, payload), payload)
         else:

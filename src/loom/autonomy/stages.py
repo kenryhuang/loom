@@ -422,7 +422,7 @@ class StageCoordinator:
                     [s for s in store.rows(db, 'agent_stages', aid) if s['objective_id'] == oid],
                     store.rows(db, 'agent_goals', aid)),
             )
-            from loom.autonomy.stage_planner import acceptance_support
+            from loom.autonomy.stage_planner import acceptance_support, fit_payload
 
             payload["acceptance_support"] = acceptance_support(payload)
             kind = "stage_review" if stage else "stage_plan"
@@ -462,6 +462,7 @@ class StageCoordinator:
             from loom.autonomy.context import build_snapshot
 
             payload["context"] = build_snapshot(store, aid, purpose=kind)
+            payload = fit_payload(payload)  # The recorded input is exactly what the planner sees.
             with store.sessions.transaction() as db:
                 run["input_snapshot_ref"] = store.artifact(db, aid, payload, kind="stage_planning_input")
                 store.put(db, "agent_runs", run)
