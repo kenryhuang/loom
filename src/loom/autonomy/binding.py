@@ -39,7 +39,8 @@ def bind_for_dispatch(service, agent, work):
                 provider_factory=getattr(service, 'setup_provider_factory', None),
                 budget_binding=dict(agent_id=agent['id'], goal_id=work['goal_id'], work_package_id=work['id']))
         )
-        proposal = recommender(objective, model=role["model"], scope="dispatch")
+        proposal = recommender(objective, model=role["model"], scope="dispatch",
+                               extra={"required_tools": work.get("required_tools", [])})
         return {
             "task_spec": spec_from_proposal(proposal),
             "plan_mode": proposal.get("plan_mode") or "auto",
@@ -127,3 +128,35 @@ def compatible_config(candidate_task, payload):
     if config(candidate_task.get("task_spec")) != config(payload.get("task_spec")):
         return False
     return (candidate_task.get("plan_mode") or "auto") == (payload.get("plan_mode") or "auto")
+
+
+def ensure_required_tools(service, payload, required):
+    """Close the minimal collection set over the work contract before dispatch.
+
+    Actual bindings, including resource restrictions and registered external
+    tools, are authoritative. Never turn a read-only resource into a writer.
+    """
+    from loom.service.contracts import validate_create
+    from loom.tasks.assembly import TaskAssembly, normalize_task_spec
+    from loom.tasks.recovery import TOOL_COLLECTIONS
+    from loom.tasks.request import TaskRequest
+
+    payload = deepcopy(payload)
+    spec = normalize_task_spec(payload.get("task_spec"), workspace=payload.get("workspace"),
+                               plan_mode=payload.get("plan_mode", "auto"))
+    collections = spec["tools"]["collections"]
+    additions = sorted({TOOL_COLLECTIONS[t] for t in required if t in TOOL_COLLECTIONS} - set(collections))
+    collections.extend(additions)
+    payload["task_spec"] = spec
+    registry = service.plugin_registry_factory() if service.plugin_registry_factory else None
+    validated = validate_create(payload, plugin_registry=registry,
+                                external_bindings=service.store.external_tools.resolve(payload.get("external_tool_ids", [])))
+    assembly = TaskAssembly(TaskRequest(payload["objective"], workspace=validated["workspace"],
+        task_spec=validated["task_spec"], metadata={k: validated[k] for k in ("knowledge_base_ids", "external_tool_bindings")}),
+        registry=registry)
+    missing = set(required) - set(assembly.bindings)
+    if missing:
+        raise ServiceError("Work contract requires unavailable tools: " + ", ".join(sorted(missing))
+                           + "; check registered bindings and workspace access before dispatch", 409, code="EXECUTION_CONTRACT")
+    payload["task_spec"] = validated["task_spec"]
+    return payload, additions

@@ -396,9 +396,13 @@ class TaskAssembly:
             }
         )
 
-    def restore(self, snapshot, *, rebind_tools=False):
+    def restore(self, snapshot, *, rebind_tools=False, tool_extension=None):
         snapshot = json_value(snapshot)
-        if rebind_tools:
+        if tool_extension:
+            from loom.tasks.tool_extension import migrate
+
+            snapshot = migrate(snapshot, self.snapshot(), tool_extension)
+        if rebind_tools and not tool_extension:
             # Only the service's explicit paused binding update enables this migration.
             current = self.snapshot()
             mutable = {"knowledge", "external_tools"}
@@ -445,6 +449,13 @@ class TaskAssembly:
         memory_ids = (self.memory.allowed if self.memory else set()) | (self.skills.allowed if self.skills else set())
         required = tuple(ref.id for ref in refs if ref.id not in memory_ids and (
             ref.id not in self.bindings or self.bindings[ref.id].placement == "control"))
+        contract_tools = set((self.request.metadata.get("autonomy") or {}).get("required_tools", []))
+        contract_tools.update(t for c in (self.acceptance.data.get("plan") or {}).get("criteria", [])
+                              for t in c.get("required_tools", []))
+        contract_tools.update(c.get("check", {}).get("tool_id")
+                              for c in (self.acceptance.data.get("plan") or {}).get("criteria", [])
+                              if c.get("verifier") == "tool_call")
+        required = tuple(dict.fromkeys((*required, *(ref.id for ref in refs if ref.id in contract_tools))))
         if self.acceptance_policy:
             # This fixed collection is the diagnosis contract, including validation and diff tools.
             required = tuple(ref.id for ref in refs)

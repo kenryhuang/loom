@@ -131,7 +131,7 @@ def test_unknown_execution_and_external_dependency_never_reassemble(agent_servic
 
 
 def test_human_change_during_review_invalidates_prepared_reassembly(agent_service):
-    service, facade, aid, work, sid = blocked(agent_service)
+    service, facade, aid, work, sid = blocked(agent_service, budget=True)
     reviewer = service.recovery_reviewer
     def interrupt(payload):
         service.store.update(sid, lambda state, emit, db: state.update(control=dict(command_id='human', kind='paused')))
@@ -218,7 +218,7 @@ def test_restart_cannot_attach_reviewed_contract_to_a_different_prepared_task(ag
 def test_budget_denial_during_contract_review_waits_without_consuming_recovery(agent_service):
     from loom.service.contracts import ServiceError
 
-    service, facade, aid, work, sid = blocked(agent_service)
+    service, facade, aid, work, sid = blocked(agent_service, budget=True)
     def denied(payload):
         error = ServiceError('Any display wording', 409, code='AGENT_BUDGET')
         error.budget_block = dict(scopes=[dict(scope='daily', used=95, limit=100, requested=20)])

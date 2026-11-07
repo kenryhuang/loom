@@ -233,7 +233,8 @@ class LoomService:
                 state["run"] = {"id": new_id("run"), "state": "queued", "steps": 0, "checkpoint": None, "active_seconds": 0, "counters": encode({})}
                 state["run"]["reset_planning"] = intent.mode in {"new_task", "restart"}
                 if old and intent.mode == "same_task":
-                    for key in ("steps", "active_seconds", "counters", "time_budget_start_seconds", "task_event_ids"):
+                    for key in ("steps", "active_seconds", "counters", "time_budget_start_seconds", "task_event_ids",
+                                "assembly_update_pending", "tool_extension_pending"):
                         if key in old:
                             state["run"][key] = old[key]
                 state['run']['restart_from_scratch'] = restarting
@@ -442,6 +443,7 @@ class LoomService:
                     self._worker_event(state, emit, db, event)
                 if run.get("assembly_update_pending") == value.get("assembly_revision"):
                     run.pop("assembly_update_pending", None)
+                    run.pop("tool_extension_pending", None)
                 run["counters"] = encode({"llm_calls": value["llm_calls"], "usage": value["usage"]})
                 if value["usage"].total_tokens != used:
                     emit("run.usage.changed", {"total_tokens": value["usage"].total_tokens})

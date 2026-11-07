@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from loom.service.contracts import ServiceError
 from tests.autonomy.helpers import goals, role
 
@@ -8,6 +10,60 @@ def prepare(facade, aid):
     facade.store.add_goal(aid, "goal", goals()[0])
     facade.supervisor._plan(facade.snapshot(aid))
     return facade.snapshot(aid)["work_packages"][0]
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_dispatch_closes_minimal_tools_over_contract_even_on_recommendation_fallback(agent_service, fallback):
+    service, facade, aid, path = agent_service
+    seen = []
+    def recommend_minimal(text, *, model, scope, extra=None):
+        seen.append(extra)
+        if fallback:
+            raise ServiceError("offline")
+        return recommend(tool_collections=["filesystem", "task_control"])
+    service.setup_recommender = recommend_minimal
+    with service.store.transaction() as db:
+        agent = facade.store.get(db, "agents", aid)
+        agent["role"]["task_spec"] = {"session_environment": {"plugin": "session", "resources": [
+            {"id": "workspace", "kind": "directory", "uri": str(path), "access": "read-write"}]},
+            "tools": {"collections": ["filesystem", "task_control"]}}
+        facade.store.put(db, "agents", agent)
+    work = prepare(facade, aid)
+    with service.store.transaction() as db:
+        work = facade.store.get(db, "agent_work_packages", work["id"], aid)
+        work["required_tools"] = ["read_file", "shell_execute"]
+        facade.store.put(db, "agent_work_packages", work)
+    facade.supervisor.dispatcher.dispatch(aid, work["id"])
+    task = service.store.list_sessions()[0]["task"]
+    assert set(task["task_spec"]["tools"]["collections"]) == {"filesystem", "task_control", "shell"}
+    assert seen == [{"required_tools": ["read_file", "shell_execute"]}]
+    assert facade.snapshot(aid)["work_packages"][0]["binding"]["added_collections"] == ["shell"]
+
+
+@pytest.mark.parametrize("required,readonly", [(["missing_plugin_tool"], False), (["shell_execute"], True)])
+def test_unsatisfied_contract_is_rejected_before_creating_worker_session(agent_service, required, readonly):
+    service, facade, aid, _ = agent_service
+    service.setup_recommender = lambda *args, **kwargs: recommend(tool_collections=["filesystem", "task_control"])
+    work = prepare(facade, aid)
+    with service.store.transaction() as db:
+        work = facade.store.get(db, "agent_work_packages", work["id"], aid)
+        work.update(required_tools=required, read_only=readonly)
+        facade.store.put(db, "agent_work_packages", work)
+    with pytest.raises(ServiceError, match=required[0]):
+        facade.supervisor.dispatcher.dispatch(aid, work["id"])
+    assert not service.store.list_sessions()
+
+
+def test_registered_external_requirement_uses_existing_binding_without_extra_collections(agent_service):
+    from loom.autonomy.binding import ensure_required_tools
+    from tests.external_tools.test_external_tools import cli_config
+
+    service, _, _, path = agent_service
+    tid = service.store.external_tools.save(cli_config())["tools"][0]["id"]
+    payload, additions = ensure_required_tools(service, dict(objective="Use echo", workspace=str(path),
+        external_tool_ids=[tid], task_spec={"tools": {"collections": ["task_control"]}}), [tid])
+    assert payload["task_spec"]["tools"]["collections"] == ["task_control", "external_tools"]
+    assert additions == []
 
 
 def recommend(**overrides):

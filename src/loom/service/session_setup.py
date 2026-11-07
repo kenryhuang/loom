@@ -115,6 +115,8 @@ _SCOPE_PROMPTS = {
         "choose the minimum collections and bindings that cover the role's recurring responsibilities."
     ),
     "dispatch": (
+        " required_tools is the work contract's mandatory runtime tool IDs. Select the minimum collections covering "
+        "all of them as well as task discovery and verification; never omit a required tool to reduce context. "
         " Knowledge bases and external tools are bound at the agent role level, not per task: "
         "return empty knowledge_base_ids and external_tools, and omit the knowledge and external_tools collections. "
         "Add a top-level plan_mode field with one of \"auto\", \"force\", \"off\": \"force\" for multi-stage "
@@ -266,6 +268,8 @@ def recommend_setup(service, objective, *, model=None, scope="session", extra=No
                "knowledge_bases": catalog["knowledge_bases"], "external_tools": [
                    {key: tool[key] for key in ('id', 'name', 'connector_name', 'kind', 'description', 'effect_kind')}
                    for tool in catalog["external_tools"]]}
+    if scope == "dispatch":
+        request["required_tools"] = (extra or {}).get("required_tools", [])
     if scope == "repair":
         extra = extra or {}
         request["unresolved_requirements"] = extra.get("unresolved_requirements") or []

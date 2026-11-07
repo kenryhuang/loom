@@ -109,6 +109,7 @@ class QueueScheduler:
         # Observe actual workers before any planning, recovery or dispatch.
         with self.service.lock, self.store.sessions.transaction() as db:
             active = []
+            capability_exiting = False
             for work in works:
                 pending = work.get("recovery", {}).get("pending")
                 if pending and db.execute("SELECT 1 FROM commands WHERE id=?", (pending["id"],)).fetchone():
@@ -121,8 +122,16 @@ class QueueScheduler:
                     continue
                 if work["session_id"] in self.service.active or state["task"]["state"] in {"running", "queued", "pausing"}:
                     active.append(work["id"])
+                    capability_exiting |= (state['task']['state'] == 'paused'
+                                           and (state.get('run') or {}).get('stop_code') == 'ACCEPTANCE_CAPABILITY_UNAVAILABLE')
         if active:
-            return self.finish(aid, "running", "当前任务仍在运行或等待执行槽位，本轮检查结束，不打断任务。", work=active[0])
+            self.finish(aid, "running", "当前任务仍在运行或等待执行槽位，本轮检查结束，不打断任务。", work=active[0])
+            if capability_exiting:
+                with self.store.sessions.transaction() as db:
+                    current = self.store.get(db, 'agents', aid)
+                    current['next_schedule_at'] = (self.store.clock() + timedelta(seconds=1)).isoformat()
+                    self.store.put(db, 'agents', current)
+            return
         blocked = [
             w for w in works if w["state"] in {"blocked", "failed", "running", "dispatched"} and not w.get("recovery", {}).get("exhausted")
         ]
@@ -342,7 +351,7 @@ class QueueScheduler:
             if repair is not None:
                 intent = self._repair(aid, wid, sid, repair)
             with service.lock:
-                if intent.get("kind") == "restart":
+                if intent.get("kind") in {"restart", "extend_tools"}:
                     from loom.tasks.recovery import assess
 
                     latest_state = service.store.snapshot(sid)
@@ -352,9 +361,10 @@ class QueueScheduler:
                         raise ServiceError('重组提交前状态变化，保留当前 Session', 409, code=Code.EXECUTION_CONTRACT)
                     service.submit(
                         sid,
-                        dict(command_id=intent["id"], type="restart_task",
+                        dict(command_id=intent["id"], type="resume" if intent["kind"] == "extend_tools" else "restart_task",
                              expected_task_revision=intent['task_revision'],
-                             payload={"task": intent.get("task") or {"task_spec": intent["task_spec"]}, "reason": intent.get("reason") or ""}),
+                             payload={} if intent["kind"] == "extend_tools" else
+                             {"task": intent.get("task") or {"task_spec": intent["task_spec"]}, "reason": intent.get("reason") or ""}),
                     )
                 else:
                     from loom.autonomy.context import build_snapshot
@@ -444,11 +454,12 @@ class QueueScheduler:
             recovery = work.get('recovery') or {}
             from loom.tasks.workspace_probe import digest
 
-            prepared['task']['limits'] = dict(state['task']['limits'], max_duration_seconds=3600,
-                max_tokens=None)
+            if prepared.get('kind') != 'extend_tools':
+                prepared['task']['limits'] = dict(state['task']['limits'], max_duration_seconds=3600,
+                    max_tokens=None)
             prepared['report']['result_key'] = digest(prepared['task'])
             intent = dict(id=new_id('schedule_resume'), run_id=run['id'], reason=repair['reason'] or 'Structured task recovery',
-                          kind='restart', task=prepared['task'], report=prepared['report'], task_revision=state['task']['revision'])
+                          kind=prepared.get('kind', 'restart'), task=prepared['task'], report=prepared['report'], task_revision=state['task']['revision'])
             context = prepared['context']
             context['command_id'] = intent['id']
             context['source_run_id'] = run['id']

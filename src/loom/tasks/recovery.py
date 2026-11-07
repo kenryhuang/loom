@@ -19,7 +19,7 @@ def assess(state, *, failure=None):
     """Report every cause, including simultaneous capability and budget gaps."""
     acceptance = state.get('acceptance') or {}
     decision = acceptance.get('decision') or {}
-    code = decision.get('reason_code') or acceptance.get('cause_code')
+    code = decision.get('reason_code') or acceptance.get('cause_code') or (state.get('run') or {}).get('stop_code')
     causes = []
 
     def add(code, **details):

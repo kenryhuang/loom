@@ -342,6 +342,29 @@ class SessionStore:
                 state["control"] = control
                 task["state"] = "pausing" if state["run"] and state["run"]["state"] == "running" else "paused"
             elif kind == "resume":
+                extension = state.get('pending_reassembly') or {}
+                if extension.get('command_id') == cid and extension.get('tool_extension'):
+                    from loom.tasks.tool_extension import extension as validate_extension
+                    from loom.tasks.workspace_probe import digest
+
+                    if (extension.get('source_run_id') != (state.get('run') or {}).get('id')
+                            or extension.get('task_key') != digest(extension.get('task'))
+                            or (state.get('control') or {}).get('command_id')):
+                        raise ServiceError('Tool extension no longer matches the paused task', 409, code='EXECUTION_CONTRACT')
+                    updated = self._restart_configuration(task, extension['task'])
+                    try:
+                        change = validate_extension(task['task_spec'], updated['task_spec'])
+                    except ValueError as exc:
+                        raise ServiceError(str(exc), 409, code='EXECUTION_CONTRACT') from exc
+                    if change != extension['tool_extension']:
+                        raise ServiceError('Tool extension configuration changed', 409, code='EXECUTION_CONTRACT')
+                    for key in ('task_spec', 'plugin_version_refs', 'resource_claims'):
+                        task[key] = updated[key]
+                    state['run'].update(assembly_update_pending=task['revision'] + 1, tool_extension_pending=change)
+                    state.pop('pending_reassembly')
+                    self.append(db, state, 'task.configuration.changed',
+                                {key: task[key] for key in (*updated, 'goal_revision')}, command_id=cid)
+                    self.append(db, state, 'task.tools.extended', change, command_id=cid)
                 if state['run']:
                     state['run']['acceptance_budget_request'] = cid
                 self.queue_resume(db, state, cid)

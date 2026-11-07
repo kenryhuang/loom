@@ -1,6 +1,6 @@
 """Session-compatible routing and replayable dispatch, under service admission."""
 
-from loom.autonomy.binding import bind_for_dispatch, compatible_config
+from loom.autonomy.binding import bind_for_dispatch, compatible_config, ensure_required_tools
 from loom.memory.store import bound_workspace, tokens
 from loom.service.contracts import ServiceError
 
@@ -107,6 +107,10 @@ class Dispatcher:
             return
         dynamic = None if stale else bind_for_dispatch(self.service, agent, work)
         payload = task_payload(agent, work, binding=dynamic)
+        if not stale:
+            payload, additions = ensure_required_tools(self.service, payload, work.get("required_tools", []))
+            if dynamic is not None:
+                dynamic["record"].update(required_tools=work.get("required_tools", []), added_collections=additions)
         generation = agent['generation']
         # Lock order is service lock -> SessionStore lock throughout dispatch/control.
         with self.service.lock:
@@ -160,8 +164,7 @@ class Dispatcher:
                         or state["task"].get("external_tool_ids", []) != agent["role"]["external_tool_ids"]
                         or state.get("autonomy")
                         and state["autonomy"]["role_revision"] != agent["role_revision"]
-                        or dynamic is not None
-                        and not compatible_config(state["task"], payload)
+                        or not compatible_config(state["task"], payload)
                     ):
                         reason = "incompatible_configuration"
                     score = len(tokens(state["task"]["objective"]) & tokens(work["objective"]))

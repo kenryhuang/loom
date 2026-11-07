@@ -327,6 +327,7 @@ class AcceptanceController:
                 "protocol": deepcopy(self.data.get("protocol")),
                 "input_budget": deepcopy(self.data.get("input_budget")),
                 "cache": deepcopy(self.data.get("cache")),
+                "cause_code": self.data.get("cause_code"),
                 "feedback": deepcopy(self.data.get("feedback")), "decision": deepcopy(self.data.get("decision"))}
 
     def input_budget(self, prompt="", content="", *, provider=None, images=()):
@@ -551,6 +552,7 @@ class AcceptanceController:
         declared = (self.assembly.request.metadata.get('autonomy') or {}).get('required_tools', [])
         unavailable = set(declared) - set(self.assembly.bindings)
         if unavailable:
+            self.data.pop('decision', None)
             self.data.update(state='blocked', cause_code='ACCEPTANCE_CAPABILITY_UNAVAILABLE', results=[
                 dict(criterion_id='execution-capabilities', status='blocked', reason='Work contract requires unavailable tools',
                      gap=dict(kind='missing_evidence', targets=[dict(kind='tool', value=t) for t in sorted(unavailable)],
@@ -639,8 +641,13 @@ class AcceptanceController:
                             if t not in self.assembly.bindings], required_fact=c['description'], suggested_action='Assemble the required tools'))
                    for c in self.data['plan']['criteria'] if set(c.get('required_tools', [])) - set(self.assembly.bindings)]
         if missing:
+            self.data.pop('decision', None)
             self.data.update(results=missing, state='blocked', cause_code='ACCEPTANCE_CAPABILITY_UNAVAILABLE')
             raise AcceptanceBlocked('Task requires tools absent from the assembled environment', code='ACCEPTANCE_CAPABILITY_UNAVAILABLE')
+        if self.data.get('cause_code') == 'ACCEPTANCE_CAPABILITY_UNAVAILABLE':
+            self.data.pop('cause_code')
+            self.data.pop('decision', None)
+            self.data.update(state='not_ready', reason='Required tools are available; continue with retained task evidence')
 
     async def revise(self, value, runtime):
         """Preserve conditions, allow repair of the method, then verify fresh evidence."""

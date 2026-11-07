@@ -136,6 +136,19 @@ def build(service, state, report):
             raise ServiceError('旧验收阻塞没有可验证的配置修复', 409, code='EXECUTION_CONTRACT')
     tools = spec.setdefault('tools', {})
     tools['collections'] = list(dict.fromkeys([*tools.get('collections', []), *additions]))
+    acceptance = state.get('acceptance') or {}
+    code = (acceptance.get('decision') or {}).get('reason_code') or acceptance.get('cause_code') or (state.get('run') or {}).get('stop_code')
+    if (additions and code == 'ACCEPTANCE_CAPABILITY_UNAVAILABLE'
+            and {c['code'] for c in report['causes']} <= {'TOOLS_REQUIRED', 'ACCEPTANCE_REVIEW'}):
+        spec, available = assembled(service, task, spec)
+        if set(required) <= available:
+            from loom.tasks.tool_extension import extension
+
+            change = extension(task['task_spec'], spec)
+            changes = dict(task_spec=spec)
+            return dict(task=changes, context=dict(schema_version=1, source_key=report['source_key'],
+                        tool_extension=change, task=changes),
+                        report={**report, 'additions': additions, 'reset': [], 'result_key': digest(changes)}, kind='extend_tools')
     plan, audit = review_contract(service, state, report)
     resources = spec.get('session_environment', {}).get('resources', [])
     workspace_id = spec.get('execution_runtime', {}).get('workspace_resource', 'workspace')

@@ -230,7 +230,10 @@ def test_dispatch_scope_strips_role_level_bindings_and_defaults_plan_mode(api): 
     base = service.store.knowledge.create({"name": "AI Infra", "description": "AI systems", "engine": "sqlite_fts"})
     bound = proposal(knowledge_base_ids=[base["id"]], external_tools=["mcp.fake"], plugins={"workflow": "dynamic"})
 
-    result = recommend_setup(service, "实现一个功能", scope="dispatch", provider_factory=lambda _: Recommender(bound))
+    provider = Recommender(bound)
+    result = recommend_setup(service, "实现一个功能", scope="dispatch", extra={"required_tools": ["shell_execute"]},
+                             provider_factory=lambda _: provider)
+    assert json.loads(provider.calls[0][1].content)["required_tools"] == ["shell_execute"]
 
     assert result["knowledge_base_ids"] == [] and result["external_tools"] == []
     assert result["plan_mode"] == "auto"

@@ -122,8 +122,9 @@ async def _execute_assembled(state, bridge, provider, request, assembly):
             bridge.checkpoint.pop("output_retries", None)
     bridge.assembly_revision = state["run"].get("assembly_update_pending")
     rebind = bool(bridge.assembly_revision)
+    tool_extension = state["run"].get("tool_extension_pending")
     if bridge.checkpoint and bridge.checkpoint.get("plugin_states"):
-        assembly.restore(bridge.checkpoint["plugin_states"], rebind_tools=rebind)
+        assembly.restore(bridge.checkpoint["plugin_states"], rebind_tools=rebind, tool_extension=tool_extension)
         context = planning.project_state(context)
     elif bridge.checkpoint and bridge.checkpoint.get("planning"):
         planning.restore(bridge.checkpoint["planning"]).unwrap()
@@ -133,7 +134,7 @@ async def _execute_assembled(state, bridge, provider, request, assembly):
         # same task. Its tool evidence and workflow must travel with its context.
         snapshot = (context.state.scratch or {}).get("execution_plugins")
         if snapshot:
-            assembly.restore(snapshot, rebind_tools=rebind)
+            assembly.restore(snapshot, rebind_tools=rebind, tool_extension=tool_extension)
             context = planning.project_state(context)
         elif (context.state.scratch or {}).get("restore_planning"):
             planning.restore(context.state.scratch["restore_planning"]).unwrap()

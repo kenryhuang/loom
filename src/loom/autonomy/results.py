@@ -27,6 +27,8 @@ def record_session_state(db, state):
         if work["state"] not in {"succeeded", "failed", "cancelled"}:
             work["state"] = "running" if status == "running" else "dispatched" if status == "queued" else "blocked"
             work["blocked_reason"] = None if status in {"running", "queued"} else state["task"]["state"]
+        if status == "suspended" and run.get("stop_code") == "ACCEPTANCE_CAPABILITY_UNAVAILABLE":
+            _wake_capability_recovery(db, state, work)
         db.execute("UPDATE agent_work_packages SET body=? WHERE id=?", (canonical(work), wid))
         return
     identifier = "learning_" + digest([state["session_id"], rid])[:32]
@@ -109,3 +111,24 @@ def record_session_state(db, state):
             ),
         ),
     )
+
+
+def _wake_capability_recovery(db, state, work):
+    """Wake once per suspended attempt, without overriding human control/policy."""
+    from loom.autonomy.contracts import scheduling_policy
+
+    run = state["run"]
+    key = digest([run["id"], run.get("attempt_id")])
+    if (work.get("capability_wake") == key or (work.get("recovery") or {}).get("exhausted")
+            or (state.get("control") or {}).get("command_id") or (state.get("input_request") or {}).get("state") == "pending"):
+        return
+    link = db.execute("SELECT taken_over FROM agent_sessions WHERE session_id=?", (state["session_id"],)).fetchone()
+    row = db.execute("SELECT body FROM agents WHERE id=?", (work["agent_id"],)).fetchone()
+    if not row or not link or link[0]:
+        return
+    agent = json.loads(row[0])
+    if agent["state"] != "enabled" or not scheduling_policy(agent["role"])["enabled"]:
+        return
+    work["capability_wake"] = key
+    agent["next_schedule_at"] = ""
+    db.execute("UPDATE agents SET body=? WHERE id=?", (canonical(agent), agent["id"]))
