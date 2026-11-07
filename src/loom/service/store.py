@@ -490,6 +490,16 @@ class SessionStore:
         with self.read() as db:
             return [json.loads(row[0]) for row in db.execute("SELECT body FROM sessions WHERE json_extract(body, '$.deleted_at') IS NULL ORDER BY rowid DESC")]
 
+    def list_sessions_by_activity(self):
+        """Most recently active session first; ties and event-less sessions keep newest-created order."""
+        with self.read() as db:
+            return [json.loads(row[0]) for row in db.execute(
+                "SELECT body FROM sessions WHERE json_extract(body, '$.deleted_at') IS NULL "
+                "ORDER BY COALESCE((SELECT json_extract(e.body, '$.at') FROM events e "
+                "WHERE e.session_id = sessions.id ORDER BY e.seq DESC LIMIT 1), "
+                "json_extract(body, '$.created_at')) DESC, rowid DESC"
+            )]
+
     def delete(self, sid):
         with self.transaction() as db:
             row = db.execute("SELECT body FROM sessions WHERE id=?", (sid,)).fetchone()

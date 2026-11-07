@@ -58,9 +58,13 @@ def decide(controller, *, origin="completion", completion_id=None):
                   f"seconds {data['elapsed_seconds']:.1f}/{controller.config['max_seconds']}")
     else:
         gaps = []
+        criteria = {c["id"]: c for c in ((data.get("plan") or {}).get("criteria") or []) if isinstance(c, dict)}
         for row in blockers:
+            scope = [p for p in (criteria.get(row.get("criterion_id"), {}).get("scope") or []) if isinstance(p, str) and p.strip()]
             gap = row.get("gap") or {"kind": "deliverable_mismatch" if row["status"] == "failed" else "unknown",
-                                      "targets": [], "required_fact": row.get("reason", ""), "suggested_action": ""}
+                                      "targets": [dict(kind="workspace_path", value=p) for p in scope][:32],
+                                      "required_fact": row.get("reason", ""),
+                                      "suggested_action": ("Restore or produce the deliverable at: " + ", ".join(scope)) if scope else ""}
             gaps.append({"criterion_id": row["criterion_id"], "status": row["status"], **gap})
         # Parked requirements are solvable until bounded repair proves otherwise: the solver
         # may produce the evidence or repair the plan before the pause reaches a human.

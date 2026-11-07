@@ -6,6 +6,19 @@ from loom.service.contracts import ServiceError
 from loom.service.store import SessionStore
 
 
+def test_sessions_list_orders_by_last_activity_descending(tmp_path, monkeypatch):
+    ticks = (f"2026-11-07T00:{i // 60:02d}:{i % 60:02d}.000Z" for i in range(1000))
+    monkeypatch.setattr("loom.service.store.now_iso", lambda: next(ticks))
+    store = SessionStore(tmp_path / "service")
+    sids = []
+    for index, name in enumerate(("a", "b", "c")):
+        (tmp_path / name).mkdir()
+        sids.append(store.create(f"create-{index}", {"objective": name, "workspace": str(tmp_path / name)})["session_id"])
+    store.submit(sids[0], {"command_id": "touch", "type": "submit_message", "payload": {"content": "still active"}})
+    listed = [s["session_id"] for s in store.list_sessions_by_activity()]
+    assert listed == [sids[0], sids[2], sids[1]]  # Touched session first; the rest keep newest-created order.
+
+
 def test_create_and_command_receipts_survive_restart(tmp_path):
     payload = {"objective": "Maintain module", "workspace": str(tmp_path)}
     store = SessionStore(tmp_path / "service")

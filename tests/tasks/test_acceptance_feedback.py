@@ -106,6 +106,26 @@ def _unresolved_gate(tmp_path, unresolved=("Customer approval cannot be observed
     return assembly, gate
 
 
+def test_fallback_gap_carries_criterion_scope_as_targets(tmp_path):
+    from loom.tasks.acceptance_feedback import decide
+
+    assembly, gate = _unresolved_gate(tmp_path, unresolved=())
+    try:
+        gate.data.update(
+            plan=gate.validate_plan({"criteria": [{"id": "report-exists", "description": "A report exists under reports/",
+                                                    "verifier": "artifact", "scope": ["reports/"],
+                                                    "check": {"path": "reports/", "contains": []}}]}),
+            results=[{"criterion_id": "report-exists", "status": "failed", "reason": "Missing deliverable: reports/"}],
+        )
+        decision = decide(gate)
+        assert decision.outcome == "repair"
+        gap = gate.data["feedback"]["gaps"][0]
+        assert gap["targets"] == [{"kind": "workspace_path", "value": "reports/"}]
+        assert "reports/" in gap["suggested_action"]
+    finally:
+        asyncio.run(assembly.close())
+
+
 def test_unresolved_requirements_alone_route_to_bounded_repair(tmp_path):
     from loom.tasks.acceptance_feedback import decide
 

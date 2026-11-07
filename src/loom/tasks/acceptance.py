@@ -46,6 +46,8 @@ their complete contents can be fingerprinted. Unavailable fingerprints disable r
 Avoid broad project roots, dependencies, build outputs and secret files.
 Select targeted checks grounded in observed project files; never invent a passing result.
 artifact.check: {path, nonempty: true, contains: [literal strings]}; scope includes path.
+path may name a directory (e.g. reports/): it passes when the directory holds at least one file and every
+contains string appears in some bounded file inside; use a file path when assertions must hold in one document.
 source.check: {urls: [required URLs]}. semantic.check: {}.
 tool_call.check: {tool_id: an exact available tool runtime ID, min_calls: 1}.
 Use tool_call for an explicit requirement to use a tool (including MCP/CLI). The host checks successful recorded invocations,
@@ -111,6 +113,29 @@ class AcceptanceBlocked(ValueError):
     def __init__(self, message, code="ACCEPTANCE_BLOCKED"):
         super().__init__(message)
         self.code = code
+
+
+def _directory_deliverable(path, check):
+    """A directory deliverable passes when it holds content; contains assertions
+    may be satisfied by any bounded file inside. Symlinks stay out of scope."""
+    entries = sorted(p for p in path.rglob("*") if not p.is_symlink() and p.is_file())
+    if not entries:
+        return {"status": "failed", "reason": f"Deliverable directory is empty: {check['path']}"}, {}
+    remaining = list(check.get("contains", []))
+    for entry in entries[:200]:
+        if not remaining:
+            break
+        if entry.stat().st_size > 100000:
+            continue
+        try:
+            text = entry.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        remaining = [value for value in remaining if value not in text]
+    if remaining:
+        return {"status": "failed", "reason": f"Deliverable directory content lacks expected assertions: {check['path']}"}, {}
+    return {"status": "passed", "reason": "Artifact directory checked"}, {
+        "path": check["path"], "files": [str(p.relative_to(path)) for p in entries[:100]]}
 
 
 class AcceptanceResponseInvalid(AcceptanceBlocked):
@@ -939,6 +964,8 @@ class AcceptanceController:
             }, detail
         if kind == "artifact":
             path = bound_path(self.root, check["path"])
+            if path.is_dir():
+                return _directory_deliverable(path, check)
             if not path.is_file():
                 return {"status": "failed", "reason": f"Missing deliverable: {check['path']}"}, {}
             if path.stat().st_size > 100000:

@@ -222,7 +222,7 @@ class SessionHandler(BaseHTTPRequestHandler):
                 else:
                     offset = self._number(query, "offset", 0)
                     limit = self._number(query, "limit", 50, 1, 200)
-                    states = service.store.list_sessions()
+                    states = service.store.list_sessions_by_activity()
                     summaries = [
                         {"session_id": s["session_id"], "title": s["title"], "task": s["task"], "event_cursor": s["event_cursor"]}
                         for s in states[offset : offset + limit]

@@ -35,6 +35,18 @@ def new(client, path, cid="create"):
     return client.create({"objective": "Maintain", "workspace": str(path)}, command_id=cid)["session_id"]
 
 
+def test_sessions_api_lists_most_recent_activity_first(api, monkeypatch):
+    _, _, client, path = api
+    ticks = (f"2026-11-07T01:{i // 60:02d}:{i % 60:02d}.000Z" for i in range(1000))
+    monkeypatch.setattr("loom.service.store.now_iso", lambda: next(ticks))
+    sids = []
+    for index in range(3):
+        (path / f"w{index}").mkdir()
+        sids.append(new(client, path / f"w{index}", cid=f"create-{index}"))
+    client.command(sids[0], "submit_message", {"content": "still active"})
+    assert [s["session_id"] for s in client.list_sessions()] == [sids[0], sids[2], sids[1]]
+
+
 def test_rejected_post_cannot_corrupt_next_keep_alive_request(api):
     _, server, _, _ = api
     connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=5)

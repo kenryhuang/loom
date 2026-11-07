@@ -169,6 +169,34 @@ def test_plan_cannot_omit_goal_and_checkpoint_invalidates_on_goal_or_file_change
     assert restored.data["plan"] is None
 
 
+def test_artifact_check_accepts_nonempty_directory_deliverable(tmp_path):
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "review.md").write_text("# Review")
+    assembly = TaskAssembly(TaskRequest("Write review", workspace=tmp_path), plan_mode="off")
+    criterion = {"id": "report-exists", "description": "A report exists under reports/", "verifier": "artifact",
+                 "scope": ["reports/"], "check": {"path": "reports/", "contains": []}}
+    row, detail = asyncio.run(assembly.acceptance.check(criterion, None))
+    assert row["status"] == "passed"
+    assert detail["files"] == ["review.md"]
+
+
+def test_artifact_check_rejects_missing_and_empty_directories_and_matches_contains_anywhere(tmp_path):
+    assembly = TaskAssembly(TaskRequest("Write review", workspace=tmp_path), plan_mode="off")
+    criterion = {"id": "report-exists", "description": "A report exists under reports/", "verifier": "artifact",
+                 "scope": ["reports/"], "check": {"path": "reports/", "contains": ["conclusion"]}}
+    row, _ = asyncio.run(assembly.acceptance.check(criterion, None))
+    assert row["status"] == "failed" and "Missing deliverable" in row["reason"]
+    (tmp_path / "reports").mkdir()
+    row, _ = asyncio.run(assembly.acceptance.check(criterion, None))
+    assert row["status"] == "failed" and "empty" in row["reason"]
+    (tmp_path / "reports" / "notes.md").write_text("body without the word")
+    row, _ = asyncio.run(assembly.acceptance.check(criterion, None))
+    assert row["status"] == "failed" and "assertions" in row["reason"]
+    (tmp_path / "reports" / "more.md").write_text("final conclusion here")
+    row, _ = asyncio.run(assembly.acceptance.check(criterion, None))
+    assert row["status"] == "passed"
+
+
 def test_command_failure_is_repaired_and_checked_again(tmp_path):
     import sys
 
