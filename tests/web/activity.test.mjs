@@ -649,6 +649,94 @@ test("new model text preserves an active text selection until the reader release
   dom.window.close();
 });
 
+test("running process summary shows live elapsed time alongside the latest activity", () => {
+  const { dom, root, feed } = setup();
+  try {
+    feed.append({
+      ...event(1, "run.started"),
+      at: new Date(Date.now() - 65000).toISOString(),
+    });
+    feed.append(
+      event(2, "tool.started", {
+        tool_call_id: "t",
+        tool_id: "read_file",
+        input: { path: "a.py" },
+      }),
+    );
+    const summary = root.querySelector(".process-group > summary").textContent;
+    assert.match(summary, /Processing · 1m 5s · /);
+    assert.match(summary, /a\.py/);
+  } finally {
+    feed.destroy();
+    dom.window.close();
+  }
+});
+
+test("running elapsed time ticks every second and stops when the run completes", (t) => {
+  const { dom, root, feed } = setup();
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 100000 });
+  try {
+    feed.append({ ...event(1, "run.started"), at: "1970-01-01T00:00:00Z" });
+    const summary = () =>
+      root.querySelector(".process-group > summary").textContent;
+    assert.match(summary(), /Processing · 1m 40s/);
+    t.mock.timers.tick(21000);
+    assert.match(summary(), /Processing · 2m 1s/);
+    feed.append({
+      ...event(2, "run.completed"),
+      at: new Date(121000).toISOString(),
+    });
+    assert.match(summary(), /2m 1s elapsed/);
+    assert.equal(feed.ticker, null);
+    t.mock.timers.tick(5000);
+    assert.match(summary(), /2m 1s elapsed/);
+  } finally {
+    feed.destroy();
+    dom.window.close();
+  }
+});
+
+test("restored running process shows elapsed time from its started milestone", () => {
+  const { dom, root, feed } = setup();
+  try {
+    feed.restore({
+      snapshot: {
+        session_id: "s",
+        event_cursor: 5,
+        task: { workspace: "/w" },
+        run: { id: "run", state: "running" },
+        messages: [],
+      },
+      events: [],
+      processes: [
+        {
+          id: "run:1",
+          run_id: "run",
+          start_seq: 1,
+          end_seq: 5,
+          state: "running",
+          milestones: [
+            {
+              seq: 1,
+              type: "run.started",
+              run_id: "run",
+              payload: {},
+              at: new Date(Date.now() - 95000).toISOString(),
+            },
+          ],
+        },
+      ],
+    });
+    assert.match(
+      root.querySelector(".process-group > summary").textContent,
+      /Processing · 1m 35s/,
+    );
+  } finally {
+    feed.destroy();
+    dom.window.close();
+  }
+});
+
 test("completed process elapsed time uses lifecycle timestamps, not later detail updates", () => {
   const { dom, root, feed } = setup();
   feed.append({ ...event(1, "run.started"), at: "2026-10-06T00:00:00Z" });

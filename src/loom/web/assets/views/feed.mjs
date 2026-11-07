@@ -6,6 +6,9 @@ import { builtinPresenters } from "../activity/presenters.mjs";
 import { ActivityRow } from "./activity-row.mjs";
 import { ActivityInspector } from "./activity-inspector.mjs";
 
+const formatElapsed = (seconds) =>
+  `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+
 export class FeedView {
   constructor(
     root,
@@ -44,14 +47,17 @@ export class FeedView {
       }
     };
     this.ownerDocument.addEventListener("selectionchange", this.onSelectionChange);
+    this.ticker = null;
     this.reset();
   }
   destroy() {
     this.inspector.close();
+    this.stopTicker();
     this.root.removeEventListener("toggle", this.onToggle, true);
     this.ownerDocument.removeEventListener("selectionchange", this.onSelectionChange);
   }
   reset({ preserveDetails = false } = {}) {
+    this.stopTicker();
     if (!preserveDetails) {
       this.inspector.close();
       this.detailMode = null;
@@ -423,22 +429,42 @@ export class FeedView {
     const completeHistory =
       group.process &&
       this.processPages.get(group.process.id)?.nextBefore === null;
-    const elapsed =
-      group.endedAt && group.startedAt
-        ? Math.max(0, Math.round((group.endedAt - group.startedAt) / 1000))
+    const elapsed = (end) =>
+      Number.isFinite(group.startedAt) && Number.isFinite(end)
+        ? formatElapsed(
+            Math.max(0, Math.round((end - group.startedAt) / 1000)),
+          )
         : null;
-    const duration =
-      elapsed == null
-        ? ""
-        : ` · ${Math.floor(elapsed / 60)}m ${elapsed % 60}s elapsed`;
-    const suffix = terminal
-      ? `${count} ${completeHistory ? "actions" : "loaded actions"}${duration}`
-      : group.latest;
+    let suffix;
+    if (terminal) {
+      const duration = elapsed(group.endedAt);
+      suffix = `${count} ${completeHistory ? "actions" : "loaded actions"}${duration ? ` · ${duration} elapsed` : ""}`;
+    } else {
+      const live = group.state === "running" ? elapsed(Date.now()) : null;
+      suffix = [live, group.latest].filter(Boolean).join(" · ");
+    }
     group.summary.textContent = `${label}${suffix ? ` · ${suffix}` : ""}`;
     const manual = this.manualProcesses.get(group.process?.id || group.key);
     if (manual !== undefined) group.node.open = manual;
     else if (this.detailMode !== null) group.node.open = this.detailMode;
     else if (group.state) group.node.open = !terminal;
+    this.syncTicker();
+  }
+  syncTicker() {
+    const running = [...this.groups.values()].some(
+      (group) => group.state === "running" && Number.isFinite(group.startedAt),
+    );
+    if (running && !this.ticker)
+      this.ticker = setInterval(() => {
+        for (const group of this.groups.values())
+          if (group.state === "running") this.processSummary(group);
+      }, 1000);
+    else if (!running) this.stopTicker();
+  }
+  stopTicker() {
+    if (!this.ticker) return;
+    clearInterval(this.ticker);
+    this.ticker = null;
   }
   orderRecords(group) {
     for (const current of group ? [group] : this.groups.values()) {
