@@ -97,7 +97,6 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
         methods=methods,
         memory=memory,
         prior_deliveries=recent_work,
-        recent_tool_calls=recent_calls,
         pending_learning_cycle_ids=[c["id"] for c in cycles if c["state"] not in {"completed", "cancelled", "failed", "incomplete"}],
     )
     # Never silently truncate explicit obligations. Excess guidance must be narrowed by the user.
@@ -105,6 +104,10 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
         from loom.service.contracts import ServiceError
 
         raise ServiceError("Agent context exceeds 24000 characters; narrow explicit guidance or split the task", 409)
+    # Auto-generated and bounded (≤20 recent calls): rides above the explicit-
+    # obligation cap so it can never break a borderline snapshot. Still part of
+    # the digested artifact — the recorded context is exactly what the model saw.
+    snapshot["recent_tool_calls"] = recent_calls
     identifier = "context_" + digest(snapshot)[:32]
     snapshot["id"] = identifier
     with store.sessions.transaction() as db:

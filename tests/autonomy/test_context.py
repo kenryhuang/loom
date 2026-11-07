@@ -76,6 +76,24 @@ def test_record_use_service_rejection_returns_tool_error_without_raising():
     assert "Link at least one completed tool call" in result.error.message
 
 
+def test_recent_tool_calls_ride_above_the_explicit_obligation_size_cap(agent_service):
+    _, facade, aid, _ = agent_service
+    base = len(json.dumps(build_snapshot(facade.store, aid), ensure_ascii=False))
+    index = 0
+    while base < 23800:  # Fill explicit obligations to just below the 24K cap.
+        facade.guidance(aid, dict(command_id=f"big{index}", text="x" * min(3900, 23800 - base), scope="persistent"))
+        base = len(json.dumps(build_snapshot(facade.store, aid), ensure_ascii=False))
+        index += 1
+    assert base < 24000
+    with facade.store.sessions.transaction() as db:
+        for i in range(20):
+            op = dict(call=dict(id=f"call_{i:02d}", name="shell_execute", arguments="{}"), status="completed")
+            db.execute("INSERT INTO operations VALUES(?,?,?)", (f"run_1:call_{i:02d}", "sess_1", json.dumps(op)))
+    snapshot = build_snapshot(facade.store, aid, session_id="sess_1", run_id="run_1")
+    assert len(snapshot["recent_tool_calls"]) == 20
+    assert sum(len(g["text"]) for g in snapshot["guidance"]) >= 15000  # Explicit obligations are never truncated.
+
+
 def test_review_confidence_reaches_context_without_rewriting_evaluation(agent_service):
     from tests.memory.helpers import fact
 
