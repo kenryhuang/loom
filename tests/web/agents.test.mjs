@@ -660,3 +660,30 @@ test('Execution reassessment submits the exact work and agent revision',async()=
   assert.equal(sent.body.expected_revision,data.revision);assert.equal(sent.body.payload.work_package_id,'blocked-work');
  }finally{view.close();dom.window.close();}
 });
+
+test('Goal work packages link to their session and show execution metrics',()=>{
+ const {dom,view}=setup({});const root=document.createElement('div');
+ try{
+  view.renderGoalWork(root,{work_packages:[{goal_id:'g',objective:'First',state:'running',session_id:'s/1',execution_seconds:75,actual_tokens:1234},
+   {goal_id:'g',objective:'Pending',state:'pending'}]},{id:'g'});
+  const table=root.querySelector('.agent-goal-work-table');
+  assert.deepEqual([...table.querySelectorAll('th')].map(x=>x.textContent),['工作包','状态','执行时长','消耗 tokens']);
+  const rows=table.tBodies[0].rows;
+  assert.equal(rows[0].cells[0].querySelector('a'),null);
+  assert.equal(rows[0].cells[1].querySelector('a').getAttribute('href'),'#/sessions/s%2F1');
+  assert.equal(rows[0].cells[2].textContent,'1 m 15 s');assert.equal(rows[0].cells[3].textContent,(1234).toLocaleString());
+  assert.equal(rows[1].cells[1].querySelector('a'),null);assert.equal(rows[1].cells[2].textContent,'—');
+ }finally{view.close();dom.window.close();}
+});
+
+test('Goal metrics fall back to Session snapshots with older servers',async()=>{
+ const calls=[];const {dom,view}=setup({json:async path=>{calls.push(path);return {run:{active_seconds:75},token_budget:{used:1234}};}});
+ try{
+  const detail={work_packages:[{session_id:'s/1'},{session_id:'s/1'},{session_id:'s/2',execution_seconds:9,actual_tokens:8}]};
+  await view.fillSessionMetrics(detail);
+  assert.deepEqual(calls,['/v1/sessions/s%2F1/snapshot']);
+  assert.equal(detail.work_packages[0].execution_seconds,75);assert.equal(detail.work_packages[1].actual_tokens,1234);
+  assert.equal(detail.work_packages[2].actual_tokens,8);
+  await view.fillSessionMetrics({work_packages:[{session_id:'s/1'}]});assert.equal(calls.length,1);
+ }finally{view.close();dom.window.close();}
+});

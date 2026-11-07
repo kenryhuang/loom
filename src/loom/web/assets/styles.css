@@ -2465,3 +2465,6 @@ section.setup-block { padding: 20px; }
   .agent-roadmap-node { padding:12px; gap:6px; }
   .agent-roadmap-detail { padding:12px; }
 }
+
+.agent-goal-work-table th:first-child, .agent-goal-work-table td:first-child { width: 100%; min-width: 220px; }
+.agent-goal-work-table th:not(:first-child), .agent-goal-work-table td:not(:first-child) { width: 1%; white-space: nowrap; }

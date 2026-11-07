@@ -2,7 +2,7 @@ import {element} from '../markdown.mjs';
 import {AgentsApi} from '../agents-api.mjs';
 import {AgentSetupView} from './agent-setup.mjs';
 import {AgentLearningView} from './agent-learning.mjs';
-import {panel, cards, table, badge, number, disclosure} from './dashboard.mjs';
+import {panel, cards, table, badge, number, seconds, disclosure} from './dashboard.mjs';
 import {agentResourceChoices} from './agent-resources.mjs';
 import {selectedTools} from './external-tools.mjs';
 import {editableStage, renderRoadmaps, roadmapDisclosure} from './agent-roadmap.mjs';
@@ -38,6 +38,7 @@ export class AgentsView {
     this.learningStates = new Map();
     this.stageExpansionStates = new Map();
     this.roadmapSelections = new Map();
+    this.sessionMetrics = new Map();
     this.heading = root.parentElement?.querySelector('#agents-heading');
   }
   close() {
@@ -77,6 +78,8 @@ export class AgentsView {
     const [catalog,detail]=await Promise.all([this.api.get(null,'',signal),
       selected?this.api.view(selected,tab.toLowerCase(),signal):Promise.resolve(null)]);
     if (generation !== this.generation || selected!==this.selected || tab!==this.tab || signal?.aborted) return;
+    if(tab==='Goals' && detail) await this.fillSessionMetrics(detail,signal);
+    if (generation !== this.generation || selected!==this.selected || tab!==this.tab || signal?.aborted) return;
     this.loadedKey=JSON.stringify([generation,selected,tab]);
     this.catalog = catalog;
     this.listRoot.replaceChildren(button('创建 Agent', () => this.createForm(), 'primary'));
@@ -103,6 +106,22 @@ export class AgentsView {
     const configurationEditing = this.configurationEditor?.form.isConnected;
     if (!editing && !resourceEditing && !learningEditing && !configurationEditing && !this.creating && this.renderedDetail !== JSON.stringify(detail)) this.render();
     else if (!this.creating) this.updateSchedule(detail);
+  }
+  async fillSessionMetrics(detail,signal) {
+    const missing=(detail.work_packages || []).filter(w=>w.session_id && !Object.hasOwn(w,'execution_seconds'));
+    const ids=[...new Set(missing.map(w=>w.session_id))], now=Date.now();
+    await Promise.all(ids.map(async id=>{
+      const cached=this.sessionMetrics.get(id);
+      if(cached && now-cached.at<30000)return;
+      try {
+        const session=await this.apiSource().json(`/v1/sessions/${encodeURIComponent(id)}/snapshot`,{signal});
+        if(session.run) this.sessionMetrics.set(id,{at:Date.now(),execution_seconds:session.run.active_seconds,actual_tokens:session.token_budget?.used});
+      } catch(error) { if(error.name==='AbortError')throw error; }
+    }));
+    for(const work of missing){
+      const metrics=this.sessionMetrics.get(work.session_id);
+      if(metrics){work.execution_seconds=metrics.execution_seconds;work.actual_tokens=metrics.actual_tokens;}
+    }
   }
   changeTab(tab) {
     this.tab=tab;this.loadedKey=null;this.render();
@@ -361,15 +380,19 @@ export class AgentsView {
   renderGoalWork(root,d,goal) {
     const works=d.work_packages.filter(w=>w.goal_id===goal.id).sort((a,b)=>(a.order??0)-(b.order??0));
     if(!works.length) {root.append(element('p','muted','尚未拆分或派发工作包。'));return;}
-    table(root,['工作包','状态','执行去向'],works.map(w=>{
-      const destination=element('div');
-      if(w.session_id) destination.append(link('打开 Session',`#/sessions/${encodeURIComponent(w.session_id)}`));
-      else destination.append(element('span','muted','尚未派发'));
-      const name=element('div','',w.objective);
+    const node=table(root,['工作包','状态','执行时长','消耗 tokens'],works.map(w=>{
+      const name=element('div');
+      name.append(element('span','',w.objective));
       if(w.reason) name.append(element('p','muted',`编排依据：${w.reason}`));
       if(w.blocked_reason && !['succeeded','completed'].includes(w.state)) name.append(element('p','notice',w.blocked_reason));
-      return [name,badge(w.superseded_contract?'旧合同 · '+label(w.state):label(w.state),w.state),destination];
+      const state=badge(w.superseded_contract?'旧合同 · '+label(w.state):label(w.state),w.state);
+      const stateCell=w.session_id ? link('',`#/sessions/${encodeURIComponent(w.session_id)}`) : state;
+      if(w.session_id)stateCell.append(state);
+      const duration=w.execution_seconds == null ? '—' : seconds(w.execution_seconds * 1000);
+      return [name,stateCell,duration,number(w.actual_tokens)];
     }));
+    node.classList.add('agent-goal-work-table');
+    node.querySelectorAll('th:nth-child(n+3)').forEach(th=>th.title='显示关联 Session 当前执行轮次的数据；Session 被复用时可能关联多个工作包。');
   }
   renderGoals(root, d) {
     renderRoadmaps(root,d,this);

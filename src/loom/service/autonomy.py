@@ -53,6 +53,10 @@ class AutonomyService:
             from loom.autonomy.profile import effective
             from loom.autonomy.sources import view as source_view
 
+            if view == 'goals':
+                from loom.autonomy.views import add_work_metrics
+
+                add_work_metrics(db, aid, result['work_packages'])
             result['preferences'] = effective(self.store, db, result) if view in {None, 'profile', 'learning'} else []
             owner = result['role'].get('owner_id', 'local')
             result['profile_entries'] = [json.loads(r[0]) for r in db.execute('SELECT body FROM agent_profile')
