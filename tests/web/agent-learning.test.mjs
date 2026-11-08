@@ -141,3 +141,50 @@ test('Workspace-less library selects one owned session and late loads cannot aff
     assert.doesNotMatch(env.view.root.textContent,/Observed project fact/);assert.match(env.view.root.textContent,/Role identity/);
   }finally{env.close();}
 });
+
+test('Filter changes cancel superseded searches and ignore their errors',async()=>{
+  const pending=[];
+  const env=setup(fixture(),(path,options)=>path.includes('/memory/library')?new Promise((resolve,reject)=>{
+    pending.push({path,signal:options.signal,resolve,reject});
+  }):undefined);
+  try {
+    await env.open();
+    const select=env.view.root.querySelector('select[name=kind]');
+    for(const kind of ['facts','lessons']){select.value=kind;select.dispatchEvent(new env.dom.window.Event('change',{bubbles:true}));}
+    assert.equal(pending.length,3);
+    assert.ok(pending[0].signal.aborted && pending[1].signal.aborted);
+    assert.equal(pending[2].signal.aborted,false);
+    pending[2].resolve({records:[memory()],total:1});await tick();
+    pending[0].resolve({records:[],total:0});pending[1].reject(new Error('obsolete failure'));await tick();
+    assert.match(env.view.root.textContent,/Observed project fact/);
+    assert.doesNotMatch(env.view.root.textContent,/obsolete failure/);
+  }finally{env.close();}
+});
+
+test('Polling preserves an in-flight library and refreshes only when memory changes',async()=>{
+  const data=fixture();data.memory_version=1;const pending=[];
+  const env=setup(data,(path,options)=>path.includes('/memory/library')?new Promise(resolve=>{
+    pending.push({signal:options.signal,resolve});
+  }):undefined);
+  try {
+    await env.open();const library=env.view.learningView.libraryRoot;
+    data.activity='working';await env.view.refresh();
+    assert.equal(pending.length,1);assert.equal(pending[0].signal.aborted,false);
+    assert.equal(env.view.learningView.libraryRoot,library);assert.ok(library.isConnected);
+    data.memory_version=2;await env.view.refresh();
+    data.memory_version=3;await env.view.refresh();
+    assert.equal(pending.length,1);assert.equal(pending[0].signal.aborted,false);
+    pending[0].resolve({records:[memory()],total:1});await tick();
+    assert.equal(pending.length,2);
+    assert.match(library.textContent,/Observed project fact/);
+    pending[1].resolve({records:[],total:0});await tick();
+    data.activity='waiting';await env.view.refresh();
+    assert.equal(pending.length,2);assert.match(library.textContent,/No learned content matches/);
+    data.memory_version=4;await env.view.refresh();
+    assert.equal(pending.length,3);
+    await env.view.changeTab('Profile');
+    assert.equal(pending[2].signal.aborted,true);
+    pending[2].resolve({records:[memory()],total:1});await tick();
+    assert.doesNotMatch(env.view.root.textContent,/Observed project fact/);
+  }finally{env.close();}
+});

@@ -31,6 +31,28 @@ def test_review_library_browses_beyond_runtime_search_and_keeps_scope(tmp_path):
             memory.browse(**arguments)
 
 
+def test_library_filters_and_pages_history_outside_runtime_candidate_window(tmp_path):
+    store = SessionStore(tmp_path / 'data')
+    workspace = tmp_path / 'project'
+    seed(store, workspace, records=[fact(f'new-{i:04}') for i in range(510)], evaluation='new')
+    older = {**fact('older'), 'kind': 'lessons', 'summary': 'Unique historical repair needle'}
+    sid = seed(store, workspace, records=[older], evaluation='old')
+    with store.transaction() as db:
+        db.execute("UPDATE semantic_jobs SET body=json_set(body,'$.created_at','2020-01-01') WHERE id='old'")
+    memory = MemoryStore(store.path, workspace=workspace)
+    assert memory.search('planets')['available_records'] == 500
+    assert memory.search('planets')['truncated']
+    page = memory.browse(offset=500)
+    assert page['total'] == 511 and len(page['records']) == 11
+    assert page['next_offset'] is None and not page['truncated']
+    assert page['records'][-1]['id'] == 'older'
+    assert memory.browse(query='needle')['records'][0]['id'] == 'older'
+    assert memory.browse(kind='lessons')['total'] == 1
+    with store.transaction() as db:
+        db.execute("UPDATE sessions SET body=json_set(body,'$.deleted_at','now') WHERE id=?", (sid,))
+    assert memory.browse(query='needle')['total'] == 0
+
+
 def test_quarantined_stale_and_legacy_unverified_records_never_enter_runtime_search(tmp_path):
     store = SessionStore(tmp_path / 'data')
     good = {**fact('published'), 'publication_state': 'published'}

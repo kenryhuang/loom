@@ -257,7 +257,9 @@ export class AgentsView {
   }
   render() {
     this.configurationEditor?.close();this.configurationEditor=null;
-    this.learningView?.close();
+    if (this.tab !== 'Learning' || (this.detail.view && this.detail.view !== 'learning') || !this.learningView?.canUpdate(this.detail)) {
+      this.learningView?.close(); this.learningView = null;
+    }
     const d = this.detail, head = this.heading || element('header', 'workspace-header');
     this.renderedDetail = JSON.stringify(d); this.renderHeading(head, d.role.name, d);
     const nav = element('nav', 'evaluation-tabs agent-tabs'); nav.setAttribute('role','tablist'); nav.setAttribute('aria-label','Agent details');
@@ -618,6 +620,7 @@ export class AgentsView {
     updates.append(element('p','muted','Configure refresh_seconds for periodic checks. The existing FTS local index supports incremental updates; backends without per-call metering keep coverage gaps.'));
   }
   renderLearning(root,d) {
+    if (this.learningView?.canUpdate(d)) { this.learningView.update(root,d); return; }
     if (!this.learningStates.has(d.id)) this.learningStates.set(d.id,{});
     this.learningView = new AgentLearningView(root,{detail:d,api:this.api,transport:this.apiSource(),state:this.learningStates.get(d.id),
       changed:async()=>{this.renderedDetail=null;await this.refresh();}});

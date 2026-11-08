@@ -11,9 +11,12 @@ from loom.service.contracts import ServiceError, new_id, text
 
 class AutonomyService:
     def __init__(self, service, background):
+        from loom.memory.library import MemoryLibraryCache
+
         self.service = service
         self.store = AgentStore(service.store)
         self.background = background
+        self.memory_library = MemoryLibraryCache()
         self.supervisor = AgentSupervisor(service, self.store, background, planner=service.agent_planner)
 
     def start(self):
@@ -53,6 +56,8 @@ class AutonomyService:
             from loom.autonomy.profile import effective
             from loom.autonomy.sources import view as source_view
 
+            if view in {None, 'learning'}:
+                result['memory_version'] = db.execute("SELECT value FROM memory_versions WHERE id='effective'").fetchone()[0]
             if view == 'goals':
                 from loom.autonomy.views import add_work_metrics
 
@@ -560,9 +565,9 @@ class AutonomyService:
                 except ValueError as exc:
                     raise ServiceError("Invalid memory library pagination") from exc
                 result = memory.browse(query=query.get("query", [""])[0], kind=query.get("kind", [""])[0],
-                                       review=query.get("review", [""])[0], offset=offset, limit=limit)
+                                       review=query.get("review", [""])[0], offset=offset, limit=limit, cache=self.memory_library)
                 # Review commands use this Agent's revision even when workspace annotations are shared.
-                with self.store.sessions.transaction() as db:
+                with self.store.sessions.read() as db:
                     for record in result["records"]:
                         source = record["source"]
                         source["annotation_revision"] = db.execute(

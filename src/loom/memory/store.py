@@ -7,6 +7,7 @@ import json
 import re
 import sqlite3
 from contextlib import closing
+from copy import deepcopy
 from pathlib import Path
 
 SCAN_LIMIT = 500
@@ -81,33 +82,49 @@ class MemoryStore:
             pass  # Normal retrieval reports the source error with its existing contract.
         return 0
 
-    def _records(self, reference=None, *, apply_annotations=True):
+    def _records(self, reference=None, *, apply_annotations=True, scan_limit=SCAN_LIMIT, kind=''):
         # Scope is applied before the candidate budget and before loading record text.
+        # Materialize once per evaluation: extracting metadata from the large job
+        # JSON after json_each repeats that work for every expanded memory.
         query = """
-            SELECT j.id, j.session_id, json_extract(j.body, '$.run_id'),
-                   json_extract(j.body, '$.created_at'), json_extract(j.body, '$.state'),
-                   json_extract(j.body, '$.checkpoint.memory.identity.source'), r.key, r.value,
-                   json_extract(j.body, '$.analysis_id')
-            FROM semantic_jobs j JOIN sessions s ON s.id = j.session_id,
-                 json_each(j.body, '$.checkpoint.memory.records') r
+            WITH candidates AS MATERIALIZED (
+            SELECT j.id, j.session_id, json_extract(j.body, '$.run_id') AS run_id,
+                   json_extract(j.body, '$.created_at') AS created_at, json_extract(j.body, '$.state') AS state,
+                   json_extract(j.body, '$.checkpoint.memory.identity.source') AS source_digest,
+                   json_extract(j.body, '$.analysis_id') AS analysis_id,
+                   json_extract(j.body, '$.checkpoint.memory.records') AS records
+            FROM semantic_jobs j JOIN sessions s ON s.id = j.session_id
             WHERE json_extract(s.body, '$.deleted_at') IS NULL
               AND memory_scope_matches(
                 CASE WHEN json_type(j.body, '$.memory_scope') = 'object'
                      THEN json_extract(j.body, '$.memory_scope.workspace')
                      ELSE memory_bound_workspace(json_extract(s.body, '$.task')) END, j.session_id)
-              AND json_extract(r.value, '$.kind') IN ('facts','lessons','workflows')
-              AND COALESCE(json_extract(r.value, '$.publication_state'), 'published') = 'published'
         """
         parameters = []
         if reference is not None:
-            query += " AND j.id = ? AND r.key = ?"
-            parameters.extend(reference)
-        query += " ORDER BY json_extract(j.body, '$.created_at') DESC, j.id, r.key LIMIT ?"
-        parameters.append(SCAN_LIMIT + 1 if reference is None else 1)
+            query += " AND j.id = ?"
+            parameters.append(reference[0])
+        query += """
+            ) SELECT j.id,j.session_id,j.run_id,j.created_at,j.state,j.source_digest,r.key,r.value,j.analysis_id
+            FROM candidates j, json_each(j.records) r
+            WHERE json_extract(r.value, '$.kind') IN ('facts','lessons','workflows')
+              AND COALESCE(json_extract(r.value, '$.publication_state'), 'published') = 'published'
+        """
+        if reference is not None:
+            query += " AND r.key = ?"
+            parameters.append(reference[1])
+        if kind:
+            query += " AND json_extract(r.value, '$.kind') = ?"
+            parameters.append(kind)
+        query += " ORDER BY j.created_at DESC, j.id, r.key"
+        if reference is not None or scan_limit is not None:
+            query += " LIMIT ?"
+            parameters.append(1 if reference is not None else scan_limit + 1)
         try:
             with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
                 db.create_function("memory_scope_matches", 2, self._scope_matches)
                 db.create_function("memory_bound_workspace", 1, lambda task: bound_workspace(json.loads(task)))
+                db.execute('BEGIN')  # Records and annotations must belong to the same read snapshot.
                 tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 if 'sessions' not in tables:
                     raise MemoryError("memory.store_unavailable", "Memory source is not a Loom service database (sessions table missing)")
@@ -126,7 +143,7 @@ class MemoryStore:
         except (sqlite3.Error, OSError) as exc:
             raise MemoryError("memory.store_unavailable", f"Cannot read memory source: {exc}") from exc
         results, issues = [], []
-        for evaluation, session, run, created, state, digest, key, raw, analysis in rows[:SCAN_LIMIT]:
+        for evaluation, session, run, created, state, digest, key, raw, analysis in rows[:scan_limit]:
             record = json.loads(raw)
             if record.get('publication_state', 'published') != 'published':
                 continue
@@ -146,7 +163,7 @@ class MemoryStore:
             from loom.memory.annotations import effective
 
             results = effective(results, annotations, suppressions)
-        return results, len(rows) > SCAN_LIMIT, issues
+        return results, scan_limit is not None and len(rows) > scan_limit, issues
 
     def search(self, query, *, limit=6):
         if not isinstance(query, str) or not query.strip() or len(query) > 20000:
@@ -193,13 +210,15 @@ class MemoryStore:
                 break
         return dict(instruction=POLICY, records=selected, available_records=len(candidates), truncated=truncated, issues=issues[:10])
 
-    def browse(self, *, query='', kind='', review='', offset=0, limit=20):
+    def browse(self, *, query='', kind='', review='', offset=0, limit=20, cache=None):
         """Paginated review library; unlike runtime search it does not require a matching query."""
         if (not isinstance(query, str) or len(query) > 20000 or kind not in {'', 'facts', 'lessons', 'workflows'}
                 or review not in {'', 'unreviewed', 'reviewed'} or type(offset) is not int or offset < 0
                 or type(limit) is not int or not 1 <= limit <= 50):
             raise MemoryError('memory.query_invalid', 'Invalid memory library filters or pagination')
-        rows, truncated, issues = self._records()
+        # Library pagination covers all scoped history; runtime retrieval keeps
+        # its separate, bounded candidate window. Filter kind before decoding.
+        rows, truncated, issues = cache.records(self) if cache is not None else self._records(scan_limit=None, kind=kind)
         terms = tokens(query)
         records = []
         for row in rows:
@@ -213,8 +232,10 @@ class MemoryStore:
                 continue
             records.append(dict(source=row['source'], **record))
         end = offset + limit
-        return dict(records=records[offset:end], total=len(records), next_offset=end if end < len(records) else None,
-                    truncated=truncated, issues=issues[:10])
+        # Callers add Agent-specific annotation revisions; never mutate shared
+        # workspace records or their nested evidence through a returned page.
+        return dict(records=deepcopy(records[offset:end]), total=len(records), next_offset=end if end < len(records) else None,
+                    truncated=truncated, issues=deepcopy(issues[:10]))
 
     def read(self, evaluation_id, record_id, *, offset=0, limit=6000):
         if (not isinstance(evaluation_id, str) or not isinstance(record_id, str)

@@ -37,8 +37,20 @@ export class AgentLearningView {
     this.render();
   }
   get dirty() { return this.saving || this.drafts.size > 0; }
-  close() { this.abort.abort(); }
+  close() { this.abort.abort(); this.libraryAbort?.abort(); }
   get current() { return !this.abort.signal.aborted && this.root.isConnected; }
+  canUpdate(detail) {
+    return !this.abort.signal.aborted && this.detail.id === detail.id
+      && this.detail.role.working_directory === detail.role.working_directory
+      && (detail.role.working_directory || JSON.stringify(this.detail.sessions.map(s=>s.session_id)) === JSON.stringify(detail.sessions.map(s=>s.session_id)));
+  }
+  update(root, detail) {
+    const memoryChanged = detail.memory_version !== this.detail.memory_version;
+    this.root = root; this.detail = detail;
+    this.render(); // Move the existing library, including any pending search, into the new shell.
+    this.libraryRefreshPending ||= memoryChanged;
+    if (this.libraryRefreshPending && !this.libraryLoading && !this.dirty) this.loadLibrary();
+  }
   disclosure(root, title, key, open = false) {
     const node = disclosure(root,title), saved = this.state.disclosures;
     if (!saved.has(key)) saved.set(key,open);
@@ -115,7 +127,9 @@ export class AgentLearningView {
     }
   }
   renderLibrary() {
+    if (this.libraryRoot) { this.root.append(this.libraryRoot); return; }
     const root = panel(this.root,'Learned knowledge & review',true); root.classList.add('agent-memory-library');
+    this.libraryRoot = root;
     root.append(element('p','muted small','Before review, entries keep their evaluation confidence; after human confirmation or correction, task context explicitly marks the human source and raises reference priority. The original evaluation, scope, and evidence are preserved.'));
     const form = element('form','agent-learning-filters');
     const query = field(form,'query','Search learned content'); query.value = this.state.query || '';
@@ -136,15 +150,19 @@ export class AgentLearningView {
   }
   async loadLibrary() {
     const generation = ++this.loadGeneration;
+    this.libraryAbort?.abort(); this.libraryAbort = new AbortController();
+    this.libraryRefreshPending = false; this.libraryLoading = false;
     for (const input of this.filters.elements) if(input.name) this.state[input.name] = input.value;
     if (!this.detail.role.working_directory && !this.state.session_id) {
       this.libraryStatus.textContent = 'Once execution produces learning records, you can browse them here by Session.'; return;
     }
     const params = new URLSearchParams({offset:this.state.offset || 0,limit:20});
     for(const name of ['query','kind','review','session_id']) if(this.state[name])params.set(name,this.state[name]);
+    this.libraryLoading = true;
     this.libraryStatus.textContent = 'Loading learned content…';
     try {
-      const answer = await this.api.get(this.detail.id,`memory/library?${params}`,this.abort.signal);
+      const signal = AbortSignal.any([this.abort.signal,this.libraryAbort.signal]);
+      const answer = await this.api.get(this.detail.id,`memory/library?${params}`,signal);
       if (!this.current || generation !== this.loadGeneration) return;
       this.results.replaceChildren(); this.pagination.replaceChildren();
       const records = answer.records || [];
@@ -153,7 +171,15 @@ export class AgentLearningView {
       if (!records.length) this.results.append(element('p','empty-state','No learned content matches the current filters.'));
       if (this.state.offset > 0) this.pagination.append(button('Previous page',()=>{this.state.offset = Math.max(0,this.state.offset-20);this.loadLibrary();}));
       if (answer.next_offset != null) this.pagination.append(button('Next page',()=>{this.state.offset = answer.next_offset;this.loadLibrary();}));
-    } catch (error) {if(this.current && generation === this.loadGeneration) this.libraryStatus.textContent = `Load failed: ${error.message}. Use "Search / refresh" to retry.`;}
+    } catch (error) {
+      if(error.name !== 'AbortError' && this.current && generation === this.loadGeneration)
+        this.libraryStatus.textContent = `Load failed: ${error.message}. Use "Search / refresh" to retry.`;
+    } finally {
+      if (generation === this.loadGeneration) {
+        this.libraryLoading = false;
+        if (this.current && this.libraryRefreshPending && !this.dirty) this.loadLibrary();
+      }
+    }
   }
   memoryCard(memory) {
     const row = element('article','agent-learning-entry'), review = memory.review_state || 'unreviewed';

@@ -183,10 +183,18 @@ def test_annotations_preserve_source_and_tools_share_view(agent_service):
         )
 
     epoch = memory.epoch()
+    assert facade.snapshot(aid, view='learning')['memory_version'] == epoch
+    def library():
+        return facade.dispatch('GET', [aid, 'memory', 'library'], {})
+
+    assert library()['records'][0]['basis'] == 'observed'
     mark("correct", "correct", 0, value="Inspect duplicate planets in the current version; this is a human correction.")
     assert memory.epoch() > epoch
+    assert facade.snapshot(aid, view='learning')['memory_version'] == memory.epoch()
     found = memory.search("duplicate planets")["records"][0]
     assert found["basis"] == "human_asserted"
+    assert library()['records'][0]['basis'] == 'human_asserted'
+    assert library()['records'][0]['source']['annotation_revision'] == 1
     assert "human correction" in memory.read("eval-memory", "memory:planet")["text"]
     with service.store.transaction() as db:
         raw = json.loads(db.execute("SELECT body FROM semantic_jobs WHERE id='eval-memory'").fetchone()[0])
@@ -195,10 +203,12 @@ def test_annotations_preserve_source_and_tools_share_view(agent_service):
         mark("stale", "reject", 0)
     mark("reject", "reject", 1)
     assert memory.search("duplicate planets")["records"] == []
+    assert library()['total'] == 0
     with pytest.raises(MemoryError):
         memory.read("eval-memory", "memory:planet")
     mark("restore", "restore", 2)
     assert memory.search("duplicate planets")["records"]
+    assert library()['total'] == 1
 
 
 def test_context_revisions_and_user_method_are_not_validated_skills(agent_service):

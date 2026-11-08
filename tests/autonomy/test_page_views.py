@@ -30,6 +30,18 @@ def test_overview_reads_summaries_while_another_connection_holds_the_write_lock(
         assert listing['agents'][0]['id'] == aid
 
 
+def test_memory_library_reads_review_revisions_without_acquiring_write_lock(agent_service):
+    from tests.memory.helpers import seed
+
+    service, facade, aid, path = agent_service
+    seed(service.store, path)
+    with sqlite3.connect(service.store.path) as writer:
+        writer.execute('BEGIN IMMEDIATE')
+        result = facade.dispatch('GET', [aid, 'memory', 'library'], {})
+    assert result['total'] == 1
+    assert result['records'][0]['source']['annotation_revision'] == 0
+
+
 def test_analysis_diagnostics_load_only_when_requested_and_do_not_expose_checkpoint_evidence(agent_service):
     service, facade, aid, _ = agent_service
     work = prepare(facade, aid)
