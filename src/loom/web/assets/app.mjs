@@ -106,7 +106,7 @@ function activateComponent(component) {
   }
 }
 for (const button of document.querySelectorAll("[data-component]")) {
-  button.addEventListener("click", () => {
+  button.addEventListener("click", async () => {
     const component = button.dataset.component;
     activateComponent(component);
     if (component === "agents") openAgents();
@@ -117,6 +117,9 @@ for (const button of document.querySelectorAll("[data-component]")) {
       openEvaluation(evaluationId || controller?.selectedId);
     else {
       setWorkspaceMode(false);
+      try { await controller?.ensureSessions(); } catch (error) { showError(error); return; }
+      if (activeComponent !== 'sessions') return;
+      if (!controller?.selectedId && controller?.sessions[0]) return select(controller.sessions[0].session_id);
       if (controller?.selectedId)
         history.pushState(
           null,
@@ -259,7 +262,12 @@ function setWorkspaceMode(mode) {
 async function openEvaluation(id, { fromHistory = false } = {}) {
   activateComponent("evaluation");
   setWorkspaceMode(true);
-  if (!controller || !id) return;
+  if (!controller) return;
+  const active = controller;
+  try { await active.ensureSessions(); } catch (error) { showError(error); return; }
+  if (controller !== active || activeComponent !== 'evaluation') return;
+  id ||= active.selectedId || active.sessions[0]?.session_id;
+  if (!id) return;
   evaluationId = id;
   evaluationList.update(controller.sessions, id);
   const session = controller.sessions.find((item) => item.session_id === id);
@@ -275,6 +283,8 @@ async function select(id, { fromHistory = false } = {}) {
   if (!controller || !id) return;
   activateComponent("sessions");
   setWorkspaceMode(false);
+  // Populate the sidebar only when visiting a Session after an Agent-only login.
+  controller.ensureSessions().catch(showError);
   if (!fromHistory)
     history.replaceState(null, "", `#/sessions/${encodeURIComponent(id)}`);
   if (controller.selectedId === id && controller.projection) return;
@@ -376,7 +386,7 @@ function renderControls() {
 async function login(token) {
   controller?.disconnect();
   const next = new SessionController(new SessionApi({ token }));
-  await next.connect();
+  await next.connect({sessions: location.hash !== '#/agents'});
   controller = next;
   catalog = next.catalog;
   next.subscribe(({ type, detail }) => {

@@ -30,9 +30,9 @@ class AutonomyService:
         self.supervisor.close()
 
     def snapshot(self, aid, *, view=None):
-        from loom.autonomy.views import VIEW_FIELDS
+        from loom.autonomy.views import page_snapshot
 
-        result = self.store.snapshot(aid, fields=VIEW_FIELDS[view] if view else None, summaries=view == 'overview')
+        result = page_snapshot(self.store, aid, view) if view else self.store.snapshot(aid)
         if view:
             result['view'] = view
         result["service_enabled"] = self.service.autonomy_enabled
@@ -57,25 +57,40 @@ class AutonomyService:
                 from loom.autonomy.views import add_work_metrics
 
                 add_work_metrics(db, aid, result['work_packages'])
-            result['preferences'] = effective(self.store, db, result) if view in {None, 'profile', 'learning'} else []
+            result['preferences'] = effective(self.store, db, result) if view is None else []
             owner = result['role'].get('owner_id', 'local')
-            result['profile_entries'] = [json.loads(r[0]) for r in db.execute('SELECT body FROM agent_profile')
-                if json.loads(r[0])['agent_id'] == aid or (json.loads(r[0])['scope'] == 'owner' and json.loads(r[0])['owner_id'] == owner)
-                ] if view in {None, 'profile', 'learning'} else []
+            result['profile_entries'] = [json.loads(r[0]) for r in db.execute(
+                "SELECT body FROM agent_profile WHERE agent_id=? OR (json_extract(body,'$.scope')='owner' "
+                "AND json_extract(body,'$.owner_id')=?)", (aid, owner))] if view in {None, 'profile'} else []
             result['source_status'] = source_view(self.store, db, result) if view in {None, 'work', 'knowledge'} else []
             result['shared_roles'] = [dict(id=a['id'], name=a['role']['name']) for r in db.execute('SELECT body FROM agents')
-                if (a := json.loads(r[0]))['role'].get('owner_id', 'local') == owner]
+                if (a := json.loads(r[0]))['role'].get('owner_id', 'local') == owner] if view in {None, 'profile'} else []
+            if result['state'] in {'paused', 'archived'} and self.service.active and not result['sessions']:
+                result['pause_pending'] = any(r[0] in self.service.active for r in db.execute(
+                    'SELECT session_id FROM agent_sessions WHERE agent_id=?', (aid,)))
             rows = db.execute(
                 "SELECT a.session_id,a.work_package_id,a.taken_over,json_extract(s.body,'$.input_request') AS request,"
                 "json_extract(s.body,'$.task.revision') AS task_revision,json_extract(s.body,'$.task.objective') AS objective "
                 "FROM agent_sessions a JOIN sessions s ON s.id=a.session_id WHERE a.agent_id=? "
                 "AND json_extract(s.body,'$.deleted_at') IS NULL AND json_extract(s.body,'$.input_request.state')='pending'", (aid,),
-            )
+            ) if view in {None, 'learning'} else []
             result["pending_decisions"] = [{**dict(row), "request": json.loads(row["request"]), "taken_over": bool(row["taken_over"])} for row in rows]
             from loom.autonomy.execution import report
 
             if view in {None, 'work'}:
                 result['execution'] = report(self.store, self.service, db, result, analysis_details=False)
+            if view == 'work':
+                # The execution report needs contracts and recovery history;
+                # queue rows do not. Fetch the original work only on expansion.
+                keys = ['id', 'goal_id', 'session_id', 'state', 'objective', 'created_at', 'started_at',
+                        'dispatched_at', 'last_slice_at', 'blocked_reason', 'blocker']
+                result['work_packages'] = [{**{k: w[k] for k in keys if k in w},
+                    'recovery': {k: w.get('recovery', {}).get(k) for k in ('attempts', 'attempt_limit', 'exhausted')},
+                    'details_lazy': True} for w in result['work_packages']]
+                result['goals'] = []
+                result['stages'] = []
+                result['objective_planning'] = []
+                result['source_status'] = []
         return result
 
     def control(self, aid, body):
@@ -382,14 +397,18 @@ class AutonomyService:
                 strict(body, {"command_id", "role"})
                 return self.store.create(body.get("command_id"), body.get("role"))
             with self.store.sessions.read() as db:
-                return {"agents": [json.loads(r[0]) for r in db.execute("SELECT body FROM agents")], "service_enabled": self.service.autonomy_enabled}
+                return {"agents": [json.loads(r[0]) for r in db.execute(
+                    "SELECT json_object('id',id,'revision',json_extract(body,'$.revision'),'state',json_extract(body,'$.state'),"
+                    "'activity',json_extract(body,'$.activity'),'role',json_object('name',json_extract(body,'$.role.name'))) FROM agents")],
+                    "service_enabled": self.service.autonomy_enabled}
         if parts == ["setup", "recommend"]:
             if method != "POST":
                 raise ServiceError("Setup recommendation supports POST", 405)
             return self.recommend_agent_setup(body)
         aid = parts[0]
         with self.store.sessions.read() as db:
-            self.store.get(db, 'agents', aid)  # Identity check without loading every collection.
+            if not db.execute('SELECT 1 FROM agents WHERE id=?', (aid,)).fetchone():
+                raise ServiceError('Agent resource not found', 404)
         if len(parts) == 1 and method == "GET":
             return self.snapshot(aid)
         route = parts[1:]
@@ -420,7 +439,7 @@ class AutonomyService:
 
             return command(self, aid, route[1], body)
         if route == ['stages'] and method == 'GET':
-            return dict(stages=self.store.snapshot(aid)['stages'])
+            return dict(stages=self.store.snapshot(aid, fields={'stages'})['stages'])
         if len(route) == 2 and route[0] == 'stages' and method == 'GET':
             with self.store.sessions.transaction() as db:
                 stage = self.store.get(db, 'agent_stages', route[1], aid)
@@ -527,7 +546,7 @@ class AutonomyService:
         if route in (["memory"], ["memory", "library"]):
             from loom.memory.store import MemoryStore
 
-            agent = self.store.snapshot(aid)
+            agent = self.store.snapshot(aid, fields=set())
             if not agent["role"]["working_directory"]:
                 sid = query.get("session_id", [""])[0]
                 if sid not in {s["session_id"] for s in agent["sessions"]}:
@@ -553,10 +572,10 @@ class AutonomyService:
                 return result
             return memory.search(query.get("query", [agent["role"]["role_text"]])[0])
         if route == ["profile"]:
-            snapshot = self.snapshot(aid)
+            snapshot = self.store.snapshot(aid, fields={'guidance'})
             return dict(role=snapshot["role"], entries=snapshot["guidance"])
         if route == ["sessions"]:
-            return {"sessions": self.snapshot(aid)["sessions"]}
+            return {"sessions": self.store.snapshot(aid, fields=set())["sessions"]}
         if route == ["memory", "annotations"]:
             with self.store.sessions.transaction() as db:
                 return {
@@ -590,14 +609,21 @@ class AutonomyService:
             "method-feedback": "agent_method_feedback",
         }
         if len(route) in {1, 2} and route[0] in tables:
-            with self.store.sessions.transaction() as db:
-                result = self.store.get(db, tables[route[0]], route[1], aid) if len(route) == 2 else self.store.rows(db, tables[route[0]], aid)
+            with self.store.sessions.read() as db:
+                if len(route) == 2:
+                    result = self.store.get(db, tables[route[0]], route[1], aid)
+                else:
+                    try:
+                        offset, limit = int(query.get('offset', ['0'])[0]), int(query.get('limit', ['100'])[0])
+                    except ValueError as exc:
+                        raise ServiceError('Invalid pagination') from exc
+                    if offset < 0 or not 1 <= limit <= 200:
+                        raise ServiceError('Invalid pagination')
+                    result = [json.loads(r[0]) for r in db.execute(
+                        f'SELECT body FROM {tables[route[0]]} WHERE agent_id=? ORDER BY rowid LIMIT ? OFFSET ?', (aid, limit + 1, offset))]
             if route[0] == "context" and len(route) == 2:
                 return self.store.read_artifact(aid, result["artifact_ref"]["sha256"])
             if isinstance(result, list):
-                offset, limit = int(query.get("offset", ["0"])[0]), int(query.get("limit", ["100"])[0])
-                if offset < 0 or not 1 <= limit <= 200:
-                    raise ServiceError("Invalid pagination")
-                return {route[0]: result[offset : offset + limit], "next_offset": offset + limit if offset + limit < len(result) else None}
+                return {route[0]: result[:limit], "next_offset": offset + limit if len(result) > limit else None}
             return result
         raise ServiceError("Unknown Agent route", 404)

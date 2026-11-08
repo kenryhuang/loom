@@ -51,7 +51,7 @@ export class SessionApi {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       cache: "no-store",
     });
-    if (!response.ok) {
+    if (!response.ok && response.status !== 304) {
       let error;
       try {
         error = (await response.json()).error;
@@ -68,6 +68,17 @@ export class SessionApi {
   }
   async json(path, options) {
     return (await this.open(path, options)).json();
+  }
+  async conditionalJson(path, {signal} = {}) {
+    const cache = this.readCache ||= new Map(), saved = cache.get(path);
+    const response = await this.open(path, {signal, headers: saved?.etag ? {'If-None-Match': saved.etag} : {}});
+    if (response.status === 304 && saved) return saved.value;
+    const value = await response.json(), etag = response.headers.get('ETag');
+    if (etag) {
+      cache.delete(path);cache.set(path, {etag, value});
+      if (cache.size > 100) cache.delete(cache.keys().next().value);
+    }
+    return value;
   }
   path(id, route) {
     return `/v1/sessions/${encodeURIComponent(id)}/${route}`;

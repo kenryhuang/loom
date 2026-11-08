@@ -41,6 +41,29 @@ function deferred() {
 }
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
+test('Agent-only connection defers the Session catalog until it is needed',async()=>{
+  let calls=0, resolve;
+  const controller=new SessionController({catalog:async()=>({templates:[]}),sessions:()=>{calls++;return new Promise(r=>resolve=r);}});
+  await controller.connect({sessions:false});assert.equal(calls,0);
+  const one=controller.ensureSessions(),two=controller.ensureSessions();assert.equal(calls,1);
+  resolve([{session_id:'s'}]);await Promise.all([one,two]);
+  await controller.ensureSessions();assert.equal(calls,1);assert.equal(controller.sessions[0].session_id,'s');
+});
+
+test('Conditional Agent reads reuse 304 bodies and replace changed representations',async()=>{
+  let calls=0;
+  const api=new SessionApi({token:'one',fetchImpl:async(path,options)=>{
+    calls++;
+    assert.equal(options.headers.Authorization,'Bearer one');
+    if(calls===1){assert.equal(options.headers['If-None-Match'],undefined);return new Response('{"revision":1}',{headers:{ETag:'"a"'}});}
+    assert.equal(options.headers['If-None-Match'],'"a"');
+    return calls===2?new Response(null,{status:304}):new Response('{"revision":2}',{headers:{ETag:'"b"'}});
+  }});
+  const first=await api.conditionalJson('/v1/agents');
+  assert.equal(await api.conditionalJson('/v1/agents'),first);
+  assert.deepEqual(await api.conditionalJson('/v1/agents'),{revision:2});
+});
+
 test("SSE parser supports split CRLF frames, heartbeat and multiline JSON", () => {
   const parser = new SseParser();
   assert.deepEqual(parser.push(': heartbeat\r\nid: 1\r\ndata: {"seq":'), []);

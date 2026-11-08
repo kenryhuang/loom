@@ -10,6 +10,46 @@ function fixture(){return {id:'a',revision:2,state:'enabled',activity:'waiting',
 function setup(api){const dom=new JSDOM('<main><header id="agents-heading" class="workspace-header"></header><section id="agents-page" class="trajectory-page"></section></main><aside></aside>');globalThis.document=dom.window.document;
  const view=new AgentsView(document.querySelector('#agents-page'),document.querySelector('aside'),{api:()=>api});return {dom,view};}
 
+
+function expandQueues(view,dom) {
+ for(const node of view.root.querySelectorAll('[data-queue-section]')) {
+  node.open=true;node.dispatchEvent(new dom.window.Event('toggle'));
+ }
+}
+
+test('Work details fetch the scoped full record only after expansion',async()=>{
+ const data=fixture();data.view='work';data.work_packages=[{id:'w/a',goal_id:'g',state:'running',objective:'Current task',details_lazy:true}];
+ let calls=0;
+ const {dom,view}=setup({json:async path=>{
+  if(path.endsWith('/work-packages/w%2Fa')){calls++;return {...data.work_packages[0],latest_context:{memory_refs:[{id:'memory-evidence'}]},binding:{source:'recommended',rationale:'detail-only'}};}
+  return path==='/v1/agents'?{agents:[data]}:data;
+ }});
+ try{
+  await view.open();await view.select('a');view.tab='Work';view.render();
+  assert.equal(calls,0);assert.doesNotMatch(view.root.textContent,/memory-evidence|detail-only/);
+  const detail=view.root.querySelector('[data-queue-id="w/a"] details');
+  detail.open=true;detail.dispatchEvent(new dom.window.Event('toggle'));await tick();
+  assert.equal(calls,1);assert.match(detail.textContent,/memory-evidence/);assert.match(detail.textContent,/detail-only/);
+  detail.open=false;detail.dispatchEvent(new dom.window.Event('toggle'));
+  detail.open=true;detail.dispatchEvent(new dom.window.Event('toggle'));await tick();assert.equal(calls,1);
+ }finally{view.close();dom.window.close();}
+});
+
+test('Changing tabs aborts an obsolete refresh without waiting for it',async()=>{
+ const data=fixture();let hold=false,aborted=false,goals=0;
+ const {dom,view}=setup({json:async(path,options)=>{
+  if(path==='/v1/agents')return {agents:[data]};
+  if(path.endsWith('/views/goals')){goals++;return {...data,view:'goals'};}
+  if(hold)return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>{aborted=true;reject(new DOMException('Cancelled','AbortError'));},{once:true}));
+  return {...data,view:'overview'};
+ }});
+ try{
+  await view.open();await view.select('a');hold=true;const stale=view.refresh();
+  await view.changeTab('Goals');await stale;
+  assert.equal(aborted,true);assert.equal(goals,1);assert.equal(view.detail.view,'goals');
+ }finally{view.close();dom.window.close();}
+});
+
 test('Agent API encodes identity and retains supplied command identity',async()=>{const calls=[];const api=new AgentsApi({json:async(...args)=>{calls.push(args);return {};}});
  await api.command('a/b','pause',3,'same-command');assert.equal(calls[0][0],'/v1/agents/a%2Fb/commands');
  assert.equal(calls[0][1].body.command_id,'same-command');assert.equal(calls[0][1].body.expected_revision,3);});
@@ -154,7 +194,7 @@ test('Analysis diagnostics are loaded only when their detail is expanded and reu
   return path==='/v1/agents'?{agents:[data]}:data;
  }});
  try{
-  await view.open();await view.select('a');view.tab='Work';view.render();
+  await view.open();await view.select('a');view.tab='Work';view.render();expandQueues(view,dom);
   assert.equal(diagnosticRequests,0);
   let detail=[...view.root.querySelectorAll('details')].find(node=>node.textContent.includes('eval') && node.querySelector('summary')?.textContent==='Details');
   assert.ok(detail);detail.open=true;detail.dispatchEvent(new dom.window.Event('toggle'));await tick();
@@ -261,7 +301,7 @@ test('Overview omits scheduling details while Work retains packages and Session 
   await view.open();await view.select('a');
   assert.doesNotMatch(view.root.textContent,/Scheduling details|Standalone and historical goals/);
   assert.equal(view.root.querySelector('[data-scheduled-goal-id]'),null);
-  view.tab='Work';view.render();
+  view.tab='Work';view.render();expandQueues(view,dom);
   assert.match(view.root.textContent,/代码调研/);assert.match(view.root.textContent,/构建与测试/);assert.match(view.root.textContent,/撰写架构文档/);
   assert.ok([...view.root.querySelectorAll('a')].some(a=>a.getAttribute('href')==='#/sessions/session%2Fb'));
  }finally{view.close();dom.window.close();}
@@ -594,7 +634,7 @@ test('Execution shows concrete blockers, recovery steps, slices and bounded back
  data.learning=[{id:'c',session_id:'s',work_package_id:'w',state:'incomplete',attempts:6,coverage:'partial',memory_result:{accepted:3},blocked_reason:'Analysis attempt limit reached'}];
  let sent;const {dom,view}=setup({json:async(path,options)=>{if(options?.body){sent=path;return {};}return path==='/v1/agents'?{agents:[data]}:data;}});
  try{
-  await view.open();await view.select('a');view.tab='Work';view.render();
+  await view.open();await view.select('a');view.tab='Work';view.render();expandQueues(view,dom);
   assert.match(view.root.textContent,/失效项：tests/);assert.match(view.root.textContent,/核对项目实际路径/);
   assert.match(view.root.textContent,/Historical slice #2 · Paused/);assert.match(view.root.textContent,/checkpoint \/ recovery context available/);
   assert.match(view.root.textContent,/1 related memories/);assert.match(view.root.textContent,/This round 6\/6/);
@@ -615,7 +655,7 @@ test('Work package details show task binding source and recovery exhaustion',asy
   {id:'w2',goal_id:'g',objective:'Fallback work',state:'pending',binding:{source:'fallback',reason:'推荐服务不可用'}}];
  const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
  try{
-  await view.open();await view.select('a');view.tab='Work';view.render();
+  await view.open();await view.select('a');view.tab='Work';view.render();expandQueues(view,dom);
   assert.match(view.root.textContent,/Suspended; waiting for manual recovery/);
   assert.doesNotMatch(view.root.textContent,/recovery_exhausted/);
   assert.match(view.root.textContent,/Binding: recommended · 需要浏览器截图/);
@@ -627,7 +667,7 @@ test('Work rationale remains text and stale blocker does not override a successf
  const data=fixture();data.work_packages=[{id:'w',goal_id:'g',objective:'Delivered work',state:'succeeded',blocked_reason:'failed',reason:'Verify before integration'}];
  const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
  try{
-  await view.open();await view.select('a');view.tab='Work';view.render();
+  await view.open();await view.select('a');view.tab='Work';view.render();expandQueues(view,dom);
   assert.match(view.root.textContent,/Orchestration rationale: Verify before integration/);
   const row=view.root.querySelector('[data-queue-id="w"]');assert.match(row.textContent,/Delivered work/);assert.match(row.textContent,/Accepted/);
   assert.doesNotMatch(view.root.textContent,/Current blocker: failed/);
@@ -668,9 +708,12 @@ test('Execution focuses two tabular queues, collapses reverse chronological hist
   assert.deepEqual(panels.map(p=>p.querySelector('h3').textContent),['Execution queue','Analysis queue']);
   const ids=(panel,kind)=>[...panel.querySelectorAll(`[data-queue-table="${kind}"] [data-queue-id]`)].map(row=>row.dataset.queueId);
   assert.deepEqual(ids(panels[0],'current'),['active']);assert.deepEqual(ids(panels[1],'current'),['current']);
+  assert.deepEqual(ids(panels[0],'history'),[]);assert.deepEqual(ids(panels[1],'waiting'),[]);
+  assert.ok([...view.root.querySelectorAll('[data-queue-section]')].every(d=>d.tagName==='DETAILS' && !d.open));
+  expandQueues(view,dom);
   assert.deepEqual(ids(panels[0],'history'),['failed','old']);assert.deepEqual(ids(panels[1],'history'),['latest','previous']);
   assert.deepEqual(ids(panels[0],'waiting'),['waiting']);assert.deepEqual(ids(panels[1],'waiting'),['queued']);
-  assert.ok([...view.root.querySelectorAll('[data-queue-section]')].every(d=>d.tagName==='DETAILS' && !d.open));
+
   const refs=panels[0].querySelector('[data-queue-id="active"]');
   assert.equal(refs.querySelector('a').getAttribute('href'),'#/sessions/session%2Fa');
   const deep=[...refs.querySelectorAll('a')].find(a=>a.textContent==='Deep Eval').getAttribute('href');

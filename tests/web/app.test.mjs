@@ -203,7 +203,8 @@ test("browser app connects to real service, answers input, creates sessions, con
     $("setup-workflow").value = "legacy_planning";
     $("restart-plan-mode").value = "off";
     submit("create-form");
-    await until(() => $("create-page").hidden && $("session-title").textContent === "Browser demo" && $("task-status").textContent === "idle");
+    await until(() => $("create-page").hidden && $("session-title").textContent === "Browser demo" && $("task-status").textContent === "idle"
+      && $("event-feed").querySelectorAll(".result").length === 2);
     assert.equal($("event-feed").querySelectorAll(".result").length, 2);
     assert.match(document.querySelector('[data-panel="budget"]').textContent, /600,000/);
     $("new-session").click();

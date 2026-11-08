@@ -95,7 +95,7 @@ def test_budget_summaries_proceed_while_write_lock_is_held(tmp_path, held_write_
 def test_supervisor_survives_transient_store_errors(tmp_path, monkeypatch):
     service = LoomService(tmp_path / "data", provider_factory=provider_factory).start()
     try:
-        original = service.store.list_sessions
+        original = service.store.scheduling_sessions
         failures = {"count": 0}
 
         def flaky():
@@ -104,7 +104,7 @@ def test_supervisor_survives_transient_store_errors(tmp_path, monkeypatch):
                 raise sqlite3.OperationalError("database is locked")
             return original()
 
-        monkeypatch.setattr(service.store, "list_sessions", flaky)
+        monkeypatch.setattr(service.store, "scheduling_sessions", flaky)
         sid = create(service, tmp_path / "workspace")
         wait_state(service, sid, "idle", timeout=10)
         assert failures["count"] == 5

@@ -33,6 +33,11 @@ function queueTable(root,headers,items,render,kind) {
   const node=table(root,headers,items.map(render));node.classList.add('agent-queue-table');node.dataset.queueTable=kind;
   [...node.tBodies[0].rows].forEach((row,i)=>{if(items[i])row.dataset.queueId=items[i].id;});
 }
+function whenOpened(detail, render) {
+  let loaded=false;
+  const load=()=>{if(detail.open && !loaded){loaded=true;render();}};
+  detail.addEventListener('toggle',load);load();
+}
 function queueSections(root,d,view,key,items,current,headers,render,isPending) {
   const active=items.filter(i=>current.has(i.id)),waiting=items.filter(i=>!current.has(i.id) && isPending(i)),history=items.filter(i=>!current.has(i.id) && !isPending(i));
   if(active.length)queueTable(root,headers,active,render,'current');
@@ -41,7 +46,7 @@ function queueSections(root,d,view,key,items,current,headers,render,isPending) {
     if(!rows.length)continue;
     const detail=roadmapDisclosure(view,root,d,`${key}:${kind}`,`${title} · ${rows.length}`);
     detail.dataset.queueSection=kind;
-    queueTable(detail,headers,rows,render,kind);
+    whenOpened(detail,()=>queueTable(detail,headers,rows,render,kind));
   }
 }
 function blockerDetails(root,items,d,view) {
@@ -63,7 +68,7 @@ export function renderExecution(root,d,view) {
   if(scheduler.manual_required)workPanel.append(element('p','agent-schedule-warning',`Manual intervention required: ${(scheduler.reason || 'See current task details').split(/[；;]/)[0]}`));
   else if(['checking','planning'].includes(scheduler.state))workPanel.append(element('p','muted',scheduler.state==='planning'?'Planning the next round of tasks.':'Checking the execution queue.'));
   queueSections(workPanel,d,view,'execution-queue',works,currentWork,['Task / time','Status / progress','Result / details','Linked records'],w=>{
-    const task=cell(),state=cell(),result=cell(),refs=records(w),live=(execution.runtime || []).find(r=>r.work_package_id===w.id),context=w.latest_context;
+    const task=cell(),state=cell(),result=cell(),refs=records(w),live=(execution.runtime || []).find(r=>r.work_package_id===w.id);
     task.append(compact(w.objective),element('span','muted small',time(stamp(w))));
     state.append(badge(label(w.state),w.state));
     if(live)state.append(element('span','muted small',`${live.steps || 0} steps · ${Math.floor(live.active_seconds || 0)}s`));
@@ -71,21 +76,37 @@ export function renderExecution(root,d,view) {
     const reason=w.state==='succeeded'?'Acceptance passed':(w.recovery?.exhausted || w.blocker?.code==='RECOVERY_EXHAUSTED'?'Suspended; waiting for manual recovery':w.blocked_reason) || issues[0]?.reason;
     if(reason && !['running','dispatched'].includes(w.state))result.append(compact(reason,w.state==='succeeded'?'muted':''));
     const detail=roadmapDisclosure(view,result,d,`execution:${w.id}`,'Details');
-    detail.append(element('p','',w.objective),element('code','agent-roadmap-id',w.id));
-    if(w.reason)detail.append(element('p','',`Orchestration rationale: ${w.reason}`));
-    if(reason && w.state!=='succeeded')detail.append(element('p','',`Current blocker: ${reason}`));
-    if(w.binding)detail.append(element('p','',`Binding: ${w.binding.source==='recommended'?'recommended':'fallback'}${w.binding.rationale?` · ${w.binding.rationale}`:w.binding.reason?` · ${w.binding.reason}`:''}`));
-    detail.append(element('p','',`Shared daily token budget · ${w.recovery?.attempts || 0}/${Math.max(w.recovery?.attempt_limit || 0,policy.max_recovery_attempts ?? 3)} recoveries`));
     if(d.state==='enabled' && ['blocked','failed'].includes(w.state))refs.append(button('Re-evaluate recovery',()=>view.act(()=>view.api.post(d.id,'commands',{
       command_id:globalThis.crypto.randomUUID(),type:'recover',expected_revision:d.revision,
       payload:{work_package_id:w.id,reason:'User requested re-evaluating the recovery configuration against the current structured blocker'}
     }))));
-
-    if(live)detail.append(element('p','',`Session: ${live.task_state} · run: ${live.run_state || '—'} · ${live.checkpoint_available?'checkpoint / recovery context available':'waiting for a recovery point'}`));
-    if(w.slice?.phase)detail.append(element('p','muted',`Historical slice #${w.slice.number} · ${label(w.slice.phase)}`));
-    if(context){detail.append(element('p','',`${context.memory_refs?.length || 0} related memories · ${context.guidance_ids?.length || 0} guidance entries · ${context.completed_learning_ids?.length || 0} completed analyses`));view.showRows(detail,(context.memory_refs || []).map(r=>JSON.stringify(r)));}
-    if(w.run_ids?.length)view.showRows(detail,w.run_ids);
-    blockerDetails(detail,issues,d,view);
+    const fill=work=>{
+      const w=work,context=w.latest_context;
+      detail.append(element('p','',w.objective),element('code','agent-roadmap-id',w.id));
+      if(w.reason)detail.append(element('p','',`Orchestration rationale: ${w.reason}`));
+      if(reason && w.state!=='succeeded')detail.append(element('p','',`Current blocker: ${reason}`));
+      if(w.binding)detail.append(element('p','',`Binding: ${w.binding.source==='recommended'?'recommended':'fallback'}${w.binding.rationale?` · ${w.binding.rationale}`:w.binding.reason?` · ${w.binding.reason}`:''}`));
+      detail.append(element('p','',`Shared daily token budget · ${w.recovery?.attempts || 0}/${Math.max(w.recovery?.attempt_limit || 0,policy.max_recovery_attempts ?? 3)} recoveries`));
+      if(live)detail.append(element('p','',`Session: ${live.task_state} · run: ${live.run_state || '—'} · ${live.checkpoint_available?'checkpoint / recovery context available':'waiting for a recovery point'}`));
+      if(w.slice?.phase)detail.append(element('p','muted',`Historical slice #${w.slice.number} · ${label(w.slice.phase)}`));
+      if(context){detail.append(element('p','',`${context.memory_refs?.length || 0} related memories · ${context.guidance_ids?.length || 0} guidance entries · ${context.completed_learning_ids?.length || 0} completed analyses`));view.showRows(detail,(context.memory_refs || []).map(r=>JSON.stringify(r)));}
+      if(w.run_ids?.length)view.showRows(detail,w.run_ids);
+      blockerDetails(detail,issues,d,view);
+    };
+    if(w.details_lazy){
+      let loading=false,loaded=false;
+      const output=element('div');detail.append(output);
+      const load=async()=>{
+        if(!detail.open || loading || loaded)return;loading=true;output.textContent='Loading work details…';
+        try{
+          const work=await view.api.get(d.id,`work-packages/${encodeURIComponent(w.id)}`,view.abort?.signal);
+          if(!detail.isConnected)return;
+          output.remove();fill(work);loaded=true;
+        }catch(error){if(error.name!=='AbortError' && detail.isConnected)output.replaceChildren(element('p','error',error.message),button('Retry',load));}
+        finally{loading=false;}
+      };
+      detail.addEventListener('toggle',load);if(detail.open)load();
+    }else fill(w);
     const related=cycles.filter(c=>c.work_package_id===w.id);
     if(related[0]?.analysis_id)refs.append(analysisLink(related[0]));
     if(related[0]?.evaluation_id)refs.append(analysisLink(related[0],true));

@@ -42,7 +42,7 @@ export class AgentsView {
     this.heading = root.parentElement?.querySelector('#agents-heading');
   }
   close() {
-    ++this.generation; this.abort?.abort(); clearInterval(this.timer); this.learningView?.close();
+    ++this.generation; this.abort?.abort(); this.refreshAbort?.abort(); clearInterval(this.timer); this.learningView?.close();
     this.refreshing=null;this.loadedKey=null;this.diagnosticsCache?.clear();
     this.setup?.close(); this.setup = null; this.creating = false; this.root.classList.remove('agent-setup-page');
     this.configurationEditor?.close(); this.configurationEditor = null;
@@ -55,7 +55,7 @@ export class AgentsView {
     const generation = this.generation;
     await this.refresh();
     if (generation !== this.generation || this.abort.signal.aborted) return;
-    this.timer = setInterval(() => this.refresh().catch(e => this.showError(e)), 1500);
+    this.timer = setInterval(() => {if (!document.hidden) this.refresh().catch(e => this.showError(e));}, 1500);
   }
   showError(error) {
     if (error.name === 'AbortError') return;
@@ -66,28 +66,35 @@ export class AgentsView {
   }
   refresh({force=false}={}) {
     const key=JSON.stringify([this.generation,this.selected,this.tab]);
+    if(this.refreshing && this.refreshingKey!==key){this.refreshAbort?.abort();this.refreshing=null;}
     if(this.refreshing)return this.refreshing.then(()=>{
       if(key===JSON.stringify([this.generation,this.selected,this.tab]) && (force || this.loadedKey!==key))return this.refresh();
     });
-    const pending=this.refreshOnce();
+    this.refreshingKey=key;this.refreshAbort=new AbortController();
+    const signal=this.abort?.signal ? AbortSignal.any([this.abort.signal,this.refreshAbort.signal]) : this.refreshAbort.signal;
+    const pending=this.refreshOnce(signal).catch(error=>{if(error.name!=='AbortError')throw error;});
     const tracked=pending.finally(()=>{if(this.refreshing===tracked)this.refreshing=null;});
     this.refreshing=tracked;return tracked;
   }
-  async refreshOnce() {
-    const generation = this.generation, signal = this.abort?.signal;
+  async refreshOnce(signal) {
+    const generation = this.generation;
     const selected=this.selected,tab=this.tab;
     const [catalog,detail]=await Promise.all([this.api.get(null,'',signal),
       selected?this.api.view(selected,tab.toLowerCase(),signal):Promise.resolve(null)]);
     if (generation !== this.generation || selected!==this.selected || tab!==this.tab || signal?.aborted) return;
-    if(tab==='Goals' && detail) await this.fillSessionMetrics(detail,signal);
+    if(tab==='Goals' && detail && !detail.view) await this.fillSessionMetrics(detail,signal);
     if (generation !== this.generation || selected!==this.selected || tab!==this.tab || signal?.aborted) return;
     this.loadedKey=JSON.stringify([generation,selected,tab]);
+    const catalogKey=JSON.stringify([this.selected,catalog]);
     this.catalog = catalog;
-    this.listRoot.replaceChildren(button('Create Agent', () => this.createForm(), 'primary'));
-    for (const agent of catalog.agents) {
-      const row = button('', () => this.select(agent.id), `session-link${agent.id === this.selected ? ' selected' : ''}`);
-      row.append(element('strong', '', agent.role.name), element('small', '', label(agent.state)));
-      row.setAttribute('aria-current', agent.id === this.selected ? 'true' : 'false'); this.listRoot.append(row);
+    if(this.renderedCatalog!==catalogKey){
+      this.renderedCatalog=catalogKey;
+      this.listRoot.replaceChildren(button('Create Agent', () => this.createForm(), 'primary'));
+      for (const agent of catalog.agents) {
+        const row = button('', () => this.select(agent.id), `session-link${agent.id === this.selected ? ' selected' : ''}`);
+        row.append(element('strong', '', agent.role.name), element('small', '', label(agent.state)));
+        row.setAttribute('aria-current', agent.id === this.selected ? 'true' : 'false'); this.listRoot.append(row);
+      }
     }
     if (!this.selected) {
       if (!this.creating) {
@@ -126,10 +133,17 @@ export class AgentsView {
     }
   }
   changeTab(tab) {
+    this.abort?.abort();this.abort=new AbortController();
     this.tab=tab;this.loadedKey=null;this.render();
     return this.refresh().catch(e=>this.showError(e));
   }
-  async select(id) { this.learningView?.close(); this.configurationEditor?.close(); this.configurationEditor=null; this.renderedDetail = null; this.manualSchedule = null; this.setup?.close(); this.setup = null; this.root.classList.remove('agent-setup-page'); this.selected = id; this.creating = false; this.tab = 'Overview'; await this.refresh(); }
+  async select(id) {
+    this.abort?.abort();this.abort=new AbortController();this.loadedKey=null;
+    this.learningView?.close();this.configurationEditor?.close();this.configurationEditor=null;
+    this.renderedDetail=null;this.manualSchedule=null;this.setup?.close();this.setup=null;
+    this.root.classList.remove('agent-setup-page');this.selected=id;this.creating=false;this.tab='Overview';
+    await this.refresh();
+  }
   async act(action) {
     try { await action(); await this.refresh({force:true}); }
     catch (error) { this.showError(error); }

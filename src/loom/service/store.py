@@ -12,6 +12,11 @@ from loom.core import now_iso
 from loom.service.artifacts import ServiceArtifacts
 from loom.service.contracts import EDITABLE_TASK_FIELDS, EVENT_SCHEMA, ServiceError, canonical, new_id, object_value, text, validate_command, validate_create
 
+SCHEDULING_PREDICATE = (
+    "json_extract(body,'$.deleted_at') IS NULL AND "
+    "(json_extract(body,'$.task.state')='queued' OR json_array_length(body,'$.workspace_blocked')>0)"
+)
+
 
 class SessionStore:
     def __init__(self, directory, *, plugin_registry_factory=None):
@@ -43,6 +48,9 @@ class SessionStore:
                 CREATE TABLE IF NOT EXISTS worker_records(
                     attempt_id TEXT NOT NULL, record_id TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(attempt_id,record_id));
             """)
+            # The queue is normally tiny relative to historical snapshots.
+            # SQLite maintains membership atomically with every body update.
+            db.execute(f'CREATE INDEX IF NOT EXISTS sessions_admission ON sessions(id) WHERE {SCHEDULING_PREDICATE}')
 
     @contextmanager
     def transaction(self):
@@ -512,6 +520,43 @@ class SessionStore:
     def list_sessions(self):
         with self.read() as db:
             return [json.loads(row[0]) for row in db.execute("SELECT body FROM sessions WHERE json_extract(body, '$.deleted_at') IS NULL ORDER BY rowid DESC")]
+
+    def scheduling_sessions(self):
+        """Only queued tasks and resource blockers participate in admission.
+
+        Keep missing resource_claims distinct from an explicitly empty list:
+        old tasks fall back to a workspace claim in ready_sessions().
+        """
+        with self.read() as db:
+            rows = db.execute(
+                "SELECT rowid,id,json_extract(body,'$.task.state'),json_extract(body,'$.task.workspace'),"
+                "json_extract(body,'$.task.resource_claims'),json_extract(body,'$.workspace_blocked'),"
+                "json_extract(body,'$.autonomy.agent_id'),json_extract(body,'$.created_at'),json_extract(body,'$.queued_since') "
+                f"FROM sessions WHERE {SCHEDULING_PREDICATE}"
+            )
+            result = []
+            # ORDER BY rowid in SQL makes SQLite prefer a full table scan to
+            # avoid sorting. Sort the tiny indexed candidate set instead.
+            for _, sid, state, workspace, claims, blocked, agent, created, queued in sorted(rows, key=lambda row: row[0], reverse=True):
+                task = dict(state=state, workspace=workspace)
+                if claims is not None:
+                    task['resource_claims'] = json.loads(claims)
+                result.append(dict(session_id=sid, task=task, workspace_blocked=json.loads(blocked) if blocked else [],
+                                   autonomy=bool(agent), created_at=created, queued_since=queued))
+            return result
+
+    def session_page(self, *, offset=0, limit=50):
+        """Project and paginate the catalog in SQL, never decode execution snapshots."""
+        with self.read() as db:
+            rows = db.execute(
+                "SELECT id,json_extract(body,'$.title'),json_extract(body,'$.task'),json_extract(body,'$.event_cursor') "
+                "FROM sessions WHERE json_extract(body,'$.deleted_at') IS NULL "
+                "ORDER BY COALESCE((SELECT json_extract(e.body,'$.at') FROM events e "
+                "WHERE e.session_id=sessions.id ORDER BY e.seq DESC LIMIT 1), "
+                "json_extract(body,'$.created_at')) DESC, rowid DESC LIMIT ? OFFSET ?", (limit + 1, offset)
+            ).fetchall()
+            return dict(sessions=[dict(session_id=r[0], title=r[1], task=json.loads(r[2]), event_cursor=r[3]) for r in rows[:limit]],
+                        next_offset=offset + limit if len(rows) > limit else None)
 
     def list_sessions_by_activity(self):
         """Most recently active session first; ties and event-less sessions keep newest-created order."""

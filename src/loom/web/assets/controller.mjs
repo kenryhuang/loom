@@ -21,17 +21,24 @@ export class SessionController {
   emit(type, detail) {
     for (const listener of this.listeners) listener({ type, detail });
   }
-  async connect() {
+  async connect({sessions = true} = {}) {
     [this.catalog, this.sessions] = await Promise.all([
       this.api.catalog(),
-      this.api.sessions(),
+      sessions ? this.api.sessions() : [],
     ]);
+    this.sessionsLoaded = sessions;
     this.emit("catalog", this.catalog);
     this.emit("sessions", this.sessions);
   }
   async refresh() {
     this.sessions = await this.api.sessions();
+    this.sessionsLoaded = true;
     this.emit("sessions", this.sessions);
+  }
+  async ensureSessions() {
+    if (this.sessionsLoaded) return;
+    if (!this.sessionsLoading) this.sessionsLoading = this.refresh().finally(() => { this.sessionsLoading = null; });
+    await this.sessionsLoading;
   }
   async select(id) {
     this.abort?.abort();

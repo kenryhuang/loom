@@ -743,7 +743,7 @@ class LoomService:
         with self.lock:
             if time.monotonic() - self.cleanup_checked >= 1:
                 self.cleanup_checked = time.monotonic()
-                for state in self.store.list_sessions():
+                for state in self.store.scheduling_sessions():
                     if state.get("workspace_blocked"):
 
                         def cleanup(state, emit, db):
@@ -787,7 +787,7 @@ class LoomService:
             shared = self.shared_active()
             available = min(self.capacity - len(self.active), self.shared_capacity - len(self.active) - len(shared))
             occupied = {**shared, **self.active}
-            candidates = self.store.list_sessions()
+            candidates = self.store.scheduling_sessions()
             if not self.autonomy_enabled:
                 candidates = [state for state in candidates if not state.get('autonomy')]
             for sid in ready_sessions(candidates, occupied, len(occupied) + max(0, available)):

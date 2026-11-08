@@ -90,9 +90,22 @@ class SessionHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._dispatch("POST")
 
-    def _json(self, status, value):
+    def _json(self, status, value, *, conditional=False):
         body = canonical(value).encode()
+        etag = None
+        if conditional:
+            import hashlib
+
+            etag = '"' + hashlib.sha256(body).hexdigest() + '"'
+            if self.headers.get('If-None-Match') == etag:
+                self.send_response(304)
+                self.send_header('ETag', etag)
+                self.send_header('Cache-Control', 'private, no-cache')
+                self.end_headers()
+                return
         self.send_response(status)
+        if etag:
+            self.send_header('ETag', etag)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -176,7 +189,7 @@ class SessionHandler(BaseHTTPRequestHandler):
                     result = self.server.autonomy.dispatch(method, parts[2:], query, self._body() if method == 'POST' else None)
                 except (ValueError, TypeError, KeyError) as exc:
                     raise ServiceError(str(exc)) from exc
-                return self._json(200, result)
+                return self._json(200, result, conditional=method == 'GET')
             if parts[:2] == ["v1", "skills"]:
                 try:
                     result = self.server.skills.dispatch(method, parts[2:], query, self._body() if method == 'POST' else None)
@@ -222,12 +235,7 @@ class SessionHandler(BaseHTTPRequestHandler):
                 else:
                     offset = self._number(query, "offset", 0)
                     limit = self._number(query, "limit", 50, 1, 200)
-                    states = service.store.list_sessions_by_activity()
-                    summaries = [
-                        {"session_id": s["session_id"], "title": s["title"], "task": s["task"], "event_cursor": s["event_cursor"]}
-                        for s in states[offset : offset + limit]
-                    ]
-                    self._json(200, {"sessions": summaries, "next_offset": offset + limit if offset + limit < len(states) else None})
+                    self._json(200, service.store.session_page(offset=offset, limit=limit))
                 return
             if len(parts) < 4 or parts[:2] != ["v1", "sessions"]:
                 raise ServiceError("Route not found", 404)

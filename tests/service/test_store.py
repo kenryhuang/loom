@@ -17,6 +17,53 @@ def test_sessions_list_orders_by_last_activity_descending(tmp_path, monkeypatch)
     store.submit(sids[0], {"command_id": "touch", "type": "submit_message", "payload": {"content": "still active"}})
     listed = [s["session_id"] for s in store.list_sessions_by_activity()]
     assert listed == [sids[0], sids[2], sids[1]]  # Touched session first; the rest keep newest-created order.
+    first = store.session_page(limit=2)
+    second = store.session_page(offset=first['next_offset'], limit=2)
+    assert [s['session_id'] for s in first['sessions'] + second['sessions']] == listed
+    assert second['next_offset'] is None
+    expected = [{k: s[k] for k in ('session_id', 'title', 'task', 'event_cursor')} for s in store.list_sessions_by_activity()]
+    assert first['sessions'] + second['sessions'] == expected
+
+
+def test_admission_projection_keeps_resource_exclusion_and_index_membership(tmp_path):
+    from loom.service.scheduler import ready_sessions
+    from loom.service.store import SCHEDULING_PREDICATE
+
+    store = SessionStore(tmp_path / 'service')
+    for name in ('shared', '2', '3'):
+        (tmp_path / name).mkdir()
+    ids = [store.create(str(i), {'objective': str(i), 'workspace': str(tmp_path / ('shared' if i < 2 else str(i)))})['session_id']
+           for i in range(4)]
+
+    def block(state, emit, db):
+        state['task']['state'] = 'paused'
+        state['workspace_blocked'] = [dict(pid=123, identity='held')]
+        state['context'] = {'large': 'execution-only-data' * 10000}
+
+    store.update(ids[0], block)
+    store.update(ids[3], lambda s, e, db: s['task'].update(state='idle'))
+    projected = store.scheduling_sessions()
+    assert list(ready_sessions(projected, {}, 4)) == list(ready_sessions(store.list_sessions(), {}, 4)) == [ids[2]]
+    assert ids[3] not in {s['session_id'] for s in projected}
+    assert 'execution-only-data' not in json.dumps(projected)
+    # Legacy tasks omit resource_claims, while an explicit [] means no claim.
+    with store.transaction() as db:
+        db.execute("UPDATE sessions SET body=json_remove(body,'$.task.resource_claims') WHERE id=?", (ids[1],))
+    assert list(ready_sessions(store.scheduling_sessions(), {}, 4)) == [ids[2]]
+    with store.transaction() as db:
+        db.execute("UPDATE sessions SET body=json_set(body,'$.task.resource_claims',json('[]')) WHERE id=?", (ids[1],))
+    assert list(ready_sessions(store.scheduling_sessions(), {}, 4)) == [ids[1], ids[2]]
+    # Membership changes are transactional, including deletion and rollback.
+    with pytest.raises(RuntimeError), store.transaction() as db:
+        db.execute("UPDATE sessions SET body=json_set(body,'$.task.state','idle') WHERE id=?", (ids[2],))
+        raise RuntimeError('rollback')
+    assert ids[2] in {s['session_id'] for s in store.scheduling_sessions()}
+    with store.transaction() as db:
+        db.execute("UPDATE sessions SET body=json_set(body,'$.deleted_at','now') WHERE id=?", (ids[2],))
+    assert ids[2] not in {s['session_id'] for s in store.scheduling_sessions()}
+    with store.read() as db:
+        plan = db.execute(f'EXPLAIN QUERY PLAN SELECT id FROM sessions WHERE {SCHEDULING_PREDICATE}').fetchall()
+    assert any('sessions_admission' in row[3] for row in plan)
 
 
 def test_create_and_command_receipts_survive_restart(tmp_path):
