@@ -14,7 +14,7 @@ __all__ = ["parse_updates", "commit_updates"]
 VALIDATION_VERSION = "graph-validation.3"
 
 
-def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_ids, allowed_fields=None, visible_ids=None):
+def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_ids, allowed_fields=None, visible_ids=None, evidence_owners=None):
     """Commit each valid record without rolling back independent siblings.
 
     Declarations are dependency ordered; action assessments need no declared goal.
@@ -42,6 +42,10 @@ def commit_updates(cp, records, *, batch_id, cards, delivered, cutoff, target_id
     def apply(item):
         index, kind, raw = item
         validate_schema(raw, UPDATE_FIELDS[kind]["items"])
+        for ref in raw.get('refs', []):
+            owner = (evidence_owners or {}).get(ref)
+            if owner and (kind not in {'assessments', 'attributions', 'comparisons'} or raw.get('card_id') != owner):
+                raise RuleViolation('graph.evidence_owner', 'Supplemental evidence belongs to a different action', path=('refs',))
         if kind == "evidence_requests":
             requests.append(raw)
             return

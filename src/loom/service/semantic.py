@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -141,11 +142,19 @@ class SessionSemantic:
         self.pool.shutdown(wait=True)
 
     def _save(self, body):
-        with self.store.transaction() as db:
-            db.execute("UPDATE semantic_jobs SET body=? WHERE id=?", (canonical(body), body["id"]))
-            db.execute("INSERT OR IGNORE INTO skill_dirty_sessions VALUES(?)", (body['session_id'],))
-            if db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_versions'").fetchone():
-                db.execute("UPDATE memory_versions SET value=value+1 WHERE id='effective'")
+        for attempt in range(3):
+            try:
+                with self.store.transaction() as db:
+                    db.execute("UPDATE semantic_jobs SET body=? WHERE id=?", (canonical(body), body["id"]))
+                    db.execute("INSERT OR IGNORE INTO skill_dirty_sessions VALUES(?)", (body['session_id'],))
+                    if db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_versions'").fetchone():
+                        db.execute("UPDATE memory_versions SET value=value+1 WHERE id='effective'")
+                return
+            except sqlite3.OperationalError as exc:
+                code = getattr(exc, 'sqlite_errorcode', 0) & 255
+                if code not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or attempt == 2:
+                    raise
+                time.sleep(.1 * (attempt + 1))
 
     def _load(self, sid, aid, identifier):
         self.trajectory._load(sid, aid)
@@ -182,6 +191,8 @@ class SessionSemantic:
             from loom.evaluation.work_items import status
 
             public.update(status(body['checkpoint']))
+            if body['state'] == 'incomplete' and public['completion_kind'] == 'limited':
+                public.update(state='completed', error=None)
             if body['state'] in {'queued', 'running', 'failed', 'cancelled'}:
                 public['execution_state'] = body['state']
             elif body['state'] in {'budget_exhausted', 'interrupted'}:
@@ -850,10 +861,11 @@ class SessionSemantic:
                 body.update(assessment)
                 if assessment['result_state'] == 'partial':
                     details = semantic['coverage'].get('review_gaps', []) + semantic.get('memory', {}).get('coverage', {}).get('issues', [])
-                    body.update(state='incomplete', error_details=details,
-                        error=('Processing finished with quality gaps. Accepted records remain available. Use Retry failed items.'
+                    body.update(state='completed' if assessment['completion_kind'] == 'limited' else 'incomplete', error_details=details,
+                        error=(None if assessment['completion_kind'] == 'limited' else
+                               'Processing finished with quality gaps. Accepted records remain available. Use Retry failed items.'
                                if assessment['execution_state'] == 'completed' else 'Analysis has unfinished work. Resume evaluation to continue.'))
-                    if details:
+                    if details and body['error']:
                         body['error'] += ' ' + '; '.join(describe(e) for e in details[:2])
             if body.get("analysis_version") == "v3" and semantic["coverage"]["status"] != "complete":
                 body.update(state="budget_exhausted", error="Evaluation budget reached; focused stages remain unfinished")
@@ -874,6 +886,14 @@ class SessionSemantic:
                 body.update(state=state, error=describe(detail), error_details=[detail])
             else:
                 body.update(state=failure_state(exc.issues), error=str(exc), error_details=exc.issues)
+        except sqlite3.OperationalError as exc:
+            if getattr(exc, 'sqlite_errorcode', 0) & 255 not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                detail = issue('runtime.internal', f'{type(exc).__name__}: {exc}', category='internal', phase='orchestrate', unit_id=body.get('stage'))
+                body.update(state='failed', error=describe(detail), error_details=[detail])
+            else:
+                detail = issue('runtime.database_busy', 'Database temporarily locked; resume from the saved checkpoint.',
+                               category='provider', phase='orchestrate', unit_id=body.get('stage'), retryable=True)
+                body.update(state='interrupted', error=describe(detail), error_details=[detail])
         except Exception as exc:
             if body.get("analysis_version") == GRAPH_ENGINE:
                 detail = issue("runtime.internal", f"{type(exc).__name__}: {exc}", category="internal", phase="orchestrate",

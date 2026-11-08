@@ -16,8 +16,8 @@ test('Agent API encodes identity and retains supplied command identity',async()=
 
 test('Agent details show actual states, tabs and literal text',async()=>{const data=fixture();const {dom,view}=setup({json:async(path)=>path==='/v1/agents'?{agents:[data]}:data});
  try{await view.open();await view.select('a');assert.match(view.root.textContent,/Keep design accurate/);assert.equal(view.root.querySelector('img'),null);
- assert.equal(view.root.querySelectorAll('.agent-tabs button').length,6);view.tab='Learning';data.learning=[{state:'deferred',coverage:'partial',blocked_reason:'Budget exhausted',session_id:'s'}];view.render();
- assert.match(view.root.textContent,/延后 · 部分/);assert.match(view.root.textContent,/Budget exhausted/);assert.equal(view.root.querySelector('a').getAttribute('href'),'#/evaluation/s');
+ assert.equal(view.root.querySelectorAll('.agent-tabs button').length,6);view.tab='Learning';data.learning=[{state:'deferred',coverage:'partial',blocked_reason:'Budget exhausted',session_id:'s',analysis_id:'an'}];view.render();
+ assert.match(view.root.textContent,/Deferred · Partial/);assert.match(view.root.textContent,/Budget exhausted/);assert.equal(view.root.querySelector('a').getAttribute('href'),'#/evaluation/s?analysis=an');
  }finally{view.close();dom.window.close();}});
 
 test('Closing Agent view ignores stale catalog replies',async()=>{let resolve;const {dom,view}=setup({json:()=>new Promise(r=>resolve=r)});
@@ -41,19 +41,19 @@ test('Details reuse Evaluation shell, dashboards and keyboard tab navigation',as
   assert.equal(document.querySelector('img'),null);
   assert.ok(view.root.querySelector('.evaluation-tabs[role="tablist"]'));
   assert.ok(view.root.querySelector('.trace-dashboard .dashboard-stats'));
-  assert.equal(view.root.querySelector('[role="tab"][aria-selected="true"]').textContent,'概览');
+  assert.equal(view.root.querySelector('[role="tab"][aria-selected="true"]').textContent,'Overview');
   view.root.querySelector('[role="tab"]').dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));
   assert.equal(view.tab,'Goals');
   assert.equal(document.activeElement.id,'agent-tab-Goals');
   assert.equal(view.root.querySelector('[role="tabpanel"]').getAttribute('aria-labelledby'),'agent-tab-Goals');
-  assert.doesNotMatch(view.root.textContent,/添加目标/);
+  assert.doesNotMatch(view.root.textContent,/Add a stage goal/);
   for(const tab of ['Work','Profile','Knowledge','Learning']){
    view.tab=tab;view.render();
    assert.ok([...view.root.querySelector('.agent-content').children].every(n=>n.classList.contains('dashboard-panel') || n.classList.contains('dashboard-disclosure')));
   }
   await view.createForm(data); assert.equal(heading.hidden,false); assert.ok(view.root.querySelector('.agent-configuration-form'));
   assert.equal(view.root.querySelector('[name=workspace], [name=objective]'),null);
-  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='取消').click();
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='Cancel').click();
   await new Promise(r=>setTimeout(r,0));
   assert.equal(heading.hidden,false); assert.ok(view.root.querySelector('.evaluation-tabs'));
  }finally{view.close();dom.window.close();}
@@ -63,13 +63,13 @@ test('Unchanged polling retains inspected records; server state changes refresh 
  const data=fixture();const {dom,view}=setup({json:async path=>path.endsWith('/runs')?{runs:[{state:'no_action',reason:'No ready goal',created_at:'2026-10-30'}]}:path==='/v1/agents'?{agents:[data]}:data});
  try{
   await view.open();await view.select('a');
-  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='查看最近编排原因').click();
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='View recent orchestration reasons').click();
   await new Promise(r=>setTimeout(r,0));
   assert.match(view.root.textContent,/No ready goal/);
   const body=view.root.querySelector('[role="tabpanel"]');await view.refresh();
   assert.equal(view.root.querySelector('[role="tabpanel"]'),body);
   data.state='paused';await view.refresh();
-  assert.match(document.querySelector('#agents-heading').textContent,/已暂停/);
+  assert.match(document.querySelector('#agents-heading').textContent,/Paused/);
  }finally{view.close();dom.window.close();}
 });
 
@@ -81,17 +81,17 @@ test('Manual scheduling shows submission, queued and actual scheduler outcome',a
   await view.open();await view.select('a');
   view.api.command=()=>{calls++;return new Promise(resolve=>resolveCommand=resolve);};
   const heading=document.querySelector('#agents-heading');
-  [...heading.querySelectorAll('button')].find(b=>b.textContent==='手动调度').click();
-  assert.match(heading.textContent,/正在提交调度请求/);
-  assert.equal([...heading.querySelectorAll('button')].find(b=>b.textContent==='手动调度').disabled,true);
+  [...heading.querySelectorAll('button')].find(b=>b.textContent==='Schedule now').click();
+  assert.match(heading.textContent,/Submitting scheduling request/);
+  assert.equal([...heading.querySelectorAll('button')].find(b=>b.textContent==='Schedule now').disabled,true);
   await view.scheduleNow(data);assert.equal(calls,1);
   resolveCommand({state:'enabled',schedule_requested:true,scheduler:{id:'old',state:'intervention'}});
-  await tick();assert.match(heading.textContent,/调度请求已提交，等待调度器检查/);
+  await tick();assert.match(heading.textContent,/Scheduling request submitted; waiting for the scheduler check/);
   data.scheduler={id:'new',state:'checking',trigger:'manual'};data.schedule_requested=false;
-  await view.refresh();assert.match(heading.textContent,/调度已开始，正在检查队列/);
+  await view.refresh();assert.match(heading.textContent,/Scheduling started; checking the queue/);
   data.scheduler={id:'new',state:'dispatched',trigger:'manual',finished_at:'2026-11-08T01:40:47Z',reason:'已派发一个工作包。'};
-  await view.refresh();assert.match(heading.textContent,/调度检查结束：已派发一个工作包/);
-  assert.equal([...heading.querySelectorAll('button')].find(b=>b.textContent==='手动调度').disabled,false);
+  await view.refresh();assert.match(heading.textContent,/Scheduling check finished: 已派发一个工作包/);
+  assert.equal([...heading.querySelectorAll('button')].find(b=>b.textContent==='Schedule now').disabled,false);
  }finally{view.close();dom.window.close();}
 });
 
@@ -100,9 +100,9 @@ test('Manual scheduling reports a failed request and allows retry',async()=>{
  try{
   await view.open();await view.select('a');view.api.command=async()=>{throw new Error('网络不可用');};
   await view.scheduleNow(data);
-  assert.match(document.querySelector('#agents-heading').textContent,/调度请求提交失败/);
+  assert.match(document.querySelector('#agents-heading').textContent,/Failed to submit the scheduling request/);
   assert.match(view.root.textContent,/网络不可用/);
-  assert.equal([...document.querySelector('#agents-heading').querySelectorAll('button')].find(b=>b.textContent==='手动调度').disabled,false);
+  assert.equal([...document.querySelector('#agents-heading').querySelectorAll('button')].find(b=>b.textContent==='Schedule now').disabled,false);
  }finally{view.close();dom.window.close();}
 });
 
@@ -137,7 +137,7 @@ test('Tab changes during polling ignore the old page and fetch the chosen page o
  try{
   await view.open();await view.select('a');requests.length=0;delayed=true;
   const old=view.refresh(),selected=view.changeTab('Knowledge');
-  assert.match(view.root.textContent,/正在加载/);
+  assert.match(view.root.textContent,/Loading…/);
   resolveOld({...structuredClone(data),view:'overview'});await Promise.all([old,selected]);
   assert.equal(view.detail.view,'knowledge');
   assert.equal(requests.filter(path=>path.endsWith('/views/knowledge')).length,1);
@@ -156,7 +156,7 @@ test('Analysis diagnostics are loaded only when their detail is expanded and reu
  try{
   await view.open();await view.select('a');view.tab='Work';view.render();
   assert.equal(diagnosticRequests,0);
-  let detail=[...view.root.querySelectorAll('details')].find(node=>node.textContent.includes('eval') && node.querySelector('summary')?.textContent==='详情');
+  let detail=[...view.root.querySelectorAll('details')].find(node=>node.textContent.includes('eval') && node.querySelector('summary')?.textContent==='Details');
   assert.ok(detail);detail.open=true;detail.dispatchEvent(new dom.window.Event('toggle'));await tick();
   assert.equal(diagnosticRequests,1);assert.match(detail.textContent,/Actual source gap/);
   view.render();await tick();assert.equal(diagnosticRequests,1);
@@ -170,10 +170,10 @@ test('Overview exposes scoped configuration panels and read-only goals and works
   const panels=[...view.root.querySelectorAll('[data-configuration-section]')];
   assert.deepEqual(panels.map(panel=>panel.dataset.configurationSection).sort(),
    ['budget','execution','identity','learning','models','resources','scheduling']);
-  assert.ok(panels.every(panel=>panel.querySelector('button[aria-label^="编辑"]')));
-  assert.match(view.root.textContent,/长期目标（只读）/);assert.match(view.root.textContent,/工作目录（固定）/);
+  assert.ok(panels.every(panel=>panel.querySelector('button[aria-label^="Edit"]')));
+  assert.match(view.root.textContent,/Long-term objectives \(read-only\)/);assert.match(view.root.textContent,/Workspace \(fixed\)/);
   assert.equal(view.root.querySelector('[name=workspace], [name=objective]'),null);
-  [...view.root.querySelectorAll('button')].find(button=>button.textContent==='前往目标页面').click();
+  [...view.root.querySelectorAll('button')].find(button=>button.textContent==='Go to Goals').click();
   assert.equal(view.tab,'Goals');
  }finally{view.close();dom.window.close();}
 });
@@ -191,7 +191,7 @@ test('Budget cancel closes immediately after focused editing and polling retains
   data={...data,activity:'planning'};document.activeElement.blur();await view.refresh();
   assert.equal(view.root.querySelector('.agent-configuration-form'),form);
   assert.equal(form.elements.daily_tokens.value,'10000000');
-  form.elements.daily_tokens.focus();[...form.querySelectorAll('button')].find(button=>button.textContent==='取消').click();
+  form.elements.daily_tokens.focus();[...form.querySelectorAll('button')].find(button=>button.textContent==='Cancel').click();
   assert.equal(view.root.querySelector('.agent-configuration-form'),null);
   assert.ok(view.root.querySelector('[data-configuration-section=budget]'));
   assert.equal(posts,0);assert.equal(data.role.budget.daily_tokens,1000000);
@@ -217,7 +217,7 @@ test('Budget save stages only daily tokens and displays the pending value',async
   assert.deepEqual(sent.changes,{budget:{daily_tokens:10000000}});assert.ok(sent.command_id);
   assert.deepEqual(data.role,original);assert.equal(view.root.querySelector('.agent-configuration-form'),null);
   const budget=view.root.querySelector('[data-configuration-section=budget]');
-  assert.match(budget.textContent,/10,000,000/);assert.match(budget.textContent,/待新任务生效/);
+  assert.match(budget.textContent,/10,000,000/);assert.match(budget.textContent,/Applies to next task/);
  }finally{view.close();dom.window.close();}
 });
 
@@ -230,7 +230,7 @@ test('Cancel during model loading ignores a stale catalog response',async()=>{
   await view.open();await view.select('a');const loading=view.createForm(data,'models');
   const form=view.root.querySelector('.agent-configuration-form');
   assert.equal(form.querySelector('button[type=submit]').disabled,true);
-  [...form.querySelectorAll('button')].find(button=>button.textContent==='取消').click();
+  [...form.querySelectorAll('button')].find(button=>button.textContent==='Cancel').click();
   assert.equal(view.root.querySelector('.agent-configuration-form'),null);
   resolve({models:[{id:'late-model'}]});await loading;
   assert.equal(view.root.querySelector('.agent-configuration-form'),null);assert.equal(view.configurationEditor,null);
@@ -242,7 +242,7 @@ test('Cancel creation immediately restores selected Agent even while an input is
  try{
   await view.open();await view.select('a');await view.createForm();
   const form=view.root.querySelector('.setup-form');form.elements.name.focus();
-  [...form.querySelectorAll('button')].find(button=>button.textContent==='取消').click();
+  [...form.querySelectorAll('button')].find(button=>button.textContent==='Cancel').click();
   assert.equal(view.root.querySelector('.setup-form'),null);assert.ok(view.root.querySelector('.agent-tabs'));
   assert.equal(document.querySelector('#agents-heading').hidden,false);
  }finally{view.close();dom.window.close();}
@@ -259,7 +259,7 @@ test('Overview omits scheduling details while Work retains packages and Session 
  const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
  try{
   await view.open();await view.select('a');
-  assert.doesNotMatch(view.root.textContent,/当前与最近调度|最近调度目标（未归入阶段）/);
+  assert.doesNotMatch(view.root.textContent,/Scheduling details|Standalone and historical goals/);
   assert.equal(view.root.querySelector('[data-scheduled-goal-id]'),null);
   view.tab='Work';view.render();
   assert.match(view.root.textContent,/代码调研/);assert.match(view.root.textContent,/构建与测试/);assert.match(view.root.textContent,/撰写架构文档/);
@@ -290,8 +290,8 @@ test('Roadmap selects one stage and retains inspected goals across polling',asyn
   assert.equal(view.root.querySelector('[data-scheduled-stage-id]'),null);
   view.tab='Goals';view.render();
   const current=view.root.querySelector('[data-stage-id="new"]');
-  assert.match(current.textContent,/当前阶段：Navigation/);assert.match(current.textContent,/Implement camera controls/);
-  assert.match(current.textContent,/历史 attempt/);assert.doesNotMatch(current.textContent,/Renderer checks/);
+  assert.match(current.textContent,/Current stage: Navigation/);assert.match(current.textContent,/Implement camera controls/);
+  assert.match(current.textContent,/Historical attempt/);assert.doesNotMatch(current.textContent,/Renderer checks/);
   assert.equal(view.root.querySelectorAll('[data-goal-id="camera"]').length,1);
   assert.equal(view.root.querySelector('[data-stage-id="old"]'),null);
   view.root.querySelector('[data-roadmap-node="old"]').click();
@@ -322,9 +322,9 @@ test('Stage roadmap shows actual delivery, learning gaps and versioned human ans
  try{
   await view.open();await view.select('a');view.tab='Goals';view.render();
   assert.match(view.root.textContent,/Recorded source inspection/);assert.match(view.root.querySelector('.agent-roadmap-rail').textContent,/Galaxy/);
-  assert.match(view.root.textContent,/学习有 1 项缺口/);assert.match(view.root.textContent,/goal1/);
+  assert.match(view.root.textContent,/Learning has 1 gap/);assert.match(view.root.textContent,/goal1/);
   view.root.querySelector('[name="answer"]').value='Camera';
-  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='提交阶段问题回答').click();await tick();
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='Submit stage answer').click();await tick();
   assert.equal(sent.path,'/v1/agents/a/objectives/quality/planning/commands');
   assert.equal(sent.body.expected_revision,4);assert.equal(sent.body.question_revision,2);assert.equal(sent.body.answer,'Camera');
  }finally{view.close();dom.window.close();}
@@ -336,8 +336,8 @@ test('Stage planning is explicitly enabled per objective with the Agent revision
   return path==='/v1/agents'?{agents:[data]}:data;}});
  try{
   await view.open();await view.select('a');view.tab='Goals';view.render();
-  assert.match(view.root.textContent,/自动阶段规划未开启/);assert.doesNotMatch(view.root.textContent,/已开启，等待/);
-  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='开启该目标的阶段规划').click();await tick();
+  assert.match(view.root.textContent,/Automatic stage planning is off/);assert.doesNotMatch(view.root.textContent,/Enabled; waiting/);
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='Enable stage planning for this objective').click();await tick();
   assert.equal(sent.type,'enable');assert.equal(sent.expected_revision,2);
  }finally{view.close();dom.window.close();}
 });
@@ -361,9 +361,9 @@ test('Knowledge tab stages only resource settings without losing advanced config
   const form=view.root.querySelector('.agent-resource-form');
   assert.equal(form.querySelector('button[type=submit]').disabled,true);await tick();
   assert.match(form.textContent,/Project documents/);assert.match(form.textContent,/Research \/ Lookup/);
-  assert.match(form.textContent,/old-base（当前不可用）/);
+  assert.match(form.textContent,/old-base \(currently unavailable\)/);
   for(const input of form.querySelectorAll('input')){input.checked=['docs','lookup'].includes(input.value);input.dispatchEvent(new dom.window.Event('change',{bubbles:true}));}
-  assert.match(form.textContent,/已选择 1 个知识库 · 1 个外部工具/);
+  assert.match(form.textContent,/1 knowledge bases · 1 external tools selected/);
   // A background state update must not discard a draft once focus leaves a checkbox.
   data={...data,activity:'planning'};document.activeElement?.blur();await view.refresh();
   assert.equal(view.root.querySelector('.agent-resource-form'),form);
@@ -392,11 +392,11 @@ test('Knowledge resource loading can retry and a revision conflict preserves sel
   await view.open();await view.select('a');view.tab='Knowledge';view.render();await tick();
   const form=view.root.querySelector('.agent-resource-form'),save=form.querySelector('button[type=submit]');
   assert.match(form.textContent,/Catalog offline/);assert.equal(save.disabled,true);
-  unavailable=false;[...form.querySelectorAll('button')].find(b=>b.textContent==='重新加载选项').click();await tick();
+  unavailable=false;[...form.querySelectorAll('button')].find(b=>b.textContent==='Reload choices').click();await tick();
   const check=form.querySelector('input[value="docs"]');check.click();assert.equal(save.disabled,false);
   save.click();await tick();
   assert.equal(posts,1);assert.equal(check.checked,true);assert.equal(check.disabled,false);
-  assert.match(form.querySelector('[role=alert]').textContent,/配置已更新/);
+  assert.match(form.querySelector('[role=alert]').textContent,/Configuration changed/);
   await view.refresh();assert.equal(view.root.querySelector('.agent-resource-form'),form);
  }finally{view.close();dom.window.close();}
 });
@@ -423,16 +423,16 @@ test('Overview shows local next scheduling time and updates its countdown withou
  try{
   await view.open();await view.select('a');
   const body=view.root.querySelector('[role=tabpanel]'),schedule=body.querySelector('[data-agent-schedule]');
-  assert.match(schedule.textContent,/下次调度/);
+  assert.match(schedule.textContent,/Next schedule/);
   assert.equal(schedule.querySelector('time').dateTime,'2026-10-30T08:02:00.000Z');
-  assert.match(schedule.textContent,/约 2 分钟后/);
+  assert.match(schedule.textContent,/in ~2m/);
   assert.ok(schedule.textContent.includes(Intl.DateTimeFormat().resolvedOptions().timeZone));
   now+=90000;await view.refresh();
   assert.equal(view.root.querySelector('[role=tabpanel]'),body);
-  assert.match(schedule.textContent,/30 秒后/);
+  assert.match(schedule.textContent,/in 30s/);
   now+=31000;await view.refresh();
-  assert.match(schedule.textContent,/已到调度时间，等待调度器处理/);
-  assert.doesNotMatch(schedule.textContent,/-1 秒|NaN|Invalid/);
+  assert.match(schedule.textContent,/Scheduling time reached/);
+  assert.doesNotMatch(schedule.textContent,/-1s|NaN|Invalid/);
  }finally{view.close();dom.window.close();}
 });
 
@@ -441,17 +441,17 @@ test('Overview distinguishes paused, disabled, unscheduled and invalid schedulin
  const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
  try{
   await view.open();await view.select('a');
-  for(const [state,title] of [['draft','尚未启用'],['paused','已暂停'],['archived','已归档']]){
+  for(const [state,title] of [['draft','Not enabled yet'],['paused','Paused'],['archived','Archived']]){
    data.state=state;await view.refresh();const schedule=view.root.querySelector('[data-agent-schedule]');
    assert.match(schedule.textContent,new RegExp(title));assert.equal(schedule.querySelector('time'),null);
   }
   data.state='enabled';data.service_enabled=false;await view.refresh();
-  assert.match(view.root.querySelector('[data-agent-schedule]').textContent,/自主运行未启用/);
+  assert.match(view.root.querySelector('[data-agent-schedule]').textContent,/Autonomy not enabled/);
   data.service_enabled=true;data.next_wake_at='';await view.refresh();
-  assert.match(view.root.querySelector('[data-agent-schedule]').textContent,/等待调度/);
+  assert.match(view.root.querySelector('[data-agent-schedule]').textContent,/Waiting for scheduling/);
   data.next_wake_at='invalid';await view.refresh();
   const schedule=view.root.querySelector('[data-agent-schedule]');
-  assert.match(schedule.textContent,/调度时间暂不可用/);assert.doesNotMatch(schedule.textContent,/Invalid|NaN/);
+  assert.match(schedule.textContent,/Schedule time unavailable/);assert.doesNotMatch(schedule.textContent,/Invalid|NaN/);
  }finally{view.close();dom.window.close();}
 });
 
@@ -461,9 +461,9 @@ test('Overview shows one daily allowance and local reset instead of cumulative q
  data.learning_budget={initial_tokens:null,effective_tokens:null,mode:'daily'};
  const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
  try{await view.open();await view.select('a');const text=view.root.textContent;
-  assert.match(text,/今日已用及预留/);assert.match(text,/250,000/);assert.match(text,/750,000/);
-  assert.match(text,/Asia\/Shanghai/);assert.match(text,/下次重置/);
-  assert.doesNotMatch(text,/单目标累计上限|单工作包上限|今日学习额度|每日调用次数上限/);
+  assert.match(text,/Used & reserved today/);assert.match(text,/250,000/);assert.match(text,/750,000/);
+  assert.match(text,/Asia\/Shanghai/);assert.match(text,/Next reset/);
+  assert.doesNotMatch(text,/Per-objective cumulative cap|Per-work-package cap|Today's learning allowance|Daily call limit/);
  }finally{view.close();dom.window.close();}
 });
 
@@ -475,11 +475,11 @@ test('Completed Goals retain source-change history without a dispatch blocker',a
  const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
  try{
   await view.open();await view.select('a');view.tab='Goals';view.render();
-  assert.match(view.root.textContent,/历史记录：来源在规划后发生过变化/);
-  assert.doesNotMatch(view.root.textContent,/当前卡点：来源|后续派发已等待目标复核/);
+  assert.match(view.root.textContent,/History: the source changed after planning/);
+  assert.doesNotMatch(view.root.textContent,/Current blockers: A source|later dispatches wait for goal review/);
   data.goals[0].state='active';view.render();
-  assert.match(view.root.textContent,/当前卡点：来源/);
-  assert.match(view.root.textContent,/后续派发已等待目标复核/);
+  assert.match(view.root.textContent,/Current blockers: A source/);
+  assert.match(view.root.textContent,/later dispatches wait for goal review/);
  } finally {view.close();dom.window.close();}
 });
 
@@ -492,8 +492,8 @@ test('Profile shows shared scope, conflicts, review and versioned adoption contr
   return path==='/v1/agents'?{agents:[data]}:data;}});
  try {
   await view.open();await view.select('a');view.tab='Profile';view.render();
-  assert.match(view.root.textContent,/Research、Writer/);assert.equal(view.root.querySelector('script'),null);
-  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='试用七天').click();await tick();
+  assert.match(view.root.textContent,/Research, Writer/);assert.equal(view.root.querySelector('script'),null);
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='Trial for 7 days').click();await tick();
   assert.equal(calls[0][1].expected_revision,3);assert.equal(calls[0][1].type,'trial');
  } finally {view.close();dom.window.close();}
 });
@@ -512,12 +512,12 @@ test('Roadmap updates tentative directions, separates replaced stages and falls 
   await view.open();await view.select('a');view.tab='Goals';view.render();
   const rail=view.root.querySelector('.agent-roadmap-rail');
   assert.doesNotMatch(rail.textContent,/Old approach|Abandoned direction/);
-  assert.match(view.root.querySelector('.agent-roadmap-detail').textContent,/当前卡点：所需来源尚未刷新/);
+  assert.match(view.root.querySelector('.agent-roadmap-detail').textContent,/Current blockers: Required sources are stale or unrefreshed/);
   assert.equal(view.root.querySelectorAll('[data-goal-id="g"]').length,1);
   assert.equal(view.root.querySelector('[name="outcome"]').closest('details').open,false);
   view.root.querySelector('[data-roadmap-node="future:r2:next"]').click();
-  assert.match(view.root.querySelector('.agent-roadmap-detail').textContent,/远期暂定：Galaxy/);
-  assert.match(view.root.querySelector('.agent-roadmap-detail').textContent,/依赖：Current delivery/);
+  assert.match(view.root.querySelector('.agent-roadmap-detail').textContent,/Tentative long-term: Galaxy/);
+  assert.match(view.root.querySelector('.agent-roadmap-detail').textContent,/Depends on: Current delivery/);
   assert.equal(view.root.querySelector('.agent-roadmap-detail form'),null);
   data.activity='working';await view.refresh();
   assert.equal(view.root.querySelector('[data-roadmap-node="future:r2:next"]').getAttribute('aria-pressed'),'true');
@@ -526,7 +526,7 @@ test('Roadmap updates tentative directions, separates replaced stages and falls 
   assert.equal(view.root.querySelector('[data-roadmap-node="current"]').getAttribute('aria-pressed'),'true');
   assert.match(view.root.querySelector('.agent-roadmap-rail').textContent,/Local group/);
   assert.doesNotMatch(view.root.querySelector('.agent-roadmap-rail').textContent,/Galaxy/);
-  assert.match(view.root.textContent,/路线调整记录/);
+  assert.match(view.root.textContent,/Route change history/);
  }finally{view.close();dom.window.close();}
 });
 
@@ -542,10 +542,10 @@ test('Standalone goals cannot be revised and stage revisions retain the selected
   await view.open();await view.select('a');view.tab='Goals';view.render();
   assert.equal(view.root.querySelectorAll('[data-goal-id]').length,2);
   const standalone=view.root.querySelector('[data-goal-id="manual"]');assert.equal(standalone.closest('.dashboard-panel').open,false);
-  assert.doesNotMatch(standalone.textContent,/修订目标|创建有退避/);
-  assert.match(view.root.querySelector('[data-goal-id="g"]').textContent,/修订目标/);
+  assert.doesNotMatch(standalone.textContent,/Revise goal|Create new attempt with backoff/);
+  assert.match(view.root.querySelector('[data-goal-id="g"]').textContent,/Revise goal/);
   const form=view.root.querySelector('[name="outcome"]').form;form.elements.reason.value='New requirement';form.elements.outcome.value='Changed';form.elements.criteria.value='Keep original\nNew check';
-  [...form.querySelectorAll('button')].find(b=>b.textContent==='保存修订并重新规划').click();await tick();
+  [...form.querySelectorAll('button')].find(b=>b.textContent==='Save revision & replan').click();await tick();
   assert.equal(sent.path,'/v1/agents/a/stages/s/commands');assert.equal(sent.body.expected_revision,7);
   assert.deepEqual(sent.body.payload,{expected_outcome:'Changed',acceptance:['Keep original','New check']});
   view.focusGoal('manual');assert.equal(view.root.querySelector('[data-goal-id="manual"]').open,true);
@@ -564,7 +564,7 @@ test('Manual Goals can only be added under the current unfinished stage',async()
   return path==='/v1/agents'?{agents:[data]}:data;}});
  try{
   await view.open();await view.select('a');view.tab='Goals';view.render();
-  assert.equal([...view.root.querySelectorAll('summary')].some(s=>s.textContent==='添加目标'),false);
+  assert.equal([...view.root.querySelectorAll('summary')].some(s=>s.textContent==='Add goal'),false);
   const form=view.root.querySelector('[data-stage-goal-form="s"]');assert.ok(form);
   form.elements.objective.value='Manual addition';form.elements.acceptance.value='First check\nSecond check';
   form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await tick();
@@ -572,13 +572,13 @@ test('Manual Goals can only be added under the current unfinished stage',async()
   assert.deepEqual(sent.body.goal,{objective:'Manual addition',acceptance:['First check','Second check']});
   view.root.querySelector('[data-roadmap-node="old"]').click();
   assert.equal(view.root.querySelector('[data-stage-goal-form]'),null);
-  assert.doesNotMatch(view.root.querySelector('[data-goal-id="old-g"]').textContent,/修订目标|创建有退避/);
+  assert.doesNotMatch(view.root.querySelector('[data-goal-id="old-g"]').textContent,/Revise goal|Create new attempt with backoff/);
   view.root.querySelector('[data-roadmap-node="future:r:future"]').click();
   assert.equal(view.root.querySelector('[data-stage-goal-form]'),null);
   view.root.querySelector('[data-roadmap-node="s"]').click();
   for(const state of ['completed','cancelled','superseded']) {
    data.stages[0].state=state;view.render();assert.equal(view.root.querySelector('[data-stage-goal-form]'),null);
-   assert.doesNotMatch(view.root.querySelector('[data-goal-id="g"]').textContent,/修订目标|创建有退避/);
+   assert.doesNotMatch(view.root.querySelector('[data-goal-id="g"]').textContent,/Revise goal|Create new attempt with backoff/);
   }
  }finally{view.close();dom.window.close();}
 });
@@ -596,14 +596,14 @@ test('Execution shows concrete blockers, recovery steps, slices and bounded back
  try{
   await view.open();await view.select('a');view.tab='Work';view.render();
   assert.match(view.root.textContent,/失效项：tests/);assert.match(view.root.textContent,/核对项目实际路径/);
-  assert.match(view.root.textContent,/历史时间片 #2 · 已暂停/);assert.match(view.root.textContent,/已有 checkpoint/);
-  assert.match(view.root.textContent,/1 条相关记忆/);assert.match(view.root.textContent,/本轮 6\/6/);
+  assert.match(view.root.textContent,/Historical slice #2 · Paused/);assert.match(view.root.textContent,/checkpoint \/ recovery context available/);
+  assert.match(view.root.textContent,/1 related memories/);assert.match(view.root.textContent,/This round 6\/6/);
   assert.match(view.root.textContent,/Analysis attempt limit reached/);
-  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='刷新已绑定来源').click();await tick();
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='Refresh bound sources').click();await tick();
   assert.equal(sent,'/v1/agents/a/sources/refresh');
-  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='重新排队分析').click();await tick();
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='Requeue analysis').click();await tick();
   assert.equal(sent,'/v1/agents/a/learning/c/commands');
-  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='检查分析队列').click();await tick();
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='Check analysis queue').click();await tick();
   assert.equal(sent,'/v1/agents/a/learning/schedule');
  }finally{view.close();dom.window.close();}
 });
@@ -616,10 +616,10 @@ test('Work package details show task binding source and recovery exhaustion',asy
  const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
  try{
   await view.open();await view.select('a');view.tab='Work';view.render();
-  assert.match(view.root.textContent,/已挂起，等待人工恢复/);
+  assert.match(view.root.textContent,/Suspended; waiting for manual recovery/);
   assert.doesNotMatch(view.root.textContent,/recovery_exhausted/);
-  assert.match(view.root.textContent,/绑定：推荐 · 需要浏览器截图/);
-  assert.match(view.root.textContent,/绑定：兜底 · 推荐服务不可用/);
+  assert.match(view.root.textContent,/Binding: recommended · 需要浏览器截图/);
+  assert.match(view.root.textContent,/Binding: fallback · 推荐服务不可用/);
  }finally{view.close();dom.window.close();}
 });
 
@@ -628,9 +628,9 @@ test('Work rationale remains text and stale blocker does not override a successf
  const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
  try{
   await view.open();await view.select('a');view.tab='Work';view.render();
-  assert.match(view.root.textContent,/编排依据：Verify before integration/);
-  const row=view.root.querySelector('[data-queue-id="w"]');assert.match(row.textContent,/Delivered work/);assert.match(row.textContent,/已验收/);
-  assert.doesNotMatch(view.root.textContent,/当前阻塞：failed/);
+  assert.match(view.root.textContent,/Orchestration rationale: Verify before integration/);
+  const row=view.root.querySelector('[data-queue-id="w"]');assert.match(row.textContent,/Delivered work/);assert.match(row.textContent,/Accepted/);
+  assert.doesNotMatch(view.root.textContent,/Current blocker: failed/);
  }finally{view.close();dom.window.close();}
 });
 
@@ -639,12 +639,12 @@ test('Queue scheduling warns on intervention and ignores manual checks while pla
  const calls=[];const {dom,view}=setup({json:async(path,options)=>{if(options?.body){calls.push(options.body);return data;}return path==='/v1/agents'?{agents:[data]}:data;}});
  try{
   await view.open();await view.select('a');view.tab='Work';view.render();
-  assert.match(view.root.textContent,/定时检查队列/);assert.match(view.root.textContent,/每次执行上限 1 小时/);
+  assert.match(view.root.textContent,/Scheduled queue checks/);assert.match(view.root.textContent,/up to 1 hour per run/);
   assert.match(view.root.querySelector('.agent-schedule-warning').textContent,/目标预算不足/);
-  let manual=[...document.querySelectorAll('button')].find(b=>b.textContent==='手动调度');manual.click();await tick();
+  let manual=[...document.querySelectorAll('button')].find(b=>b.textContent==='Schedule now');manual.click();await tick();
   assert.equal(calls[0].type,'wake');
   data.execution.scheduler={state:'planning'};view.render();
-  manual=[...document.querySelectorAll('button')].find(b=>b.textContent==='手动调度');assert.equal(manual.disabled,true);
+  manual=[...document.querySelectorAll('button')].find(b=>b.textContent==='Schedule now');assert.equal(manual.disabled,true);
   assert.equal(view.root.querySelector('.agent-schedule-warning'),null);
  }finally{view.close();dom.window.close();}
 });
@@ -665,7 +665,7 @@ test('Execution focuses two tabular queues, collapses reverse chronological hist
  try{
   await view.open();await view.select('a');view.tab='Work';view.render();
   const panels=[...view.root.querySelectorAll('.agent-queue-panel')];assert.equal(panels.length,2);
-  assert.deepEqual(panels.map(p=>p.querySelector('h3').textContent),['执行队列','分析队列']);
+  assert.deepEqual(panels.map(p=>p.querySelector('h3').textContent),['Execution queue','Analysis queue']);
   const ids=(panel,kind)=>[...panel.querySelectorAll(`[data-queue-table="${kind}"] [data-queue-id]`)].map(row=>row.dataset.queueId);
   assert.deepEqual(ids(panels[0],'current'),['active']);assert.deepEqual(ids(panels[1],'current'),['current']);
   assert.deepEqual(ids(panels[0],'history'),['failed','old']);assert.deepEqual(ids(panels[1],'history'),['latest','previous']);
@@ -688,7 +688,7 @@ test('Execution reassessment submits the exact work and agent revision',async()=
  const {dom,view}=setup({json:async(path,options)=>{if(options?.body)sent={path,body:options.body};return path==='/v1/agents'?{agents:[data]}:data;}});
  try{
   await view.open();await view.select('a');view.tab='Work';view.render();
-  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='重新评估恢复').click();await tick();
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='Re-evaluate recovery').click();await tick();
   assert.equal(sent.path,'/v1/agents/a/commands');assert.equal(sent.body.type,'recover');
   assert.equal(sent.body.expected_revision,data.revision);assert.equal(sent.body.payload.work_package_id,'blocked-work');
  }finally{view.close();dom.window.close();}
@@ -700,7 +700,7 @@ test('Goal work packages link to their session and show execution metrics',()=>{
   view.renderGoalWork(root,{work_packages:[{goal_id:'g',objective:'First',state:'running',session_id:'s/1',execution_seconds:75,actual_tokens:1234},
    {goal_id:'g',objective:'Pending',state:'pending'}]},{id:'g'});
   const table=root.querySelector('.agent-goal-work-table');
-  assert.deepEqual([...table.querySelectorAll('th')].map(x=>x.textContent),['工作包','状态','执行时长','消耗 tokens']);
+  assert.deepEqual([...table.querySelectorAll('th')].map(x=>x.textContent),['Work package','Status','Execution time','Tokens used']);
   const rows=table.tBodies[0].rows;
   assert.equal(rows[0].cells[0].querySelector('a'),null);
   assert.equal(rows[0].cells[1].querySelector('a').getAttribute('href'),'#/sessions/s%2F1');

@@ -176,6 +176,21 @@ def test_coordinator_resumes_existing_evaluation_without_retrying_settled_qualit
     assert store.snapshot(cycle["agent_id"])["learning"][0]["state"] == "running"
 
 
+def test_completed_with_unknown_finishes_learning_without_promoting_coverage_or_retry(tmp_path):
+    store, _, _, cycle, job = setup(tmp_path)
+    job.update(state='completed', settings={}, usage={}, error=None, error_details=[])
+    starts = []
+    background = SimpleNamespace(
+        trajectory=SimpleNamespace(get=lambda *args: {'state': 'completed'}),
+        semantic=SimpleNamespace(_load=lambda *args: job,
+            _public=lambda _: {'state': 'completed', 'completion_kind': 'limited', 'result_state': 'partial', 'retryable_work': 0},
+            start=lambda *args, **kwargs: starts.append(args)),
+    )
+    LearningCoordinator(store, background)._advance(store.snapshot(cycle['agent_id']), cycle)
+    assert cycle['state'] == 'completed' and cycle['coverage'] == 'partial'
+    assert 'unknown' in cycle['blocked_reason'] and not starts
+
+
 def test_daily_wait_does_not_exhaust_retries_and_resumes_automatically_next_day(tmp_path):
     store, clock, ledger, cycle, job = setup(tmp_path, budget=dict(daily_tokens=100))
     deny(store, ledger, job)

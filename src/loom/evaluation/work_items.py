@@ -3,7 +3,7 @@
 from loom.evaluation.framework import semantic_unknown_ids
 from loom.evaluation.rules import policy
 
-VERSION = 'evaluation-status.2'
+VERSION = 'evaluation-status.3'
 
 
 def settle(unit, issues, *, accepted=0, unknown=False):
@@ -18,6 +18,8 @@ def terminal(unit):
 
 
 def status(cp):
+    from loom.evaluation.gaps import gaps, retryable_unit
+
     graph = list(cp.get('units', {}).values())
     graph_scanned = cp.get('cursor', 0) >= cp.get('total_cards', len(cp.get('extraction', {}).get('cards', [])))
     memory = cp.get('memory', {})
@@ -27,21 +29,31 @@ def status(cp):
     issues = list(cp.get('conflicts', [])) + [e for u in memory.get('units', {}).values() for e in u.get('issues', [])]
     unknown = len(semantic_unknown_ids(cp))
     unknown += sum(r.get('rating') == 'unknown' for r in memory.get('records', {}).values() if r.get('publication_state') != 'stale')
-    quality = bool(issues or unknown or any(u.get('disposition') in {'abstained', 'quarantined', 'exhausted'} for u in units))
+    quarantine = bool(memory.get('quarantine')) if requested else False
+    quality = bool(issues or unknown or quarantine or any(u.get('disposition') in {'abstained', 'quarantined', 'exhausted'} for u in units))
+    projected_gaps = gaps(cp)
+    limited = (done and bool(projected_gaps) and not issues and not quarantine and not any(u.get('issues') for u in units)
+               and not any(u.get('disposition') in {'quarantined', 'exhausted'} for u in units)
+               and all(g['code'] == 'evidence.unknown' for g in projected_gaps))
     return dict(status_version=VERSION, execution_state='completed' if done else 'paused',
                 result_state='ready' if done and not quality else 'partial',
+                completion_kind='limited' if limited else 'complete' if done and not quality else 'needs_repair' if done else 'unfinished',
                 support_state='mixed' if quality else 'not_assessed',
                 pending_work=sum(not terminal(u) for u in units) + int(not graph_scanned)
                 + int(requested and not memory.get('execution_complete', memory.get('complete', False))),
-                retryable_work=sum(u.get('disposition') in {'abstained', 'quarantined', 'exhausted'} for u in units),
-                unknown_judgments=unknown)
+                retryable_work=sum(retryable_unit(u) for u in units),
+                unknown_judgments=unknown, gaps=projected_gaps)
 
 
 def retry_failed(cp):
     """An explicit user operation; ordinary Resume never resets settled failures."""
+    from loom.evaluation.gaps import retryable_unit
+
     for group in (cp.get('units', {}), cp.get('memory', {}).get('units', {})):
         for unit in group.values():
-            if unit.get('disposition') in {'abstained', 'quarantined', 'exhausted'}:
+            # Explicit callers may deliberately reassess unknowns; automatic
+            # scheduling relies on retryable_work and never retries them alone.
+            if retryable_unit(unit) or unit.get('disposition') == 'abstained' and not unit.get('issues'):
                 unit.setdefault('retry_history', []).append(dict(disposition=unit['disposition'], issues=unit.get('issues', [])))
                 unit.update(work_state='pending', complete=False, retry_requested=True)
                 if 'cards' in unit:

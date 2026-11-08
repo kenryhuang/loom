@@ -131,6 +131,14 @@ def messages_for(unit, mode):
             and any(m['stage_id'] == s['id'] for m in a['memberships'])]} for s in payload['stages']]
         payload['rejudge_stages'] = unit.get('rejudge_stages', [])
         payload['repair_targets'] = unit.get('repair_targets', [])
+        codes = {e.get('code') for e in unit.get('issues', []) if isinstance(e, dict)}
+        hints = []
+        if 'memory.anchor_undelivered' in codes:
+            hints.append('Use only handles in the current delivery; do not reuse handles from earlier requests.')
+        if 'memory.workflow_step_support' in codes:
+            hints.append('Use observed only when each step has its own recorded tool output; otherwise describe a proposed route or withdraw it.')
+        if hints:
+            payload['repair_hints'] = hints
         payload['actions'] = [{**a,
             'source_fields': {e['id'].rsplit('.', 1)[0]: e['field'] for e in payload['evidence'] if e['action_id'] == a['id']},
             'evidence': [{k: e[k] for k in ('id', 'text', 'basis', 'truncated')}

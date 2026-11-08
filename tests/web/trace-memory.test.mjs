@@ -82,6 +82,36 @@ test('history retry action sends an explicit retry_failed operation', async () =
   abort.abort(); dom.window.close();
 });
 
+test('completed memory with unknown judgments explains limitations without proposing retry', () => {
+  const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
+  const root = document.querySelector('main'), data = fixture();
+  data.memory = {status:'partial', execution_complete:true, contributions:[], facts:[], lessons:[], workflows:[], limitations:[],
+    coverage:{completed_windows:1,total_windows:1,evidence_chars:0,processed_actions:1,source_actions:1,
+      published_records:1,quarantined_records:0,stale_records:0,unknown_contributions:1,issues:[]}};
+  const view = new IncrementalGraphView(root); view.update(data); click(root, 'Memory');
+  assert.match(root.textContent,/Processing finished with evidence limitations/);
+  assert.doesNotMatch(root.textContent,/Use Retry failed items/);
+  dom.window.close();
+});
+
+test('evaluation displays unknown gap and does not offer a failed-item retry', async () => {
+  const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
+  const abort = new AbortController(), root = document.querySelector('main');
+  const job = {id:'limited', analysis_version:'goal_graph_v1', run_id:'run', model:'test', state:'completed',
+    execution_state:'completed', result_state:'partial', completion_kind:'limited', status_version:'evaluation-status.3',
+    retryable_work:0, settings:{max_calls:20}, usage:{calls:4,total_tokens:100},
+    gaps:[{code:'evidence.unknown',reason:'No recorded output',action:'inspect_evidence'}]};
+  const catalog = {jobs:[job], models:[{id:'test',label:'Test'}], default_model:'test', defaults:job.settings,
+    bounds:{max_calls:[1,100]}, analysis_versions:['goal_graph_v1'], default_analysis_version:'goal_graph_v1', run_ids:['run']};
+  const view = new EvaluationView(root,{api:{evaluations:async()=>catalog,evaluation:async()=>job},
+    sessionId:'s',analysisId:'a',signal:abort.signal});
+  await view.open(); await view.follow(job.id);
+  assert.match(root.textContent,/Processing complete with evidence limitations/);
+  assert.match(root.textContent,/No recorded output/);
+  assert.ok(![...root.querySelectorAll('button')].some(b=>b.textContent==='Retry failed items'));
+  abort.abort();dom.window.close();
+});
+
 test('completed memory still exposes explicitly withdrawn proposals and their reasons', () => {
   const dom = new JSDOM('<main></main>'); globalThis.document = dom.window.document;
   const root = document.querySelector('main'), data = fixture();

@@ -75,7 +75,8 @@ class LearningCoordinator:
             # Reconsider legacy next-window deferrals once when the structured
             # budget policy is first installed, without requiring manual Resume.
             migrate_budget = cycle.get("auto_resume") and not cycle.get("budget_policy_seen")
-            migrate_partial = cycle["state"] == "completed" and cycle.get("coverage") == "partial" and cycle.get("evaluation_id")
+            migrate_partial = (cycle["state"] == "completed" and cycle.get("coverage") == "partial"
+                               and cycle.get("evaluation_id") and cycle.get('completion_kind') != 'limited')
             if not action and (
                 agent["state"] != "enabled"
                 or cycle["state"] in TERMINAL
@@ -338,9 +339,13 @@ class LearningCoordinator:
                 )
         elif job["state"] in {"completed", "incomplete"}:
             public = self.background.semantic._public(job)
-            coverage = "partial" if job["state"] == "incomplete" or public.get("retryable_work") else "full"
+            coverage = "partial" if public.get('result_state') == 'partial' or job["state"] == "incomplete" or public.get("retryable_work") else "full"
             if coverage == "full":
                 cycle.update(state="completed", phase="feedback", coverage=coverage, blocked_reason=None)
+            elif public.get('completion_kind') == 'limited':
+                cycle.update(state="completed", phase="feedback", coverage="partial",
+                             completion_kind='limited',
+                             blocked_reason="Analysis finished with explicitly unknown judgments; source evidence is insufficient.")
             elif public.get("retryable_work"):
                 fingerprint = progress(job)
                 if cycle.get("last_retry_progress") == fingerprint:

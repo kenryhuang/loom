@@ -165,11 +165,28 @@ Memory 的失败记录反馈有独立大小限制和脱敏处理。
 能确定失败候选的来源 action 时，只重新交付相关 spans；无法确定时保留窗口证据，避免猜测来源。
 
 `execution_state` 描述队列是否处理结束，`result_state` 描述是否仍有缺口；unknown、隔离及未处理分别计数。
-完成但有缺口时旧 `state` 保守投影为 incomplete，新 UI 显示 **Retry failed items**；
+只有已校验的 unknown 时，`state` 为 completed、`completion_kind` 为 limited，
+`result_state` 仍为 partial；不自动重试缺少新证据的判断，也不把它计为已支持。
+存在可修复的已隔离候选时旧 `state` 保守投影为 incomplete，UI 显示 **Retry failed items**；
 预算/取消等导致有未完成工作时显示 **Resume**。所有候选被拒绝不会显示为 ready。
 Session 检索仅使用 published 记录；stale、quarantined、未验证 legacy 不进入执行期提示词。
 
-显式重评 unknown 通过 `rejudge_stages` 表达，不预先把已接受记录标为 stale。
+`gaps` 按单位和候选提供稳定标识、规则代码、原因和建议动作；graph 中缺失判断带来的
+`cards_pending` / `assessment_dependency` 与根因聚合展示。自动学习只对有实际可修复 issue
+的单位安排重试；仅有 unknown 的结果需要新证据或新评估，而不提供普通的失败项重试。历史 incomplete 的 unknown-only 记录在
+读取时投影为 completed/limited，不修改旧 checkpoint 或把 partial 覆盖提升为 full。
+
+Graph 首轮仍使用元数据。引用范围错误进入已准入的修复轮时，宿主可从同一窗口按失败 action
+补充最多三段、每段最多 400 字符的原始快照片段，受既有证据和请求预算约束。片段必须通过
+来源、cutoff、内容和脱敏校验，且仅可由所属 action 引用；无可证明的来源则不补证。
+超出请求预算时舍弃本次附加视图，不影响原始结果。Memory 定向修复保留当前投递句柄和
+已接受候选，并对引用与 observed workflow 缺口提供具体提示。SQLite checkpoint 写入只对
+带类型的 busy/locked 进行有限退避，耗尽后保留可恢复状态，不把模型调用重新执行当作重试写入。
+
+历史只读回放可运行 `python scripts/replay_eval_gaps.py --database runs/service/service.sqlite --session-id SESSION_ID`；
+它比较新旧待重试数量，不发模型调用或改写历史，也不声称校验了语义正确性。
+
+需要重评的 unknown 在 checkpoint 中通过 `rejudge_stages` 表达，不预先把已接受记录标为 stale。
 原判断在新候选通过完整校验之前继续有效；有效替代按窗口/stage 身份提交并保留旧判断历史，
 同一判断的旧失败候选进入 resolved 审计。新候选失败仍被隔离，但不会制造 `stages_pending`。
 只有依赖变化才使既有判断失效。旧重试策略错误失效的 unknown，可在来源、scope、依赖及

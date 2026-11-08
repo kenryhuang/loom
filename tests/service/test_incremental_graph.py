@@ -183,6 +183,53 @@ def test_incomplete_graph_job_reports_issue_detail_and_resume_hint(evaluation): 
     assert detail["details"]["limit"] == 600
 
 
+def test_checkpoint_save_retries_only_typed_sqlite_lock_without_replaying_model_call(evaluation, monkeypatch):  # noqa: F811
+    import sqlite3
+    from contextlib import contextmanager
+
+    _, _, manager, _, _, _ = evaluation
+    original = manager.store.transaction
+    attempts = []
+
+    @contextmanager
+    def temporarily_locked():
+        attempts.append(1)
+        if len(attempts) <= 2:
+            error = sqlite3.OperationalError('database is locked')
+            error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+            raise error
+        with original() as db:
+            yield db
+
+    monkeypatch.setattr(manager.store, 'transaction', temporarily_locked)
+    monkeypatch.setattr('loom.service.semantic.time.sleep', lambda _: None)
+    manager._save({'id': 'absent', 'session_id': 'session'})
+    assert len(attempts) == 3
+
+
+def test_unknown_only_finishes_with_limitations_without_hiding_partial_result(evaluation):  # noqa: F811
+    from loom.core import ok
+    from loom.llm import LlmResponse
+
+    class Uncertain(GraphJudge):
+        async def chat(self, *args, **kwargs):
+            response = await super().chat(*args, **kwargs)
+            value = json.loads(response.value.content)
+            for group in value['groups']:
+                for row in group['assessments']:
+                    row.update(status='unknown', contribution='unknown', necessity='unknown', purpose='Not established')
+            return ok(LlmResponse(content=json.dumps(value)))
+
+    _, _, manager, _, sid, aid = evaluation
+    manager.provider_factory = lambda _: Uncertain()
+    job = manager.start(sid, aid, dict(analysis_version='goal_graph_v1', run_id='r'))
+    result = wait_job(manager, sid, aid, job['id'])
+    assert result['state'] == 'completed' and result['execution_state'] == 'completed'
+    assert result['result_state'] == 'partial' and result['completion_kind'] == 'limited'
+    assert result['retryable_work'] == 0 and result['unknown_judgments'] > 0
+    assert any(gap['code'] == 'evidence.unknown' for gap in result['gaps'])
+
+
 def test_resume_revalidates_saved_graph_without_another_provider_request(evaluation):  # noqa: F811
     _, _, manager, _, sid, aid = evaluation
     judge = GraphJudge()

@@ -69,6 +69,8 @@ export class EvaluationView {
     this.root.classList.add("deep-evaluation");
     this.status = element("p", "notice", "Loading evaluator…");
     this.status.setAttribute("role", "status");
+    this.gapPanel = element('details', 'dashboard-panel');
+    this.gapPanel.hidden = true;
     this.form = element("form", "deep-controls");
     this.toolbar = element("div", "dashboard-toolbar deep-toolbar");
     this.historyPanel = element("section", "evaluation-history dashboard-panel");
@@ -88,7 +90,7 @@ export class EvaluationView {
     this.progress = element("section", "evaluation-progress dashboard-panel");
     this.progress.setAttribute("aria-label", "Evaluation progress");
     this.progress.hidden = true;
-    this.root.append(element('p', 'analysis-session-id', `Session: ${this.sessionId}`), this.form, this.status, this.progress, this.results);
+    this.root.append(element('p', 'analysis-session-id', `Session: ${this.sessionId}`), this.form, this.status, this.gapPanel, this.progress, this.results);
     try {
       const catalog = await this.api.evaluations(
         this.sessionId,
@@ -569,6 +571,15 @@ export class EvaluationView {
       this.matchScopeVersion();
       this.renderHistory();
       this.status.textContent = job.error || "";
+      if(job.completion_kind === 'limited') this.status.textContent = 'Processing complete with evidence limitations. Unknown judgments remain explicit; available records remain usable.';
+      this.gapPanel.replaceChildren();
+      this.gapPanel.hidden = !job.gaps?.length;
+      if(job.gaps?.length) {
+        this.gapPanel.append(element('summary', '', `Evidence and quality gaps · ${job.gaps.length}`));
+        const list=element('ul');
+        for(const gap of job.gaps)list.append(element('li','',`${gap.code}: ${gap.reason || 'See source evidence'} · ${gap.action}`));
+        this.gapPanel.append(list);
+      }
       if (job.error_details?.some(detail => detail.code === "request.timeout")) {
         this.status.textContent += " Increase Call timeout · seconds in Evaluation settings, then use Resume on this history record. Saved results are retained.";
       }

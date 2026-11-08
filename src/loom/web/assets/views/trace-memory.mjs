@@ -25,7 +25,9 @@ export function renderTraceMemory(view, root) {
   if (coverage.processed_actions != null) root.append(element('p', 'muted',
     `${coverage.processed_actions} / ${coverage.source_actions} actions processed · ${coverage.published_records} available records · ${coverage.quarantined_records} quarantined · ${coverage.stale_records} stale · ${coverage.unknown_contributions} unknown contributions`));
   if (memory.status !== 'complete') root.append(element('p', 'notice', memory.execution_complete
-    ? 'Processing finished with quality gaps. Available records remain usable; quarantined and stale records are excluded from session memory. Use Retry failed items on this history record.'
+    ? coverage.quarantined_records || coverage.issues?.length
+      ? 'Processing finished with quality gaps. Available records remain usable; quarantined and stale records are excluded from session memory. Use Retry failed items on this history record.'
+      : 'Processing finished with evidence limitations. Unknown judgments remain explicit; available records remain usable.'
     : 'Partial memory: saved records remain available. Resume the evaluation to finish remaining windows.'));
   const goals = new Map((view.data.goals || []).map(g => [g.id, g]));
   const stages = new Map((view.data.stages || []).map(s => [s.id, s]));

@@ -56,6 +56,93 @@ def context(cp, cards, cutoff):
     )
 
 
+def supplement_repair_evidence(cp, unit, card_map, judge_cards, registry, settings, source=None):
+    """Deliver bounded source evidence for this window, never future evidence."""
+    if unit.get('supplement_attempted') or not any(e.get('code') in {
+            'graph.evidence_scope', 'graph.relationship_evidence_scope'} for e in unit.get('feedback', [])):
+        return
+    unit['supplement_attempted'] = True
+    if settings.get('max_read_rounds', 0) <= 0:
+        return
+    from loom.evaluation.memory.evidence import sanitize
+
+    delivered = {ref for cid in unit['cards'] for ref in judge_cards[cid]['refs']}
+    extra, remaining = [], max(0, settings['max_evidence_chars'] - cp.get('read_chars', 0))
+    targets = {e.get('record_id') for e in unit.get('feedback', [])} & set(unit['cards'])
+    for cid in unit['cards']:
+        excerpts = list(card_map[cid].get('excerpts', []))
+        if source is not None and cid in targets:
+            from loom.evaluation.evidence_store import text_value
+
+            for capture in card_map[cid].get('captured', [])[:1]:
+                entry = registry.get(capture.get('ref'))
+                if not entry or entry['line'] > unit['cutoff']:
+                    continue
+                try:
+                    text = text_value(source.resolve(entry['ref']))[:400]
+                except (KeyError, ValueError, TypeError):
+                    continue
+                excerpts.insert(0, dict(ref=capture['ref'], text=text))
+        for excerpt in excerpts:
+            ref, text = excerpt.get('ref'), excerpt.get('text', '')
+            entry = registry.get(ref)
+            if not entry or ref in delivered or entry['line'] > unit['cutoff'] or not isinstance(text, str):
+                continue
+            # Redaction changes coordinates; never attach such a span as original evidence.
+            if sanitize(text) != text or not text.strip():
+                continue
+            text = text[:min(400, remaining)]
+            if not text:
+                break
+            pointer = dict(entry['ref'])
+            start = pointer.get('start') or 0
+            pointer.update(start=start, end=start + len(text))
+            new_ref = 'e' + identity(pointer)[:12]
+            registry[new_ref] = dict(id=new_ref, ref=pointer, line=entry['line'])
+            cp.setdefault('extra_evidence', {})[new_ref] = registry[new_ref]
+            extra.append(dict(id=new_ref, card_id=cid, text=text))
+            delivered.add(ref)
+            remaining -= len(text)
+            if len(extra) >= 3 or not remaining:
+                break
+        if len(extra) >= 3 or not remaining:
+            break
+    if extra:
+        unit['extra'] = extra
+        cp['read_chars'] = cp.get('read_chars', 0) + sum(len(e['text']) for e in extra)
+        unit['supplement_manifest'] = dict(source=cp['identity']['source'], cutoff=unit['cutoff'], refs=[e['id'] for e in extra],
+                                           owners={e['id']: e['card_id'] for e in extra})
+
+
+def repair_feedback(errors):
+    roots = [e for e in errors if e.get('code') not in {'graph.cards_pending', 'graph.assessment_dependency'}]
+    return roots or errors
+
+
+def validated_supplements(source, cp, unit, registry, cutoff):
+    from loom.evaluation.evidence_store import text_value
+    from loom.evaluation.memory.evidence import sanitize
+
+    manifest = unit.get('supplement_manifest') or {}
+    if manifest.get('source') != cp['identity']['source'] or manifest.get('cutoff') != cutoff:
+        return []
+    result = []
+    for row in unit.get('extra', []):
+        if (not isinstance(row, dict) or row.get('id') not in manifest.get('refs', []) or row.get('card_id') not in unit['cards']
+                or manifest.get('owners', {}).get(row['id']) != row['card_id']):
+            continue
+        entry = registry.get(row['id'])
+        if not entry or entry['line'] > cutoff or not isinstance(row.get('text'), str):
+            continue
+        try:
+            actual = text_value(source.resolve(entry['ref']))
+        except (KeyError, ValueError, TypeError):
+            continue
+        if actual == row['text'] and sanitize(actual) == actual:
+            result.append(row)
+    return result
+
+
 def upgrade_budget_identity(checkpoint, saved_settings):
     """Recognize the old exact settings digest before separating capacity limits.
 
@@ -164,6 +251,11 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
             remaining_memory = (len(cards) + 7) // 8 + 1 if cp['memory_requested'] and not cp.get('memory') else 0
             if not reserve_repair(cp, candidate, candidate['feedback'], settings, remaining_work=remaining_memory):
                 continue
+            failed_cards = {e.get('record_id') for e in candidate['feedback'] if e.get('record_type') == 'assessments'}
+            candidate['rejudge_cards'] = sorted(set(candidate.get('rejudge_cards', [])) | {
+                cid for cid in failed_cards & set(candidate['cards'])
+                if cp['assessments'].get(cid, {}).get('status') in {None, 'unknown', 'needs_evidence'}})
+            supplement_repair_evidence(cp, candidate, card_map, judge_cards, registry, settings, source)
             candidate.update(work_state='pending', complete=False)
             pending.append(candidate)
         if not pending:
@@ -242,6 +334,7 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         structure_only = len(accepted_ids) == len(subset) and structure_pending(cp, unit) and not any(
             e.get("record_type") not in {"structure", "goals", "stages", "attributions"} for e in unit.get("feedback", [])
         )
+        extra = validated_supplements(source, cp, unit, registry, cutoff)
         payload = dict(
             batch_id=unit["id"],
             base_graph_revision=cp["graph_revision"],
@@ -249,9 +342,9 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
             **known_state,
             input_version=INPUT_VERSION,
             cards=[judge_cards[c["id"]] for c in subset],
-            extra_evidence=[],
+            extra_evidence=extra,
             review_control=dict(mode="structure_only" if structure_only else "metadata_only", remaining_reads=0),
-            feedback=feedback_metadata(unit.get("feedback", [])),
+            feedback=feedback_metadata(repair_feedback(unit.get("feedback", []))),
             frontier=frontier,
             prior_actions=prior_actions,
             accepted_card_ids=accepted_ids,
@@ -265,12 +358,21 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
             payload["contract"] = compact_contract(cp["mode"], metadata_only=True, structure_only=structure_only)
         messages = [
             LlmMessage(
-                role="system", content=SYSTEM + ("\nNo more evidence reads; conclude with supported findings or explicit unknown." if not allow_reads else "")
+                role="system", content=SYSTEM + ("\nUse any extra_evidence only for its supplied card; its IDs are valid refs."
+                    if extra else "") + ("\nNo more evidence reads; conclude with supported findings or explicit unknown."
+                                                     if not allow_reads else "")
             ),
             LlmMessage(role="user", content=serialized(payload)),
         ]
         profile = request_profile(messages, payload, cp["mode"], response_protocol)
         chars = profile["total_chars"]
+        if extra and chars > min(settings['max_prompt_chars'], REQUEST_CHARS):
+            # Optional evidence must not turn an otherwise runnable repair into
+            # a request-size failure. Keep the saved supplement for a later run.
+            payload['extra_evidence'] = []
+            messages[1] = LlmMessage(role='user', content=serialized(payload))
+            profile = request_profile(messages, payload, cp['mode'], response_protocol)
+            chars = profile['total_chars']
         if chars > min(settings["max_prompt_chars"], REQUEST_CHARS) and unit["id"] not in cp["units"] and len(subset) > 1:
             half = subset[: max(1, len(subset) // 2)]
             unit.update(id="batch:" + identity([c["id"] for c in half]), cards=[c["id"] for c in half], cutoff=max(c["end_line"] for c in half))
@@ -382,7 +484,7 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         )
         await emit(dict(type="llm.completed", **meta, response=answer))
         await save()
-        delivered_ids = {e for c in payload["cards"] for e in c["refs"]} | set(boundary)
+        delivered_ids = {e for c in payload["cards"] for e in c["refs"]} | set(boundary) | {e['id'] for e in payload['extra_evidence']}
         cp["responses"][-1]["delivered_ref_ids"] = sorted(delivered_ids)
         cp["responses"][-1]["allowed_record_types"] = list(response_protocol.schema["properties"]) if structure_only else None
         visible_ids = known_ids | {r['id'] for r in known_state.get('older_goal_index', [])}
@@ -395,7 +497,8 @@ async def review(source, facts, provider, *, run_id, checkpoint, save_checkpoint
         # Dedicated structure repair explicitly forbids rejudging accepted cards.
         rejected, _ = commit_updates(cp, normalized, batch_id=unit["id"], cards=cards, delivered=delivered,
                                      cutoff=cutoff, target_ids=set(unit["cards"]),
-                                     allowed_fields=response_protocol.schema["properties"] if structure_only else None, visible_ids=visible_ids)
+                                     allowed_fields=response_protocol.schema["properties"] if structure_only else None, visible_ids=visible_ids,
+                                     evidence_owners={e['id']: e['card_id'] for e in payload['extra_evidence']})
         errors += rejected
         cp["responses"][-1]["validation_errors"] = deepcopy(errors)
         cp["responses"][-1]["validation_version"] = VALIDATION_VERSION
