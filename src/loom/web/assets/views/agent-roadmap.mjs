@@ -132,22 +132,33 @@ export function renderRoadmaps(root,d,view) {
     const current=stages.find(s=>s.id===state?.stage_id) || stages.at(-1);
     const roadmap=(d.roadmaps || []).find(r=>r.id===state?.roadmap_id);
     const enabled=objective.stage_planning?.mode==='autonomous';
+    const statusName=d.planning_engine===2 && state?.state==='waiting' && ['MODEL_PROTOCOL','CONTRACT_INVALID'].includes(state.blocker?.code)
+      ? 'Planning needs correction' : name(state?.state);
     const block=panel(root,'Delivery roadmap',true);block.classList.add('agent-roadmap');block.dataset.objectiveId=objective.id || '';
-    const header=block.querySelector('header');header.append(badge(enabled?name(state?.state):'Auto-progress not enabled',state?.state));
+    const header=block.querySelector('header');header.append(badge(enabled?statusName:'Auto-progress not enabled',state?.state));
     if(roadmap?.revision || roadmap?.created_at) header.append(element('small','muted',`${roadmap.revision?'route v'+roadmap.revision:''}${roadmap.created_at?' · '+time(roadmap.created_at):''}`));
     block.append(element('h4','agent-roadmap-vision',objective.desired_outcome));
     if(roadmap?.baseline) block.append(element('p','agent-roadmap-baseline',`Current baseline · ${roadmap.baseline}`));
     if(!enabled) {
-      block.append(element('p','muted','Automatic stage planning is off. Once enabled, it verifies the current state and generates stage goals within the existing scope and budget, then splits them into execution.'));
+      block.append(element('p','muted',d.planning_engine===2
+        ? 'Autonomous progression is off. Scheduled responsibilities and explicit triggers can still publish complete stages; each plan includes its goals, work packages and verification checks.'
+        : 'Automatic stage planning is off. Once enabled, it verifies the current state and generates stage goals within the existing scope and budget, then splits them into execution.'));
       block.append(element('p','muted','Long-term objectives have no cumulative token cap; all tasks share the Agent\'s daily total.'));
       if(objective.id) block.append(button('Enable stage planning for this objective',()=>view.act(()=>view.api.post(d.id,`objectives/${encodeURIComponent(objective.id)}/planning/commands`,
         {command_id:crypto.randomUUID(),expected_revision:d.revision,type:'enable'}))));
     }
     if(state && ['blocked','awaiting_input','deferred','paused','waiting'].includes(state.state))
-      block.append(element('p','notice',`${name(state.state)}: ${state.reason || 'Waiting for the next planning update'}`));
-    if(!current) block.append(element('p','empty-state',enabled?'Enabled; waiting to verify the current state and run the first planning round.':'No stage route yet; existing standalone goals are kept below.'));
+      block.append(element('p','notice',`${statusName}: ${state.reason || 'Waiting for the next planning update'}`));
+    if(state?.revision_requested) block.append(element('p','notice','A plan revision is pending. The previous contract remains in history; new work starts after the replacement plan passes validation.'));
+    if(state?.blocker?.details?.issues?.length) for(const issue of state.blocker.details.issues) {
+      const detail=`${issue.path}: ${issue.message}`;
+      if(!state.reason?.includes(detail)) block.append(element('p','muted',detail));
+    }
+    if(!current) block.append(element('p','empty-state',enabled
+      ? (d.planning_engine===2?'Preparing the first complete stage. If project facts are missing, a discovery stage will appear here.':'Enabled; waiting to verify the current state and run the first planning round.')
+      :'No stage route yet; historical goals are kept below.'));
     const nodes=[...stages.filter(s=>s.state==='completed' && s.id!==current?.id).map(s=>({id:s.id,title:s.title,state:s.state,tag:'Delivered',stage:s})),
-      ...(current?[{id:current.id,title:current.title,state:current.state,tag:terminal.has(current.state)?'Latest stage':'Current stage',stage:current}]:[]),
+      ...(current?[{id:current.id,title:current.title,state:current.state,tag:terminal.has(current.state)?'Latest stage':current.kind==='discovery'?'Discovery stage':'Current stage',stage:current}]:[]),
       ...(roadmap?.future || []).map((f,i)=>({id:`future:${roadmap.id}:${f.key || i}`,title:f.title,tag:'Tentative direction',future:f,state:'tentative'}))];
     // Replaced/cancelled stages remain inspectable in history, not on the active route.
     const history=stages.filter(s=>!nodes.some(n=>n.id===s.id));

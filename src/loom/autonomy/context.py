@@ -146,6 +146,7 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
         roadmap_id=(goal or {}).get('roadmap_id'),
         stage_contract=_stage_contract(stage, goal),
         work_package_id=work["id"] if work else None,
+        compiled_inputs=(binding or {}).get("input_bindings", []),
         guidance=[dict(id=e["id"], text=e["text"], source="human", scope=e["scope"]) for e in entries],
         methods=methods,
         memory=memory,

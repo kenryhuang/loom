@@ -35,6 +35,15 @@ def changed(store, db, stage, state):
 
 def add(facade, aid, sid, body):
     strict(body, {"command_id", "expected_revision", "goal"})
+    with facade.store.sessions.read() as db:
+        agent = facade.store.get(db, "agents", aid)
+        stage = facade.store.get(db, "agent_stages", sid, aid) if agent.get("planning_engine") == 2 else None
+    if stage is not None:
+        from loom.autonomy.plan_commands import request_revision
+
+        goal = strict(body.get("goal", {}), {"objective", "acceptance"})
+        return request_revision(facade, aid, stage["objective_id"], dict(command_id=body["command_id"],
+            expected_revision=body["expected_revision"], reason="Add requested Goal: " + goal.get("objective", "")), stage_id=sid, addition=goal)
     request = dict(agent_id=aid, stage_id=sid, type="stage_goal", **body)
     store = facade.store
     with facade.service.lock, store.sessions.transaction() as db:

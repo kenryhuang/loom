@@ -23,6 +23,9 @@ class AgentSupervisor:
         from loom.autonomy.scheduling import QueueScheduler
 
         self.scheduler = QueueScheduler(self)
+        from loom.autonomy.planning import ObjectiveCoordinator
+
+        self.unified = ObjectiveCoordinator(self)
         self.timer_thread = None
         self.schedule_threads = {}
         self.stopped = threading.Event()
@@ -51,7 +54,8 @@ class AgentSupervisor:
             for row in db.execute("SELECT body FROM agent_runs").fetchall():
                 run = json.loads(row[0])
                 if run["state"] == "planning":
-                    run.update(state="recoverable" if run.get("kind") in {"stage_plan", "stage_review"} else "superseded", reason="Service restart")
+                    recoverable = run.get("kind") in {"stage_plan", "stage_review", "unified_plan"}
+                    run.update(state="recoverable" if recoverable else "superseded", reason="Service restart")
                     store.put(db, "agent_runs", run)
 
     def start(self):
@@ -150,6 +154,8 @@ class AgentSupervisor:
         return self.scheduler.advance(aid, manual=True)
 
     def _plan(self, agent):
+        if agent.get("planning_engine") == 2:
+            return  # Complete compiled stages already contain every work package.
         aid = agent["id"]
         with self.store.sessions.transaction() as db:
             current = self.store.get(db, "agents", aid)

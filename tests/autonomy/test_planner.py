@@ -109,3 +109,46 @@ def test_correction_cannot_bypass_shared_daily_budget(agent_service, monkeypatch
     with pytest.raises(Exception, match="daily token budget exhausted"):
         facade.supervisor.planner.propose(agent, goal, {})
     assert len(provider.payloads) == 1
+
+
+def test_read_only_planning_corrects_unavailable_tools_before_committing(agent_service, monkeypatch):
+    bad = {"work_packages": [{**PROPOSAL["work_packages"][0], "required_tools": ["shell_execute"]}]}
+    good = {"work_packages": [{**PROPOSAL["work_packages"][0], "required_tools": ["list_directory", "read_file"]}]}
+    facade, agent, goal, provider = configure(agent_service, monkeypatch, [reply(json.dumps(bad)), reply(json.dumps(good))])
+    goal["read_only"] = True
+    with facade.store.sessions.transaction() as db:
+        facade.store.put(db, "agent_goals", goal)
+    facade.supervisor._plan(agent)
+    work = facade.snapshot(agent["id"])["work_packages"][0]
+    assert work["required_tools"] == ["list_directory", "read_file"]
+    environment = provider.payloads[0]["execution_environment"]
+    assert environment["read_only"]
+    assert {"list_directory", "read_file", "finish"} <= set(environment["available_tools"])
+    assert not {"shell_execute", "process_execute", "write_file", "edit_file"} & set(environment["available_tools"])
+    assert "shell_execute" in provider.payloads[1]["repair"]["validation_error"]
+    facade.supervisor.dispatcher.dispatch(agent["id"], work["id"])
+    assert facade.snapshot(agent["id"])["work_packages"][0]["session_id"]
+    assert facade.snapshot(agent["id"])["budget"][0]["calls"] == 2
+
+
+def test_read_only_planning_rejects_repeated_capability_conflict_without_work_packages(agent_service, monkeypatch):
+    bad = {"work_packages": [{**PROPOSAL["work_packages"][0], "required_tools": ["shell_execute"]}]}
+    facade, agent, goal, provider = configure(agent_service, monkeypatch, [reply(json.dumps(bad))] * 2)
+    goal["read_only"] = True
+    with facade.store.sessions.transaction() as db:
+        facade.store.put(db, "agent_goals", goal)
+    with pytest.raises(ServiceError, match="unavailable_tools"):
+        facade.supervisor._plan(agent)
+    state = facade.snapshot(agent["id"])
+    assert state["work_packages"] == [] and state["sessions"] == []
+    assert len(provider.payloads) == 2
+
+
+def test_custom_planner_cannot_bypass_read_only_tool_contract(agent_service):
+    _, facade, aid, _ = agent_service
+    goal = facade.store.add_goal(aid, "goal", goals()[0])
+    goal["read_only"] = True
+    facade.supervisor.planner.provider = lambda *_: {"work_packages": [
+        {**PROPOSAL["work_packages"][0], "required_tools": ["shell_execute"]}]}
+    with pytest.raises(ServiceError, match="Read-only work cannot use: shell_execute"):
+        facade.supervisor.planner.propose(facade.snapshot(aid), goal, {})

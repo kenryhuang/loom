@@ -21,6 +21,7 @@
 
 ## Plan 与执行控制
 
+- [2026-11-08-unified-agent-planning.zh-CN.md](2026-11-08-unified-agent-planning.zh-CN.md) — 自主 Agent 统一规划链路与架构（已实现，新 Agent 默认启用）：调研纳入 Stage、计划编译、统一修订与显式迁移
 - [2026-07-31-plan-execute-loop-design.md](2026-07-31-plan-execute-loop-design.md) — Plan & Execute 循环设计
 - [2026-07-31-unified-task-command-design.md](2026-07-31-unified-task-command-design.md) — 统一 task 命令设计
 - [2026-08-01-llm-driven-plan-checkpoints-design.md](2026-08-01-llm-driven-plan-checkpoints-design.md) — LLM 驱动的 plan 检查点

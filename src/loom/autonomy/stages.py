@@ -126,6 +126,16 @@ def role_signature(role):
 
 
 def runnable(store, db, agent, goal):
+    if goal.get("engine_version") == 2:
+        objective = next((o for o in agent["role"]["long_term_objectives"] if o["id"] == goal["long_term_objective_id"]), None)
+        if not objective or agent.get("planning_engine") != 2:
+            return False
+        state = planning_state(store, db, agent, objective)
+        stage = store.get(db, "agent_stages", goal["stage_id"], agent["id"])
+        return (not state.get("manual_pause") and not state.get("revision_requested")
+                and state.get("state") not in {"awaiting_input", "cancelled", "completed", "paused"}
+                and state.get("stage_id") == stage["id"] and stage["state"] == "active"
+                and goal["id"] in stage["goal_ids"] and goal.get("plan_id") == stage.get("plan_id"))
     if not goal.get("stage_id") and not goal.get("stage_discovery"):
         return True
     objective = next((o for o in agent["role"]["long_term_objectives"] if o["id"] == goal["long_term_objective_id"]), None)
@@ -189,6 +199,8 @@ class StageCoordinator:
         """No model calls: reconcile structural facts before queue recovery/dispatch."""
         with self.store.sessions.transaction() as db:
             agent = self.store.get(db, "agents", aid)
+            if agent.get("planning_engine") == 2:
+                return
             if agent["state"] != "enabled" or agent.get("planner_lease"):
                 return
             for state in self.store.rows(db, "agent_objective_planning", aid):
@@ -257,6 +269,8 @@ class StageCoordinator:
             if not activate(self.store, db, aid):
                 return
         snapshot = self.store.snapshot(aid)
+        if snapshot.get("planning_engine") == 2:
+            return
         served = {s["objective_id"]: s.get("last_planned_at", "") for s in snapshot["objective_planning"]}
         for objective in sorted(snapshot["role"]["long_term_objectives"], key=lambda o: served.get(o["id"], "")):
             if stage_enabled(objective) and self._advance(aid, objective["id"]):

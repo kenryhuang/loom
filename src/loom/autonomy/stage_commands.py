@@ -64,6 +64,17 @@ def control_goals(store, db, aid, goal_ids, kind, cid):
 def command(facade, aid, identifier, body, *, stage_command=False):
     strict(body, {"command_id", "expected_revision", "type", "reason", "question_id", "question_revision", "answer", "payload"})
     store, service = facade.store, facade.service
+    with store.sessions.read() as db:
+        agent = store.get(db, "agents", aid)
+        if agent.get("planning_engine") == 2 and body.get("type") in {"replan", "revise"}:
+            stage = store.get(db, "agent_stages", identifier, aid) if stage_command else None
+            oid = stage["objective_id"] if stage else identifier
+        else:
+            oid = None
+    if oid is not None:
+        from loom.autonomy.plan_commands import request_revision
+
+        return request_revision(facade, aid, oid, body, stage_id=identifier if stage_command else None)
     request = dict(agent_id=aid, identifier=identifier, stage_command=stage_command, **body)
     with service.lock:
         with store.sessions.transaction() as db:
@@ -169,6 +180,10 @@ def command(facade, aid, identifier, body, *, stage_command=False):
             state["revision"] += 1
             store.put(db, "agent_objective_planning", state)
             agent.update(generation=agent["generation"] + 1, next_wake_at=store.now(), planner_lease=None)
+            if agent.get("planning_engine") == 2:
+                from loom.autonomy.planning import wake
+
+                wake(store, agent)
             store.put(db, "agents", agent)
             store.event(db, aid, "stage.command", dict(type=body["type"], objective_id=oid, stage_id=stage and stage["id"]))
             result = store.receipt(db, body["command_id"], request, state)

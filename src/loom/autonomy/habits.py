@@ -25,13 +25,18 @@ def configure(store, aid, body):
             raise ServiceError("Adopt the preference and configure objective iteration before scheduling a check", 409)
         entry.update(habit=dict(objective_id=objective["id"], every_seconds=every), revision=entry["revision"] + 1)
         store.put(db, "agent_profile", entry)
+        if agent.get("planning_engine") == 2:
+            from loom.autonomy.planning import wake
+
+            wake(store, agent)
+            store.put(db, "agents", agent)
         return store.receipt(db, body["command_id"], request, entry)
 
 
 def materialize(store, aid):
     with store.sessions.transaction() as db:
         agent = store.get(db, "agents", aid)
-        if agent["state"] != "enabled":
+        if agent["state"] != "enabled" or agent.get("planning_engine") == 2:
             return
         from loom.autonomy.profile import effective
 

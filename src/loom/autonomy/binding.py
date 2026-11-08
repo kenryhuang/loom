@@ -136,10 +136,8 @@ def ensure_required_tools(service, payload, required):
     Actual bindings, including resource restrictions and registered external
     tools, are authoritative. Never turn a read-only resource into a writer.
     """
-    from loom.service.contracts import validate_create
-    from loom.tasks.assembly import TaskAssembly, normalize_task_spec
+    from loom.tasks.assembly import normalize_task_spec
     from loom.tasks.recovery import TOOL_COLLECTIONS
-    from loom.tasks.request import TaskRequest
 
     payload = deepcopy(payload)
     spec = normalize_task_spec(payload.get("task_spec"), workspace=payload.get("workspace"),
@@ -148,6 +146,27 @@ def ensure_required_tools(service, payload, required):
     additions = sorted({TOOL_COLLECTIONS[t] for t in required if t in TOOL_COLLECTIONS} - set(collections))
     collections.extend(additions)
     payload["task_spec"] = spec
+    validated, available = validated_tool_ids(service, payload)
+    missing = set(required) - available
+    if missing:
+        raise ServiceError("Work contract requires unavailable tools: " + ", ".join(sorted(missing))
+                           + "; check registered bindings and workspace access before dispatch", 409, code="EXECUTION_CONTRACT")
+    payload["task_spec"] = validated["task_spec"]
+    return payload, additions
+
+
+def validated_tool_ids(service, payload):
+    """Resolve actual bindings consistently for planning and dispatch."""
+    validated, assembly = validated_assembly(service, payload)
+    return validated, assembly.available_tool_ids()
+
+
+def validated_assembly(service, payload):
+    """Assemble without opening a Session or granting additional permissions."""
+    from loom.service.contracts import validate_create
+    from loom.tasks.assembly import TaskAssembly
+    from loom.tasks.request import TaskRequest
+
     registry = service.plugin_registry_factory() if service.plugin_registry_factory else None
     validated = validate_create(payload, plugin_registry=registry,
                                 external_bindings=service.store.external_tools.resolve(payload.get("external_tool_ids", [])))
@@ -155,9 +174,4 @@ def ensure_required_tools(service, payload, required):
         task_spec=validated["task_spec"], metadata={**{k: validated[k] for k in ("knowledge_base_ids", "external_tool_bindings")},
                                                     "memory_database": str(service.store.path)}),
         registry=registry)
-    missing = set(required) - assembly.available_tool_ids()
-    if missing:
-        raise ServiceError("Work contract requires unavailable tools: " + ", ".join(sorted(missing))
-                           + "; check registered bindings and workspace access before dispatch", 409, code="EXECUTION_CONTRACT")
-    payload["task_spec"] = validated["task_spec"]
-    return payload, additions
+    return validated, assembly

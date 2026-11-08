@@ -9,7 +9,7 @@ from loom.autonomy.store import digest
 def materialize(store, aid):
     with store.sessions.transaction() as db:
         agent = store.get(db, "agents", aid)
-        if agent["state"] != "enabled":
+        if agent["state"] != "enabled" or agent.get("planning_engine") == 2:
             return
         goals = store.rows(db, "agent_goals", aid)
         elapsed = max(0, (store.clock() - datetime.fromisoformat(agent["created_at"])).total_seconds())

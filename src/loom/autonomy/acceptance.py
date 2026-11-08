@@ -65,7 +65,12 @@ def sync_objectives(agent, previous=None):
 
 
 def objective_view(agent, objective):
-    return dict(objective, acceptance_criteria=agent.get("objective_contracts", {}).get(objective["id"], {}).get("criteria", []))
+    value = dict(objective, acceptance_criteria=agent.get("objective_contracts", {}).get(objective["id"], {}).get("criteria", []))
+    if agent.get("planning_engine") == 2:
+        from loom.autonomy.contracts import stage_policy
+
+        value.setdefault("stage_planning", stage_policy({}))
+    return value
 
 
 def contract_key(items):

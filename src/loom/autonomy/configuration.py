@@ -69,6 +69,16 @@ def revise(store, aid, cid, revision, section, changes):
 
 def busy(store, db, agent):
     aid = agent['id']
+    if agent.get('planning_engine') == 2:
+        # A stopped, fully accounted run can be replaced by a compiled revision.
+        # Background learning retains its own pinned inputs and is not a gate.
+        return bool(agent.get('planner_lease') or db.execute(
+            "SELECT 1 FROM sessions s JOIN agent_sessions l ON s.id=l.session_id "
+            "WHERE l.agent_id=? AND l.taken_over=0 AND (json_extract(s.body,'$.task.state') IN ('running','queued','pausing') "
+            "OR json_extract(s.body,'$.workspace_blocked')=1 OR json_extract(s.body,'$.input_request.state')='pending' "
+            "OR EXISTS (SELECT 1 FROM operations o WHERE o.session_id=s.id AND json_extract(o.body,'$.status')='started' "
+            "AND json_extract(o.body,'$.effect_kind')='side_effecting')) LIMIT 1", (aid,),
+        ).fetchone())
     if agent.get('planner_lease') or db.execute(
         "SELECT 1 FROM agent_budget_calls WHERE agent_id=? AND state='reserved' LIMIT 1", (aid,),
     ).fetchone():
@@ -122,6 +132,14 @@ def activate(store, db, aid):
             store.put(db, 'agent_work_packages', work)
     for stage in store.rows(db, 'agent_stages', aid):
         if stage.get('role_signature') == previous_signature and stage['state'] not in {'completed', 'cancelled', 'superseded'}:
+            if agent.get('planning_engine') == 2 and previous_signature != role_signature(role):
+                from loom.autonomy.stages import planning_state
+
+                objective = next(o for o in role['long_term_objectives'] if o['id'] == stage['objective_id'])
+                state = planning_state(store, db, agent, objective)
+                state.update(revision_requested=True, last_input=None, next_review_at='', revision=state['revision'] + 1)
+                store.put(db, 'agent_objective_planning', state)
+                continue
             stage['role_signature'] = role_signature(role)
             stage['revision'] += 1
             store.put(db, 'agent_stages', stage)

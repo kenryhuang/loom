@@ -85,6 +85,11 @@ def record_session_state(db, state):
     if row:
         agent = json.loads(row[0])
         agent["next_wake_at"] = ""
+        if binding.get("engine_version") == 2:
+            from loom.autonomy.contracts import scheduling_policy
+
+            if scheduling_policy(agent["role"])["enabled"]:
+                agent["next_schedule_at"] = ""
         db.execute("UPDATE agents SET body=? WHERE id=?", (canonical(agent), aid))
     goalrow = db.execute("SELECT body FROM agent_goals WHERE id=?", (binding["goal_id"],)).fetchone()
     if goalrow:

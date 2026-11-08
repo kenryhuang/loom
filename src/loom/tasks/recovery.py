@@ -5,6 +5,7 @@ from copy import deepcopy
 from loom.tasks.workspace_probe import digest
 
 TOOL_COLLECTIONS = {
+    'list_directory': 'filesystem',
     'read_file': 'filesystem', 'write_file': 'filesystem', 'edit_file': 'filesystem',
     'shell_execute': 'shell', 'process_execute': 'shell', 'browser_capture': 'browser',
     'fetch_url': 'web_research', 'create_report': 'document_outputs', 'finish': 'task_control',

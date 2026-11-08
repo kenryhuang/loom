@@ -23,6 +23,30 @@ from loom.tasks.request import TaskRequest
 def make_task_tools(request: TaskRequest) -> dict[str, Any]:
     root = (request.workspace or Path.cwd()).resolve()
 
+    async def list_directory(input_value: Any, _options: Mapping[str, Any] | None = None) -> Result:
+        data = _tool_input(input_value)
+        resolved = _resolve_workspace_path(root, data.get("path", "."))
+        if not resolved.ok:
+            return resolved
+        offset = data.get("offset", 0)
+        limit = data.get("limit", 200)
+        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 1000:
+            return err(make_loom_error("VALIDATION_FAILED", "offset must be nonnegative and limit must be between 1 and 1000", retryable=False))
+
+        def listing():
+            paths = sorted(resolved.value.iterdir(), key=lambda p: p.name)
+            entries = [{"path": str(p.relative_to(root)),
+                        "kind": "symlink" if p.is_symlink() else "directory" if p.is_dir() else "file" if p.is_file() else "other"}
+                       for p in paths[offset:offset + limit]]
+            return dict(path=_relative_to_root(root, resolved.value), entries=entries,
+                        next_offset=offset + limit if offset + limit < len(paths) else None)
+
+        try:
+            value = await asyncio.to_thread(listing)
+        except OSError as exc:
+            return err(make_loom_error("TOOL_FAILED", f"Failed to list directory: {exc}", retryable=False))
+        return ok(Observation(new_trace_id(), "list_directory", value, now_iso()))
+
     async def read_file(input_value: Any, _options: Mapping[str, Any] | None = None) -> Result:
         data = _tool_input(input_value)
         resolved = _resolve_workspace_path(root, data.get("path"))
@@ -303,6 +327,7 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
         )
 
     return {
+        "list_directory": list_directory,
         "read_file": read_file,
         "edit_file": edit_file,
         "write_file": write_file,

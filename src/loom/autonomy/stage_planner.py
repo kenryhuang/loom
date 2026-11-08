@@ -193,6 +193,17 @@ def validate_ref(ref):
         raise ServiceError("criterion_revision must be a positive integer", code="ACCEPTANCE_REFERENCE")
 
 
+def validate_evidence_refs(refs, available, path):
+    unknown = sorted(set(refs) - available)
+    if unknown:
+        message = (f"Stage decision cites unavailable evidence. Unknown evidence IDs: {unknown!r}. Allowed evidence IDs: {sorted(available)!r}. "
+                   "Copy exact evidence[].id values; paths, route IDs and field names are not evidence IDs. "
+                   "Use [] if none apply; discovery planning does not require passed delivery evidence.")
+        error = ServiceError(message, code="ACCEPTANCE_REFERENCE")
+        error.details = dict(issues=[dict(path=path, message=message)], unknown_refs=unknown, available_refs=sorted(available))
+        raise error
+
+
 def validate(value, payload):
     """Semantic input checks supplement the provider's JSON schema validation."""
     strict(value, SCHEMA["properties"])
@@ -202,11 +213,10 @@ def validate(value, payload):
     text(value.get("reason"), "reason", max_length=4000)
     refs = strings(value.get("source_refs", []), "source_refs")
     available = {e["id"] for e in payload["evidence"]}
-    if not set(refs) <= available:
-        raise ServiceError("Stage decision cites unavailable evidence")
+    validate_evidence_refs(refs, available, "/source_refs")
     policy = payload["objective"]["stage_planning"]
     if action == "propose_stage":
-        if not refs or not any(e["id"] in refs and e["kind"] == "delivery" for e in payload["evidence"]):
+        if payload.get("planning_engine") != 2 and (not refs or not any(e["id"] in refs and e["kind"] == "delivery" for e in payload["evidence"])):
             raise ServiceError("Stage needs recorded baseline delivery evidence")
         text(value.get("baseline"), "baseline", max_length=4000)
         stage = strict(value.get("stage"), STAGE["properties"])

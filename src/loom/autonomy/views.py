@@ -5,6 +5,7 @@ import json
 from loom.service.contracts import ServiceError
 
 AGENT_FIELDS = [
+    "planning_engine",
     "id",
     "agent_id",
     "revision",
@@ -93,6 +94,9 @@ PAGE_COLLECTIONS = {
         "goals": GOAL_FIELDS,
         "work_packages": ["id", "goal_id", "session_id", "state", "objective", "order", "reason", "blocked_reason", "superseded_contract"],
         "stages": [
+            "kind",
+            "plan_id",
+            "engine_version",
             "id",
             "objective_id",
             "roadmap_id",
@@ -111,7 +115,8 @@ PAGE_COLLECTIONS = {
             "review_id",
         ],
         "roadmaps": ["id", "objective_id", "revision", "created_at", "baseline", "future", "reason"],
-        "objective_planning": ["id", "objective_id", "revision", "state", "stage_id", "roadmap_id", "reason", "manual_pause", "question", "next_review_at"],
+        "objective_planning": ["id", "objective_id", "revision", "state", "stage_id", "roadmap_id", "plan_id", "reason", "manual_pause", "question",
+                               "next_review_at", "blocker", "revision_requested"],
         "stage_reviews": ["id", "decision", "learning"],
     },
     "work": {

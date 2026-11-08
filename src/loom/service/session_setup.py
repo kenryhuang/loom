@@ -17,7 +17,7 @@ from loom.tasks.config import create_provider_from_task_config, load_task_config
 COLLECTIONS = {
     "browser": ("Browser & visual evidence",
                 "Open Web applications, interact and capture screenshots, including Canvas/WebGL. Local previews require workspace and shell.", False),
-    "filesystem": ("Files", "Read, create and edit workspace files. Does not run commands.", True),
+    "filesystem": ("Files", "List workspace directories; read, create and edit files. Does not run commands.", True),
     "shell": ("Commands", "Execute shell commands and processes in the workspace.", True),
     "web_research": ("Web sources", "Fetch and read HTTP(S) source URLs. Not a general web search engine.", False),
     "document_outputs": (

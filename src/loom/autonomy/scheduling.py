@@ -92,6 +92,10 @@ class QueueScheduler:
             self.store.event(db, aid, "schedule.finished", agent["scheduler"])
 
     def _cycle(self, aid):
+        with self.store.sessions.read() as db:
+            unified = self.store.get(db, "agents", aid).get("planning_engine") == 2
+        if unified:
+            return self.supervisor.unified.cycle(self, aid)
         from loom.autonomy.control import drain
         from loom.autonomy.sources import reconcile_own_changes
 
@@ -350,6 +354,8 @@ class QueueScheduler:
                     service.store._save(db, state)
             if repair is not None:
                 intent = self._repair(aid, wid, sid, repair)
+                if intent.get('kind') == 'plan_revision':
+                    return
             with service.lock:
                 if intent.get("kind") in {"restart", "extend_tools"}:
                     from loom.tasks.recovery import assess
@@ -407,6 +413,54 @@ class QueueScheduler:
 
     def _repair(self, aid, wid, sid, repair):
         """Prepare outside locks, then compare the exact inputs before committing."""
+        with self.store.sessions.read() as db:
+            work = self.store.get(db, "agent_work_packages", wid, aid)
+        if work.get("engine_version") == 2:
+            from loom.autonomy.planning import wake
+            from loom.autonomy.stages import planning_state
+            from loom.tasks.recovery import assess
+
+            with self.service.lock, self.store.sessions.transaction() as db:
+                agent = self.store.get(db, "agents", aid)
+                work = self.store.get(db, "agent_work_packages", wid, aid)
+                goal = self.store.get(db, 'agent_goals', work['goal_id'], aid)
+                session = self.store.sessions._load(db, sid)
+                from loom.service.failures import failure_details
+
+                current_report = assess(session, failure=failure_details(db, session))
+                if (agent['generation'] != repair['generation'] or (session.get('run') or {}).get('id') != repair['run_id']
+                        or session['task']['state'] not in {'paused', 'failed'} or not current_report
+                        or current_report['source_key'] != repair['report']['source_key']
+                        or goal['revision'] != repair['goal_revision'] or goal.get('source_changed')
+                        or agent['state'] != 'enabled' or not runnable(self.store, db, agent, goal)
+                        or not sources_ready(self.store, db, agent, goal) or work.get('superseded_contract')):
+                    raise ServiceError('The contract or execution changed during recovery', 409, code=Code.EXECUTION_CONTRACT)
+                link = db.execute('SELECT * FROM agent_sessions WHERE session_id=? AND agent_id=?', (sid, aid)).fetchone()
+                if (not link or link['taken_over'] or link['work_package_id'] not in {None, wid}
+                        or session.get('autonomy', {}).get('work_package_id') != wid):
+                    raise ServiceError('Session ownership changed during recovery', 409, code=Code.SESSION_OWNERSHIP)
+                if (sid in self.service.active or session.get('workspace_blocked')
+                        or (session.get('input_request') or {}).get('state') == 'pending'
+                        or db.execute("SELECT 1 FROM operations WHERE session_id=? AND json_extract(body,'$.status')='started' "
+                                      "AND json_extract(body,'$.effect_kind')='side_effecting'", (sid,)).fetchone()):
+                    raise ServiceError('Resolve pending execution results before revising', 409, code=Code.EXECUTION_INPUT)
+                from loom.autonomy.acceptance import objective_view
+
+                objective = objective_view(agent, next(o for o in agent["role"]["long_term_objectives"] if o["id"] == work["objective_id"]))
+                state = planning_state(self.store, db, agent, objective)
+                fingerprint = repair['report']['source_key']
+                if fingerprint in state.get('repair_fingerprints', []):
+                    raise ServiceError("This execution gap already requested a plan revision; provide new input", 409, code=Code.EXECUTION_CONTRACT)
+                if state['no_progress'] >= objective['stage_planning']['max_replans_without_progress']:
+                    raise ServiceError("Plan revision limit reached; provide new input", 409, code=Code.RECOVERY_EXHAUSTED)
+                state.setdefault('repair_fingerprints', []).append(fingerprint)
+                state['answers'].append(dict(type='execution_gap', producer='host', report=repair['report']))
+                state.update(revision_requested=True, last_input=None, next_review_at='', no_progress=state['no_progress'] + 1,
+                             revision=state['revision'] + 1)
+                self.store.put(db, 'agent_objective_planning', state)
+                wake(self.store, agent)
+                self.store.put(db, 'agents', agent)
+            return dict(kind='plan_revision')
         from loom.autonomy.reassembly import build
         from loom.tasks.recovery import assess
 

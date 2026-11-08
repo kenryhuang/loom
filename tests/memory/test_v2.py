@@ -116,6 +116,23 @@ def test_revision_conflicts_retirement_and_idempotency(catalog):
     assert reader.browse(lifecycle="retired")["total"] == 1
 
 
+def test_expiry_excludes_current_context_without_rejecting_history(catalog):
+    store, _, _, reader, _ = catalog
+    item = reader.browse()["records"][0]
+    ops = MemoryOperations(store.path)
+    payload = dict(memory_id=item["memory_id"], version_id=item["version_id"], expected_revision=item["revision"])
+    with pytest.raises(ValueError, match="verification reason"):
+        ops.execute(reader.ns, "EXPIRE", payload, command_id="unexplained-expiry")
+    ops.execute(reader.ns, "EXPIRE", {**payload, "reason": "Current file verification contradicts this old configuration"}, command_id="verified-expiry")
+    assert reader.browse()["total"] == 0
+    assert reader.browse(lifecycle="all")["total"] == 1
+    assert reader.original("eval-memory", "memory:planet")["historical"]
+    with reader.repo.connect() as db:
+        assert not available(db, item["version_id"])
+        assert db.execute("SELECT COUNT(*) FROM memory_tombstones").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM memory_observations").fetchone()[0] == 1
+
+
 def test_temporal_change_future_and_old_arrival(catalog):
     store, _, _, reader, _ = catalog
     item = reader.browse()["records"][0]
@@ -202,6 +219,33 @@ def test_merge_undo_and_dependencies(catalog):
     ops.execute(reader.ns, "RETIRE", dict(memory_id=second["memory_id"], expected_revision=second["revision"]), command_id="retire")
     with reader.repo.connect() as db:
         assert not available(db, first["version_id"])
+
+
+def test_reviewed_scope_alias_merge_preserves_history_and_is_reversible(catalog):
+    store, workspace, _, reader, _ = catalog
+    second = fact("second")
+    second["scope"] = "An explicit alias of the original scope"
+    seed(store, workspace, evaluation="second", records=[second])
+    migrate_database(store.path)
+    first, second = reader.browse()["records"]
+    ops = MemoryOperations(store.path)
+    payload = dict(memory_id=first["memory_id"], expected_revision=first["revision"],
+                   target_memory_id=second["memory_id"], target_revision=second["revision"])
+    with pytest.raises(ValueError, match="applicability"):
+        ops.execute(reader.ns, "MERGE", payload, command_id="no-review")
+    review = dict(source=first["scope"], target=second["scope"], reason="Explicitly reviewed the scope alias")
+    with pytest.raises(ValueError, match="exact source and target"):
+        ops.execute(reader.ns, "MERGE", {**payload, "scope_equivalence": {**review, "source": "another scope"}}, command_id="wrong-review")
+    with pytest.raises(ValueError, match="explicit review"):
+        ops.execute(reader.ns, "MERGE", {**payload, "scope_equivalence": review}, command_id="auto-review", actor="calibrated_consolidator")
+    ops.execute(reader.ns, "MERGE", {**payload, "scope_equivalence": review}, command_id="reviewed-merge", actor="assistant_history_review")
+    assert reader.browse()["total"] == 1
+    with reader.repo.connect() as db:
+        scopes = {json.loads(r[0])["scope"] for r in db.execute("SELECT record FROM memory_item_versions")}
+        assert scopes == {first["scope"], second["scope"]}
+        assert db.execute("SELECT COUNT(*) FROM memory_observations").fetchone()[0] == 2
+    ops.undo_merge(reader.ns, "reviewed-merge", command_id="undo-reviewed-merge")
+    assert reader.browse()["total"] == 2
 
 
 def test_cursor_is_scoped_and_epoch_guarded(catalog):

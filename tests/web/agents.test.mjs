@@ -763,3 +763,40 @@ test('Goal metrics fall back to Session snapshots with older servers',async()=>{
   await view.fillSessionMetrics({work_packages:[{session_id:'s/1'}]});assert.equal(calls.length,1);
  }finally{view.close();dom.window.close();}
 });
+
+
+test('Legacy planning migration previews effects before applying the versioned command',async()=>{
+ const data=fixture();data.planning_engine=1;
+ const writes=[];
+ const {dom,view}=setup({json:async(path,options)=>{
+  if(path.endsWith('/planning/migration')){
+   if(options?.body){writes.push(options.body);data.planning_engine=2;return {migrated:true};}
+   return {agent_id:'a',revision:7,retire_work_ids:['w1','w2'],preserve_completed_goal_ids:['g1'],blockers:[]};
+  }
+  return path==='/v1/agents'?{agents:[data]}:data;
+ }});
+ try{
+  await view.open();await view.select('a');view.tab='Goals';view.render();
+  assert.ok(![...view.root.querySelectorAll('button')].some(b=>b.textContent==='Apply planning migration'));
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='Review planning migration').click();await tick();
+  assert.equal(writes.length,0);assert.match(view.root.textContent,/Replace 2 unfinished work contracts; preserve 1 completed goals/);
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='Apply planning migration').click();await tick();
+  assert.equal(writes.length,1);assert.equal(writes[0].expected_revision,7);
+ }finally{view.close();dom.window.close();}
+});
+
+
+test('Planning validation diagnostics are shown once when already present in the waiting reason',async()=>{
+ const data=fixture();data.planning_engine=2;
+ data.role.long_term_objectives=[{id:'primary',desired_outcome:'Inspect implementation',stage_planning:{mode:'autonomous'}}];
+ const issue={path:'/source_refs',message:'Unknown evidence IDs; use the registered citation IDs'};
+ data.objective_planning=[{id:'p',objective_id:'primary',revision:5,state:'waiting',reason:`${issue.path}: ${issue.message}`,
+  blocker:{code:'MODEL_PROTOCOL',details:{issues:[issue]}}}];
+ const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');view.tab='Goals';view.render();
+  assert.equal(view.root.textContent.split(issue.message).length-1,1);
+  assert.match(view.root.textContent,/Planning needs correction/);
+  assert.doesNotMatch(view.root.textContent,/Waiting for review/);
+ }finally{view.close();dom.window.close();}
+});

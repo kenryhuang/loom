@@ -440,11 +440,30 @@ export class AgentsView {
     node.querySelectorAll('th:nth-child(n+3)').forEach(th=>th.title="Shows data from the linked Session's current run; a reused Session may be linked to multiple work packages.");
   }
   renderGoals(root, d) {
+    if(d.planning_engine!==2) {
+      const migration=element('div','notice');
+      migration.append(element('p','','This Agent uses the legacy planning flow. Migration preserves completed evidence and recompiles unstarted work into stages.'));
+      const report=this.migrationPreview?.agent_id===d.id?this.migrationPreview:null;
+      migration.append(button('Review planning migration',()=>this.act(async()=>{
+        this.migrationPreview=await this.api.get(d.id,'planning/migration');
+        this.renderedDetail=null;
+      })));
+      if(report) {
+        migration.append(element('p','',`Replace ${report.retire_work_ids.length} unfinished work contracts; preserve ${report.preserve_completed_goal_ids.length} completed goals. A database backup is saved before migration.`));
+        for(const blocker of report.blockers) migration.append(element('p','notice',blocker));
+        if(!report.blockers.length) migration.append(button('Apply planning migration',()=>this.act(async()=>{
+          await this.api.post(d.id,'planning/migration',{command_id:crypto.randomUUID(),expected_revision:report.revision});
+          this.migrationPreview=null;
+          this.renderedDetail=null;
+        })));
+      }
+      root.append(migration);
+    }
     renderRoadmaps(root,d,this);
     const assigned=new Set((d.stages || []).flatMap(s=>s.goal_ids || []));
     const standalone=d.goals.filter(g=>!assigned.has(g.id) && !(d.stages || []).some(s=>s.id===g.stage_id));
     if(standalone.length) {
-      const block=roadmapDisclosure(this,root,d,'unassigned',`Standalone and historical goals · ${standalone.length}`);
+      const block=roadmapDisclosure(this,root,d,'unassigned',`Historical and legacy goals · ${standalone.length}`);
       block.classList.add('dashboard-panel','dashboard-wide');
       block.append(element('p','muted','Deliverables not assigned to a stage stay here as the current-state basis for future planning.'));
       for(const goal of standalone) this.renderGoal(block,d,goal);

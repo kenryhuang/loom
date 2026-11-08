@@ -1,5 +1,7 @@
 """Session-compatible routing and replayable dispatch, under service admission."""
 
+from copy import deepcopy
+
 from loom.autonomy.binding import bind_for_dispatch, compatible_config, ensure_required_tools
 from loom.memory.store import bound_workspace, tokens
 from loom.service.contracts import ServiceError
@@ -56,11 +58,14 @@ class Dispatcher:
 
         if not runnable(self.store, db, agent, goal):
             return "goal_not_runnable"
+        if work.get("engine_version") == 2 and any(
+                self.store.get(db, "agent_goals", gid, aid)["state"] != "completed" for gid in goal.get("depends_on", [])):
+            return "goal_dependency"
         if goal["state"] in {"paused", "cancelled", "superseded", "blocked"}:
             return "goal_" + goal["state"]
         siblings = self.store.rows(db, "agent_work_packages", aid)
         if any(
-            w["state"] in {"dispatched", "running", "blocked"}
+            w["state"] in ({"dispatched", "running"} if work.get("engine_version") == 2 else {"dispatched", "running", "blocked"})
             and not w.get("recovery", {}).get("exhausted")
             and w["id"] != work["id"]
             and w.get("session_id")
@@ -107,9 +112,17 @@ class Dispatcher:
                 )
         except ServiceError:
             return
-        dynamic = None if stale else bind_for_dispatch(self.service, agent, work)
-        payload = task_payload(agent, work, binding=dynamic)
-        if not stale:
+        compiled = work.get("engine_version") == 2
+        dynamic = None if stale or compiled else bind_for_dispatch(self.service, agent, work)
+        payload = deepcopy(work["compiled_payload"]) if compiled else task_payload(agent, work, binding=dynamic)
+        if compiled and not stale:
+            from loom.autonomy.binding import validated_assembly
+            from loom.autonomy.plan_compiler import binding_fingerprint
+
+            _, assembly = validated_assembly(self.service, payload)
+            if binding_fingerprint(assembly) != work["binding_fingerprint"] or set(work["required_tools"]) - assembly.available_tool_ids():
+                raise ServiceError("The compiled tool/environment binding changed; revise the plan before dispatch", 409, code="EXECUTION_CONTRACT")
+        if not stale and not compiled:
             payload, additions = ensure_required_tools(self.service, payload, work.get("required_tools", []))
             if dynamic is not None:
                 dynamic["record"].update(required_tools=work.get("required_tools", []), added_collections=additions)
@@ -142,6 +155,10 @@ class Dispatcher:
                     work["blocker"] = make(Code.ROLE_CHANGED, wid, work["blocked_reason"], phase="dispatch")
                     self.store.put(db, "agent_work_packages", work)
                     return
+                if compiled:
+                    from loom.autonomy.plan_inputs import resolve
+
+                    resolve(self.store, db, aid, work)
                 candidates = []
                 for link in db.execute("SELECT * FROM agent_sessions WHERE agent_id=?", (aid,)):
                     reason = None
@@ -151,7 +168,7 @@ class Dispatcher:
                         continue
                     if link["taken_over"] or link["work_package_id"]:
                         reason = "taken_over_or_reserved"
-                    elif work.get('read_only'):
+                    elif compiled or work.get('read_only'):
                         reason = 'Routine checks require a fresh restricted environment'
                     elif state["session_id"] in self.service.active or state["task"]["state"] != "idle" or state.get("workspace_blocked"):
                         reason = "busy_or_recovering"
@@ -207,6 +224,9 @@ class Dispatcher:
                     stage_id=goal.get("stage_id"),
                     roadmap_id=goal.get("roadmap_id"),
                 )
+                if compiled:
+                    binding.update(engine_version=2, plan_id=work["plan_id"], contract_digest=work["contract_digest"],
+                                   verification_plan=work["verification_plan"], input_bindings=resolve(self.store, db, aid, work))
                 from loom.autonomy.acceptance import contract_key
 
                 binding["acceptance_contract"] = contract_key(work["acceptance_criteria"])

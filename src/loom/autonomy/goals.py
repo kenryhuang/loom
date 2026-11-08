@@ -34,6 +34,10 @@ def observe(store, aid, cid, payload, *, producer="human"):
         )
         store.put(db, "agent_observations", row)
         agent.update(next_wake_at=store.now(), generation=agent["generation"] + 1)
+        if agent.get("planning_engine") == 2:
+            from loom.autonomy.planning import wake
+
+            wake(store, agent)
         store.put(db, "agents", agent)
         store.event(db, aid, "objective.observed", dict(observation_id=row["id"], state=row["state"]))
         return store.receipt(db, cid, request, row)
@@ -42,7 +46,7 @@ def observe(store, aid, cid, payload, *, producer="human"):
 def materialize(store, aid):
     with store.sessions.transaction() as db:
         agent = store.get(db, "agents", aid)
-        if agent["state"] != "enabled":
+        if agent["state"] != "enabled" or agent.get("planning_engine") == 2:
             return
         observations = store.rows(db, "agent_observations", aid)
         goals = store.rows(db, "agent_goals", aid)
@@ -183,6 +187,8 @@ def retry(store, aid, gid, body, *, stage_only=False):
             return old
         agent = store.get(db, "agents", aid)
         goal = store.get(db, "agent_goals", gid, aid)
+        if agent.get("planning_engine") == 2:
+            raise ServiceError("Compiled goals are retried through a complete plan revision", 409, code="EXECUTION_CONTRACT")
         store.expect(goal, body.get("expected_revision"))
         if stage_only:
             from loom.autonomy.stage_goals import editable_stage

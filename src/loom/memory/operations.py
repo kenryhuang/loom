@@ -96,8 +96,14 @@ class MemoryOperations(Repository):
                     touched.append(new_version)
                 self.validity(db, version, lifecycle="superseded")
                 db.execute("UPDATE memory_items SET latest_revision=latest_revision+1 WHERE id=?", (item["id"],))
-            elif operation in {"RETIRE", "RESTORE", "CONFIRM", "PIN", "TAG"}:
-                if operation == "RETIRE":
+            elif operation in {"EXPIRE", "RETIRE", "RESTORE", "CONFIRM", "PIN", "TAG"}:
+                if operation == "EXPIRE":
+                    if not isinstance(payload.get("reason"), str) or not payload["reason"].strip():
+                        raise ValueError("Expiry requires a verification reason")
+                    # Staleness is not a human rejection and must not create a
+                    # permanent denial tombstone for a potentially recurring fact.
+                    self.validity(db, version, freshness="expired")
+                elif operation == "RETIRE":
                     self.validity(db, version, lifecycle="retired")
                     db.execute("INSERT OR REPLACE INTO memory_tombstones VALUES(?,?,?)", (ns, row["signature"], payload.get("reason", "human rejection")))
                 elif operation == "RESTORE":
@@ -167,8 +173,25 @@ class MemoryOperations(Repository):
                 ]
                 target_content = json.loads(db.execute("SELECT record FROM memory_item_versions WHERE id=?", (target_version,)).fetchone()[0])
                 original_content = json.loads(row["record"])
+                scope_review = payload.get("scope_equivalence")
+                same_scope = target_content.get("scope") == original_content.get("scope")
+                if scope_review is not None:
+                    # An explicit reviewed alias is bound to the exact scopes and
+                    # optimistic revisions. Preserve both immutable versions;
+                    # never normalize arbitrary scope text during ingestion.
+                    if (
+                        not isinstance(scope_review, dict)
+                        or set(scope_review) != {"source", "target", "reason"}
+                        or scope_review["source"] != original_content.get("scope")
+                        or scope_review["target"] != target_content.get("scope")
+                        or not isinstance(scope_review["reason"], str)
+                        or not scope_review["reason"].strip()
+                        or actor == "calibrated_consolidator"
+                    ):
+                        raise ValueError("Scope equivalence requires an explicit review of the exact source and target scopes")
+                    same_scope = True
                 if (
-                    target_content.get("scope") != original_content.get("scope")
+                    not same_scope
                     or target_content.get("claim", {}).get("conditions", {}) != original_content.get("claim", {}).get("conditions", {})
                     or bool(target_content.get("claim")) != bool(original_content.get("claim"))
                     or original_content.get("claim")

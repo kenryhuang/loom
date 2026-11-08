@@ -21,6 +21,7 @@ TABLES = {
     "agent_stages",
     "agent_stage_reviews",
     "agent_objective_planning",
+    "agent_plan_revisions",
 }
 
 

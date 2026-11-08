@@ -14,7 +14,7 @@ class AutonomyService:
         from loom.memory.library import MemoryLibraryCache
 
         self.service = service
-        self.store = AgentStore(service.store)
+        self.store = AgentStore(service.store, planning_engine=service.agent_planning_engine)
         self.background = background
         self.memory_library = MemoryLibraryCache()
         self.supervisor = AgentSupervisor(service, self.store, background, planner=service.agent_planner)
@@ -178,6 +178,23 @@ class AutonomyService:
 
     def goal_command(self, aid, gid, body):
         strict(body, {"command_id", "type", "expected_revision", "payload"})
+        if body.get("type") == "revise":
+            with self.store.sessions.read() as db:
+                agent = self.store.get(db, "agents", aid)
+                receipt_request = dict(agent_id=aid, goal_id=gid, **body)
+                replay = self.store.replay(db, body.get("command_id"), receipt_request)
+                if replay:
+                    return replay
+                unified_goal = self.store.get(db, "agent_goals", gid, aid) if agent.get("planning_engine") == 2 else None
+                if unified_goal:
+                    self.store.expect(unified_goal, body.get("expected_revision"))
+                    stage = self.store.get(db, "agent_stages", unified_goal["stage_id"], aid)
+            if unified_goal:
+                from loom.autonomy.plan_commands import request_revision
+
+                return request_revision(self, aid, unified_goal["long_term_objective_id"], dict(command_id=body["command_id"],
+                    expected_revision=stage["revision"], reason="Revise Goal: " + gid + ": " + text(body.get("payload", {}).get("objective"), "objective")),
+                    stage_id=stage["id"], addition=body.get("payload"), receipt_request=receipt_request)
         request = dict(agent_id=aid, goal_id=gid, **body)
         stop_sessions = []
         with self.service.lock:
@@ -419,6 +436,13 @@ class AutonomyService:
         if len(parts) == 1 and method == "GET":
             return self.snapshot(aid)
         route = parts[1:]
+        if route == ['planning', 'migration']:
+            from loom.autonomy.plan_commands import migrate, migration_report
+
+            if method == 'POST':
+                return migrate(self, aid, body)
+            with self.store.sessions.read() as db:
+                return migration_report(self.store, db, aid)
         if route and route[0] == 'memory' and len(route) >= 2 and route[1] in {'items', 'commands', 'status', 'proposals'}:
             from loom.memory.service import dispatch
 
@@ -509,6 +533,12 @@ class AutonomyService:
 
             return command(self.store, aid, body)
         if len(route) == 3 and route[0] == 'goals' and route[2] == 'retry' and method == 'POST':
+            with self.store.sessions.read() as db:
+                unified = self.store.get(db, 'agents', aid).get('planning_engine') == 2
+            if unified:
+                from loom.autonomy.plan_commands import retry_goal
+
+                return retry_goal(self, aid, route[1], body)
             from loom.autonomy.goals import retry
 
             return retry(self.store, aid, route[1], body, stage_only=True)

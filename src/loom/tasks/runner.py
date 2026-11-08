@@ -344,6 +344,20 @@ def _criteria_for_request(profile: TaskProfile, request: TaskRequest) -> tuple[S
 def _task_tool_refs() -> tuple[ToolRef, ...]:
     return (
         ToolRef(
+            "list_directory",
+            "List immediate workspace directory entries without running commands or modifying files. "
+            "Use directory paths to explore subdirectories; pass next_offset as offset to continue a truncated listing.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Workspace-relative directory; defaults to ."},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        ToolRef(
             "read_file",
             "Read a UTF-8 text file from the workspace. Use this before making claims about source or documentation.",
             input_schema={

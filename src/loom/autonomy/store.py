@@ -14,9 +14,10 @@ def digest(value):
 
 
 class AgentStore:
-    def __init__(self, sessions, *, clock=None):
+    def __init__(self, sessions, *, clock=None, planning_engine=1):
         self.sessions = sessions
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.planning_engine = planning_engine
         with self.sessions.transaction() as db:
             migrate(db)
             if not db.execute('SELECT 1 FROM autonomy_migrations WHERE version=6').fetchone():
@@ -134,6 +135,7 @@ class AgentStore:
                 generation=1,
                 role_revision=1,
                 role=role,
+                planning_engine=self.planning_engine,
                 state="draft",
                 activity="idle",
                 guidance_version=0,
@@ -164,6 +166,7 @@ class AgentStore:
                 ("roadmaps", "agent_roadmaps"),
                 ("objective_planning", "agent_objective_planning"),
                 ("stage_reviews", "agent_stage_reviews"),
+                ("plan_revisions", "agent_plan_revisions"),
             ]:
                 if fields is not None and key not in fields:
                     agent[key] = []
@@ -293,6 +296,11 @@ class AgentStore:
             from loom.autonomy.stage_commands import reconcile_role_change
 
             reconcile_role_change(self, db, agent, previous_role, cid)
+            if agent.get("planning_engine") == 2 and not budget_only:
+                for state in self.rows(db, "agent_objective_planning", aid):
+                    if state["state"] not in {"completed", "cancelled"}:
+                        state.update(revision_requested=True, last_input=None, next_review_at="", revision=state["revision"] + 1)
+                        self.put(db, "agent_objective_planning", state)
             if budget_only:
                 # Resource limits do not change the execution contract. Keep
                 # queued packages dispatchable after a budget-only revision.

@@ -564,10 +564,35 @@ class AcceptanceController:
         if self.data["plan"]:
             from loom.tasks.visual_migration import migrate_legacy
 
+            contract = self.assembly.request.metadata.get('autonomy') or {}
+            if contract.get('engine_version') == 2:
+                from loom.tasks.workspace_probe import digest
+
+                if (self.data['plan'].get('contract_digest') != contract.get('contract_digest')
+                        or self.data['plan'].get('verification_digest') != digest(contract.get('verification_plan'))):
+                    raise AcceptanceBlocked('Checkpoint verification differs from the compiled contract', code='EXECUTION_CONTRACT')
             await migrate_legacy(self, runtime)
             self.require_capabilities()
             return
         recovery = self.assembly.request.metadata.get('recovery_context') or {}
+        contract = self.assembly.request.metadata.get('autonomy') or {}
+        if contract.get('engine_version') == 2:
+            from loom.tasks.workspace_probe import digest
+
+            pinned = contract.get('verification_plan')
+            if not pinned or not contract.get('contract_digest'):
+                raise AcceptanceBlocked('Compiled work is missing its verification contract', code='EXECUTION_CONTRACT')
+            proposal = dict(criteria=[c for c in pinned['criteria'] if c['id'] != 'goal'],
+                            unresolved_requirements=pinned.get('unresolved_requirements', []))
+            self.data['profile'] = probe(self.root)
+            self.data['revision'] += 1
+            self.data['plan'] = {**self.validate_plan(proposal), 'revision': self.data['revision'],
+                                 'goal_digest': self.data['goal_digest'], 'origin': 'compiled_plan',
+                                 'contract_digest': contract['contract_digest'], 'verification_digest': digest(pinned)}
+            self.data.update(state='not_ready', reason='Compiled verification contract loaded; execution evidence required')
+            await self.emit(runtime, 'acceptance.plan.accepted')
+            self.require_capabilities()
+            return
         if recovery.get('acceptance_plan'):
             reviewed = recovery['acceptance_plan']
             proposal = dict(criteria=[c for c in reviewed['criteria'] if c['id'] != 'goal'],
@@ -652,6 +677,8 @@ class AcceptanceController:
 
     async def revise(self, value, runtime):
         """Preserve conditions, allow repair of the method, then verify fresh evidence."""
+        if (self.assembly.request.metadata.get('autonomy') or {}).get('engine_version') == 2:
+            raise AcceptanceBlocked('Request a plan revision to change the compiled verification method', code='EXECUTION_CONTRACT')
         if getattr(self.assembly, "acceptance_policy", None):
             raise ValueError("Trusted diagnosis acceptance cannot be changed by the solver")
         if not self.data["plan"] or value.get("base_revision") != self.data["revision"]:

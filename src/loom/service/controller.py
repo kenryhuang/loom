@@ -46,7 +46,7 @@ def _record_error_response(record, exc):
 class LoomService:
     def __init__(self, directory, *, config_path=None, max_active_runs=2, provider_factory=None, plugin_registry_factory=None,
                  autonomy_enabled=False, agent_planner=None, evaluation_provider_factory=None, agent_stage_planner=None,
-                 setup_recommender=None):
+                 setup_recommender=None, agent_plan_provider=None, agent_planning_engine=None):
         if isinstance(max_active_runs, bool) or not isinstance(max_active_runs, int) or max_active_runs < 1:
             raise ServiceError("max_active_runs must be positive")
         self.store = SessionStore(directory, plugin_registry_factory=plugin_registry_factory)
@@ -80,6 +80,11 @@ class LoomService:
         self.autonomy_enabled = autonomy_enabled
         self.agent_planner = agent_planner
         self.agent_stage_planner = agent_stage_planner
+        self.agent_plan_provider = agent_plan_provider
+        # Injected legacy planners retain their protocol unless explicitly opted in.
+        self.agent_planning_engine = agent_planning_engine if agent_planning_engine is not None else (1 if agent_planner or agent_stage_planner else 2)
+        if type(self.agent_planning_engine) is not int or self.agent_planning_engine not in {1, 2}:
+            raise ServiceError("Unknown Agent planning engine")
         self.evaluation_provider_factory = evaluation_provider_factory
         self.setup_recommender = setup_recommender
         self.cleanup_checked = 0
@@ -156,6 +161,15 @@ class LoomService:
                 answer = None
 
             def after(state, emit, db):
+                binding = state.get('autonomy') or {}
+                if binding.get('engine_version') == 2 and command['type'] in {
+                        'resume', 'restart_task', 'submit_message', 'set_external_tools', 'set_knowledge_bases'}:
+                    row = db.execute('SELECT body FROM agent_work_packages WHERE id=?', (binding['work_package_id'],)).fetchone()
+                    work = json.loads(row[0]) if row else {}
+                    if not work or work.get('superseded_contract') or work.get('contract_digest') != binding.get('contract_digest'):
+                        raise ServiceError('This execution contract was superseded; use the current stage plan', 409)
+                    if command['type'] != 'resume':
+                        raise ServiceError('Revise the stage plan or take over the Session before changing its execution contract', 409)
                 if command['type'] in {'set_external_tools', 'set_knowledge_bases'} and sid in self.active:
                     raise ServiceError('Wait for the paused worker to exit before changing tools', 409)
                 if command['type'] == 'restart_task' and sid in self.active:
