@@ -9,13 +9,13 @@ import {editableStage, renderRoadmaps, roadmapDisclosure} from './agent-roadmap.
 import {renderExecution} from './agent-execution.mjs';
 import {AgentConfigurationEditor, configurationTitles, configuredRole} from './agent-configuration.mjs';
 
-const status = {draft:'未启用', enabled:'已启用', paused:'已暂停', archived:'已归档', idle:'空闲', waiting:'等待',
-  working:'执行中', planning:'编排中', degraded:'需要处理', pending:'待处理', running:'进行中', completed:'已完成',
-  incomplete:'未完成（已退出队列）',failed:'失败', blocked:'阻塞', deferred:'延后', cancelled:'已取消', queued:'排队中', active:'进行中', succeeded:'已验收',
-  dispatched:'已派发', full:'完整', partial:'部分', none:'暂无', not_applicable:'无可分析证据'};
+const status = {draft:'Disabled', enabled:'Enabled', paused:'Paused', archived:'Archived', idle:'Idle', waiting:'Waiting',
+  working:'Working', planning:'Planning', degraded:'Needs attention', pending:'Pending', running:'Running', completed:'Completed',
+  incomplete:'Incomplete (left queue)',failed:'Failed', blocked:'Blocked', deferred:'Deferred', cancelled:'Cancelled', queued:'Queued', active:'Active', succeeded:'Accepted',
+  dispatched:'Dispatched', full:'Full', partial:'Partial', none:'None', not_applicable:'No analyzable evidence'};
 const label = value => status[value] || value || '—';
 const tabs = ['Overview','Goals','Work','Profile','Knowledge','Learning'];
-const titles = ['概览','目标','执行','工作方式','知识来源','学习'];
+const titles = ['Overview','Goals','Work','Profile','Knowledge','Learning'];
 const uuid = () => globalThis.crypto.randomUUID();
 
 function field(form, name, title, value = '', multiline = false) {
@@ -50,7 +50,7 @@ export class AgentsView {
   }
   async open() {
     this.close(); this.abort = new AbortController();
-    if (!this.apiSource()) { this.root.replaceChildren(element('p', '', '连接服务后查看 Agents。')); return; }
+    if (!this.apiSource()) { this.root.replaceChildren(element('p', '', 'Connect to the service to view Agents.')); return; }
     this.api = new AgentsApi(this.apiSource());
     const generation = this.generation;
     await this.refresh();
@@ -62,7 +62,7 @@ export class AgentsView {
     this.error(error);
     let node = this.root.querySelector('.agent-error');
     if (!node) { node = element('p', 'agent-error'); node.setAttribute('role', 'alert'); this.root.prepend(node); }
-    node.textContent = `${error.message}${error.status === 409 ? '。请刷新后核对最新版本。' : ''}`;
+    node.textContent = `${error.message}${error.status === 409 ? ' Please refresh and check the latest version.' : ''}`;
   }
   refresh({force=false}={}) {
     const key=JSON.stringify([this.generation,this.selected,this.tab]);
@@ -83,7 +83,7 @@ export class AgentsView {
     if (generation !== this.generation || selected!==this.selected || tab!==this.tab || signal?.aborted) return;
     this.loadedKey=JSON.stringify([generation,selected,tab]);
     this.catalog = catalog;
-    this.listRoot.replaceChildren(button('创建 Agent', () => this.createForm(), 'primary'));
+    this.listRoot.replaceChildren(button('Create Agent', () => this.createForm(), 'primary'));
     for (const agent of catalog.agents) {
       const row = button('', () => this.select(agent.id), `session-link${agent.id === this.selected ? ' selected' : ''}`);
       row.append(element('strong', '', agent.role.name), element('small', '', label(agent.state)));
@@ -92,10 +92,10 @@ export class AgentsView {
     if (!this.selected) {
       if (!this.creating) {
         this.renderedDetail = null;
-        const head = this.heading || element('header', 'workspace-header'); this.renderHeading(head, '选择一个 Agent');
+        const head = this.heading || element('header', 'workspace-header'); this.renderHeading(head, 'Select an Agent');
         const body = element('div', 'trace-dashboard'), intro = panel(body, 'Agents', true);
-        intro.append(element('p', 'empty-state', '配置长期目标、工作目录与方法，让 Agent 持续推进工作。'),
-          button(catalog.agents.length ? '创建 Agent' : '创建第一个 Agent', () => this.createForm(), 'primary'));
+        intro.append(element('p', 'empty-state', 'Configure long-term objectives, a workspace, and methods so the Agent can keep making progress.'),
+          button(catalog.agents.length ? 'Create Agent' : 'Create your first Agent', () => this.createForm(), 'primary'));
         this.root.replaceChildren(...(this.heading ? [] : [head]), body);
       }
       return;
@@ -137,26 +137,26 @@ export class AgentsView {
   updateManualSchedule(detail) {
     const pending=this.manualSchedule, scheduler=detail.scheduler || detail.execution?.scheduler;
     if(!pending || pending.agentId!==detail.id || pending.state==='submitting' || !scheduler || scheduler.id===pending.previousId || scheduler.trigger!=='manual')return;
-    if(['checking','planning'].includes(scheduler.state)) pending.message=scheduler.state==='planning'?'调度已开始，正在规划任务。':'调度已开始，正在检查队列。';
-    else if(scheduler.finished_at) {pending.state='finished';pending.message=`调度检查结束：${scheduler.reason || '请查看执行状态。'}`;}
+    if(['checking','planning'].includes(scheduler.state)) pending.message=scheduler.state==='planning'?'Scheduling started; planning tasks.':'Scheduling started; checking the queue.';
+    else if(scheduler.finished_at) {pending.state='finished';pending.message=`Scheduling check finished: ${scheduler.reason || 'See execution status for details.'}`;}
   }
   async scheduleNow(detail) {
     if(this.manualSchedule?.state==='submitting')return;
-    const pending={agentId:detail.id,previousId:(detail.scheduler || detail.execution?.scheduler)?.id,state:'submitting',message:'正在提交调度请求…'};
+    const pending={agentId:detail.id,previousId:(detail.scheduler || detail.execution?.scheduler)?.id,state:'submitting',message:'Submitting scheduling request…'};
     this.manualSchedule=pending;
     const redraw=()=>{if(this.manualSchedule===pending && this.selected===detail.id && this.detail?.id===detail.id)this.renderHeading(this.heading || this.root.querySelector('header'),this.detail.role.name,this.detail);};
     redraw();
     try {
       const result=await this.api.command(detail.id,'wake',detail.revision);
       if(this.manualSchedule!==pending)return;
-      if(result?.state && result.state!=='enabled') {pending.state='finished';pending.message='Agent 未启用，调度请求未执行。';}
-      else if(['checking','planning'].includes(result?.scheduler?.state)) {pending.state='finished';pending.message='调度正在进行，本次没有重复提交。';}
-      else {pending.state='queued';pending.message='调度请求已提交，等待调度器检查。';}
+      if(result?.state && result.state!=='enabled') {pending.state='finished';pending.message='Agent is not enabled; the scheduling request was not run.';}
+      else if(['checking','planning'].includes(result?.scheduler?.state)) {pending.state='finished';pending.message='Scheduling already in progress; skipped the duplicate submission.';}
+      else {pending.state='queued';pending.message='Scheduling request submitted; waiting for the scheduler check.';}
       redraw();
       await this.refresh({force:true});
     } catch(error) {
       if(this.manualSchedule!==pending)return;
-      if(pending.state==='submitting') {pending.state='finished';pending.message='调度请求提交失败，请查看错误信息。';redraw();}
+      if(pending.state==='submitting') {pending.state='finished';pending.message='Failed to submit the scheduling request; see the error details.';redraw();}
       this.showError(error);
     }
   }
@@ -181,8 +181,8 @@ export class AgentsView {
         if(this.heading)this.heading.hidden=false;
         if(returnTo && this.detail?.id===returnTo){this.selected=returnTo;this.render();}
         else {
-          if(this.heading)this.renderHeading(this.heading,'选择一个 Agent');
-          this.root.append(element('p','empty-state','已取消创建。选择一个 Agent 查看配置。'));
+          if(this.heading)this.renderHeading(this.heading,'Select an Agent');
+          this.root.append(element('p','empty-state','Creation cancelled. Select an Agent to view its configuration.'));
         }
         this.refresh().catch(e=>this.showError(e));
       },
@@ -219,10 +219,10 @@ export class AgentsView {
   }
   configurationPanel(root,detail,section,rows,wide=false) {
     const node=panel(root,configurationTitles[section],wide);node.dataset.configurationSection=section;
-    const edit=button('编辑',()=>this.editConfiguration(detail,section));edit.setAttribute('aria-label',`编辑${configurationTitles[section]}`);
+    const edit=button('Edit',()=>this.editConfiguration(detail,section));edit.setAttribute('aria-label',`Edit ${configurationTitles[section]}`);
     edit.disabled=detail.state==='archived';node.firstChild.append(edit);
-    if(detail.pending_configuration?.sections?.[section])node.firstChild.append(badge('待新任务生效'));
-    table(node,['参数','新任务配置'],rows);return node;
+    if(detail.pending_configuration?.sections?.[section])node.firstChild.append(badge('Applies to next task'));
+    table(node,['Setting','New-task configuration'],rows);return node;
   }
   renderHeading(head, title, d = null) {
     head.hidden = false; head.replaceChildren();
@@ -230,11 +230,11 @@ export class AgentsView {
     head.append(identity);
     if (d) {
       const actions = element('div', 'trajectory-actions agent-actions');
-      actions.append(badge(d.pause_pending ? '暂停中' : label(d.state)), badge(label(d.activity), d.activity === 'degraded' ? 'blocked' : d.activity));
-      const controls = d.state === 'enabled' ? [['pause','暂停'],['wake','手动调度']] : d.state === 'archived' ? [] : d.state === 'paused' ? [['resume','恢复']] : [['enable','启用']];
+      actions.append(badge(d.pause_pending ? 'Pausing' : label(d.state)), badge(label(d.activity), d.activity === 'degraded' ? 'blocked' : d.activity));
+      const controls = d.state === 'enabled' ? [['pause','Pause'],['wake','Schedule now']] : d.state === 'archived' ? [] : d.state === 'paused' ? [['resume','Resume']] : [['enable','Enable']];
       for (const [type, title] of controls) {
         const action=button(title, () => type==='wake' ? this.scheduleNow(d) : this.act(() => this.api.command(d.id,type,d.revision)), type === 'enable' ? 'primary' : 'quiet');
-        if(type==='wake' && (this.manualSchedule?.agentId===d.id && ['submitting','queued'].includes(this.manualSchedule.state) || d.schedule_requested || ['checking','planning'].includes((d.scheduler || d.execution?.scheduler)?.state))){action.disabled=true;action.title='调度请求已提交或正在执行';}
+        if(type==='wake' && (this.manualSchedule?.agentId===d.id && ['submitting','queued'].includes(this.manualSchedule.state) || d.schedule_requested || ['checking','planning'].includes((d.scheduler || d.execution?.scheduler)?.state))){action.disabled=true;action.title='Scheduling request already submitted or running';}
         actions.append(action);
       }
       if(this.manualSchedule?.agentId===d.id){const message=element('span','agent-schedule-feedback',this.manualSchedule.message);message.setAttribute('role','status');actions.append(message);}
@@ -246,7 +246,7 @@ export class AgentsView {
     this.learningView?.close();
     const d = this.detail, head = this.heading || element('header', 'workspace-header');
     this.renderedDetail = JSON.stringify(d); this.renderHeading(head, d.role.name, d);
-    const nav = element('nav', 'evaluation-tabs agent-tabs'); nav.setAttribute('role','tablist'); nav.setAttribute('aria-label','Agent 详情');
+    const nav = element('nav', 'evaluation-tabs agent-tabs'); nav.setAttribute('role','tablist'); nav.setAttribute('aria-label','Agent details');
     tabs.forEach((tab, i) => {
       const b = button(titles[i], () => {this.changeTab(tab); this.root.querySelector(`[data-tab="${tab}"]`).focus();});
       b.dataset.tab = tab; b.id = `agent-tab-${tab}`; b.setAttribute('role','tab'); b.setAttribute('aria-selected',String(tab === this.tab));
@@ -259,61 +259,61 @@ export class AgentsView {
     const content = element('section', 'agent-content trace-dashboard'); content.id = 'agent-tab-content'; content.setAttribute('role','tabpanel'); content.tabIndex = 0;
     content.setAttribute('aria-labelledby',`agent-tab-${this.tab}`);
     this.root.replaceChildren(...(this.heading ? [] : [head]), nav);
-    if (!d.service_enabled) this.root.append(element('p','notice','自主运行尚未启用。启动服务时添加 --enable-agents；配置和历史仍可查看。'));
+    if (!d.service_enabled) this.root.append(element('p','notice','Autonomous operation is not enabled. Start the service with --enable-agents; configuration and history remain viewable.'));
     if (d.error || d.service_error) this.root.append(element('p','notice error',d.error || d.service_error));
     this.root.append(content);
-    if(d.view && d.view!==this.tab.toLowerCase())content.append(element('p','empty-state','正在加载…'));
+    if(d.view && d.view!==this.tab.toLowerCase())content.append(element('p','empty-state','Loading…'));
     else this[`render${this.tab}`](content,d);
   }
   renderOverview(root, d) {
-    const summary = panel(root,'运行概览',true);
+    const summary = panel(root,'Run overview',true);
     const schedule = element('div','agent-schedule'); schedule.dataset.agentSchedule = '';
-    schedule.append(element('span','muted','下次调度'),element('strong'),element('p','muted small'));
+    schedule.append(element('span','muted','Next schedule'),element('strong'),element('p','muted small'));
     summary.append(schedule); this.updateSchedule(d);
-    cards(summary, [['待处理目标',number(d.goals.filter(g => !['completed','cancelled','superseded'].includes(g.state)).length)],
-      ['活动工作包',number(d.work_packages.filter(w => ['dispatched','running'].includes(w.state)).length)],
-      ['关联 Session',number(d.sessions.length)], ['学习待办',number(d.learning.filter(l => !['completed','cancelled','failed','incomplete'].includes(l.state)).length)]]);
+    cards(summary, [['Open goals',number(d.goals.filter(g => !['completed','cancelled','superseded'].includes(g.state)).length)],
+      ['Active work packages',number(d.work_packages.filter(w => ['dispatched','running'].includes(w.state)).length)],
+      ['Linked Sessions',number(d.sessions.length)], ['Learning backlog',number(d.learning.filter(l => !['completed','cancelled','failed','incomplete'].includes(l.state)).length)]]);
     const r=configuredRole(d);
-    root.append(element('p','muted dashboard-wide','配置修改用于后续新调度任务。已派发任务及其恢复沿用原配置；长期目标请在目标页面管理，工作目录固定。'));
-    if(d.configuration?.pending)root.append(element('p','notice dashboard-wide','新配置已保存，等待已派发任务与分析结束后，在下一次新任务调度前生效。'));
-    const goals = panel(root,'长期目标（只读）');
+    root.append(element('p','muted dashboard-wide','Configuration changes apply to newly scheduled tasks. Dispatched tasks and their recovery keep the original configuration; manage long-term objectives on the Goals tab. The workspace is fixed.'));
+    if(d.configuration?.pending)root.append(element('p','notice dashboard-wide','New configuration saved; it takes effect before the next new task is scheduled, once dispatched tasks and analysis finish.'));
+    const goals = panel(root,'Long-term objectives (read-only)');
     this.showRows(goals,d.role.long_term_objectives.map(g=>g.desired_outcome));
-    goals.append(button('前往目标页面',()=>this.changeTab('Goals')));
-    const workspace=panel(root,'工作目录（固定）');
-    table(workspace,['配置','当前值'],[['Workspace',d.role.workspace || d.role.working_directory || '无本地目录'],
-      ['工作目录',d.role.working_directory || '无本地目录']]);
-    this.configurationPanel(root,d,'identity',[['名称',r.name],['角色说明',r.role_text],['默认方法',(r.methods || []).join('；') || '未设置']]);
-    this.configurationPanel(root,d,'models',[['执行与规划模型',r.model || '服务默认模型'],['评估模型',r.evaluation_model || '服务默认模型']]);
-    this.configurationPanel(root,d,'execution',[['规划模式',({auto:'自动',force:'强制规划',off:'直接执行'})[r.plan_mode] || '自动'],
-      ['上下文插件',r.task_spec?.context?.plugin || '服务默认'],['工作流插件',r.task_spec?.workflow?.plugin || '服务默认'],
-      ['工具集合',r.task_spec?.tools?.collections?.join('、') || '服务默认']]);
+    goals.append(button('Go to Goals',()=>this.changeTab('Goals')));
+    const workspace=panel(root,'Workspace (fixed)');
+    table(workspace,['Setting','Current value'],[['Workspace',d.role.workspace || d.role.working_directory || 'No local directory'],
+      ['Working directory',d.role.working_directory || 'No local directory']]);
+    this.configurationPanel(root,d,'identity',[['Name',r.name],['Role description',r.role_text],['Default methods',(r.methods || []).join('; ') || 'Not set']]);
+    this.configurationPanel(root,d,'models',[['Execution & planning model',r.model || 'Service default'],['Evaluation model',r.evaluation_model || 'Service default']]);
+    this.configurationPanel(root,d,'execution',[['Planning mode',({auto:'Auto',force:'Forced planning',off:'Direct execution'})[r.plan_mode] || 'Auto'],
+      ['Context plugin',r.task_spec?.context?.plugin || 'Service default'],['Workflow plugin',r.task_spec?.workflow?.plugin || 'Service default'],
+      ['Tool collections',r.task_spec?.tools?.collections?.join(', ') || 'Service default']]);
     const scheduling=r.scheduling_policy || {};
-    this.configurationPanel(root,d,'scheduling',[['目标检查间隔',`${r.interval_seconds || 86400} 秒`],
-      ['定时调度',scheduling.enabled===false?'仅手动':'开启'],['调度检查间隔',`${scheduling.tick_seconds || 60} 秒`],
-      ['每任务自动恢复次数',scheduling.max_recovery_attempts ?? 5],['时区',r.timezone || 'UTC']]);
+    this.configurationPanel(root,d,'scheduling',[['Goal check interval',`${r.interval_seconds || 86400} s`],
+      ['Scheduled runs',scheduling.enabled===false?'Manual only':'On'],['Scheduler tick interval',`${scheduling.tick_seconds || 60} s`],
+      ['Auto-recoveries per task',scheduling.max_recovery_attempts ?? 5],['Timezone',r.timezone || 'UTC']]);
     const learning=r.learning_policy || {};
-    this.configurationPanel(root,d,'learning',[['每个评估每日自动续跑次数',learning.max_resumes ?? 3],
-      ['每轮分析尝试次数',learning.max_attempts ?? 6],['评估调用次数上限',learning.max_evaluation_calls ?? 500],
-      ['自动方法学习',r.method_learning?'开启':'关闭']]);
-    this.configurationPanel(root,d,'resources',[['资料路径',(r.source_routes || []).flatMap(route=>route.paths || []).join('、') || '未设置'],
-      ['知识库',(r.knowledge_base_ids || []).join('、') || '未设置'],['外部工具',(r.external_tool_ids || []).join('、') || '未设置']]);
-    const budget=this.configurationPanel(root,d,'budget',[['每日 token 上限',number(r.budget.daily_tokens)]],true);
+    this.configurationPanel(root,d,'learning',[['Auto-resumes per evaluation per day',learning.max_resumes ?? 3],
+      ['Attempts per analysis round',learning.max_attempts ?? 6],['Evaluation call limit',learning.max_evaluation_calls ?? 500],
+      ['Automatic method learning',r.method_learning?'On':'Off']]);
+    this.configurationPanel(root,d,'resources',[['Source paths',(r.source_routes || []).flatMap(route=>route.paths || []).join(', ') || 'Not set'],
+      ['Knowledge bases',(r.knowledge_base_ids || []).join(', ') || 'Not set'],['External tools',(r.external_tool_ids || []).join(', ') || 'Not set']]);
+    const budget=this.configurationPanel(root,d,'budget',[['Daily token limit',number(r.budget.daily_tokens)]],true);
     const daily=d.daily_budget;
-    cards(budget,[['当前每日上限',number(daily?.limit ?? d.role.budget.daily_tokens)],['今日已用及预留',number(daily?.used ?? 0)],
-      ['今日剩余',number(daily?.remaining ?? d.role.budget.daily_tokens)],['累计模型调用',number(d.budget.reduce((sum,row)=>sum+row.calls,0))],
-      ['未知用量调用',number(d.budget.reduce((sum,row)=>sum+(row.unknown_calls || 0),0))]]);
-    budget.append(element('p','muted',`所有任务共用每日额度；当前按 ${d.role.timezone || 'UTC'} 每天零点重新计数，历史账本保留。长期目标、Goal、工作包和学习无独立 Token 配额。`));
-    if(daily?.resets_at)budget.append(element('p','muted',`当前窗口：${daily.window} · 下次重置：${new Date(daily.resets_at).toLocaleString()}`));
+    cards(budget,[['Current daily limit',number(daily?.limit ?? d.role.budget.daily_tokens)],['Used & reserved today',number(daily?.used ?? 0)],
+      ['Remaining today',number(daily?.remaining ?? d.role.budget.daily_tokens)],['Total model calls',number(d.budget.reduce((sum,row)=>sum+row.calls,0))],
+      ['Calls with unknown usage',number(d.budget.reduce((sum,row)=>sum+(row.unknown_calls || 0),0))]]);
+    budget.append(element('p','muted',`All tasks share the daily allowance; usage resets at midnight ${d.role.timezone || 'UTC'} and the historical ledger is kept. Long-term objectives, Goals, work packages, and learning have no separate token quotas.`));
+    if(daily?.resets_at)budget.append(element('p','muted',`Current window: ${daily.window} · Next reset: ${new Date(daily.resets_at).toLocaleString()}`));
     this.renderBudgetUsage(budget,d);
-    const history = panel(root,'编排记录',true);
-    history.firstChild.append(button('查看最近编排原因',()=>this.act(async()=>{const {runs}=await this.api.get(d.id,'runs');
-      output.replaceChildren();table(output,['状态','调度目标','编排原因','时间'],runs.map(r=>{
+    const history = panel(root,'Orchestration history',true);
+    history.firstChild.append(button('View recent orchestration reasons',()=>this.act(async()=>{const {runs}=await this.api.get(d.id,'runs');
+      output.replaceChildren();table(output,['Status','Scheduled goal','Orchestration reason','Time'],runs.map(r=>{
         const goal=d.goals.find(g=>g.id===r.goal_id);
         const target=goal ? button(goal.objective,()=>this.focusGoal(goal.id)) : r.goal_id ||
-          (r.kind==='stage_plan'?'阶段规划':r.kind==='stage_review'?'阶段复盘':'本轮未调度新目标');
+          (r.kind==='stage_plan'?'Stage planning':r.kind==='stage_review'?'Stage review':'No new goal scheduled this round');
         return [badge(label(r.state)),target,r.reason,r.created_at];
       }));})));
-    const output=element('div'); output.append(element('p','empty-state','查看每轮编排的原因与结果。'));history.append(output);
+    const output=element('div'); output.append(element('p','empty-state','See why each orchestration round ran and what it produced.'));history.append(output);
   }
   budgetDisclosure(root, title, agentId, section) {
     const node = disclosure(root,title), key = JSON.stringify([agentId,section]);
@@ -324,24 +324,24 @@ export class AgentsView {
     return node;
   }
   renderBudgetUsage(root, d) {
-    const usage = this.budgetDisclosure(root,'用量明细',d.id,'usage');
+    const usage = this.budgetDisclosure(root,'Usage breakdown',d.id,'usage');
     usage.classList.add('agent-budget-usage');
-    usage.append(element('h4','','每日汇总'));
+    usage.append(element('h4','','Daily totals'));
     const days = new Map();
     for (const row of [...d.budget].sort((a,b) => b.window.localeCompare(a.window) || a.category.localeCompare(b.category))) {
       if (!days.has(row.window)) days.set(row.window,[]);
       days.get(row.window).push(row);
     }
     const metrics = ['calls','tokens','unknown_calls'];
-    const headers = ['调用数','Token（含预留）','未知用量调用'];
+    const headers = ['Calls','Tokens (incl. reserved)','Unknown-usage calls'];
     const entries = [...days].map(([day, rows], index) => {
       const totals = metrics.map(key => number(rows.reduce((sum,row) => sum+(row[key] || 0),0)));
       const key = JSON.stringify([d.id,'usage',day]);
       const detailRow = element('tr','agent-usage-detail-row'), cell = element('td'); cell.colSpan = 5;
       detailRow.id = `agent-usage-day-${index}`;
       const detail = element('section','agent-usage-day-detail');
-      detail.append(element('h5','',`${day} · 用途明细`));
-      table(detail,['用途',...headers],rows.map(row => [row.category,...metrics.map(metric => number(row[metric] || 0))]));
+      detail.append(element('h5','',`${day} · Usage by purpose`));
+      table(detail,['Purpose',...headers],rows.map(row => [row.category,...metrics.map(metric => number(row[metric] || 0))]));
       cell.append(detail); detailRow.append(cell);
       const toggle = button('',() => {
         const expanded = detailRow.hidden;
@@ -350,7 +350,7 @@ export class AgentsView {
       },'quiet agent-usage-toggle');
       const update = expanded => {
         detailRow.hidden = !expanded;
-        toggle.textContent = expanded ? '收起明细' : '展开明细';
+        toggle.textContent = expanded ? 'Collapse details' : 'Expand details';
         toggle.setAttribute('aria-expanded',String(expanded));
         toggle.setAttribute('aria-label',`${day} ${toggle.textContent}`);
       };
@@ -358,7 +358,7 @@ export class AgentsView {
       update(this.expandedBudgetSections.has(key));
       return {values:[element('strong','',day),...totals,toggle],detailRow};
     });
-    const daily = table(usage,['日期',...headers,'用途明细'],entries.map(entry => entry.values));
+    const daily = table(usage,['Date',...headers,'Usage details'],entries.map(entry => entry.values));
     [...daily.tBodies[0].rows].forEach((row,index) => {
       if (entries[index]) row.after(entries[index].detailRow);
     });
@@ -367,27 +367,27 @@ export class AgentsView {
     const schedule = this.root.querySelector('[data-agent-schedule]'); if (!schedule) return;
     const title = schedule.querySelector('strong'), note = schedule.querySelector('p');
     const inactive = {
-      draft:['尚未启用','启用 Agent 后开始调度。'],
-      paused:[d.pause_pending ? '暂停中' : '已暂停','恢复 Agent 后重新调度。'],
-      archived:['已归档','不再自动调度。'],
-    }[d.state] || (!d.service_enabled ? ['自主运行未启用','服务启用自主运行后才能调度。'] : null);
+      draft:['Not enabled yet','Scheduling starts once the Agent is enabled.'],
+      paused:[d.pause_pending ? 'Pausing' : 'Paused','Resume the Agent to resume scheduling.'],
+      archived:['Archived','No longer scheduled automatically.'],
+    }[d.state] || (!d.service_enabled ? ['Autonomy not enabled','The service must enable autonomous operation before scheduling.'] : null);
     if (inactive) {title.textContent = inactive[0]; note.textContent = inactive[1]; return;}
     if (!d.next_wake_at) {
-      title.textContent = '等待调度'; note.textContent = '已请求调度，等待调度器检查。'; return;
+      title.textContent = 'Waiting for scheduling'; note.textContent = 'Scheduling requested; waiting for the scheduler check.'; return;
     }
     const at = new Date(d.next_wake_at);
     if (!Number.isFinite(at.getTime())) {
-      title.textContent = '调度时间暂不可用'; note.textContent = '等待服务更新调度时间。'; return;
+      title.textContent = 'Schedule time unavailable'; note.textContent = 'Waiting for the service to update the schedule time.'; return;
     }
     const time = element('time','',at.toLocaleString(undefined,{
       year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false,
     }));
     time.dateTime = at.toISOString(); title.replaceChildren(time);
     const remaining = Math.ceil((at.getTime() - now) / 1000);
-    const countdown = remaining <= 0 ? '已到调度时间，等待调度器处理' : remaining < 60 ? `${remaining} 秒后` :
-      remaining < 3600 ? `约 ${Math.ceil(remaining / 60)} 分钟后` : remaining < 86400 ? `约 ${Math.ceil(remaining / 3600)} 小时后` : `约 ${Math.ceil(remaining / 86400)} 天后`;
-    note.textContent = `${countdown} · 本地时间（${Intl.DateTimeFormat().resolvedOptions().timeZone}）`;
-    schedule.title = '预计进行下一次目标检查与编排的时间；新目标或执行结果可能触发提前调度。';
+    const countdown = remaining <= 0 ? 'Scheduling time reached; waiting for the scheduler' : remaining < 60 ? `in ${remaining}s` :
+      remaining < 3600 ? `in ~${Math.ceil(remaining / 60)}m` : remaining < 86400 ? `in ~${Math.ceil(remaining / 3600)}h` : `in ~${Math.ceil(remaining / 86400)}d`;
+    note.textContent = `${countdown} · local time (${Intl.DateTimeFormat().resolvedOptions().timeZone})`;
+    schedule.title = 'When the next goal check and orchestration is expected; new goals or execution results may trigger it earlier.';
   }
   showRows(root, values) { const list = element('ul','dashboard-file-list'); for (const value of values) list.append(element('li','',value)); root.append(list); }
   focusGoal(id) {
@@ -408,29 +408,29 @@ export class AgentsView {
   }
   renderGoalWork(root,d,goal) {
     const works=d.work_packages.filter(w=>w.goal_id===goal.id).sort((a,b)=>(a.order??0)-(b.order??0));
-    if(!works.length) {root.append(element('p','muted','尚未拆分或派发工作包。'));return;}
-    const node=table(root,['工作包','状态','执行时长','消耗 tokens'],works.map(w=>{
+    if(!works.length) {root.append(element('p','muted','No work packages split or dispatched yet.'));return;}
+    const node=table(root,['Work package','Status','Execution time','Tokens used'],works.map(w=>{
       const name=element('div');
       name.append(element('span','',w.objective));
-      if(w.reason) name.append(element('p','muted',`编排依据：${w.reason}`));
+      if(w.reason) name.append(element('p','muted',`Orchestration rationale: ${w.reason}`));
       if(w.blocked_reason && !['succeeded','completed'].includes(w.state)) name.append(element('p','notice',w.blocked_reason));
-      const state=badge(w.superseded_contract?'旧合同 · '+label(w.state):label(w.state),w.state);
+      const state=badge(w.superseded_contract?'Superseded contract · '+label(w.state):label(w.state),w.state);
       const stateCell=w.session_id ? link('',`#/sessions/${encodeURIComponent(w.session_id)}`) : state;
       if(w.session_id)stateCell.append(state);
       const duration=w.execution_seconds == null ? '—' : seconds(w.execution_seconds * 1000);
       return [name,stateCell,duration,number(w.actual_tokens)];
     }));
     node.classList.add('agent-goal-work-table');
-    node.querySelectorAll('th:nth-child(n+3)').forEach(th=>th.title='显示关联 Session 当前执行轮次的数据；Session 被复用时可能关联多个工作包。');
+    node.querySelectorAll('th:nth-child(n+3)').forEach(th=>th.title="Shows data from the linked Session's current run; a reused Session may be linked to multiple work packages.");
   }
   renderGoals(root, d) {
     renderRoadmaps(root,d,this);
     const assigned=new Set((d.stages || []).flatMap(s=>s.goal_ids || []));
     const standalone=d.goals.filter(g=>!assigned.has(g.id) && !(d.stages || []).some(s=>s.id===g.stage_id));
     if(standalone.length) {
-      const block=roadmapDisclosure(this,root,d,'unassigned',`独立与历史目标 · ${standalone.length}`);
+      const block=roadmapDisclosure(this,root,d,'unassigned',`Standalone and historical goals · ${standalone.length}`);
       block.classList.add('dashboard-panel','dashboard-wide');
-      block.append(element('p','muted','未归入阶段的交付保留在这里，作为后续规划的现状依据。'));
+      block.append(element('p','muted','Deliverables not assigned to a stage stay here as the current-state basis for future planning.'));
       for(const goal of standalone) this.renderGoal(block,d,goal);
     }
   }
@@ -446,117 +446,117 @@ export class AgentsView {
     name.append(document.createTextNode(goal.objective));
     const tags=element('span','goal-tree-tags');tags.append(badge(label(goal.state),goal.state));
     const track=element('span','agent-goal-progress-track'+(total?'':' is-unknown'));
-    track.setAttribute('role','img');track.setAttribute('aria-label',`工作包验收 ${accepted} / ${total}`);
+    track.setAttribute('role','img');track.setAttribute('aria-label',`Work packages accepted ${accepted} / ${total}`);
     if(total){const fill=element('span','agent-goal-progress-fill');fill.style.width=`${Math.round(accepted/total*100)}%`;track.append(fill);}
-    tags.append(track,element('span','agent-goal-progress-count',total?`${accepted} / ${total}`:'尚未拆分'));
+    tags.append(track,element('span','agent-goal-progress-count',total?`${accepted} / ${total}`:'Not split yet'));
     const idcode=element('code','agent-roadmap-id',goal.id);idcode.title=goal.id;tags.append(idcode);
     heading.append(name,tags);
     row.querySelector('summary').append(heading);
-    row.append(element('h5','','验收条件'));
+    row.append(element('h5','','Acceptance criteria'));
     this.showRows(row, goal.acceptance);
     const selection = (d.selection || []).find(s => s.goal_id === goal.id);
     if (selection && selection.blocker?.code !== 'GOAL_STATE') row.append(element('p','muted',selection.reason));
-    if (goal.proposal) row.append(element('p','muted',`提案依据：${goal.proposal.reason} · 来源：${goal.proposal.source}`));
-    if (goal.not_before) row.append(element('p','muted',`最早重试：${goal.not_before}`));
+    if (goal.proposal) row.append(element('p','muted',`Proposal rationale: ${goal.proposal.reason} · Source: ${goal.proposal.source}`));
+    if (goal.not_before) row.append(element('p','muted',`Earliest retry: ${goal.not_before}`));
     if (goal.source_changed) row.append(element('p','notice',['completed','cancelled','superseded'].includes(goal.state)
-      ? '历史记录：来源在规划后发生过变化。' : '来源在规划后发生变化，后续派发已等待目标复核。'));
+      ? 'History: the source changed after planning.' : 'The source changed after planning; later dispatches wait for goal review.'));
     if (editable && goal.state === 'blocked') {
       const retry = element('form','agent-form');
       const kind = element('select'); kind.name='change_kind';
-      for (const [value,title] of [['input','输入变化'],['method','方法变化'],['environment','环境变化']]) {
+      for (const [value,title] of [['input','Input change'],['method','Method change'],['environment','Environment change']]) {
         const option=element('option','',title); option.value=value; kind.append(option);
       }
-      retry.append(kind); field(retry,'change','本次与上次失败相比有什么变化','',true);
-      retry.append(button('创建有退避的新 attempt',()=>this.act(()=>this.api.post(d.id,`goals/${encodeURIComponent(goal.id)}/retry`,
+      retry.append(kind); field(retry,'change','What changed since the last failure','',true);
+      retry.append(button('Create new attempt with backoff',()=>this.act(()=>this.api.post(d.id,`goals/${encodeURIComponent(goal.id)}/retry`,
         {command_id:uuid(),expected_revision:goal.revision,change_kind:kind.value,change:retry.elements.change.value}))));
       row.append(retry);
     }
     if ((editable || !goal.stage_id) && !['completed','cancelled','superseded'].includes(goal.state)) for (const type of ['pause','resume','cancel']) row.append(button(
-      {pause:'暂停目标',resume:'恢复目标',cancel:'取消目标'}[type], () => this.act(() => this.api.post(d.id, `goals/${encodeURIComponent(goal.id)}/commands`,
+      {pause:'Pause goal',resume:'Resume goal',cancel:'Cancel goal'}[type], () => this.act(() => this.api.post(d.id, `goals/${encodeURIComponent(goal.id)}/commands`,
         {command_id:uuid(), type, expected_revision:goal.revision}))));
-    if (editable) row.append(button('修订目标', () => {
-      const form=element('form','agent-form');field(form,'objective','目标',goal.objective,true);field(form,'acceptance','验收条件',goal.acceptance.join('\n'),true);
-      form.append(button('保存新合同',()=>this.act(async()=>{await this.api.post(d.id,`goals/${encodeURIComponent(goal.id)}/commands`,
+    if (editable) row.append(button('Revise goal', () => {
+      const form=element('form','agent-form');field(form,'objective','Objective',goal.objective,true);field(form,'acceptance','Acceptance criteria',goal.acceptance.join('\n'),true);
+      form.append(button('Save new contract',()=>this.act(async()=>{await this.api.post(d.id,`goals/${encodeURIComponent(goal.id)}/commands`,
         {command_id:uuid(),type:'revise',expected_revision:goal.revision,payload:{objective:form.elements.objective.value,acceptance:lines(form.elements.acceptance.value)}});
         document.activeElement?.blur();})));row.append(form);
     }));
-    row.append(element('h5','','执行工作包'));this.renderGoalWork(row,d,goal);
+    row.append(element('h5','','Execution work packages'));this.renderGoalWork(row,d,goal);
   }
   renderWork(root, d) {
     renderExecution(root,d,this);
-    const sessions = roadmapDisclosure(this,root,d,'execution-sessions','Session 管理与路由');
+    const sessions = roadmapDisclosure(this,root,d,'execution-sessions','Session management & routing');
     sessions.classList.add('dashboard-wide');
-    table(sessions,['Session','归属','操作'],d.sessions.map(s => [link(s.session_id,`#/sessions/${encodeURIComponent(s.session_id)}`),
-      badge(s.taken_over ? '人工接管' : 'Agent 管理'),button(s.taken_over ? '归还 Session' : '接管 Session',()=>this.act(()=>this.api.post(d.id,
+    table(sessions,['Session','Ownership','Actions'],d.sessions.map(s => [link(s.session_id,`#/sessions/${encodeURIComponent(s.session_id)}`),
+      badge(s.taken_over ? 'Human takeover' : 'Agent managed'),button(s.taken_over ? 'Return Session' : 'Take over Session',()=>this.act(()=>this.api.post(d.id,
         `sessions/${encodeURIComponent(s.session_id)}/commands`,{command_id:uuid(),type:s.taken_over?'release':'takeover',expected_revision:d.revision})))]));
-    const routes = roadmapDisclosure(this,sessions,d,'execution-routes','Session 选择依据'), output=element('div'); routes.append(output);
-    routes.firstChild.append(button('查看路由记录',()=>this.act(async()=>{const {routes:rows}=await this.api.get(d.id,'routes');output.replaceChildren();
-      table(output,['选择','依据'],rows.map(r=>[r.action,r.reason]));})));
+    const routes = roadmapDisclosure(this,sessions,d,'execution-routes','Session routing rationale'), output=element('div'); routes.append(output);
+    routes.firstChild.append(button('View routing history',()=>this.act(async()=>{const {routes:rows}=await this.api.get(d.id,'routes');output.replaceChildren();
+      table(output,['Choice','Rationale'],rows.map(r=>[r.action,r.reason]));})));
   }
   renderProfile(root, d) {
-    const role = panel(root,'角色定位',true);
-    role.firstChild.append(button('编辑角色', () => this.createForm(d,'identity')));
+    const role = panel(root,'Role identity',true);
+    role.firstChild.append(button('Edit role', () => this.createForm(d,'identity')));
     role.append(element('p','',d.role.role_text));
-    role.append(button('管理学习与人工方法',()=>this.changeTab('Learning')));
-    const preferences = panel(root,'偏好与习惯',true);
-    preferences.append(element('p','muted','明确指导立即生效；推断偏好保留来源、反例和复核期限。试用只影响指导，不增加工具权限。'));
-    table(preferences,['偏好','范围','状态','证据 / 复核','操作'],(d.profile_entries || []).map(p => {
+    role.append(button('Manage learning & manual methods',()=>this.changeTab('Learning')));
+    const preferences = panel(root,'Preferences & habits',true);
+    preferences.append(element('p','muted','Explicit guidance takes effect immediately; inferred preferences keep their source, counterexamples, and review deadline. Trials only affect guidance and grant no extra tool permissions.'));
+    table(preferences,['Preference','Scope','State','Evidence / review','Actions'],(d.profile_entries || []).map(p => {
       const actions=element('div','actions');
-      for (const [type,title] of [['activate','以后采用'],['trial','试用七天'],['lock','锁定'],[p.state==='retired'?'restore':'retire',p.state==='retired'?'恢复':'停用']]) {
+      for (const [type,title] of [['activate','Adopt from now on'],['trial','Trial for 7 days'],['lock','Lock'],[p.state==='retired'?'restore':'retire',p.state==='retired'?'Restore':'Retire']]) {
         actions.append(button(title,()=>this.act(()=>this.api.post(d.id,'preferences/commands',
           {command_id:uuid(),entry_id:p.id,expected_revision:p.revision,type}))));
       }
       const active=d.work_packages.find(w=>['running','dispatched'].includes(w.state));
-      if (active) actions.append(button('仅这次',()=>this.act(()=>this.api.post(d.id,'preferences/commands',
+      if (active) actions.append(button('Just this once',()=>this.act(()=>this.api.post(d.id,'preferences/commands',
         {command_id:uuid(),entry_id:p.id,expected_revision:p.revision,type:'once',work_package_id:active.id}))));
-      return [p.text,p.scope==='owner'?`共享：${(d.shared_roles || []).map(r=>r.name).join('、')}`:p.scope,
-        `${p.state}${p.locked_by_user?' · 已锁定':''}`,`${p.independent_episodes} 个独立记录 · ${p.counterexamples.length} 个反例 · ${p.review_at}`,actions];
+      return [p.text,p.scope==='owner'?`Shared: ${(d.shared_roles || []).map(r=>r.name).join(', ')}`:p.scope,
+        `${p.state}${p.locked_by_user?' · Locked':''}`,`${p.independent_episodes} independent records · ${p.counterexamples.length} counterexamples · ${p.review_at}`,actions];
     }));
     const form=element('form','agent-form');
-    field(form,'key','偏好名称','',true); field(form,'text','以后采用的偏好','',true);
-    const scope=element('select'); scope.name='scope'; scope.setAttribute('aria-label','偏好范围');
-    for (const [value,title] of [['agent','仅此角色'],['owner','同 owner 的所有角色']]) {
+    field(form,'key','Preference name','',true); field(form,'text','Preference to adopt from now on','',true);
+    const scope=element('select'); scope.name='scope'; scope.setAttribute('aria-label','Preference scope');
+    for (const [value,title] of [['agent','This role only'],['owner','All roles of the same owner']]) {
       const option=element('option','',title); option.value=value; scope.append(option);
     }
-    form.append(scope,button('保存明确偏好',()=>this.act(()=>this.api.post(d.id,'preferences/feedback',
+    form.append(scope,button('Save explicit preference',()=>this.act(()=>this.api.post(d.id,'preferences/feedback',
       {command_id:uuid(),key:form.elements.key.value,text:form.elements.text.value,scope:scope.value,kind:'explicit'}))));
     preferences.append(form);
-    const feedback=panel(root,'方法使用反馈',true), output=element('div');
-    feedback.append(button('查看采用与结果',()=>this.act(async()=>{
+    const feedback=panel(root,'Method usage feedback',true), output=element('div');
+    feedback.append(button('View adoption & outcomes',()=>this.act(async()=>{
       const report=await this.api.get(d.id,'methods/feedback'); output.replaceChildren();
-      output.append(element('p','muted',`${report.sample_runs} 个执行样本 · ${report.corrections} 条纠正。因果改善仍为 unknown。`));
-      table(output,['方法 / 记忆','采用','验收','实际动作','Token / 未知用量调用'],report.records.map(r=>[
-        r.reference_id,r.state,r.acceptance,r.action_ids.join('、'),`${r.actual_tokens ?? 'unknown'} / ${r.unknown_cost_calls}`]));
+      output.append(element('p','muted',`${report.sample_runs} execution samples · ${report.corrections} corrections. Causal improvement remains unknown.`));
+      table(output,['Method / memory','Adoption','Acceptance','Actual actions','Tokens / unknown-usage calls'],report.records.map(r=>[
+        r.reference_id,r.state,r.acceptance,r.action_ids.join(', '),`${r.actual_tokens ?? 'unknown'} / ${r.unknown_cost_calls}`]));
     })),output);
   }
   renderKnowledge(root,d) {
-    const sources = panel(root,'资料获取位置',true);
-    table(sources,['用途','资料位置','知识库','外部工具'],configuredRole(d).source_routes.map(s=>[s.topic,(s.paths || []).join('、'),
-      (s.knowledge_base_ids || []).join('、'),(s.external_tool_ids || []).join('、')]));
-    const resources = panel(root,'知识库与外部工具',true), form = element('form','agent-resource-form'); resources.append(form);
+    const sources = panel(root,'Source locations',true);
+    table(sources,['Purpose','Source paths','Knowledge bases','External tools'],configuredRole(d).source_routes.map(s=>[s.topic,(s.paths || []).join(', '),
+      (s.knowledge_base_ids || []).join(', '),(s.external_tool_ids || []).join(', ')]));
+    const resources = panel(root,'Knowledge bases & external tools',true), form = element('form','agent-resource-form'); resources.append(form);
     const grid = element('div','trace-dashboard'); form.append(grid);
-    const knowledge = panel(grid,'知识库'), tools = panel(grid,'外部工具');
+    const knowledge = panel(grid,'Knowledge bases'), tools = panel(grid,'External tools');
     const knowledgeList = element('div','knowledge-choices'), toolList = element('div','external-choices');
-    for (const [target,list,title] of [[knowledge,knowledgeList,'知识库'],[tools,toolList,'外部工具']]) {
+    for (const [target,list,title] of [[knowledge,knowledgeList,'Knowledge bases'],[tools,toolList,'External tools']]) {
       list.setAttribute('role','group'); list.setAttribute('aria-label',title);
-      list.append(element('p','muted','加载可选项…')); target.append(list);
+      list.append(element('p','muted','Loading choices…')); target.append(list);
     }
     const count = element('p','muted small'), message = element('p','notice'); message.hidden = true;
     message.setAttribute('role','status');
-    const actions = element('div','setup-form-actions'), save = element('button','primary','保存资源绑定');
+    const actions = element('div','setup-form-actions'), save = element('button','primary','Save resource bindings');
     save.type = 'submit'; save.disabled = true;
-    const retry = button('重新加载选项',()=>load()); retry.hidden = true;
+    const retry = button('Reload choices',()=>load()); retry.hidden = true;
     actions.append(save,retry); form.append(count,message,actions);
     const editor = this.resourceEditor = {form,dirty:false,saving:false,loaded:false};
     const generation = this.generation, signal = this.abort?.signal;
     const current = () => generation === this.generation && this.selected === d.id && form.isConnected;
     const summarize = () => {
-      count.textContent = `已选择 ${selectedTools(knowledgeList).length} 个知识库 · ${selectedTools(toolList).length} 个外部工具`;
+      count.textContent = `${selectedTools(knowledgeList).length} knowledge bases · ${selectedTools(toolList).length} external tools selected`;
     };
     form.addEventListener('change',()=>{editor.dirty = true; summarize(); save.disabled = !editor.loaded || editor.saving;});
     const showError = error => {
       message.hidden = false; message.classList.add('error'); message.setAttribute('role','alert');
-      message.textContent = `${error.message}${error.status === 409 ? '。配置已更新，请重新进入知识来源页核对后再保存。' : ''}`;
+      message.textContent = `${error.message}${error.status === 409 ? ' Configuration changed; reopen the Knowledge tab to verify before saving.' : ''}`;
     };
     const load = async () => {
       retry.hidden = true; save.disabled = true; message.hidden = true;
@@ -597,11 +597,11 @@ export class AgentsView {
       }
     });
     load();
-    const updates=panel(root,'知识更新',true);
-    updates.append(button('检查已绑定来源',()=>this.act(()=>this.api.post(d.id,'sources/refresh',{}))));
-    table(updates,['来源','状态','版本','核验时间','使用条件'],(d.source_status || []).map(s=>[
-      s.route_id,s.state,String(s.revision),s.checked_at,s.revalidate_before_use?'使用前需重新核验':'当前版本可用']));
-    updates.append(element('p','muted','配置 refresh_seconds 可周期检查。现有 FTS 本地索引支持增量更新；尚无逐调用计量适配的后端会保留覆盖缺口。'));
+    const updates=panel(root,'Knowledge updates',true);
+    updates.append(button('Check bound sources',()=>this.act(()=>this.api.post(d.id,'sources/refresh',{}))));
+    table(updates,['Source','State','Revision','Checked at','Usage condition'],(d.source_status || []).map(s=>[
+      s.route_id,s.state,String(s.revision),s.checked_at,s.revalidate_before_use?'Revalidate before use':'Current version usable']));
+    updates.append(element('p','muted','Configure refresh_seconds for periodic checks. The existing FTS local index supports incremental updates; backends without per-call metering keep coverage gaps.'));
   }
   renderLearning(root,d) {
     if (!this.learningStates.has(d.id)) this.learningStates.set(d.id,{});

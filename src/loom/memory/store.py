@@ -86,7 +86,8 @@ class MemoryStore:
         query = """
             SELECT j.id, j.session_id, json_extract(j.body, '$.run_id'),
                    json_extract(j.body, '$.created_at'), json_extract(j.body, '$.state'),
-                   json_extract(j.body, '$.checkpoint.memory.identity.source'), r.key, r.value
+                   json_extract(j.body, '$.checkpoint.memory.identity.source'), r.key, r.value,
+                   json_extract(j.body, '$.analysis_id')
             FROM semantic_jobs j JOIN sessions s ON s.id = j.session_id,
                  json_each(j.body, '$.checkpoint.memory.records') r
             WHERE json_extract(s.body, '$.deleted_at') IS NULL
@@ -125,7 +126,7 @@ class MemoryStore:
         except (sqlite3.Error, OSError) as exc:
             raise MemoryError("memory.store_unavailable", f"Cannot read memory source: {exc}") from exc
         results, issues = [], []
-        for evaluation, session, run, created, state, digest, key, raw in rows[:SCAN_LIMIT]:
+        for evaluation, session, run, created, state, digest, key, raw, analysis in rows[:SCAN_LIMIT]:
             record = json.loads(raw)
             if record.get('publication_state', 'published') != 'published':
                 continue
@@ -138,7 +139,7 @@ class MemoryStore:
                 continue
             content_digest = hashlib.sha256(serialized(record).encode()).hexdigest()
             results.append(dict(record=record, source=dict(
-                session_id=session, run_id=run, evaluation_id=evaluation, record_id=key,
+                session_id=session, run_id=run, analysis_id=analysis, evaluation_id=evaluation, record_id=key,
                 source_digest=digest, content_digest=content_digest, created_at=created, evaluation_state=state,
             )))
         if apply_annotations and (annotations or suppressions):

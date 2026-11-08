@@ -73,6 +73,21 @@ function result() {
   };
 }
 
+test('linked evaluation opens the requested saved job instead of the newest one',async()=>{
+  const dom=new JSDOM('<section id="root"></section>');globalThis.document=dom.window.document;
+  const abort=new AbortController(),reads=[];
+  const jobs=[{id:'newest',state:'completed',model:'judge',settings},
+              {id:'linked',state:'completed',model:'judge',settings}];
+  const api={evaluations:async()=>({models:[{id:'judge',label:'Judge'}],default_model:'judge',defaults:settings,
+      bounds:Object.fromEntries(Object.keys(settings).map(k=>[k,[1,1000000]])),jobs}),
+    evaluation:async(sid,aid,id)=>{reads.push([sid,aid,id]);return {...jobs.find(job=>job.id===id),evaluation:result()};}};
+  try{
+    const view=new EvaluationView(document.querySelector('#root'),{api,sessionId:'s',analysisId:'a',evaluationId:'linked',signal:abort.signal});
+    await view.open();await new Promise(resolve=>setTimeout(resolve,0));
+    assert.deepEqual(reads,[['s','a','linked']]);assert.equal(view.selectedHistoryId,'linked');
+  }finally{abort.abort();dom.window.close();}
+});
+
 test("deep evaluation selects budgets, renders uncertainty and evidence, and restores cached history", async () => {
   const dom = new JSDOM('<section id="root"></section>');
   globalThis.document = dom.window.document;

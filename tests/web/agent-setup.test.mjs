@@ -91,8 +91,8 @@ test('Editing preserves advanced role configuration and makes unavailable bindin
   const f=fixture({edit:{id:'a',revision:2,role}});
   try {
     await f.view.load();
-    assert.match(f.view.model.textContent,/missing（当前不可用）/);
-    assert.match(f.view.knowledgeList.textContent,/missing-kb（当前不可用）/);
+    assert.match(f.view.model.textContent,/missing \(currently unavailable\)/);
+    assert.match(f.view.knowledgeList.textContent,/missing-kb \(currently unavailable\)/);
     assert.equal(f.view.daily.choice.value,'custom');
     const result=f.view.payload();
     assert.equal(result.working_directory,'/project/sub'); assert.equal(result.interval_seconds,1234);
@@ -113,7 +113,7 @@ test('Loading failure disables saving and retry keeps entered text',async () => 
     assert.equal(f.view.submit.disabled,true); assert.equal(f.view.retry.hidden,false); assert.match(f.view.error.textContent,/Offline/);
     fail=false; await f.view.load();
     assert.equal(f.view.submit.disabled,false); assert.equal(f.view.form.elements.objective.value,'Keep my draft');
-    assert.match(f.view.knowledgeList.textContent,/暂无知识库/);
+    assert.match(f.view.knowledgeList.textContent,/No knowledge bases yet/);
   } finally {f.close();}
 });
 
@@ -134,7 +134,7 @@ test('Only the shared daily token allowance is configurable, including custom va
   assert.deepEqual(f.view.payload().budget,{daily_tokens:1000000});
   for(const name of ['work','goal_budget','learning','max_calls','stage_budget','work_ceiling','objective_ceiling'])
    assert.equal(f.view.form.elements[name],undefined);
-  assert.match(f.view.form.textContent,/每天零点重新计数/);
+  assert.match(f.view.form.textContent,/Usage resets at midnight in the chosen timezone/);
   f.view.daily.choice.value='100000000';f.change(f.view.daily.choice);
   assert.deepEqual(f.view.payload().budget,{daily_tokens:100000000});
   f.view.daily.choice.value='custom';f.change(f.view.daily.choice);f.view.form.elements.daily_custom.value='1234567';
@@ -148,7 +148,7 @@ const EXEC_CATALOG={models:[{id:'fast',label:'Fast model'}],setup_recommendation
  plugins:{context:[{id:'bounded_context',label:'Bounded context'}],workflow:[{id:'dynamic',label:'Dynamic'},{id:'legacy_planning',label:'Legacy planning'}]},
  external_tools:[{id:'lookup',connector_name:'Research',name:'Lookup',kind:'mcp',description:'Find references',effect_kind:'read_only'}]};
 const EXEC_BASES={knowledge_bases:[{id:'kb-project',name:'Project documents',description:'Design notes'}]};
-const execBlock=view=>[...view.form.querySelectorAll('details.setup-block')].find(d=>d.textContent.includes('执行配置'));
+const execBlock=view=>[...view.form.querySelectorAll('details.setup-block')].find(d=>d.textContent.includes('Execution configuration'));
 const execChecked=view=>[...execBlock(view).querySelectorAll('input[type="checkbox"]:checked')].map(n=>n.value);
 
 test('Recommend backfills execution config and manual edits reach the saved role',async()=>{
@@ -165,12 +165,12 @@ test('Recommend backfills execution config and manual edits reach the saved role
   await f.view.load();
   const block=execBlock(f.view);
   assert.ok(block);assert.equal(block.open,false);
-  assert.match(block.querySelector('.setup-selection-summary').textContent,/跟随系统默认/);
+  assert.match(block.querySelector('.setup-selection-summary').textContent,/Follow system defaults/);
   assert.equal(f.view.payload().task_spec,null);
   assert.equal(f.view.payload().plan_mode,'auto');
   f.view.form.elements.role.value='先查实现，再修改设计';
   f.view.form.elements.objective.value='维护项目文档';
-  const recommend=[...block.querySelectorAll('button')].find(b=>b.textContent==='智能推荐');
+  const recommend=[...block.querySelectorAll('button')].find(b=>b.textContent==='Recommend for me');
   assert.equal(recommend.disabled,false);
   recommend.click();await new Promise(r=>setTimeout(r,0));
   const request=calls.find(c=>c[0]==='/v1/agents/setup/recommend');
@@ -185,7 +185,7 @@ test('Recommend backfills execution config and manual edits reach the saved role
   assert.equal(f.view.toolList.querySelector('input[value="lookup"]').checked,true);
   assert.match(block.textContent,/需要读写源码并运行测试/);
   assert.match(block.textContent,/读写源码/);
-  assert.match(block.querySelector('.setup-selection-summary').textContent,/已选择 3 项/);
+  assert.match(block.querySelector('.setup-selection-summary').textContent,/3 selected/);
   const role=f.view.payload();
   assert.deepEqual(role.task_spec,{schema_version:1,tools:{collections:['filesystem','shell','task_control']},context:{plugin:'bounded_context'},workflow:{plugin:'dynamic'}});
   assert.equal(role.plan_mode,'force');
@@ -209,7 +209,7 @@ test('Recommend failure keeps manual configuration and reports the error',async(
   const block=execBlock(f.view);
   execBlock(f.view).querySelector('input[value="filesystem"]').checked=true;
   f.view.form.elements.role.value='先查实现';
-  const recommend=[...block.querySelectorAll('button')].find(b=>b.textContent==='智能推荐');
+  const recommend=[...block.querySelectorAll('button')].find(b=>b.textContent==='Recommend for me');
   recommend.click();await new Promise(r=>setTimeout(r,0));
   assert.match(block.textContent,/模型不可用/);
   assert.equal(recommend.disabled,false);
@@ -230,7 +230,7 @@ test('Editing reads the role execution config and clearing it returns to system 
   assert.equal(f.view.form.elements.workflow_plugin.value,'dynamic');
   assert.equal(f.view.form.elements.context_plugin.value,'');
   assert.equal(f.view.form.elements.plan_mode.value,'force');
-  assert.match(block.querySelector('.setup-selection-summary').textContent,/已选择 2 项/);
+  assert.match(block.querySelector('.setup-selection-summary').textContent,/2 selected/);
   assert.equal(f.view.payload().task_spec.workflow.plugin,'dynamic');
   assert.equal(f.view.payload().plan_mode,'force');
   for(const check of execBlock(f.view).querySelectorAll('input[type="checkbox"]'))check.checked=false;

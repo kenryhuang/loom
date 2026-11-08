@@ -45,11 +45,11 @@ def tree_digest(root, *, exclude=()):
             h.update(relative.encode() + b'\0')
             if path.is_symlink():
                 if not path.resolve().is_relative_to(root):
-                    raise ServiceError('独立验证副本不支持指向工作区外的符号链接：' + relative, 409, code='EXECUTION_CONTRACT')
+                    raise ServiceError('Isolated verification copies do not support symlinks pointing outside the workspace: ' + relative, 409, code='EXECUTION_CONTRACT')
                 h.update(b'link:' + os.readlink(path).encode())
             else:
                 if not path.is_file():
-                    raise ServiceError('工作区包含不可复制的特殊文件：' + relative, 409, code='EXECUTION_CONTRACT')
+                    raise ServiceError('The workspace contains a special file that cannot be copied: ' + relative, 409, code='EXECUTION_CONTRACT')
                 with path.open('rb') as stream:
                     for chunk in iter(lambda: stream.read(1024 * 1024), b''):
                         h.update(chunk)
@@ -59,7 +59,7 @@ def tree_digest(root, *, exclude=()):
 def copy_workspace(data_dir, source, identity):
     source, data_dir = Path(source).resolve(), Path(data_dir).resolve()
     if source == data_dir or source.is_relative_to(data_dir):
-        raise ServiceError('服务数据目录不能作为自动验证副本的源目录', 409, code='EXECUTION_CONTRACT')
+        raise ServiceError('The service data directory cannot be the source of an automatic verification copy', 409, code='EXECUTION_CONTRACT')
     # A test/workspace may contain the service directory; never recursively copy it.
     excluded = (data_dir,) if data_dir.is_relative_to(source) else ()
     target = data_dir / 'recovery_workspaces' / identity
@@ -69,9 +69,9 @@ def copy_workspace(data_dir, source, identity):
         saved = json.loads(receipt.read_text())
         if saved['source_digest'] == before and target.is_dir() and input_manifest(target) == saved['inputs']:
             return saved
-        raise ServiceError('恢复副本对应的原始工作区已变化，需要重新评估', 409, code='EXECUTION_CONTRACT')
+        raise ServiceError('The original workspace for the recovery copy has changed; re-evaluation required', 409, code='EXECUTION_CONTRACT')
     if (source / '.git').is_file():
-        raise ServiceError('链接式 Git worktree 需要独立验证环境，不能复制其外部 Git 元数据', 409, code='EXECUTION_CONTRACT')
+        raise ServiceError('A linked Git worktree needs an isolated verification environment; its external Git metadata cannot be copied', 409, code='EXECUTION_CONTRACT')
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         shutil.rmtree(target)  # Only this recovery's incomplete, never-dispatched copy.
@@ -79,10 +79,10 @@ def copy_workspace(data_dir, source, identity):
                     ignore=lambda directory, names: [n for n in names if Path(directory, n).resolve() in excluded])
     after = tree_digest(source, exclude=excluded)
     if before != after or tree_digest(target) != before:
-        raise ServiceError('复制期间源文件变化，验证副本未提交', 409, code='EXECUTION_CONTRACT')
+        raise ServiceError('Source files changed during the copy; the verification copy was not committed', 409, code='EXECUTION_CONTRACT')
     inputs = input_manifest(source, excluded)
     if inputs != input_manifest(target):
-        raise ServiceError('验证副本的输入清单与源工作区不一致', 409, code='EXECUTION_CONTRACT')
+        raise ServiceError('The verification copy input manifest does not match the source workspace', 409, code='EXECUTION_CONTRACT')
     saved = dict(source=str(source), path=str(target), source_digest=before, inputs=inputs, excluded=[str(p) for p in excluded])
     receipt.write_text(json.dumps(saved))
     return saved

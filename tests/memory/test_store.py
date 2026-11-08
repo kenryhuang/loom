@@ -48,6 +48,8 @@ def test_scope_citations_partial_chinese_and_delete(tmp_path):
     store = SessionStore(tmp_path / 'data')
     workspace = tmp_path / 'solar'
     sid = seed(store, workspace)
+    with store.transaction() as db:
+        db.execute("UPDATE semantic_jobs SET body=json_set(body, '$.analysis_id', ?) WHERE id=?", ('analysis-1', 'eval-memory'))
     seed(store, tmp_path / 'other', evaluation='private')
     memory = MemoryStore(store.path, workspace=workspace)
     result = memory.search('修复行星渲染')
@@ -56,6 +58,8 @@ def test_scope_citations_partial_chinese_and_delete(tmp_path):
     assert source['evaluation_state'] == 'incomplete'
     assert source['session_id'] == sid
     assert source['run_id'] == 'historical-run'
+    assert source['analysis_id'] == 'analysis-1'
+    assert memory.browse()['records'][0]['source']['analysis_id'] == 'analysis-1'
     full = memory.read('eval-memory', 'memory:planet', limit=100)
     assert full['next_offset'] == 100
     rest = memory.read('eval-memory', 'memory:planet', offset=100)

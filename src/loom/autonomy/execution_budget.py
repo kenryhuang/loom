@@ -94,15 +94,15 @@ def allocate(store, db, agent, work, *, requested=None):
 def parent_block(store, db, agent, work, requested):
     aid, budget = agent["id"], agent["role"]["budget"]
     window = store.clock().astimezone(ZoneInfo(agent["role"]["timezone"])).date().isoformat()
-    checks = [("daily", "每日", "window=?", (window,), budget["daily_tokens"])]
+    checks = [("daily", "Daily", "window=?", (window,), budget["daily_tokens"])]
     reasons, scopes = [], []
     for scope, name, where, args, limit in checks:
         used = db.execute(f"SELECT COALESCE(SUM(COALESCE(actual,reserved)),0) FROM agent_budget_calls WHERE agent_id=? AND {where}", (aid, *args)).fetchone()[0]
         if used + requested > limit:
-            reasons.append(f"{name} Token 总预算不足：已用及预留 {used}，本次需要 {requested}，上限 {limit}")
+            reasons.append(f"{name} token budget exceeded: used & reserved {used}, this run needs {requested}, limit {limit}")
             scopes.append(dict(scope=scope, limit=limit, used=used, requested=requested, projected=used + requested))
     if not scopes:
         return None
-    error = ServiceError('；'.join(reasons), 409, code='EXECUTION_BUDGET')
+    error = ServiceError('; '.join(reasons), 409, code='EXECUTION_BUDGET')
     error.details = dict(scopes=scopes, window=window)
     return error

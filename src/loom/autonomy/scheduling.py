@@ -68,7 +68,7 @@ class QueueScheduler:
                     current.update(error=str(exc), activity="degraded")
                     current["scheduler"]["retry_generation"] = current["generation"]
                     self.store.put(db, "agents", current)
-                self.finish(aid, "intervention", str(exc), steps=["检查原始错误并修正配置或输入，再点击手动调度。"],
+                self.finish(aid, "intervention", str(exc), steps=["Fix the original error in the configuration or input, then run a manual check."],
                             blockers=[from_exception(exc, aid, None, None)])
             return True
         finally:
@@ -125,7 +125,7 @@ class QueueScheduler:
                     capability_exiting |= (state['task']['state'] == 'paused'
                                            and (state.get('run') or {}).get('stop_code') == 'ACCEPTANCE_CAPABILITY_UNAVAILABLE')
         if active:
-            self.finish(aid, "running", "当前任务仍在运行或等待执行槽位，本轮检查结束，不打断任务。", work=active[0])
+            self.finish(aid, "running", "A task is still running or waiting for an execution slot; this check ends without interrupting it.", work=active[0])
             if capability_exiting:
                 with self.store.sessions.transaction() as db:
                     current = self.store.get(db, 'agents', aid)
@@ -139,7 +139,7 @@ class QueueScheduler:
             work = blocked[0]
             try:
                 self.recover(aid, work["id"])
-                return self.finish(aid, "recovered", "已恢复原任务，等待执行；下一次定时检查继续核对状态。", work=work["id"])
+                return self.finish(aid, "recovered", "The original task was recovered and is waiting to run; the next scheduled check re-verifies its state.", work=work["id"])
             except ServiceError as exc:
                 blocker = from_exception(exc, work["id"], None, None)
                 with self.store.sessions.transaction() as db:
@@ -152,12 +152,12 @@ class QueueScheduler:
                     str(exc),
                     work=work["id"],
                     blockers=[blocker],
-                    steps=["查看此工作包的具体阻塞项和原 Session。", "按原因补充输入、恢复人工暂停或调整预算上限，再点击手动调度。"],
+                    steps=["See this work package's specific blocker and original Session.", "Add input, resume the manual pause, or raise the budget cap as needed, then run a manual check."],
                 )
         from loom.autonomy import goals, sources
 
         if agent.get('pending_configuration'):
-            return self.finish(aid, 'waiting', '新配置已保存，等待已派发任务与分析结束后用于下一次调度。')
+            return self.finish(aid, 'waiting', 'The new configuration is saved and takes effect on the next check after dispatched tasks and analyses finish.')
 
         sources.refresh(self.store, aid)
         self.supervisor.stages.reconcile(aid)
@@ -195,11 +195,11 @@ class QueueScheduler:
             return self.finish(
                 aid,
                 "intervention" if intervention else "waiting",
-                (planning[0].get("reason") if planning else None) or "队列目标尚不可运行，请检查目标依赖、阶段和必需来源。",
-                steps=["按结构化恢复动作处理对应阻塞后再调度。"] if intervention else ["等待预算窗口或额度变化后自动复查。"],
+                (planning[0].get("reason") if planning else None) or "Queued goals are not runnable yet; check goal dependencies, stages, and required sources.",
+                steps=["Resolve the corresponding blockers with the structured recovery actions before scheduling."] if intervention else ["Automatically rechecked after the budget window or quota changes."],
                 blockers=blockers,
             )
-        self.finish(aid, "idle", "队列已完成，本轮现状检查没有产生新的可执行目标；按配置等待下次检查。")
+        self.finish(aid, "idle", "The queue is complete; this check produced no new runnable goals. Waiting for the next check as configured.")
 
     def dispatch_one(self, aid, works):
         with self.store.sessions.transaction() as db:
@@ -208,7 +208,7 @@ class QueueScheduler:
                 c for c in self.store.rows(db, "agent_learning_cycles", aid) if c["state"] not in {"completed", "failed", "cancelled", "incomplete"}
             ]
         if len(pending_learning) >= 20:
-            return self.finish(aid, "intervention", "后台分析积压达到 20 项，暂不派发新工作。", steps=["处理后台分析的预算或失败项后手动调度。"])
+            return self.finish(aid, "intervention", "Background analysis backlog reached 20 items; no new work will be dispatched.", steps=["Resolve the background analysis budget or failures, then run a manual check."])
         for work in sorted(works, key=lambda w: (w.get("created_at", ""), w.get("order", 0))):
             if work["state"] != "pending":
                 continue
@@ -219,12 +219,12 @@ class QueueScheduler:
             with self.store.sessions.transaction() as db:
                 current = self.store.get(db, "agent_work_packages", work["id"], aid)
             if current["state"] == "dispatched":
-                return self.finish(aid, "dispatched", "已派发一个工作包，共享每日 Token 额度，本次执行时间上限 1 小时。", work=work["id"])
+                return self.finish(aid, "dispatched", "Dispatched one work package on the shared daily token budget; this run is limited to 1 hour.", work=work["id"])
         self.finish(
             aid,
             "intervention",
-            "排队任务尚不能派发：请检查前序任务验收、来源时效、Role 版本或指定学习依赖。",
-            steps=["在推进事项中查看具体缺失条件；刷新来源或修订合同后手动调度。"],
+            "Queued tasks cannot be dispatched yet: check prerequisite acceptance, source freshness, Role revision, or required learning dependencies.",
+            steps=["See the missing conditions under Work; refresh sources or revise the contract, then run a manual check."],
         )
 
     def recover(self, aid, wid):
@@ -238,7 +238,7 @@ class QueueScheduler:
                 agent = store.get(db, "agents", aid)
                 work = store.get(db, "agent_work_packages", wid, aid)
                 if not work.get("session_id"):
-                    raise ServiceError(work.get("blocked_reason") or "工作包合同不可派发，需修订或重新规划", 409, code=Code.EXECUTION_CONTRACT)
+                    raise ServiceError(work.get("blocked_reason") or "The work package contract cannot be dispatched; revise or replan it", 409, code=Code.EXECUTION_CONTRACT)
                 sid = work["session_id"]
                 link = db.execute("SELECT * FROM agent_sessions WHERE session_id=? AND agent_id=?", (sid, aid)).fetchone()
                 state = store.sessions._load(db, sid)
@@ -247,34 +247,34 @@ class QueueScheduler:
                 goal = store.get(db, "agent_goals", work["goal_id"], aid)
                 block = execution_block(store, db, agent, work, state)
                 if not link or link["taken_over"] or link["work_package_id"] not in {None, wid} or state.get("autonomy", {}).get("work_package_id") != wid:
-                    raise ServiceError("Session 已被人工接管或用于其他任务，需手工处理归属", 409, code=Code.SESSION_OWNERSHIP)
+                    raise ServiceError("Session was taken over or is used by another task; resolve ownership manually", 409, code=Code.SESSION_OWNERSHIP)
                 if agent["state"] != "enabled" or sid in service.active or state["task"]["state"] not in {"paused", "failed"}:
-                    raise ServiceError("Session 未处于可安全恢复状态，等待 worker 退出或处理恢复问题", 409, code=Code.EXECUTION_BUSY)
+                    raise ServiceError("Session is not in a safely recoverable state; wait for the worker to exit or resolve the recovery issue", 409, code=Code.EXECUTION_BUSY)
                 if state.get("workspace_blocked") or (state.get("input_request") or {}).get("state") == "pending":
-                    raise ServiceError("Session 有待答问题或未确认副作用；请在原 Session 完成人工处理", 409, code=Code.EXECUTION_INPUT)
+                    raise ServiceError("Session has a pending question or unconfirmed side effect; finish the manual handling in the original Session", 409, code=Code.EXECUTION_INPUT)
                 if db.execute(
                     "SELECT 1 FROM operations WHERE session_id=? AND json_extract(body,'$.status')='started' "
                     "AND json_extract(body,'$.effect_kind')='side_effecting' LIMIT 1",
                     (sid,),
                 ).fetchone():
-                    raise ServiceError("存在尚未确认结果的副作用操作，请在原 Session 核实后恢复", 409, code=Code.EXECUTION_INPUT)
+                    raise ServiceError("A side-effecting operation has no confirmed result; verify it in the original Session before resuming", 409, code=Code.EXECUTION_INPUT)
                 if goal["state"] in {"paused", "cancelled", "superseded", "completed"}:
-                    raise ServiceError("目标或阶段不可运行，请在目标页恢复或修订；执行原始原因：" + reason, 409, code=Code.EXECUTION_CONTRACT)
+                    raise ServiceError("Goal or stage is not runnable; resume or revise it on the Goals tab. Original execution reason: " + reason, 409, code=Code.EXECUTION_CONTRACT)
                 if not runnable(store, db, agent, goal) and not (block and restore_budget_stage(store, db, agent, goal)):
-                    raise ServiceError("目标或阶段不可运行，请在目标页恢复或修订；执行原始原因：" + reason, 409, code=Code.EXECUTION_CONTRACT)
+                    raise ServiceError("Goal or stage is not runnable; resume or revise it on the Goals tab. Original execution reason: " + reason, 409, code=Code.EXECUTION_CONTRACT)
                 pinned = store.get(db, "agent_roles", f"{aid}:{state['autonomy']['role_revision']}", aid)["role"]
                 if role_signature(pinned) != role_signature(agent["role"]) or goal.get("source_changed"):
-                    raise ServiceError("执行合同或来源发生变化，需复核目标后恢复", 409, code=Code.EXECUTION_CONTRACT)
+                    raise ServiceError("The execution contract or a source changed; review the goal before resuming", 409, code=Code.EXECUTION_CONTRACT)
                 if not sources_ready(store, db, agent, goal):
-                    raise ServiceError("已尝试刷新来源，但必需来源仍不可用；请修正路径或权限", 409, code=Code.SOURCE_UNAVAILABLE)
+                    raise ServiceError("Sources were refreshed, but a required source is still unavailable; fix its path or permissions", 409, code=Code.SOURCE_UNAVAILABLE)
                 for lid in goal.get("learning_dependency", []):
                     cycle = store.get(db, "agent_learning_cycles", lid, aid)
                     if cycle["state"] != "completed" or cycle["coverage"] != "full":
-                        raise ServiceError(f"指定分析 {lid} 尚未完整完成：{cycle['state']}/{cycle['coverage']}", 409, code=Code.LEARNING_DEPENDENCY)
+                        raise ServiceError(f"Required analysis {lid} is not fully complete: {cycle['state']}/{cycle['coverage']}", 409, code=Code.LEARNING_DEPENDENCY)
                 control = state.get("control") or {}
                 legacy = (work.get("slice") or {}).get("pause_command_id") == control.get("command_id") and bool(control.get("command_id"))
                 if control.get("command_id") and not legacy:
-                    raise ServiceError("当前为人工暂停或停止；请手动恢复，调度器不会覆盖人工控制", 409, code=Code.MANUAL_PAUSE)
+                    raise ServiceError("The Session is under a manual pause or stop; resume it manually - the scheduler never overrides human control", 409, code=Code.MANUAL_PAUSE)
                 # Acceptance repair restarts with a repaired spec instead of
                 # resuming the old run, so the checkpoint premise only guards
                 # the resume paths.
@@ -284,9 +284,9 @@ class QueueScheduler:
                 recovery_report = assess(state, failure=failure_details(db, state))
                 acceptance_repair = recovery_report is not None and recovery_report['mode'] == 'reassemble'
                 if recovery_report and recovery_report['mode'] == 'manual':
-                    raise ServiceError("恢复需要先处理外部依赖或未知执行结果", 409, code=Code.EXECUTION_INPUT)
+                    raise ServiceError("Recovery needs external dependencies or unknown execution results handled first", 409, code=Code.EXECUTION_INPUT)
                 if not acceptance_repair and not run.get("checkpoint") and not state.get("context"):
-                    raise ServiceError("缺少持久 checkpoint 或恢复上下文，不能安全自动续跑", 409, code=Code.EXECUTION_CHECKPOINT)
+                    raise ServiceError("Missing a persistent checkpoint or recovery context; cannot safely auto-resume", 409, code=Code.EXECUTION_CHECKPOINT)
                 policy = scheduling_policy(agent["role"])
                 recovery = work.get("recovery", {})
                 intent = recovery.get("pending")
@@ -298,7 +298,7 @@ class QueueScheduler:
                     attempt_limit = max(policy['max_recovery_attempts'], recovery.get('attempt_limit', 0))
                     if recovery.get("attempts", 0) >= attempt_limit:
                         raise _Decision(
-                            f"自动恢复次数已达 {recovery.get('attempts', 0)}/{attempt_limit}，需要手工介入", exhausted=True
+                            f"Auto-recovery attempts reached {recovery.get('attempts', 0)}/{attempt_limit}; manual intervention required", exhausted=True
                         )
                     if block:
                         if parent := parent_block(store, db, agent, work, block["requested"]):
@@ -322,7 +322,7 @@ class QueueScheduler:
                           and (run.get('failure') or {}).get('code') != 'TOKEN_BUDGET_EXCEEDED'
                           and not legacy and run.get("stop_code") != "ACTIVE_TIME_BUDGET_EXCEEDED"
                           and not (recovery_report and recovery_report['mode'] == 'resume')):
-                        raise _Decision(f"无法自动恢复：{reason or work.get('blocked_reason') or state['task']['state']}；请检查原 Session")
+                        raise _Decision(f"Cannot auto-recover: {reason or work.get('blocked_reason') or state['task']['state']}; check the original Session")
                     elif not block and (parent := parent_block(store, db, agent, work, agent["role"]["budget"]["output_tokens"])):
                         raise parent
                     if repair is None:
@@ -332,7 +332,7 @@ class QueueScheduler:
                         store.event(db, aid, "schedule.recovery.requested", dict(work_package_id=wid, **intent))
                 if repair is None:
                     if intent["run_id"] != run["id"]:
-                        raise ServiceError("恢复意图与当前 run 不匹配，请检查执行历史", 409)
+                        raise ServiceError("The recovery intent does not match the current run; check the execution history", 409)
                     state["task"]["limits"].update(
                         max_duration_seconds=max(3600, state["task"]["limits"]["max_duration_seconds"]), max_tokens=None
                     )
@@ -358,7 +358,7 @@ class QueueScheduler:
                     latest_report = assess(latest_state)
                     if ((latest_state.get('control') or {}).get('command_id') or not latest_report
                             or latest_report['source_key'] != intent['report']['source_key']):
-                        raise ServiceError('重组提交前状态变化，保留当前 Session', 409, code=Code.EXECUTION_CONTRACT)
+                        raise ServiceError('State changed before the reassembly commit; keeping the current Session', 409, code=Code.EXECUTION_CONTRACT)
                     service.submit(
                         sid,
                         dict(command_id=intent["id"], type="resume" if intent["kind"] == "extend_tools" else "restart_task",
@@ -424,7 +424,7 @@ class QueueScheduler:
                 denial = ServiceError(str(exc), 409, code=Code.EXECUTION_BUDGET)
                 denial.details = getattr(exc, 'budget_block', None) or {}
                 raise denial from exc
-            raise _Decision(f"恢复配置准备失败：{exc}", details=dict(recovery=repair['report'], error_code=getattr(exc, 'code', 'REASSEMBLY_FAILED'))) from exc
+            raise _Decision(f"Failed to prepare the recovery configuration: {exc}", details=dict(recovery=repair['report'], error_code=getattr(exc, 'code', 'REASSEMBLY_FAILED'))) from exc
         with service.lock, store.sessions.transaction() as db:
             agent = store.get(db, 'agents', aid)
             work = store.get(db, 'agent_work_packages', wid, aid)
@@ -438,19 +438,19 @@ class QueueScheduler:
                     or goal['revision'] != repair['goal_revision'] or goal.get('source_changed')
                     or agent['state'] != 'enabled' or goal['state'] in {'paused', 'cancelled', 'superseded', 'completed'}
                     or not runnable(store, db, agent, goal) or not sources_ready(store, db, agent, goal)):
-                raise ServiceError('恢复准备期间合同或状态发生变化，本次配置未应用', 409, code=Code.EXECUTION_CONTRACT)
+                raise ServiceError('The contract or state changed during recovery preparation; this configuration was not applied', 409, code=Code.EXECUTION_CONTRACT)
             link = db.execute('SELECT * FROM agent_sessions WHERE session_id=? AND agent_id=?', (sid, aid)).fetchone()
             if (not link or link['taken_over'] or link['work_package_id'] not in {None, wid}
                     or state.get('autonomy', {}).get('work_package_id') != wid):
-                raise ServiceError('恢复期间 Session 归属已变化', 409, code=Code.SESSION_OWNERSHIP)
+                raise ServiceError('Session ownership changed during recovery', 409, code=Code.SESSION_OWNERSHIP)
             if sid in service.active or state.get('workspace_blocked'):
-                raise ServiceError('Session 尚有活跃执行，等待退出', 409, code=Code.EXECUTION_BUSY)
+                raise ServiceError('Session still has an active execution; waiting for it to exit', 409, code=Code.EXECUTION_BUSY)
             if (state.get('control') or {}).get('command_id'):
-                raise ServiceError('恢复期间 Session 被人工控制', 409, code=Code.MANUAL_PAUSE)
+                raise ServiceError('Session was taken under manual control during recovery', 409, code=Code.MANUAL_PAUSE)
             if ((state.get('input_request') or {}).get('state') == 'pending' or db.execute(
                     "SELECT 1 FROM operations WHERE session_id=? AND json_extract(body,'$.status')='started' "
                     "AND json_extract(body,'$.effect_kind')='side_effecting' LIMIT 1", (sid,)).fetchone()):
-                raise ServiceError('存在未确认结果，需要先核实', 409, code=Code.EXECUTION_INPUT)
+                raise ServiceError('There are unconfirmed results that must be verified first', 409, code=Code.EXECUTION_INPUT)
             recovery = work.get('recovery') or {}
             from loom.tasks.workspace_probe import digest
 

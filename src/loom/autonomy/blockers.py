@@ -134,11 +134,11 @@ def holds(blocker, fingerprint, budget_key, *, retry_requested=False):
 
 def instructions(blocker):
     return [{
-        Recovery.REVISE_CONTRACT: "复核变化的来源或合同，修订后再调度。",
-        Recovery.CHANGE_INPUT: "查看阻塞详情，补充条件或处理失败项后继续。",
-        Recovery.ANSWER: "回答当前待处理问题，或确认执行结果。",
-        Recovery.WAIT_BUDGET: "等待预算窗口恢复后自动复查。",
-        Recovery.ADJUST_BUDGET: "调整对应预算额度后再调度，累计用量会保留。",
-        Recovery.MANUAL_RETRY: "检查错误并修正配置或输入后，点击手动调度重试一次。",
-        Recovery.RECONCILE: "等待依赖条件满足后自动复查。",
+        Recovery.REVISE_CONTRACT: "Review the changed source or contract, revise it, then reschedule.",
+        Recovery.CHANGE_INPUT: "Review the blocker details, add conditions or handle the failed items, then continue.",
+        Recovery.ANSWER: "Answer the pending question or confirm the execution results.",
+        Recovery.WAIT_BUDGET: "Automatically rechecked after the budget window resets.",
+        Recovery.ADJUST_BUDGET: "Adjust the matching budget before rescheduling; cumulative usage is kept.",
+        Recovery.MANUAL_RETRY: "Check the error, fix the configuration or input, then retry once via manual scheduling.",
+        Recovery.RECONCILE: "Automatically rechecked once the dependency conditions are met.",
     }[blocker["recovery"]]]

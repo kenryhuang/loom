@@ -81,7 +81,7 @@ def review_contract(service, state, report):
 
         rows = asyncio.run(run()).value
     if any(r['relation'] == 'ambiguous' for r in rows):
-        raise ServiceError('验收标准与原要求的关系尚不明确，需要复核合同', 409, code='EXECUTION_CONTRACT')
+        raise ServiceError("The acceptance criteria's relation to the original requirements is unclear; the contract needs review", 409, code='EXECUTION_CONTRACT')
     by_id = {r['criterion_id']: r for r in rows}
     for criterion in plan['criteria']:
         criterion['description'] = by_id[criterion['id']]['description']
@@ -124,7 +124,7 @@ def build(service, state, report):
     required = sorted({t for c in report['causes'] for t in c['details'].get('tool_ids', [])})
     additions = sorted({TOOL_COLLECTIONS[t] for t in required if t not in available and t in TOOL_COLLECTIONS})
     if any(t not in available and t not in TOOL_COLLECTIONS for t in required):
-        raise ServiceError('缺少未注册的执行工具，必须先安装或绑定对应工具', 409, code='EXECUTION_CONTRACT')
+        raise ServiceError('Required execution tools are not registered; install or bind them first', 409, code='EXECUTION_CONTRACT')
     if any(c['code'] == 'LEGACY_ACCEPTANCE' for c in report['causes']):
         from loom.autonomy.binding import repair_collections
 
@@ -133,7 +133,7 @@ def build(service, state, report):
             current_collections=spec.get('tools', {}).get('collections', []),
             budget_binding={**state['autonomy'], 'run_id': state['run']['id']} if state.get('autonomy') else None)
         if not additions:
-            raise ServiceError('旧验收阻塞没有可验证的配置修复', 409, code='EXECUTION_CONTRACT')
+            raise ServiceError('The legacy acceptance blocker has no verifiable configuration fix', 409, code='EXECUTION_CONTRACT')
     tools = spec.setdefault('tools', {})
     tools['collections'] = list(dict.fromkeys([*tools.get('collections', []), *additions]))
     acceptance = state.get('acceptance') or {}
@@ -185,7 +185,7 @@ def build(service, state, report):
         spec['workflow'] = {'plugin': 'legacy_planning', 'mode': 'auto'}
     spec, available = assembled(service, task, spec)
     if not set(required) <= available:
-        raise ServiceError('修复配置仍无法提供必需工具', 409, code='EXECUTION_CONTRACT')
+        raise ServiceError('The repaired configuration still cannot provide the required tools', 409, code='EXECUTION_CONTRACT')
     objective = report['original_objective']
     if workspace_copy:
         objective = objective.replace(workspace_copy['source'], workspace_copy['path'])

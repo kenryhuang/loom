@@ -50,13 +50,13 @@ def report(store, service, db, agent, *, analysis_details=True):
         )
 
     if not agent.get("service_enabled", True):
-        block("SERVICE_DISABLED", aid, "自主服务未启用", [], ["使用 --enable-agents 启动原数据目录的服务。"])
+        block("SERVICE_DISABLED", aid, "Autonomy service not enabled", [], ["Start the service on the original data directory with --enable-agents."])
     scheduler = agent.get("scheduler", {})
     if scheduler.get("manual_required"):
-        block("SCHEDULER_INTERVENTION", scheduler.get("work_package_id") or aid, scheduler.get("reason", "调度需要人工介入"),
-              [f"最近检查：{scheduler.get('finished_at')}"], scheduler.get("next_steps", []))
+        block("SCHEDULER_INTERVENTION", scheduler.get("work_package_id") or aid, scheduler.get("reason", "Scheduling needs manual intervention"),
+              [f"Last check: {scheduler.get('finished_at')}"], scheduler.get("next_steps", []))
     if agent["state"] != "enabled":
-        block("AGENT_PAUSED", aid, f"Agent 状态为 {agent['state']}", [], ["在 Agent 顶部恢复或启用；人工暂停不会被定时器覆盖。"])
+        block("AGENT_PAUSED", aid, f"Agent state: {agent['state']}", [], ["Resume or enable the Agent from its header; a manual pause is never overridden by the timer."])
     for error in ("error", "service_error", "scheduling_error", "background_error"):
         if agent.get(error):
             block(
@@ -64,7 +64,7 @@ def report(store, service, db, agent, *, analysis_details=True):
                 aid,
                 str(agent[error]),
                 [],
-                ["核对下方任务和 Session 的原始错误，修复后点击立即检查；不要通过反复重建任务绕过失败。"],
+                ["Check the original errors of the tasks and Sessions below, fix them, then run a check; do not bypass failures by recreating tasks."],
             )
     for goal in goals.values():
         if goal["state"] in {"completed", "cancelled", "superseded"}:
@@ -73,17 +73,17 @@ def report(store, service, db, agent, *, analysis_details=True):
             block(
                 "GOAL_" + goal["state"].upper(),
                 goal["id"],
-                f"目标{goal['state']}：{goal['objective']}",
-                [str(goal.get("blocked_reason") or goal.get("reason") or "见该目标的执行结果和阶段记录")],
-                ["在目标页核对失败或暂停原因；补充变化输入后重试，或手动恢复暂停的目标。"],
+                f"Goal {goal['state']}: {goal['objective']}",
+                [str(goal.get("blocked_reason") or goal.get("reason") or "see the goal's execution results and stage records")],
+                ["Check the failure or pause reason on the Goals tab; retry with changed input, or manually resume the paused goal."],
             )
         if goal.get("not_before", "") > store.now():
             block(
                 "GOAL_BACKOFF",
                 goal["id"],
-                "目标正在等待重试窗口",
-                [f"最早执行：{goal['not_before']}"],
-                ["到达重试时间且前置条件满足后自动检查。"],
+                "Goal is waiting for its retry window",
+                [f"Earliest run: {goal['not_before']}"],
+                ["Automatically checked once the retry time arrives and preconditions are met."],
                 automatic=True,
             )
         if goal.get("stage_id"):
@@ -92,9 +92,9 @@ def report(store, service, db, agent, *, analysis_details=True):
                 block(
                     "STAGE_NOT_RUNNABLE",
                     goal["id"],
-                    f"所属阶段不可执行：{stage.get('title', goal['stage_id'])}",
-                    [f"阶段状态：{stage.get('state')}；原因：{stage.get('reason') or '人工或阶段控制变更'}"],
-                    ["在目标路线图检查阶段状态；修复卡点后恢复或重新规划，旧阶段的工作包不会强行执行。"],
+                    f"Owning stage is not runnable: {stage.get('title', goal['stage_id'])}",
+                    [f"Stage state: {stage.get('state')}; reason: {stage.get('reason') or 'manual or stage control change'}"],
+                    ["Check the stage state on the goal roadmap; resume or replan after fixing the blocker - work packages from the old stage are never force-run."],
                 )
         for rid in goal.get("required_source_ids", []):
             source = sources.get(rid)
@@ -102,21 +102,21 @@ def report(store, service, db, agent, *, analysis_details=True):
             if (source and not source["revalidate_before_use"]) or any(s and not s["revalidate_before_use"] for s in fallback):
                 continue
             route = routes.get(rid)
-            details = [f"目标：{goal['objective']}", f"来源：{rid}", f"绑定路径：{', '.join((route or {}).get('paths', [])) or '无本地路径'}"]
+            details = [f"Goal: {goal['objective']}", f"Source: {rid}", f"Bound paths: {', '.join((route or {}).get('paths', [])) or 'no local paths'}"]
             if source:
                 details += [
-                    f"状态：{source['state']}；上次核验：{source.get('checked_at')}；有效至：{source.get('expires_at')}",
-                    f"失效项：{', '.join(source.get('invalid_document_ids', [])) or '无'}",
+                    f"State: {source['state']}; last checked: {source.get('checked_at')}; valid until: {source.get('expires_at')}",
+                    f"Invalid items: {', '.join(source.get('invalid_document_ids', [])) or 'none'}",
                 ]
                 details += [str(i.get("source", "")) + ": " + str(i.get("error", "")) for i in source.get("issues", [])]
             else:
-                details.append("该来源尚无核验记录。" if route else "该来源已不在当前 Role 的绑定范围内。")
+                details.append("This source has no verification record yet." if route else "This source is no longer in the current Role's bindings.")
             block(
                 "SOURCE_NOT_CURRENT",
                 goal["id"] + ":" + rid,
-                "必需来源不可用或已过期",
+                "A required source is unavailable or expired",
                 details,
-                ["在知识来源核对路径、知识库和权限，修正不存在的项目。", "刷新已绑定来源；若内容或 Role 已变更，复核并重新规划该阶段。"],
+                ["Verify paths, knowledge bases, and permissions under Knowledge; fix the entries that no longer exist.", "Refresh bound sources; if content or the Role changed, review and replan the stage."],
                 automatic=bool(route and route.get("refresh_seconds")),
                 action="refresh_sources",
             )
@@ -125,18 +125,18 @@ def report(store, service, db, agent, *, analysis_details=True):
             block(
                 "GOAL_DEPENDENCY",
                 goal["id"],
-                "等待前置目标验收",
-                [f"{g.get('objective', g['id'])}：{g['state']}" for g in pending],
-                ["先处理前置目标的卡点；前置目标验收通过后自动调度。"],
+                "Waiting for prerequisite goal acceptance",
+                [f"{g.get('objective', g['id'])}: {g['state']}" for g in pending],
+                ["Resolve the prerequisite goals' blockers first; scheduling continues automatically once they pass acceptance."],
                 automatic=True,
             )
         if goal.get("source_changed"):
             block(
                 "SOURCE_CHANGED",
                 goal["id"],
-                "来源在规划后发生变化",
-                [f"来源事件：{goal['source_changed']}"],
-                ["查看来源变更，修订或重新规划阶段；已有执行结果保留。"],
+                "A source changed after planning",
+                [f"Source event: {goal['source_changed']}"],
+                ["Review the source change and revise or replan the stage; existing execution results are kept."],
             )
         for lid in goal.get("learning_dependency", []):
             cycle = next((c for c in agent["learning"] if c["id"] == lid), {})
@@ -144,9 +144,9 @@ def report(store, service, db, agent, *, analysis_details=True):
                 block(
                     "LEARNING_DEPENDENCY",
                     goal["id"] + ":" + lid,
-                    "等待指定分析产出",
-                    [f"分析 {lid}：{cycle.get('state', 'missing')} / {cycle.get('coverage', 'none')}"],
-                    ["检查后台分析的预算、重试次数与拒绝记录；完整分析后自动继续。"],
+                    "Waiting for a required analysis",
+                    [f"Analysis {lid}: {cycle.get('state', 'missing')} / {cycle.get('coverage', 'none')}"],
+                    ["Check the background analysis budget, retry count, and rejections; execution continues automatically once the analysis is complete."],
                     automatic=cycle.get("state") in {"running", "pending"},
                 )
     for state in agent.get("objective_planning", []):
@@ -155,8 +155,8 @@ def report(store, service, db, agent, *, analysis_details=True):
                 (state.get("blocker") or {}).get("code") or "STAGE_" + state["state"].upper(),
                 state["id"],
                 state.get("reason") or state["state"],
-                [f"长期目标：{state['objective_id']}", f"阶段：{state.get('stage_id') or '尚未生成'}"],
-                instructions(state["blocker"]) if state.get("blocker") else ["检查旧版状态并手动重试。"],
+                [f"Long-term objective: {state['objective_id']}", f"Stage: {state.get('stage_id') or 'not generated yet'}"],
+                instructions(state["blocker"]) if state.get("blocker") else ["Check the legacy state and retry manually."],
                 automatic=bool(state.get("blocker")) and not manual_required(state["blocker"]),
             )
     for work in works:
@@ -173,9 +173,9 @@ def report(store, service, db, agent, *, analysis_details=True):
                 block(
                     "WORK_DEPENDENCY",
                     work["id"],
-                    "等待同一目标的前序工作包验收",
-                    [f"{w['objective']}：{w['state']} ({w['id']})" for w in predecessors],
-                    ["先完成前序工作包；保存时间片 checkpoint 不等于完成验收。"],
+                    "Waiting for earlier work packages of the same goal",
+                    [f"{w['objective']}: {w['state']} ({w['id']})" for w in predecessors],
+                    ["Finish the earlier work packages first; saving a slice checkpoint is not acceptance."],
                     automatic=True,
                 )
         if not work.get("session_id"):
@@ -184,8 +184,8 @@ def report(store, service, db, agent, *, analysis_details=True):
                     "DISPATCH_BLOCKED",
                     work["id"],
                     work["blocked_reason"],
-                    [f"工作包 Role 版本：{work.get('role_revision')}；当前版本：{agent['role_revision']}"],
-                    ["核对该工作包的前置条件；配置或合同变化后在目标页修订或重新规划，不能强行派发旧合同。"],
+                    [f"Work package Role revision: {work.get('role_revision')}; current revision: {agent['role_revision']}"],
+                    ["Check this work package's preconditions; after configuration or contract changes, revise or replan on the Goals tab - old contracts are never force-dispatched."],
                 )
             continue
         try:
@@ -205,7 +205,7 @@ def report(store, service, db, agent, *, analysis_details=True):
                 sessions[sid] = json.loads(row[0])
             state = sessions[sid]
         except Exception as exc:
-            block("SESSION_MISSING", work["id"], str(exc), [work["session_id"]], ["恢复原 Session 与数据目录，禁止将未知执行结果当作未执行。"])
+            block("SESSION_MISSING", work["id"], str(exc), [work["session_id"]], ["Restore the original Session and data directory; never treat unknown execution results as not run."])
             continue
         run = state.get("run") or {}
         if run.get("id") not in work.get("run_ids", []) and work["state"] in {"succeeded", "failed", "cancelled"}:
@@ -213,9 +213,9 @@ def report(store, service, db, agent, *, analysis_details=True):
                 block(
                     "WORK_FAILED",
                     work["id"],
-                    (work.get("outcome") or {}).get("reason") or "历史工作包执行失败",
-                    [f"原 run：{work.get('terminal_run_id')}；Session 已承接后续工作。"],
-                    ["打开原执行记录定位此 run 的失败原因；提供变化输入后重试对应目标。"],
+                    (work.get("outcome") or {}).get("reason") or "Historical work package execution failed",
+                    [f"Original run: {work.get('terminal_run_id')}; the Session has taken over later work."],
+                    ["Open the original execution record to find this run's failure; retry the goal with changed input."],
                 )
             continue  # A reused Session's current run must not be shown as this work's progress.
         item = dict(
@@ -239,20 +239,20 @@ def report(store, service, db, agent, *, analysis_details=True):
                 block(
                     "RESUME_ROLE_CHANGED",
                     work["id"],
-                    "暂停期间 Role 的执行合同发生变化",
-                    [f"Session Role 版本：{state['autonomy']['role_revision']}；当前版本：{agent['role_revision']}"],
-                    ["核对 Role 的职责、工具或来源变化；重新规划对应任务，定时器不能把新合同套用到旧 checkpoint。"],
+                    "The Role's execution contract changed while paused",
+                    [f"Session Role revision: {state['autonomy']['role_revision']}; current revision: {agent['role_revision']}"],
+                    ["Review the Role's responsibility, tool, or source changes and replan the affected tasks; the timer cannot apply a new contract to an old checkpoint."],
                 )
             if (state.get("control") or {}).get("command_id") != info.get("pause_command_id"):
                 block(
                     "RESUME_CONTROL_CHANGED",
                     work["id"],
-                    "暂停后收到人工或其他恢复控制，自动续跑已让出",
-                    [f"当前控制：{(state.get('control') or {}).get('command_id')}"],
-                    ["在原 Session 检查并手动恢复；人工控制优先。"],
+                    "A manual or other recovery control arrived after the pause; auto-resume has yielded",
+                    [f"Current control: {(state.get('control') or {}).get('command_id')}"],
+                    ["Check the original Session and resume it manually; human control takes precedence."],
                 )
         if info.get("phase") == "held":
-            block("SLICE_HELD", work["id"], info.get("reason") or "时间片续跑需要处理", [], ["打开原 Session 核对暂停控制和 checkpoint；完成恢复确认后继续。"])
+            block("SLICE_HELD", work["id"], info.get("reason") or "Slice resume needs attention", [], ["Open the original Session to check the pause control and checkpoint; continue after confirming recovery."])
         if info.get("phase") == "running":
             item["slice_elapsed_seconds"] = max(0, (store.clock() - datetime.fromisoformat(info["started_at"])).total_seconds())
         runtime.append(item)
@@ -262,22 +262,22 @@ def report(store, service, db, agent, *, analysis_details=True):
             block(
                 "SESSION_ADMISSION",
                 work["id"],
-                "等待 Session 执行槽位或工作目录锁",
-                [f"服务活动 worker：{len(active)}/{service.capacity}", f"当前活动 Session：{', '.join(active) or '无；等待下一次服务调度'}"],
-                ["服务在槽位空闲且资源无冲突时自动派发；不要重建同一任务。"],
+                "Waiting for a Session execution slot or workspace lock",
+                [f"Active service workers: {len(active)}/{service.capacity}", f"Active Sessions: {', '.join(active) or 'none; waiting for the next service dispatch'}"],
+                ["The service dispatches automatically when a slot is free and resources do not conflict; do not recreate the same task."],
                 automatic=True,
             )
         link = next((s for s in agent["sessions"] if s["session_id"] == work["session_id"]), {})
         if link.get("taken_over"):
-            block("HUMAN_TAKEOVER", work["id"], "Session 已被人工接管", [state["session_id"]], ["完成手工处理后，在 Session 管理中归还 Agent。"])
+            block("HUMAN_TAKEOVER", work["id"], "Session was taken over by a human", [state["session_id"]], ["After finishing manual work, return the Session under Session management."])
         if state.get("workspace_blocked") or (state.get("input_request") or {}).get("state") == "pending":
             request = state.get("input_request") or {}
             block(
                 "SESSION_INPUT",
                 work["id"],
-                "执行需要输入或副作用恢复确认",
+                "Execution needs input or side-effect recovery confirmation",
                 [str(request.get("question") or request.get("prompt") or request), str(state.get("workspace_blocked") or "")],
-                ["打开原 Session，核实已有工具结果，回答待答问题；定时器不会自动猜测副作用是否完成。"],
+                ["Open the original Session, verify the tool results, and answer pending questions; the timer never guesses whether side effects completed."],
             )
         elif info.get("phase") in {"pausing", "paused", "resuming"}:
             pass  # Expected checkpoint handoff is progress, not an execution failure.
@@ -287,31 +287,31 @@ def report(store, service, db, agent, *, analysis_details=True):
                 work["id"],
                 run.get("reason") or work.get("blocked_reason") or state["task"]["state"],
                 [f"Session：{state['session_id']}", f"run：{run.get('id')}", str(run.get("failure") or "")],
-                ["打开 Session 检查失败或暂停的原始原因。", "人工暂停需手动恢复；失败需提供变化原因后重试，时间片调度不会绕过预算、输入和恢复要求。"],
+                ["Open the Session to check the original failure or pause reason.", "Manual pauses need manual resume; failures need a stated change before retry - slice scheduling never bypasses budgets, input, or recovery requirements."],
             )
     for cycle in agent["learning"]:
         if cycle["state"] in {"failed", "deferred", "incomplete"}:
             evidence = []
             job = analysis_diagnostics(db, cycle) if analysis_details and cycle.get('evaluation_id') else {}
             if job.get('state'):
-                evidence.append(f"Deep Eval：{job['state']}；Calls {job.get('usage', {}).get('calls', 0)}/{job.get('settings', {}).get('max_calls', '未知')}")
+                evidence.append(f"Deep Eval: {job['state']}; Calls {job.get('usage', {}).get('calls', 0)}/{job.get('settings', {}).get('max_calls', 'unknown')}")
                 evidence += [str(e) for e in job.get("error_details", [])]
                 for unit in job['units']:
                     issues = unit.get("issues") or unit.get("errors") or []
                     if issues or unit.get("disposition") in {"abstained", "quarantined", "exhausted"}:
-                        evidence.append(f"{unit.get('id', '分析单元')} / {unit.get('disposition')}：{issues or '证据不足或结论为 unknown，不能视为完整完成'}")
+                        evidence.append(f"{unit.get('id', 'analysis unit')} / {unit.get('disposition')}: {issues or 'insufficient evidence or an unknown conclusion; not a complete pass'}")
             block(
                 "ANALYSIS_" + cycle["state"].upper(),
                 cycle["id"],
                 cycle.get("blocked_reason") or cycle["state"],
                 [
-                    f"评估：{cycle.get('evaluation_id')}",
-                    f"本轮分析次数：{cycle.get('attempts', 0) - cycle.get('round_start_attempts', 0)}/{learning_policy(agent['role'])['max_attempts']}；"
-                    f"累计 {cycle.get('attempts', 0)}",
-                    f"下次允许重试：{cycle.get('retry_after') or '需要变化输入'}",
+                    f"Evaluation: {cycle.get('evaluation_id')}",
+                    f"Attempts this round: {cycle.get('attempts', 0) - cycle.get('round_start_attempts', 0)}/{learning_policy(agent['role'])['max_attempts']}; "
+                    f"total {cycle.get('attempts', 0)}",
+                    f"Next retry allowed: {cycle.get('retry_after') or 'changed input required'}",
                     *evidence,
                 ],
-                ["查看 Deep Eval 的具体失败项和已接受记录。", "预算可在现有上限内自动扩容；达到次数、无进展或硬预算上限后，修复原因或调整配置再重试。"],
+                ["See the specific Deep Eval failures and accepted records.", "Budget can auto-expand within existing caps; after hitting the attempt cap, no progress, or the hard budget cap, fix the cause or adjust the configuration before retrying."],
                 automatic=bool(cycle.get("auto_resume")),
             )
     return dict(

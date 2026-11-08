@@ -35,18 +35,42 @@ test('Learning library auto-loads evidence, filters all records, and persists hu
   });
   try{
     await env.open();const root=env.view.root;
-    assert.match(root.textContent,/已学知识与审核/);assert.match(root.textContent,/待人工审核/);assert.match(root.textContent,/评估置信度：低/);
+    assert.match(root.textContent,/Learned knowledge & review/);assert.match(root.textContent,/Awaiting human review/);assert.match(root.textContent,/Evaluation confidence: Low/);
     assert.match(root.textContent,/original evidence/);assert.equal(root.querySelector('img'),null);
     const filter=root.querySelector('.agent-learning-filters select[name=kind]');filter.value='facts';filter.dispatchEvent(new env.dom.window.Event('change',{bubbles:true}));await tick();
     assert.match(env.calls.at(-1)[0],/kind=facts/);
     const form=root.querySelector('.agent-memory-results form');
     form.dispatchEvent(new env.dom.window.Event('submit',{bubbles:true,cancelable:true}));await tick();await tick();
     assert.equal(annotation.kind,'confirm');assert.equal(annotation.expected_revision,3);assert.equal(annotation.content_digest,'digest');
-    assert.match(root.textContent,/人工已确认/);assert.match(root.textContent,/高优先级参考/);assert.match(root.textContent,/评估置信度：低/);
+    assert.match(root.textContent,/Confirmed by human/);assert.match(root.textContent,/high-priority reference/);assert.match(root.textContent,/Evaluation confidence: Low/);
     root.querySelector('.agent-memory-results details summary').click();await tick();
     data.activity='working';await env.view.refresh();await tick();
     assert.equal(root.querySelector('.agent-memory-results details').open,true);
     assert.ok(env.calls.filter(([path])=>path.includes('/memory/library')).every(([path])=>!path.includes('disclosures')));
+  }finally{env.close();}
+});
+
+test('Learning history and memory link to their exact saved analysis, evaluation and run',async()=>{
+  const data=fixture();
+  data.learning=[{id:'complete',session_id:'s/1',analysis_id:'analysis/1',evaluation_id:'eval/1',run_id:'run/1',
+                  state:'completed',coverage:'full',memory_result:{accepted:67}},
+                 {id:'pending',session_id:'s/2',state:'pending',coverage:'none'}];
+  const record=memory();record.source={...record.source,session_id:'s/1',analysis_id:'analysis/1',evaluation_id:'eval/1',run_id:'run/1'};
+  const env=setup(data,async path=>path.includes('/memory/library')?{records:[record],total:1}:undefined);
+  try{
+    await env.open();const root=env.view.root;
+    const links=[...root.querySelectorAll('a')].filter(a=>a.textContent.includes('Analysis & evidence'));
+    assert.equal(links.length,2);
+    for(const a of links)assert.equal(a.getAttribute('href'),'#/evaluation/s%2F1?analysis=analysis%2F1&evaluation=eval%2F1&run=run%2F1');
+    assert.match(root.textContent,/No Analysis available yet\./);
+  }finally{env.close();}
+});
+
+test('Legacy memory without a saved analysis links to the source Session explicitly',async()=>{
+  const data=fixture(),env=setup(data,async path=>path.includes('/memory/library')?{records:[memory()],total:1}:undefined);
+  try{
+    await env.open();const link=[...env.view.root.querySelectorAll('a')].find(a=>a.textContent.includes('Open the source Session (analysis unavailable)'));
+    assert.equal(link.getAttribute('href'),'#/sessions/s');
   }finally{env.close();}
 });
 
@@ -63,7 +87,7 @@ test('Learning review drafts survive polling and conflicts; reloading uses the l
     data.activity='working';await env.view.refresh();
     assert.equal(env.view.root.querySelector('.agent-memory-results form'),form);
     form.dispatchEvent(new env.dom.window.Event('submit',{bubbles:true,cancelable:true}));await tick();
-    assert.match(form.textContent,/重新加载后核对/);assert.equal(form.elements.value.value,'Corrected project scope');
+    assert.match(form.textContent,/Content changed; reload and verify\./);assert.equal(form.elements.value.value,'Corrected project scope');
     record.source.annotation_revision=4;await env.view.learningView.loadLibrary();
     form=env.view.root.querySelector('.agent-memory-results form');assert.equal(form.elements.value.value,'Corrected project scope');
     conflict=false;form.dispatchEvent(new env.dom.window.Event('submit',{bubbles:true,cancelable:true}));await tick();await tick();
@@ -75,15 +99,15 @@ test('Human principles move from Profile to Learning and submit current-task sco
   const data=fixture();data.work_packages=[{id:'w',objective:'Current work',state:'running'}];let sent;
   const env=setup(data,async(path,options)=>{if(path.endsWith('/guidance') && options?.body){sent=options.body;data.guidance=[{id:'g',text:sent.text,state:'active',scope:sent.scope,revision:1}];return {};}});
   try{
-    await env.open();env.view.tab='Profile';env.view.render();assert.doesNotMatch(env.view.root.textContent,/保存原则/);
+    await env.open();env.view.tab='Profile';env.view.render();assert.doesNotMatch(env.view.root.textContent,/Save principle/);
     env.view.tab='Learning';env.view.render();await tick();
     const form=env.view.root.querySelector('.agent-human-guidance .agent-form');
     form.elements.text.value='Verify assumptions before changing code';form.elements.scope.value='current_task';
     form.elements.scope.dispatchEvent(new env.dom.window.Event('change',{bubbles:true}));
     assert.equal(form.elements.work.parentElement.hidden,false);
-    [...form.querySelectorAll('button')].find(node=>node.textContent==='保存原则').click();await tick();await tick();
+    [...form.querySelectorAll('button')].find(node=>node.textContent==='Save principle').click();await tick();await tick();
     assert.equal(sent.scope,'current_task');assert.equal(sent.work_package_id,'w');
-    assert.equal(sent.text,'Verify assumptions before changing code');assert.match(env.view.root.textContent,/生效中/);
+    assert.equal(sent.text,'Verify assumptions before changing code');assert.match(env.view.root.textContent,/Active/);
   }finally{env.close();}
 });
 
@@ -102,7 +126,7 @@ test('Live decisions use existing answer commands, preserve drafts on stale inpu
     assert.equal(sent.type,'answer_input');assert.equal(sent.expected_task_revision,7);assert.deepEqual(sent.payload,{request_id:'q',answer:'Keep API'});
     assert.equal(form.elements.answer.value,'Keep API');assert.match(form.textContent,/Input request is stale/);
     conflict=false;form.dispatchEvent(new env.dom.window.Event('submit',{bubbles:true,cancelable:true}));await tick();await tick();
-    assert.match(env.view.root.querySelector('.agent-decisions').textContent,/当前没有待回答的问题/);
+    assert.match(env.view.root.querySelector('.agent-decisions').textContent,/No questions waiting for an answer\./);
   }finally{env.close();}
 });
 
@@ -114,6 +138,6 @@ test('Workspace-less library selects one owned session and late loads cannot aff
     const select=env.view.root.querySelector('select[name=session_id]');select.value='two';select.dispatchEvent(new env.dom.window.Event('change',{bubbles:true}));
     assert.match(env.calls.at(-1)[0],/session_id=two/);
     env.view.tab='Profile';env.view.render();resolve({records:[memory()],total:1});await tick();
-    assert.doesNotMatch(env.view.root.textContent,/Observed project fact/);assert.match(env.view.root.textContent,/角色定位/);
+    assert.doesNotMatch(env.view.root.textContent,/Observed project fact/);assert.match(env.view.root.textContent,/Role identity/);
   }finally{env.close();}
 });

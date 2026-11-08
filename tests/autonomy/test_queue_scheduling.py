@@ -172,7 +172,7 @@ def test_daily_budget_waits_without_allocating_or_consuming_recovery(agent_servi
     service.store.update(sid, lambda s, e, db: s["run"].update(reason=None, failure=dict(code="AGENT_BUDGET", message="Typed admission denial")))
     facade.supervisor.scheduler.advance(aid, manual=True)
     saved = facade.snapshot(aid)
-    assert not saved["scheduler"]["manual_required"] and "每日 Token 总预算不足" in saved["scheduler"]["reason"]
+    assert not saved["scheduler"]["manual_required"] and "Daily token budget exceeded" in saved["scheduler"]["reason"]
     assert saved["role"]["budget"]["goal_tokens"] == 100
     assert not saved["work_packages"][0].get("recovery", {}).get("attempts")
     assert saved['scheduler']['blockers'][0]['code'] == 'EXECUTION_BUDGET'

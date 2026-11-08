@@ -213,10 +213,10 @@ class AgentStore:
                 reason = text(payload.get('reason'), 'reason')
                 work = self.get(db, 'agent_work_packages', text(payload.get('work_package_id'), 'work_package_id'), aid)
                 if agent['state'] != 'enabled' or work['state'] not in {'blocked', 'failed'}:
-                    raise ServiceError('只能重新评估已启用 Agent 的阻塞或失败工作包', 409)
+                    raise ServiceError('Only blocked or failed work packages of an enabled Agent can be re-evaluated', 409)
                 recovery = work.setdefault('recovery', {})
                 if recovery.get('pending') or agent.get('scheduler', {}).get('state') in {'checking', 'planning'}:
-                    raise ServiceError('恢复检查正在进行，请等待当前检查结束', 409)
+                    raise ServiceError('A recovery check is already in progress; wait for it to finish', 409)
                 before = max(recovery.get('attempt_limit', 0), scheduling_policy(agent['role'])['max_recovery_attempts'])
                 after = max(before, recovery.get('attempts', 0) + 1)
                 recovery.update(exhausted=False, attempt_limit=after,
