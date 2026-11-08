@@ -81,7 +81,7 @@ def decide(controller, *, origin="completion", completion_id=None):
         elif not _capable(assembly, gaps):
             code = "ACCEPTANCE_CAPABILITY_UNAVAILABLE"
             missing = sorted({t['value'] for g in gaps for t in g.get('targets', [])
-                              if t['kind'] == 'tool' and t['value'] not in assembly.bindings})
+                              if t['kind'] == 'tool' and t['value'] not in assembly.available_tool_ids()})
             reason = 'Required execution capabilities are unavailable: ' + (', '.join(missing) or 'workflow feedback support')
         elif (feedback and feedback["state"] == "applied" and feedback["progress_baseline"] == binding
               and feedback.get("plan_revision") == data["revision"]):
@@ -135,7 +135,7 @@ def _capable(assembly, gaps):
 
     if not isinstance(assembly.workflow, TaskFeedbackWorkflow):
         return False
-    tools = set(assembly.bindings)
+    tools = assembly.available_tool_ids()
     for gap in gaps:
         for target in gap.get("targets", []):
             if target["kind"] == "tool" and target["value"] not in tools:

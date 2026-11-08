@@ -153,6 +153,28 @@ def test_required_tool_preflight_blocks_before_solver_or_verifier_execution(tmp_
     asyncio.run(exercise())
 
 
+def test_scoped_required_memory_is_available_at_acceptance_and_execution(tmp_path):
+    from loom.service.store import SessionStore
+
+    async def exercise():
+        store = SessionStore(tmp_path / 'service')
+        request = TaskRequest('Inspect memory', workspace=tmp_path,
+                              metadata={'memory_database': str(store.path), 'autonomy': {'required_tools': ['memory_read']}})
+        assembly = TaskAssembly(request, plan_mode='off')
+        judge = Judge([dict(id='memory', description='Inspect historical context', verifier='semantic', scope=[], check={},
+                            required_tools=['memory_read'])])
+        assembly.configure_acceptance(judge)
+        context = make_task_context(request, assembly=assembly, plan_mode='off').unwrap()
+        runtime = SimpleNamespace(run_id='r', loop_id='l', trace_id='t', trace_sink=Sink(), cancellation=None)
+        await assembly.acceptance.prepare(context, runtime)
+        assert 'memory_read' in {ref.id for ref in assembly.context_tools()}
+        assert 'memory_read' in assembly.handlers()
+        assert assembly.acceptance.data['state'] == 'not_ready'
+        await assembly.close()
+
+    asyncio.run(exercise())
+
+
 def test_reassembled_acceptance_uses_reviewed_contract_and_fresh_verification(tmp_path):
     async def exercise():
         reviewed = dict(criteria=[dict(id='preserve', description='Preserve initial files', verifier='semantic', scope=[], check={})],

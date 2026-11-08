@@ -7,7 +7,7 @@ import pytest
 
 from loom.core import ok
 from loom.llm import build_messages
-from loom.memory.runtime import RuntimeMemory
+from loom.memory.runtime import RuntimeMemory, compact_memory
 from loom.service.controller import LoomService
 from loom.service.store import SessionStore
 from loom.tasks.assembly import TaskAssembly
@@ -17,6 +17,38 @@ from loom.tasks.runner import make_task_context
 from tests.memory.helpers import MemoryProvider, memory_provider_factory, seed
 from tests.service.test_controller import wait_state
 from tests.tasks.test_task_runner import RecordingTraceSink
+
+
+def test_compact_memory_keeps_readable_references_and_marks_truncation():
+    source = {"evaluation_id": "evaluation", "record_id": "record", "content_digest": "hash"}
+    original = {"instruction": "historical only", "records": [{"source": source, "title": "t" * 300,
+                "summary": "s" * 500, "scope": "project", "preconditions": ["check first"],
+                "review_state": "confirmed", "effective_confidence": "high"}], "issues": []}
+    result = compact_memory(original)
+    record = result["records"][0]
+    assert record["source"] == source and record["review_state"] == "confirmed"
+    assert len(record["title"]) == 100 and len(record["summary"]) == 160
+    assert record["truncated_fields"] == ["title", "summary"]
+    assert "preconditions" not in record and original["records"][0]["preconditions"] == ["check first"]
+
+
+def test_agent_memory_summary_can_be_read_in_full(tmp_path):
+    store = SessionStore(tmp_path / 'data')
+    seed(store, tmp_path)
+    memory = RuntimeMemory(store.path, workspace=tmp_path)
+    context = make_task_context(TaskRequest('Fix duplicate planets', workspace=tmp_path), plan_mode='off').unwrap()
+    context = replace(context, metadata={**(context.metadata or {}), 'agent_context': {'id': 'agent-context'}})
+    runtime = SimpleNamespace(trace_sink=RecordingTraceSink(), trace_id='trace')
+
+    async def run():
+        attached = await memory.attach(context, runtime)
+        record = attached.metadata['retrieved_memory']['records'][0]
+        ref = record['source']
+        result = await memory.handlers()['memory_read']({'evaluation_id': ref['evaluation_id'], 'record_id': ref['record_id']})
+        assert result.ok
+        assert json.loads(result.value.value['text'])['citations']
+
+    asyncio.run(run())
 
 
 def test_real_cli_to_assembly_memory_tools_and_trace(tmp_path, monkeypatch):

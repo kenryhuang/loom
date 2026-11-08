@@ -73,6 +73,39 @@ test('Unchanged polling retains inspected records; server state changes refresh 
  }finally{view.close();dom.window.close();}
 });
 
+test('Manual scheduling shows submission, queued and actual scheduler outcome',async()=>{
+ const data=fixture();data.scheduler={id:'old',state:'intervention'};
+ const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ let resolveCommand,calls=0;
+ try{
+  await view.open();await view.select('a');
+  view.api.command=()=>{calls++;return new Promise(resolve=>resolveCommand=resolve);};
+  const heading=document.querySelector('#agents-heading');
+  [...heading.querySelectorAll('button')].find(b=>b.textContent==='手动调度').click();
+  assert.match(heading.textContent,/正在提交调度请求/);
+  assert.equal([...heading.querySelectorAll('button')].find(b=>b.textContent==='手动调度').disabled,true);
+  await view.scheduleNow(data);assert.equal(calls,1);
+  resolveCommand({state:'enabled',schedule_requested:true,scheduler:{id:'old',state:'intervention'}});
+  await tick();assert.match(heading.textContent,/调度请求已提交，等待调度器检查/);
+  data.scheduler={id:'new',state:'checking',trigger:'manual'};data.schedule_requested=false;
+  await view.refresh();assert.match(heading.textContent,/调度已开始，正在检查队列/);
+  data.scheduler={id:'new',state:'dispatched',trigger:'manual',finished_at:'2026-11-08T01:40:47Z',reason:'已派发一个工作包。'};
+  await view.refresh();assert.match(heading.textContent,/调度检查结束：已派发一个工作包/);
+  assert.equal([...heading.querySelectorAll('button')].find(b=>b.textContent==='手动调度').disabled,false);
+ }finally{view.close();dom.window.close();}
+});
+
+test('Manual scheduling reports a failed request and allows retry',async()=>{
+ const data=fixture(),{dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');view.api.command=async()=>{throw new Error('网络不可用');};
+  await view.scheduleNow(data);
+  assert.match(document.querySelector('#agents-heading').textContent,/调度请求提交失败/);
+  assert.match(view.root.textContent,/网络不可用/);
+  assert.equal([...document.querySelector('#agents-heading').querySelectorAll('button')].find(b=>b.textContent==='手动调度').disabled,false);
+ }finally{view.close();dom.window.close();}
+});
+
 const tick = () => new Promise(resolve => setTimeout(resolve,0));
 
 test('Polling shares in-flight requests and requests list and current page concurrently',async()=>{

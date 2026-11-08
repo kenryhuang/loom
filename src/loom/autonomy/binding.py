@@ -152,9 +152,10 @@ def ensure_required_tools(service, payload, required):
     validated = validate_create(payload, plugin_registry=registry,
                                 external_bindings=service.store.external_tools.resolve(payload.get("external_tool_ids", [])))
     assembly = TaskAssembly(TaskRequest(payload["objective"], workspace=validated["workspace"],
-        task_spec=validated["task_spec"], metadata={k: validated[k] for k in ("knowledge_base_ids", "external_tool_bindings")}),
+        task_spec=validated["task_spec"], metadata={**{k: validated[k] for k in ("knowledge_base_ids", "external_tool_bindings")},
+                                                    "memory_database": str(service.store.path)}),
         registry=registry)
-    missing = set(required) - set(assembly.bindings)
+    missing = set(required) - assembly.available_tool_ids()
     if missing:
         raise ServiceError("Work contract requires unavailable tools: " + ", ".join(sorted(missing))
                            + "; check registered bindings and workspace access before dispatch", 409, code="EXECUTION_CONTRACT")

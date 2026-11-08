@@ -550,7 +550,7 @@ class AcceptanceController:
     async def prepare(self, context, runtime):
         self.goal(context)
         declared = (self.assembly.request.metadata.get('autonomy') or {}).get('required_tools', [])
-        unavailable = set(declared) - set(self.assembly.bindings)
+        unavailable = set(declared) - self.assembly.available_tool_ids()
         if unavailable:
             self.data.pop('decision', None)
             self.data.update(state='blocked', cause_code='ACCEPTANCE_CAPABILITY_UNAVAILABLE', results=[
@@ -636,10 +636,11 @@ class AcceptanceController:
         self.require_capabilities()
 
     def require_capabilities(self):
+        available = self.assembly.available_tool_ids()
         missing = [dict(criterion_id=c['id'], status='blocked', reason='Required execution tools are unavailable',
                         gap=dict(kind='missing_evidence', targets=[dict(kind='tool', value=t) for t in c.get('required_tools', [])
-                            if t not in self.assembly.bindings], required_fact=c['description'], suggested_action='Assemble the required tools'))
-                   for c in self.data['plan']['criteria'] if set(c.get('required_tools', [])) - set(self.assembly.bindings)]
+                            if t not in available], required_fact=c['description'], suggested_action='Assemble the required tools'))
+                   for c in self.data['plan']['criteria'] if set(c.get('required_tools', [])) - available]
         if missing:
             self.data.pop('decision', None)
             self.data.update(results=missing, state='blocked', cause_code='ACCEPTANCE_CAPABILITY_UNAVAILABLE')

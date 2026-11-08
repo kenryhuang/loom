@@ -6,6 +6,56 @@ from dataclasses import replace
 from loom.autonomy.store import digest
 from loom.memory.store import MemoryError, MemoryStore
 
+CONTEXT_MAX_CHARS = 96000
+
+
+def _source_summary(rows):
+    result = []
+    for row in rows:
+        item = {k: v for k, v in row.items() if k != "work_states"}
+        states = row.get("work_states")
+        if isinstance(states, dict):
+            counts = {}
+            for state in states.values():
+                counts[state] = counts.get(state, 0) + 1
+            item["work_state_counts"] = counts
+        result.append(item)
+    return result
+
+
+def _stage_contract(stage, goal):
+    if not stage:
+        return None
+    contract = {k: stage[k] for k in ('title', 'expected_outcome', 'scope', 'non_goals', 'acceptance', 'stop_conditions')}
+    # Remove only exact duplicates; distinct stage obligations remain intact.
+    for field in ("acceptance", "stop_conditions"):
+        goal_values = (goal or {}).get(field) or []
+        repeated = [value for value in contract[field] if value in goal_values]
+        if repeated:
+            contract[field] = [value for value in contract[field] if value not in goal_values]
+            contract[field + "_also_in_goal"] = len(repeated)
+    return contract
+
+
+def _goal_summary(goal):
+    if not isinstance(goal, dict):
+        return goal
+    result = dict(goal)
+    criteria, acceptance = goal.get("acceptance_criteria"), goal.get("acceptance")
+    if isinstance(criteria, list) and isinstance(acceptance, list):
+        rows = []
+        indexed = False
+        for row in criteria:
+            row = dict(row)
+            if row.get("text") in acceptance:
+                row["acceptance_index"] = acceptance.index(row.pop("text"))
+                indexed = True
+            rows.append(row)
+        result["acceptance_criteria"] = rows
+        if indexed:
+            result["acceptance_index_note"] = "acceptance_index is a zero-based index into goal.acceptance"
+    return result
+
 
 def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id="", purpose="execution"):
     with store.sessions.transaction() as db:
@@ -23,7 +73,7 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
         from loom.autonomy.sources import view as source_view
 
         preferences = effective(store, db, agent, work_id=work['id'] if work else None)
-        source_status = source_view(store, db, agent)
+        source_status = _source_summary(source_view(store, db, agent))
         entries = [
             e
             for e in entries
@@ -67,6 +117,9 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
             memory = MemoryStore(store.sessions.path, workspace=pinned["working_directory"], session_id=session_id).search(query[:20000])
         except MemoryError as exc:
             memory["issues"].append({"message": str(exc), "code": exc.code})
+    from loom.memory.runtime import compact_memory
+
+    memory = compact_memory(memory)
     snapshot = dict(
         agent_id=aid,
         session_id=session_id,
@@ -88,10 +141,10 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
                          "use request_input with a concrete question, alternatives and their tradeoffs. "
                          "Proceed autonomously on routine implementation choices. Retrospective analysis alternatives are suggestions, "
                          "not pending human decisions. Human answers guide the current task; only explicit persistent guidance applies across tasks."),
-        goal=goal,
+        goal=_goal_summary(goal),
         stage_id=(goal or {}).get('stage_id'),
         roadmap_id=(goal or {}).get('roadmap_id'),
-        stage_contract={k: stage[k] for k in ('title', 'expected_outcome', 'scope', 'non_goals', 'acceptance', 'stop_conditions')} if stage else None,
+        stage_contract=_stage_contract(stage, goal),
         work_package_id=work["id"] if work else None,
         guidance=[dict(id=e["id"], text=e["text"], source="human", scope=e["scope"]) for e in entries],
         methods=methods,
@@ -100,10 +153,10 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
         pending_learning_cycle_ids=[c["id"] for c in cycles if c["state"] not in {"completed", "cancelled", "failed", "incomplete"}],
     )
     # Never silently truncate explicit obligations. Excess guidance must be narrowed by the user.
-    if len(json.dumps(snapshot, ensure_ascii=False)) > 24000:
+    if len(json.dumps(snapshot, ensure_ascii=False)) > CONTEXT_MAX_CHARS:
         from loom.service.contracts import ServiceError
 
-        raise ServiceError("Agent context exceeds 24000 characters; narrow explicit guidance or split the task", 409)
+        raise ServiceError(f"Agent context exceeds {CONTEXT_MAX_CHARS} characters; narrow explicit guidance or split the task", 409)
     # Auto-generated and bounded (≤20 recent calls): rides above the explicit-
     # obligation cap so it can never break a borderline snapshot. Still part of
     # the digested artifact — the recorded context is exactly what the model saw.

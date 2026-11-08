@@ -10,6 +10,30 @@ from loom.runtime.execution_contracts import validate_tool_input
 TOOL_IDS = {"memory_search", "memory_read"}
 
 
+def compact_memory(value):
+    """Project searchable references; the scoped store retains complete records."""
+    records = []
+    for row in value.get("records", []):
+        item = {k: row[k] for k in ("kind", "confidence", "basis", "validation", "review_state",
+                                     "effective_confidence", "confidence_basis", "human_confirmed", "pinned") if k in row}
+        source = row.get("source", {})
+        item["source"] = {k: source[k] for k in ("evaluation_id", "record_id", "content_digest") if k in source}
+        truncated = []
+        for key, limit in (("title", 100), ("summary", 160), ("scope", 100)):
+            text = row.get(key)
+            if isinstance(text, str):
+                if key == "summary" and text == row.get("title"):
+                    item["summary_same_as_title"] = True
+                    continue
+                item[key] = text[:limit]
+                if len(text) > limit:
+                    truncated.append(key)
+        if truncated:
+            item["truncated_fields"] = truncated
+        records.append(item)
+    return {**value, "records": records}
+
+
 class RuntimeMemory:
     def __init__(self, database, *, workspace=None, session_id="", allowed_tools=None):
         self.store = MemoryStore(database, workspace=workspace, session_id=session_id)
@@ -74,5 +98,6 @@ class RuntimeMemory:
         metadata = dict(context.metadata or {})
         metadata.pop('retrieved_memory', None)
         if self.summary and self.summary['records']:
-            metadata['retrieved_memory'] = self.summary
+            metadata['retrieved_memory'] = (compact_memory(self.summary) if (context.metadata or {}).get('agent_context')
+                                            and 'memory_read' in self.allowed else self.summary)
         return replace(context, metadata=metadata)

@@ -46,6 +46,7 @@ export class AgentsView {
     this.refreshing=null;this.loadedKey=null;this.diagnosticsCache?.clear();
     this.setup?.close(); this.setup = null; this.creating = false; this.root.classList.remove('agent-setup-page');
     this.configurationEditor?.close(); this.configurationEditor = null;
+    this.manualSchedule = null;
   }
   async open() {
     this.close(); this.abort = new AbortController();
@@ -100,6 +101,7 @@ export class AgentsView {
       return;
     }
     this.detail = detail;
+    this.updateManualSchedule(detail);
     const editing = this.root.contains(document.activeElement) && /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName);
     const resourceEditing = this.resourceEditor?.form.isConnected && (this.resourceEditor.dirty || this.resourceEditor.saving);
     const learningEditing = this.learningView?.current && this.learningView.dirty;
@@ -127,10 +129,36 @@ export class AgentsView {
     this.tab=tab;this.loadedKey=null;this.render();
     return this.refresh().catch(e=>this.showError(e));
   }
-  async select(id) { this.learningView?.close(); this.configurationEditor?.close(); this.configurationEditor=null; this.renderedDetail = null; this.setup?.close(); this.setup = null; this.root.classList.remove('agent-setup-page'); this.selected = id; this.creating = false; this.tab = 'Overview'; await this.refresh(); }
+  async select(id) { this.learningView?.close(); this.configurationEditor?.close(); this.configurationEditor=null; this.renderedDetail = null; this.manualSchedule = null; this.setup?.close(); this.setup = null; this.root.classList.remove('agent-setup-page'); this.selected = id; this.creating = false; this.tab = 'Overview'; await this.refresh(); }
   async act(action) {
     try { await action(); await this.refresh({force:true}); }
     catch (error) { this.showError(error); }
+  }
+  updateManualSchedule(detail) {
+    const pending=this.manualSchedule, scheduler=detail.scheduler || detail.execution?.scheduler;
+    if(!pending || pending.agentId!==detail.id || pending.state==='submitting' || !scheduler || scheduler.id===pending.previousId || scheduler.trigger!=='manual')return;
+    if(['checking','planning'].includes(scheduler.state)) pending.message=scheduler.state==='planning'?'调度已开始，正在规划任务。':'调度已开始，正在检查队列。';
+    else if(scheduler.finished_at) {pending.state='finished';pending.message=`调度检查结束：${scheduler.reason || '请查看执行状态。'}`;}
+  }
+  async scheduleNow(detail) {
+    if(this.manualSchedule?.state==='submitting')return;
+    const pending={agentId:detail.id,previousId:(detail.scheduler || detail.execution?.scheduler)?.id,state:'submitting',message:'正在提交调度请求…'};
+    this.manualSchedule=pending;
+    const redraw=()=>{if(this.manualSchedule===pending && this.selected===detail.id && this.detail?.id===detail.id)this.renderHeading(this.heading || this.root.querySelector('header'),this.detail.role.name,this.detail);};
+    redraw();
+    try {
+      const result=await this.api.command(detail.id,'wake',detail.revision);
+      if(this.manualSchedule!==pending)return;
+      if(result?.state && result.state!=='enabled') {pending.state='finished';pending.message='Agent 未启用，调度请求未执行。';}
+      else if(['checking','planning'].includes(result?.scheduler?.state)) {pending.state='finished';pending.message='调度正在进行，本次没有重复提交。';}
+      else {pending.state='queued';pending.message='调度请求已提交，等待调度器检查。';}
+      redraw();
+      await this.refresh({force:true});
+    } catch(error) {
+      if(this.manualSchedule!==pending)return;
+      if(pending.state==='submitting') {pending.state='finished';pending.message='调度请求提交失败，请查看错误信息。';redraw();}
+      this.showError(error);
+    }
   }
   createForm(edit = null, section = null) {
     if(edit) {
@@ -205,10 +233,11 @@ export class AgentsView {
       actions.append(badge(d.pause_pending ? '暂停中' : label(d.state)), badge(label(d.activity), d.activity === 'degraded' ? 'blocked' : d.activity));
       const controls = d.state === 'enabled' ? [['pause','暂停'],['wake','手动调度']] : d.state === 'archived' ? [] : d.state === 'paused' ? [['resume','恢复']] : [['enable','启用']];
       for (const [type, title] of controls) {
-        const action=button(title, () => this.act(() => this.api.command(d.id,type,d.revision)), type === 'enable' ? 'primary' : 'quiet');
-        if(type==='wake' && ['checking','planning'].includes(d.execution?.scheduler?.state)){action.disabled=true;action.title='调度程序正在执行，本次不重复启动';}
+        const action=button(title, () => type==='wake' ? this.scheduleNow(d) : this.act(() => this.api.command(d.id,type,d.revision)), type === 'enable' ? 'primary' : 'quiet');
+        if(type==='wake' && (this.manualSchedule?.agentId===d.id && ['submitting','queued'].includes(this.manualSchedule.state) || d.schedule_requested || ['checking','planning'].includes((d.scheduler || d.execution?.scheduler)?.state))){action.disabled=true;action.title='调度请求已提交或正在执行';}
         actions.append(action);
       }
+      if(this.manualSchedule?.agentId===d.id){const message=element('span','agent-schedule-feedback',this.manualSchedule.message);message.setAttribute('role','status');actions.append(message);}
       head.append(actions);
     }
   }

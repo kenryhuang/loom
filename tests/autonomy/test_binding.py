@@ -66,6 +66,26 @@ def test_registered_external_requirement_uses_existing_binding_without_extra_col
     assert additions == []
 
 
+def test_dispatch_accepts_scoped_runtime_memory_requirement(agent_service):
+    service, facade, aid, _ = agent_service
+    service.setup_recommender = lambda *args, **kwargs: recommend(tool_collections=["filesystem", "task_control"])
+    work = prepare(facade, aid)
+    with service.store.transaction() as db:
+        work = facade.store.get(db, "agent_work_packages", work["id"], aid)
+        work["required_tools"] = ["read_file", "memory_read"]
+        facade.store.put(db, "agent_work_packages", work)
+    facade.supervisor.dispatcher.dispatch(aid, work["id"])
+    assert facade.snapshot(aid)["work_packages"][0]["session_id"]
+
+
+def test_dispatch_rejects_runtime_memory_without_scope(agent_service):
+    from loom.autonomy.binding import ensure_required_tools
+
+    service, _, _, _ = agent_service
+    with pytest.raises(ServiceError, match="memory_read"):
+        ensure_required_tools(service, dict(objective="Read memory", task_spec={"tools": {"collections": ["task_control"]}}), ["memory_read"])
+
+
 def recommend(**overrides):
     return {
         "task_type": "general",

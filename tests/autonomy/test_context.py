@@ -2,12 +2,42 @@ import json
 
 import pytest
 
-from loom.autonomy.context import build_snapshot
+from loom.autonomy.context import CONTEXT_MAX_CHARS, _goal_summary, _source_summary, _stage_contract, build_snapshot
 from loom.memory.annotations import annotate
 from loom.memory.store import MemoryError, MemoryStore
 from loom.service.contracts import ServiceError
 from tests.autonomy.helpers import goals
 from tests.memory.helpers import seed
+
+
+def test_context_projects_source_and_only_deduplicates_exact_stage_obligations():
+    source = {"route_id": "code", "state": "partial", "revalidate_before_use": True,
+              "invalid_document_ids": ["missing"], "work_states": {"w1": "failed", "w2": "failed", "w3": "running"}}
+    projected = _source_summary([source])[0]
+    assert projected["work_state_counts"] == {"failed": 2, "running": 1}
+    assert "work_states" not in projected
+    assert projected["invalid_document_ids"] == ["missing"] and projected["revalidate_before_use"]
+    stage = dict(title="stage", expected_outcome="result", scope=["all"], non_goals=[],
+                 acceptance=["shared", "stage only"], stop_conditions=["stop", "different stop"])
+    goal = dict(acceptance=["shared"], stop_conditions=["stop"])
+    contract = _stage_contract(stage, goal)
+    assert contract["acceptance"] == ["stage only"] and contract["acceptance_also_in_goal"] == 1
+    assert contract["stop_conditions"] == ["different stop"] and contract["stop_conditions_also_in_goal"] == 1
+    assert stage["acceptance"] == ["shared", "stage only"]
+    goal["acceptance_criteria"] = [{"id": "c1", "text": "shared"}, {"id": "c2", "text": "unique"}]
+    projected_goal = _goal_summary(goal)
+    assert projected_goal["acceptance_criteria"] == [{"id": "c1", "acceptance_index": 0}, {"id": "c2", "text": "unique"}]
+    assert goal["acceptance_criteria"][0]["text"] == "shared"
+
+
+def test_agent_context_limit_allows_more_than_old_limit_but_preserves_guidance(agent_service):
+    _, facade, aid, _ = agent_service
+    for index in range(7):
+        facade.guidance(aid, dict(command_id=f"large{index}", text=str(index) + "x" * 3899, scope="persistent"))
+    snapshot = build_snapshot(facade.store, aid)
+    assert 24000 < len(json.dumps(snapshot, ensure_ascii=False)) < CONTEXT_MAX_CHARS
+    assert len(snapshot["guidance"]) == 7
+    assert all(len(entry["text"]) == 3900 for entry in snapshot["guidance"])
 
 
 def test_snapshot_lists_recent_completed_tool_calls_for_record_use_linking(agent_service):

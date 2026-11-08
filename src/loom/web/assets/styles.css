@@ -2327,6 +2327,7 @@ section.setup-block { padding: 20px; }
 #agents-heading > div:first-child { min-width: 0; flex: 1; }
 #agents-heading h1 { overflow-wrap: anywhere; }
 .agent-actions { justify-content: flex-end; padding-top: 9px; }
+.agent-schedule-feedback { flex-basis: 100%; text-align: right; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .agent-tabs { overflow-x: auto; scrollbar-width: thin; flex-shrink: 0; }
 .agent-tabs [role="tab"] { white-space: nowrap; flex-shrink: 0; }
 .agent-content { padding-bottom: 20px; }

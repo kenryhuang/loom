@@ -439,6 +439,14 @@ class TaskAssembly:
         if not self.environment.reconnect() or not self.runtime.reconnect():
             raise ValueError("Task execution resources could not be reconnected")
 
+    def available_tool_ids(self):
+        """Include scoped runtime adapters as well as collection bindings."""
+        available = set(self.bindings)
+        if (self.memory and self.memory.store.database.is_file()
+                and (self.memory.store.workspace or self.memory.store.session_id)):
+            available.update(self.memory.allowed)
+        return available
+
     def resolve_tools(self, context):
         refs = context.affordances.tools
         budget_config = self.spec["tools"].get("budget")
@@ -636,7 +644,11 @@ class TaskAssembly:
     def context_tools(self):
         refs = (*self.normal_refs, self.artifact_tool_ref()) if self.expose_artifacts else self.normal_refs
         if self.memory:
-            refs = (*refs, *self.memory.refs())
+            required = set((self.request.metadata.get('autonomy') or {}).get('required_tools', []))
+            required.update(t for c in (self.acceptance.data.get('plan') or {}).get('criteria', [])
+                            for t in c.get('required_tools', []))
+            force = bool(required & self.memory.allowed & self.available_tool_ids())
+            refs = (*refs, *self.memory.refs(include_unavailable=force))
         if self.skills:
             refs = (*refs, *self.skills.refs())
         if self.agent_context:
