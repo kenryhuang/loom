@@ -132,6 +132,9 @@ export class SessionApi {
       { signal },
     );
   }
+  sessionEvaluationHistory(id, {offset = 0, limit = 50, signal} = {}) {
+    return this.json(`${this.path(id, 'evaluation-history')}?${new URLSearchParams({offset, limit})}`, {signal});
+  }
   startEvaluation(id, analysisId, body, signal) {
     return this.json(
       this.path(id, `trajectory/${encodeURIComponent(analysisId)}/evaluation`),

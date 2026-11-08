@@ -35,6 +35,21 @@ def new(client, path, cid="create"):
     return client.create({"objective": "Maintain", "workspace": str(path)}, command_id=cid)["session_id"]
 
 
+def test_session_evaluation_history_route_requires_access_and_checks_pagination(api):
+    _, _, client, path = api
+    sid = new(client, path)
+    assert client._json(f'/v1/sessions/{sid}/evaluation-history?limit=1') == {'jobs': [], 'next_offset': None}
+    with pytest.raises(ServiceError) as error:
+        client._json(f'/v1/sessions/{sid}/evaluation-history?limit=201')
+    assert error.value.status == 400
+    with pytest.raises(ServiceError) as error:
+        client._json('/v1/sessions/missing/evaluation-history')
+    assert error.value.status == 404
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(client.url + f'/v1/sessions/{sid}/evaluation-history')
+    assert error.value.code == 401
+
+
 def test_sessions_api_lists_most_recent_activity_first(api, monkeypatch):
     _, _, client, path = api
     ticks = (f"2026-11-07T01:{i // 60:02d}:{i % 60:02d}.000Z" for i in range(1000))

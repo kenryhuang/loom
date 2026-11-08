@@ -73,6 +73,23 @@ function result() {
   };
 }
 
+test('Session history exposes Agent jobs from earlier snapshots without mixing snapshot-scoped jobs',async()=>{
+  const dom=new JSDOM('<section id="root"></section>');globalThis.document=dom.window.document;
+  const abort=new AbortController();
+  const api={evaluations:async()=>({models:[{id:'judge',label:'Judge'}],default_model:'judge',defaults:settings,
+      bounds:Object.fromEntries(Object.keys(settings).map(k=>[k,[1,1000000]])),jobs:[],run_ids:['new-run']}),
+    sessionEvaluationHistory:async()=>({jobs:[{id:'old/eval',analysis_id:'old/analysis',analysis_state:'completed',
+      run_id:'old/run',state:'completed',agent_id:'agent'}],next_offset:null})};
+  try{
+    const view=new EvaluationView(document.querySelector('#root'),{api,sessionId:'session/1',analysisId:'new-analysis',signal:abort.signal});
+    await view.open();await new Promise(resolve=>setTimeout(resolve,0));
+    assert.match(view.historyTitle.textContent,/0/);
+    const link=view.sessionHistoryList.querySelector('a');
+    assert.match(link.textContent,/Agent learning/);
+    assert.equal(link.getAttribute('href'),'#/evaluation/session%2F1?analysis=old%2Fanalysis&evaluation=old%2Feval&run=old%2Frun');
+  }finally{abort.abort();dom.window.close();}
+});
+
 test('linked evaluation opens the requested saved job instead of the newest one',async()=>{
   const dom=new JSDOM('<section id="root"></section>');globalThis.document=dom.window.document;
   const abort=new AbortController(),reads=[];

@@ -270,6 +270,9 @@ class SessionHandler(BaseHTTPRequestHandler):
                     self._json(202, diagnosis.resume(sid, parts[4], self._body()))
                 else:
                     raise ServiceError("Route not found", 404)
+            elif route == 'evaluation-history' and method == 'GET' and len(parts) == 4:
+                self._json(200, self.server.semantic.session_history(sid, offset=self._number(query, 'offset', 0),
+                                                                      limit=self._number(query, 'limit', 50, 1, 200)))
             elif route == "trajectory":
                 analysis = self.server.trajectory
                 if method == "POST" and len(parts) == 4:

@@ -177,6 +177,20 @@ class SessionSemantic:
             runs = list(dict.fromkeys(e.run_id for e in source.events if e.run_id))
         return {"jobs": [self._public(row) for row in rows if row["analysis_id"] == aid], "run_ids": runs, **self.options()}
 
+    def session_history(self, sid, *, offset=0, limit=50):
+        """Compact session-wide index; every entry remains pinned to its analysis."""
+        with self.store.read() as db:
+            self.store._load(db, sid)
+            rows = db.execute(
+                "SELECT j.id, json_extract(j.body,'$.analysis_id') AS analysis_id, "
+                "json_extract(j.body,'$.run_id') AS run_id, json_extract(j.body,'$.state') AS state, "
+                "json_extract(j.body,'$.created_at') AS created_at, json_extract(j.body,'$.model') AS model, "
+                "json_extract(j.body,'$.analysis_version') AS analysis_version, "
+                "json_extract(j.body,'$.autonomy_budget.agent_id') AS agent_id, a.state AS analysis_state "
+                "FROM semantic_jobs j LEFT JOIN session_analyses a ON a.id=json_extract(j.body,'$.analysis_id') AND a.session_id=j.session_id "
+                "WHERE j.session_id=? ORDER BY j.rowid DESC LIMIT ? OFFSET ?", (sid, limit + 1, offset)).fetchall()
+        return {'jobs': [dict(row) for row in rows[:limit]], 'next_offset': offset + limit if len(rows) > limit else None}
+
     def _public(self, body):
         public = {k: v for k, v in body.items() if k not in {"checkpoint", "config_digest"}}
         # Present historical combined errors precisely without rewriting checkpoints.

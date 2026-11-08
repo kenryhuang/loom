@@ -80,6 +80,14 @@ export class EvaluationView {
     this.historyHeading.append(this.historyTitle);
     this.historyList = element("ul", "evaluation-history-list");
     this.historyPanel.append(this.historyHeading, this.historyList);
+    this.sessionHistoryPanel = element('section', 'evaluation-history dashboard-panel');
+    this.sessionHistoryPanel.setAttribute('aria-label', 'All Session evaluations');
+    this.sessionHistoryPanel.hidden = !this.api.sessionEvaluationHistory;
+    this.sessionHistoryPanel.append(element('h3', '', 'All Session evaluation history'),
+      element('p', 'muted small', 'Includes Agent learning and evaluations from earlier analysis snapshots. Open a record to view its original evidence.'));
+    this.sessionHistoryList = element('ul', 'evaluation-history-list');
+    this.sessionHistoryStatus = element('p', 'muted small', 'Loading Session history…');
+    this.sessionHistoryPanel.append(this.sessionHistoryStatus, this.sessionHistoryList);
     this.settingsPanel = element("details", "evaluation-settings dashboard-panel setup-block");
     this.settingsSummary = element("summary", "", "Evaluation settings · New evaluation");
     this.settingsPanel.append(this.settingsSummary);
@@ -90,7 +98,9 @@ export class EvaluationView {
     this.progress = element("section", "evaluation-progress dashboard-panel");
     this.progress.setAttribute("aria-label", "Evaluation progress");
     this.progress.hidden = true;
-    this.root.append(element('p', 'analysis-session-id', `Session: ${this.sessionId}`), this.form, this.status, this.gapPanel, this.progress, this.results);
+    this.root.append(element('p', 'analysis-session-id', `Session: ${this.sessionId}`), this.form, this.sessionHistoryPanel,
+      this.status, this.gapPanel, this.progress, this.results);
+    if(this.api.sessionEvaluationHistory) void this.loadSessionHistory();
     try {
       const catalog = await this.api.evaluations(
         this.sessionId,
@@ -196,6 +206,37 @@ export class EvaluationView {
 
     } catch (error) {
       this.fail(error);
+    }
+  }
+  async loadSessionHistory(offset = 0) {
+    const generation = this.sessionHistoryGeneration = (this.sessionHistoryGeneration || 0) + 1;
+    this.sessionHistoryStatus.textContent = 'Loading Session history…';
+    try {
+      const page = await this.api.sessionEvaluationHistory(this.sessionId, {offset, signal:this.signal});
+      if(this.signal.aborted || generation !== this.sessionHistoryGeneration)return;
+      if(!offset)this.sessionHistoryList.replaceChildren();
+      this.sessionHistoryPanel.querySelector('[data-more-history]')?.remove();
+      for(const job of page.jobs || []) {
+        const item=element('li','evaluation-history-item');
+        const title=`${job.agent_id ? 'Agent learning' : 'Evaluation'} · ${label(job.state)} · ${createdLabel(job.created_at)}`;
+        if(job.analysis_id && job.analysis_state === 'completed') {
+          const query=new URLSearchParams({analysis:job.analysis_id,evaluation:job.id});
+          if(job.run_id)query.set('run',job.run_id);
+          const a=element('a','evaluation-history-record',title);
+          a.href=`#/evaluation/${encodeURIComponent(this.sessionId)}?${query}`;
+          item.append(a);
+        } else item.append(element('span','muted',`${title} · source analysis unavailable`));
+        item.append(element('code','',job.id), element('span','muted small',
+          `${job.run_id ? `Run ${job.run_id}` : 'Snapshot scope'} · ${job.analysis_version || 'v2'}`));
+        this.sessionHistoryList.append(item);
+      }
+      this.sessionHistoryStatus.textContent = this.sessionHistoryList.childElementCount ? '' : 'No saved evaluations in this Session.';
+      if(page.next_offset != null) {
+        const more=button('Load more',()=>this.loadSessionHistory(page.next_offset));
+        more.dataset.moreHistory='';this.sessionHistoryPanel.append(more);
+      }
+    } catch(error) {
+      if(!this.signal.aborted && generation === this.sessionHistoryGeneration)this.sessionHistoryStatus.textContent=`Session history unavailable: ${error.message}`;
     }
   }
   newEvaluation() {
@@ -416,6 +457,7 @@ export class EvaluationView {
       this.submitting = false;
       if (!this.signal.aborted) {
         this.rememberJob(job);
+        if(this.api.sessionEvaluationHistory) void this.loadSessionHistory();
         await this.follow(job.id);
       }
     } catch (error) {
@@ -513,6 +555,7 @@ export class EvaluationView {
     else {
       this.status.textContent = "Evaluation permanently deleted.";
       this.status.hidden = false;
+      if(this.api.sessionEvaluationHistory) void this.loadSessionHistory();
     }
   }
   async follow(id, generation) {

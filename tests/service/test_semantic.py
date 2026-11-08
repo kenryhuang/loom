@@ -56,6 +56,24 @@ def wait_job(manager, sid, aid, jid):
     pytest.fail("Evaluation did not finish")
 
 
+def test_session_history_spans_snapshots_is_paginated_and_scoped(evaluation):
+    store, _, semantic, _, sid, aid = evaluation
+    other_sid = store.create('other-history', {'objective': 'Other'})['session_id']
+    with store.transaction() as db:
+        db.execute("INSERT INTO session_analyses VALUES(?,?,?,?,?,?)", ('old-analysis', sid, 0, 'old', 'completed', '{}'))
+        for index, (session, analysis) in enumerate(((sid, aid), (sid, 'old-analysis'), (other_sid, 'other-analysis'))):
+            body = dict(id=f'job-{index}', session_id=session, analysis_id=analysis, run_id=f'run-{index}', state='completed',
+                        created_at='2026-01-01', model='model', autonomy_budget={'agent_id': 'agent'} if index == 1 else {})
+            db.execute('INSERT INTO semantic_jobs VALUES(?,?,?,?)', (body['id'], session, f'key-{index}', json.dumps(body)))
+    first = semantic.session_history(sid, limit=1)
+    second = semantic.session_history(sid, offset=first['next_offset'], limit=1)
+    assert first['jobs'][0]['id'] == 'job-1' and first['jobs'][0]['agent_id'] == 'agent'
+    assert first['jobs'][0]['analysis_id'] == 'old-analysis' and first['jobs'][0]['analysis_state'] == 'completed'
+    assert second['jobs'][0]['id'] == 'job-0' and second['next_offset'] is None
+    with pytest.raises(ServiceError):
+        semantic.session_history('missing')
+
+
 @pytest.fixture
 def evaluation(tmp_path):
     store = SessionStore(tmp_path / "data")
