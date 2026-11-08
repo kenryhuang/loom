@@ -97,7 +97,10 @@ test('Editing preserves advanced role configuration and makes unavailable bindin
     const result=f.view.payload();
     assert.equal(result.working_directory,'/project/sub'); assert.equal(result.interval_seconds,1234);
     assert.deepEqual(result.source_routes,role.source_routes); assert.deepEqual(result.long_term_objectives,role.long_term_objectives);
-    assert.deepEqual(result.budget,role.budget); assert.deepEqual(result.task_spec,role.task_spec);
+    assert.deepEqual(result.budget,role.budget);
+    assert.deepEqual(result.task_spec,{...role.task_spec,session_environment:{plugin:'session',resources:[
+      {id:'workspace',kind:'directory',uri:'/project/sub',access:'read-write'}]}});
+    assert.deepEqual(role.task_spec,{schema_version:1});
     assert.deepEqual(result.knowledge_base_ids,['missing-kb']); assert.deepEqual(result.external_tool_ids,['missing-tool']);
     f.view.knowledgeList.querySelector('input[value="missing-kb"]').checked=false;
     assert.deepEqual(f.view.payload().source_routes[0].knowledge_base_ids,[]);
@@ -150,6 +153,27 @@ const EXEC_CATALOG={models:[{id:'fast',label:'Fast model'}],setup_recommendation
 const EXEC_BASES={knowledge_bases:[{id:'kb-project',name:'Project documents',description:'Design notes'}]};
 const execBlock=view=>[...view.form.querySelectorAll('details.setup-block')].find(d=>d.textContent.includes('Execution configuration'));
 const execChecked=view=>[...execBlock(view).querySelectorAll('input[type="checkbox"]:checked')].map(n=>n.value);
+
+test('New Agent binds the entered workspace when submitting file and shell tools',async()=>{
+ let saved;
+ const f=fixture({save:async role=>{saved=role;},api:{json:async path=>path.endsWith('/catalog')?EXEC_CATALOG:EXEC_BASES}});
+ try{
+  await f.view.load();
+  f.view.form.elements.name.value='Project agent';
+  f.view.form.elements.role.value='Maintain the project';
+  f.view.form.elements.objective.value='Keep tests passing';
+  f.view.form.elements.workspace.value='/project';
+  for(const id of ['filesystem','shell','task_control'])execBlock(f.view).querySelector(`input[value="${id}"]`).checked=true;
+  await f.view.form.onsubmit({preventDefault(){}});
+  assert.ok(saved);
+  assert.equal(saved.working_directory,'/project');
+  assert.deepEqual(saved.task_spec.session_environment,{plugin:'session',resources:[
+   {id:'workspace',kind:'directory',uri:'/project',access:'read-write'}]});
+  assert.deepEqual(saved.task_spec.tools.collections,['filesystem','shell','task_control']);
+  f.view.form.elements.workspace.value='/another-project';
+  assert.equal(f.view.payload().task_spec.session_environment.resources[0].uri,'/another-project');
+ }finally{f.close();}
+});
 
 test('Recommend backfills execution config and manual edits reach the saved role',async()=>{
  const proposal={task_spec:{schema_version:1,tools:{collections:['filesystem','shell','task_control']},context:{plugin:'bounded_context'},workflow:{plugin:'dynamic'}},
@@ -242,7 +266,7 @@ test('Editing reads the role execution config and clearing it returns to system 
 
 test('Saving preserves unknown task_spec keys while editing the managed ones',async()=>{
  const role={name:'Existing',role_text:'Evidence first',workspace:'/project',model:'fast',
-  task_spec:{schema_version:1,session_environment:{plugin:'session',resources:[{id:'workspace',kind:'directory',uri:'/project',access:'read-write'}]},
+  task_spec:{schema_version:1,session_environment:{plugin:'session',resources:[{id:'workspace',kind:'directory',uri:'/project',access:'read-only'}]},
    tools:{collections:['filesystem','task_control'],budget:{max_output_tokens:4000}},outputs:{directory:'out'},
    acceptance:{required:true},execution_runtime:{kind:'sandbox'},workflow:{plugin:'dynamic'}},
   plan_mode:'force',long_term_objectives:[{id:'primary',mode:'ongoing',desired_outcome:'Review'}],source_routes:[],knowledge_base_ids:[],external_tool_ids:[]};

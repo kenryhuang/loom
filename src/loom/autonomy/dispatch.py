@@ -18,13 +18,15 @@ def task_payload(agent, work, binding=None):
         **({"task_spec": role["task_spec"]} if role["task_spec"] else {}),
         limits={"max_tokens": None, "max_duration_seconds": 3600},
     )
-    if binding is not None:
-        # Normalize so the reuse-compatibility comparison and session creation
-        # see the same effective configuration.
+    if binding is not None or role["task_spec"] is not None:
+        # Creation validation and dispatch must bind the same Role directory,
+        # including form specs that only configure tools and workflow plugins.
         from loom.tasks.assembly import normalize_task_spec
 
-        payload["plan_mode"] = binding["plan_mode"]
-        spec = normalize_task_spec(binding.get("task_spec"), workspace=role["working_directory"], plan_mode=binding["plan_mode"])
+        if binding is not None:
+            payload["plan_mode"] = binding["plan_mode"]
+        spec = normalize_task_spec(binding.get("task_spec") if binding is not None else role["task_spec"],
+                                   workspace=role["working_directory"], plan_mode=payload["plan_mode"])
         environment = spec.setdefault("session_environment", {"plugin": "session"})
         if role["working_directory"] and not any(r.get("kind") == "directory" for r in environment.get("resources", [])):
             environment["resources"] = [

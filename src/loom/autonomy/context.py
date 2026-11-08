@@ -176,7 +176,9 @@ def build_snapshot(store, aid, *, goal=None, binding=None, session_id="", run_id
                 run_id=run_id,
                 purpose=purpose,
                 guidance_ids=[entry["id"] for entry in entries],
-                memory_refs=[{k: r.get('source', r).get(k) for k in ('record_id', 'evaluation_id', 'content_digest')} for r in memory.get('records', [])],
+                memory_refs=[{k: r.get('source', r).get(k)
+                              for k in ('record_id', 'evaluation_id', 'content_digest', 'memory_id', 'version_id') if k in r.get('source', r)}
+                             for r in memory.get('records', [])],
                 completed_learning_ids=[c['id'] for c in cycles if c['state'] == 'completed' and c.get('coverage') == 'full'],
                 created_at=store.now(),
             ),
@@ -203,6 +205,8 @@ class RuntimeAgentContext:
                     "properties": {
                         "evaluation_id": {"type": "string"},
                         "record_id": {"type": "string"},
+                        "memory_id": {"type": "string"},
+                        "version_id": {"type": "string"},
                         "method_version_id": {"type": "string"},
                         "explanation": {"type": "string"},
                         "disposition": {"enum": ["adopted", "declined"]},
@@ -253,7 +257,7 @@ def record_use(store, binding, run_id, payload):
     from loom.autonomy.contracts import strict, strings
     from loom.service.contracts import ServiceError, canonical
 
-    strict(payload, {"evaluation_id", "record_id", "method_version_id", "tool_call_ids", "explanation", "disposition"})
+    strict(payload, {"evaluation_id", "record_id", "method_version_id", "tool_call_ids", "explanation", "disposition", "memory_id", "version_id"})
     if payload.get('disposition', 'adopted') not in {'adopted', 'declined'}:
         raise ServiceError('Invalid adoption disposition')
     ids = strings(payload.get("tool_call_ids", []), "tool_call_ids", 20)
@@ -275,14 +279,18 @@ def record_use(store, binding, run_id, payload):
                 for g in store.rows(db, "agent_guidance", aid)
             ):
                 raise ServiceError("Method is not active guidance for this Agent")
-        elif not payload.get("evaluation_id") or not payload.get("record_id"):
+        elif not (payload.get("memory_id") and payload.get("version_id")) and (not payload.get("evaluation_id") or not payload.get("record_id")):
             raise ServiceError("Provide memory reference or method_version_id")
         for identifier in ids:
             row = db.execute("SELECT body FROM operations WHERE id=? AND session_id=?", (f"{run_id}:{identifier}", link[0])).fetchone()
             if not row or json.loads(row[0])["status"] not in {"completed", "reconciled"}:
                 raise ServiceError("Use real completed calls from this run")
     if not payload.get("method_version_id"):
-        MemoryStore(store.sessions.path, workspace=agent["role"]["working_directory"], session_id=link[0]).read(payload["evaluation_id"], payload["record_id"])
+        memory = MemoryStore(store.sessions.path, workspace=agent["role"]["working_directory"], session_id=link[0])
+        if payload.get('memory_id'):
+            memory.read(memory_id=payload['memory_id'], version_id=payload.get('version_id'))
+        else:
+            memory.read(payload["evaluation_id"], payload["record_id"])
     usage = dict(
         kind="model_reported_use",
         run_id=run_id,

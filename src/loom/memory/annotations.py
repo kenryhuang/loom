@@ -72,6 +72,7 @@ def annotate(store, aid, cid, payload):
         if kind == "restore":
             db.execute("DELETE FROM memory_suppressions WHERE agent_id=? AND lineage=?", (aid, lineage))
         db.execute("UPDATE memory_versions SET value=value+1 WHERE id='effective'")
+        apply_canonical(db, annotation, store.sessions.path)
         store.event(db, aid, "memory.annotated", annotation)
         return store.receipt(db, cid, request, annotation)
 
@@ -110,3 +111,40 @@ def effective(rows, annotations, suppressions):
             source["annotation_revision"] = max((a["revision"] for a in annotations if a["id"] in applied), default=0)
             result.append(dict(record=record, source=source))
     return result
+
+
+def apply_canonical(db, annotation, database):
+    """Legacy command bridge; shares the annotation transaction and denial boundary."""
+    import json
+
+    from loom.memory.operations import MemoryOperations
+    from loom.memory.schema import exists
+
+    if not exists(db):
+        return
+    source = annotation['source']
+    rows = db.execute('''SELECT DISTINCT i.id,i.namespace_id,i.latest_revision FROM memory_sources src
+        JOIN memory_observations o ON o.source_id=src.id JOIN memory_supports s ON s.observation_id=o.id
+        JOIN memory_item_versions v ON v.id=s.version_id JOIN memory_items i ON i.id=v.memory_id
+        WHERE src.evaluation_id=? AND src.record_id=? AND src.revision=? AND i.canonical_redirect IS NULL''',
+        (source['evaluation_id'], source['record_id'], source['content_digest'])).fetchall()
+    for row in rows:
+        kind = annotation['kind']
+        operation = {'confirm': 'CONFIRM', 'reject': 'RETIRE', 'retire': 'RETIRE', 'restore': 'RESTORE',
+                     'correct': 'REVISE', 'scope': 'REVISE', 'pin': 'PIN', 'tag': 'TAG'}[kind]
+        payload = dict(memory_id=row['id'], expected_revision=row['latest_revision'], reason=annotation.get('reason', ''), value=annotation.get('value'))
+        if kind in {'correct', 'scope'}:
+            record = json.loads(db.execute('SELECT record FROM memory_item_versions WHERE memory_id=? ORDER BY revision DESC LIMIT 1',
+                                           (row['id'],)).fetchone()[0])
+            if kind == 'correct':
+                record['summary'] = annotation['value']
+                record.pop('claim', None)  # Free text cannot preserve a now-contradictory structured value.
+            else:
+                record['scope'] += '; Human limitation: ' + annotation['value']
+                if record.get('claim'):
+                    record['claim'] = {**record['claim'], 'conditions': {
+                        **record['claim'].get('conditions', {}), 'human_scope_requires_validation': annotation['value']}}
+                record['runtime_blocked'] = True
+            payload['record'] = record
+        MemoryOperations(database).execute(row['namespace_id'], operation, payload,
+            command_id='legacy:' + annotation['id'] + ':' + row['id'], _db=db)

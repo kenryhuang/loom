@@ -266,6 +266,14 @@ export class AgentSetupView {
       if (spec.tools && !Object.keys(spec.tools).length) delete spec.tools;
       role.task_spec = Object.keys(spec).some(key => key !== 'schema_version') ? spec : null;
     }
+    if (role.task_spec && role.working_directory) {
+      role.task_spec = structuredClone(role.task_spec);
+      const environment = role.task_spec.session_environment ||= {plugin:'session'};
+      if (!(environment.resources || []).some(resource => resource.kind === 'directory')) {
+        environment.resources = [...(environment.resources || []),
+          {id:'workspace',kind:'directory',uri:role.working_directory,access:'read-write'}];
+      }
+    }
     const paths = lines(f.sources.value);
     if (role.source_routes.length) role.source_routes[0].paths = paths;
     else if (paths.length) role.source_routes.push({id:'implementation', topic:'Implementation sources', paths});

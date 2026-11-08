@@ -188,3 +188,23 @@ test('Polling preserves an in-flight library and refreshes only when memory chan
     assert.doesNotMatch(env.view.root.textContent,/Observed project fact/);
   }finally{env.close();}
 });
+
+test('Canonical memory loads history only on expansion and reviews a pinned version',async()=>{
+  const data=fixture(),record={...memory(),memory_id:'mem:1',version_id:'mv:1',revision:4,lifecycle:'active',support_count:2};
+  delete record.citations;
+  let detailLoads=0,review;
+  const env=setup(data,async(path,options)=>{
+    if(path.includes('/memory/library'))return {records:[record],total:1,storage:'memory_v2'};
+    if(path.includes('/memory/items/')){detailLoads++;return {versions:[{...record,citations:[{quote:'lazy evidence'}],supports:[]}]};}
+    if(path.endsWith('/memory/commands')){review=options.body;return {};}
+  });
+  try {
+    await env.open();assert.equal(detailLoads,0);assert.match(env.view.root.textContent,/Available reference/);
+    const details=[...env.view.root.querySelectorAll('details')].find(d=>d.querySelector('summary')?.textContent==='View evidence & method details');
+    details.open=true;details.dispatchEvent(new env.dom.window.Event('toggle'));await tick();
+    assert.equal(detailLoads,1);assert.match(details.textContent,/lazy evidence/);
+    const form=env.view.root.querySelector('.agent-memory-results form');
+    form.dispatchEvent(new env.dom.window.Event('submit',{bubbles:true,cancelable:true}));await tick();
+    assert.equal(review.operation,'CONFIRM');assert.equal(review.payload.version_id,'mv:1');assert.equal(review.payload.expected_revision,4);
+  } finally {env.close();}
+});

@@ -12,12 +12,16 @@ TOOL_IDS = {"memory_search", "memory_read"}
 
 def compact_memory(value):
     """Project searchable references; the scoped store retains complete records."""
+    if value.get('storage') == 'memory_v2':
+        from loom.memory.query import packet
+
+        return packet(value)  # Already bounded; do not truncate applicability or conflict caveats.
     records = []
     for row in value.get("records", []):
         item = {k: row[k] for k in ("kind", "confidence", "basis", "validation", "review_state",
                                      "effective_confidence", "confidence_basis", "human_confirmed", "pinned") if k in row}
         source = row.get("source", {})
-        item["source"] = {k: source[k] for k in ("evaluation_id", "record_id", "content_digest") if k in source}
+        item["source"] = {k: source[k] for k in ("evaluation_id", "record_id", "content_digest", "memory_id", "version_id") if k in source}
         truncated = []
         for key, limit in (("title", 100), ("summary", 160), ("scope", 100)):
             text = row.get(key)
@@ -31,7 +35,9 @@ def compact_memory(value):
         if truncated:
             item["truncated_fields"] = truncated
         records.append(item)
-    return {**value, "records": records}
+    from loom.memory.query import packet
+
+    return packet({**value, "records": records})
 
 
 class RuntimeMemory:
@@ -53,11 +59,14 @@ class RuntimeMemory:
                                                           "limit": {"type": "integer", "minimum": 1, "maximum": 6}},
                         "required": ["query"], "additionalProperties": False}),
             ToolRef("memory_read", "Read an accepted historical memory and its original citations. "
-                    "Use evaluation_id and record_id from memory_search or supplied summaries; reads remain scope-restricted.", input_schema={
+                    "Use memory_id/version_id for canonical knowledge, or evaluation_id/record_id for the original historical extraction. "
+                    "Reads remain scope-restricted.", input_schema={
                         "type": "object", "properties": {"evaluation_id": {"type": "string"}, "record_id": {"type": "string"},
+                                                          "memory_id": {"type": "string"}, "version_id": {"type": "string"},
                                                           "offset": {"type": "integer", "minimum": 0},
                                                           "limit": {"type": "integer", "minimum": 1, "maximum": 6000}},
-                        "required": ["evaluation_id", "record_id"], "additionalProperties": False}),
+                        "anyOf": [{"required": ["evaluation_id", "record_id"]}, {"required": ["memory_id", "version_id"]}],
+                        "additionalProperties": False}),
         )
         return tuple(ref for ref in refs if ref.id in self.allowed)
 
@@ -80,6 +89,21 @@ class RuntimeMemory:
         # Short continuation replies (e.g. "continue") retain the interrupted goal's retrieval context.
         prior = (context.metadata or {}).get('prior_requests', ())
         query = "\n".join([context.goal.objective, *list(prior)[-2:]])[:20000]
+        supplied = (context.metadata or {}).get('agent_context', {}).get('memory')
+        if supplied is not None:
+            # The persisted Agent snapshot is the exact packet consumed by execution.
+            changed = self.summary != supplied
+            self.summary = supplied
+            self.available = supplied.get('available_records', len(supplied.get('records', []))) > 0
+            metadata = dict(context.metadata or {})
+            metadata.pop('retrieved_memory', None)
+            if changed and runtime.trace_sink:
+                (await runtime.trace_sink.emit(dict(type='memory.retrieved', packet_id=supplied.get('packet_id'),
+                    packet_digest=supplied.get('packet_digest'), sources=[r['source'] for r in supplied.get('records', [])],
+                    run_id=context.run_id, trace_id=runtime.trace_id, at=now_iso()))).unwrap()
+            if supplied.get('records') or supplied.get('conflicts'):
+                metadata['retrieved_memory'] = supplied
+            return replace(context, metadata=metadata)
         epoch = await asyncio.to_thread(self.store.epoch)
         if self.query != query or self.epoch != epoch:
             self.query = query
@@ -97,7 +121,7 @@ class RuntimeMemory:
                 (await runtime.trace_sink.emit({**event, "run_id": context.run_id, "trace_id": runtime.trace_id, "at": now_iso()})).unwrap()
         metadata = dict(context.metadata or {})
         metadata.pop('retrieved_memory', None)
-        if self.summary and self.summary['records']:
+        if self.summary and (self.summary['records'] or self.summary.get('conflicts')):
             metadata['retrieved_memory'] = (compact_memory(self.summary) if (context.metadata or {}).get('agent_context')
                                             and 'memory_read' in self.allowed else self.summary)
         return replace(context, metadata=metadata)

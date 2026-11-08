@@ -517,7 +517,7 @@ async def test_resume_revalidates_saved_scope_failure_without_another_extraction
     memory = cp["memory"]
     unit = next(u for u in memory["units"].values() if u["mode"] == "extract")
     response = next(r for r in reversed(cp["responses"]) if r["batch_id"] == unit["id"])
-    value = {kind: [{k: r[k] for k in FIELDS[kind]['items']['properties']} for r in memory['records'].values()
+    value = {kind: [{k: r[k] for k in FIELDS[kind]['items']['properties'] if k in r} for r in memory['records'].values()
                     if r['kind'] == kind and r['unit_id'] == unit['id']] for kind in FIELDS}
     fact = value["facts"][0]
     owner = fact["action_ids"][0]

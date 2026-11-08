@@ -12,6 +12,47 @@ def prepare(facade, aid):
     return facade.snapshot(aid)["work_packages"][0]
 
 
+def test_create_and_dispatch_with_workspace_and_form_tool_spec(agent_service):
+    service, facade, _, path = agent_service
+    directory = path / "project"
+    directory.mkdir()
+    spec = {"schema_version": 1, "tools": {"collections": ["filesystem", "shell", "task_control"]}}
+    agent = facade.dispatch("POST", [], {}, {
+        "command_id": "create-form-agent", "role": {**role(path), "working_directory": str(directory), "task_spec": spec},
+    })
+    assert agent["role"]["task_spec"] == spec
+    facade.store.command(agent["id"], "enable-form-agent", "enable", 1)
+    work = prepare(facade, agent["id"])
+    facade.supervisor.dispatcher.dispatch(agent["id"], work["id"])
+    task = service.store.list_sessions()[0]["task"]
+    assert task["workspace"] == str(directory)
+    assert task["task_spec"]["session_environment"]["resources"] == [
+        {"id": "workspace", "kind": "directory", "uri": str(directory), "access": "read-write"},
+    ]
+    assert task["task_spec"]["tools"]["collections"] == spec["tools"]["collections"]
+
+
+def test_create_preserves_explicit_read_only_workspace(agent_service):
+    _, facade, _, path = agent_service
+    from loom.autonomy.dispatch import task_payload
+    from loom.service.contracts import validate_create
+
+    resource = {"id": "source", "kind": "directory", "uri": str(path), "access": "read-only"}
+    spec = {"session_environment": {"plugin": "session", "resources": [resource]},
+            "tools": {"collections": ["filesystem", "task_control"]}}
+    agent = facade.store.create("create-read-only", {**role(path), "task_spec": spec})
+    task = validate_create(task_payload(agent, dict(objective="Inspect files", acceptance=[])))
+    assert task["task_spec"]["session_environment"]["resources"] == [resource]
+    assert task["task_spec"]["execution_runtime"]["workspace_resource"] == "source"
+
+
+def test_create_file_tools_still_requires_a_workspace(agent_service):
+    _, facade, _, path = agent_service
+    with pytest.raises(ServiceError, match="explicit workspace resource"):
+        facade.store.create("create-unbound", {**role(path), "workspace": None, "source_routes": [],
+            "task_spec": {"tools": {"collections": ["filesystem", "shell", "task_control"]}}})
+
+
 @pytest.mark.parametrize("fallback", [False, True])
 def test_dispatch_closes_minimal_tools_over_contract_even_on_recommendation_fallback(agent_service, fallback):
     service, facade, aid, path = agent_service

@@ -22,7 +22,7 @@ def fields():
         if kind == 'workflows':
             props['steps']['items'] = obj(dict(text=deepcopy(props['steps']['items']), evidence=dict(type='array', items=ID, maxItems=8),
                                                basis=dict(enum=['observed', 'proposed'])))
-        spec['items']['required'] = [k for k in props if k != 'applies_to']
+        spec['items']['required'] = [k for k in props if k not in {'applies_to', 'claim'}]
     return result
 
 
@@ -85,6 +85,8 @@ Select key_action_ids only from that stage's eligible_key_action_ids; use [] if 
 Framework boundaries and root-owned verification/finish actions are context, never a semantic stage's key actions.
 Do not infer value from duration, token counts, tool success, default membership or chronological order.
 Facts: distinguish observed output from inferred claims, preserve applicability and revalidate_when.
+Keep each fact atomic. Optional claim has a concrete stable subject, predicate, typed object, single/set cardinality, and all
+known environment/platform/branch/version/config_path conditions. Omit claim if applicability cannot be fully represented.
 Prior memory marked historical_reference is not a fresh observation. Observed claims need relevant tool output.
 For facts about recorded runtime/acceptance/verification state, observed_runtime_state is direct evidence of that state only.
 observation_handles lists the eligible handles: runtime_state supports what the harness recorded, not the truth of its claims.

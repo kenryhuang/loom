@@ -101,7 +101,7 @@ def migrate(cp, expected):
             try:
                 if unit is None:
                     raise RuleViolation('memory.legacy_scope', 'Legacy scope is missing')
-                validate_record(record['kind'], {k: record[k] for k in FIELDS[record['kind']]['items']['properties']}, unit)
+                validate_record(record['kind'], {k: record[k] for k in FIELDS[record['kind']]['items']['properties'] if k in record}, unit)
                 record.update(publication_state='published', provenance_status='validated', support_assessment='legacy_model_judgment')
             except (RuleViolation, KeyError):
                 record['publication_state'] = 'legacy'

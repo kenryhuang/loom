@@ -1,7 +1,7 @@
 import {element} from '../markdown.mjs';
 import {panel, cards, badge, number, disclosure} from './dashboard.mjs';
 
-const kinds = {facts:'Facts',lessons:'Lessons',workflows:'Methods'};
+const kinds = {facts:'Facts',lessons:'Lessons',workflows:'Skills / procedure proposals'};
 const confidence = {high:'High',medium:'Medium',low:'Low',unknown:'Unknown'};
 const reviews = {unreviewed:'Awaiting human review',confirmed:'Confirmed by human',corrected:'Corrected by human'};
 const states = {pending:'Pending',running:'Running',completed:'Completed',incomplete:'Incomplete (left queue)',failed:'Failed',deferred:'Deferred',cancelled:'Cancelled',
@@ -134,18 +134,20 @@ export class AgentLearningView {
     const form = element('form','agent-learning-filters');
     const query = field(form,'query','Search learned content'); query.value = this.state.query || '';
     choice(form,'kind','Content type',[['','All types'],...Object.entries(kinds)],this.state.kind);
+    choice(form,'lifecycle','Knowledge state',[['current','Current knowledge'],['disputed','Conflicting knowledge'],['retired','Retired'],['all','All versions']],this.state.lifecycle);
     choice(form,'review','Review state',[['','All states'],['unreviewed','Awaiting human review'],['reviewed','Human reviewed']],this.state.review);
     if (!this.detail.role.working_directory) {
       choice(form,'session_id','Owning Session',this.detail.sessions.map(row=>[row.session_id,row.session_id]),this.state.session_id);
       root.append(element('p','muted small','No workspace bound; showing learned content for the selected Session only.'));
     }
     const submit = element('button','quiet','Search / refresh'); submit.type = 'submit'; form.append(submit);
-    form.addEventListener('submit',event=>{event.preventDefault();this.state.offset = 0;this.loadLibrary();});
-    form.addEventListener('change',event=>{if(event.target.tagName === 'SELECT'){this.state.offset = 0;this.loadLibrary();}});
+    form.addEventListener('submit',event=>{event.preventDefault();this.state.offset = 0;this.state.cursor=null;this.state.cursorHistory=[];this.loadLibrary();});
+    form.addEventListener('change',event=>{if(event.target.tagName === 'SELECT'){this.state.offset = 0;this.state.cursor=null;this.state.cursorHistory=[];this.loadLibrary();}});
     root.append(form); this.filters = form;
     this.libraryStatus = element('p','muted small'); this.libraryStatus.setAttribute('role','status');
     this.results = element('div','agent-memory-results'); this.pagination = element('div','agent-learning-actions');
     root.append(this.libraryStatus,this.results,this.pagination);
+    this.renderMemoryProposals(root);
     this.loadLibrary();
   }
   async loadLibrary() {
@@ -157,7 +159,7 @@ export class AgentLearningView {
       this.libraryStatus.textContent = 'Once execution produces learning records, you can browse them here by Session.'; return;
     }
     const params = new URLSearchParams({offset:this.state.offset || 0,limit:20});
-    for(const name of ['query','kind','review','session_id']) if(this.state[name])params.set(name,this.state[name]);
+    for(const name of ['query','kind','review','session_id','lifecycle','cursor']) if(this.state[name])params.set(name,this.state[name]);
     this.libraryLoading = true;
     this.libraryStatus.textContent = 'Loading learned content…';
     try {
@@ -169,8 +171,8 @@ export class AgentLearningView {
       this.libraryStatus.textContent = `${number(answer.total ?? records.length)} total${answer.truncated ? ' · showing only the most recent records' : ''}${answer.issues?.length ? ' · some sources unavailable' : ''}`;
       for (const memory of records) this.results.append(this.memoryCard(memory));
       if (!records.length) this.results.append(element('p','empty-state','No learned content matches the current filters.'));
-      if (this.state.offset > 0) this.pagination.append(button('Previous page',()=>{this.state.offset = Math.max(0,this.state.offset-20);this.loadLibrary();}));
-      if (answer.next_offset != null) this.pagination.append(button('Next page',()=>{this.state.offset = answer.next_offset;this.loadLibrary();}));
+      if (this.state.offset > 0) this.pagination.append(button('Previous page',()=>{this.state.offset = Math.max(0,this.state.offset-20);this.state.cursor=this.state.cursorHistory?.pop() || null;this.loadLibrary();}));
+      if (answer.next_offset != null) this.pagination.append(button('Next page',()=>{(this.state.cursorHistory ||= []).push(this.state.cursor || null);this.state.cursor=answer.next_cursor || null;this.state.offset = answer.next_offset;this.loadLibrary();}));
     } catch (error) {
       if(error.name !== 'AbortError' && this.current && generation === this.loadGeneration)
         this.libraryStatus.textContent = `Load failed: ${error.message}. Use "Search / refresh" to retry.`;
@@ -187,11 +189,16 @@ export class AgentLearningView {
     meta.append(badge(kinds[memory.kind] || memory.kind),badge(reviews[review] || review,review === 'unreviewed' ? '' : 'success'),
       element('span','muted small',`Evaluation confidence: ${confidence[memory.confidence] || 'Unknown'}`));
     if (review !== 'unreviewed') meta.append(element('span','agent-review-priority','Human reviewed · high-priority reference'));
+    if (memory.lifecycle) {
+      meta.append(badge(memory.lifecycle === 'active' ? (memory.freshness === 'needs_revalidation' ? 'Needs revalidation' : 'Available reference') : memory.lifecycle));
+      meta.append(element('span','muted small',`${memory.support_count || 0} independent evidence groups · revision ${memory.revision}`));
+    }
     if (memory.pinned) meta.append(badge('Priority reference'));
     for (const tag of memory.tags || []) meta.append(badge(tag));
     row.append(meta,element('h4','',memory.title),element('p','',memory.summary),element('p','muted small',`Scope: ${memory.scope}`));
     const identity = JSON.stringify([memory.source.evaluation_id,memory.source.record_id]);
     const evidence = this.disclosure(row,'View evidence & method details',`evidence:${identity}`);
+    if (memory.memory_id) this.lazyKnowledge(evidence,memory);
     const epistemic = {observed:'Observed',inferred:'Inferred',human_asserted:'Human corrected',observed_recovery:'Recovery observed',proposed:'Proposal pending validation'};
     for (const [key,title] of [['basis','Factual basis'],['validation','Validation state'],['revalidate_when','Revalidate when'],['preconditions','Preconditions'],
       ['trigger','Trigger'],['failed_approach','Failed approach'],['failure_reason','Reason'],['better_approach','Better approach'],['avoid','Avoid'],['preserve','Checks to preserve'],['expected_benefit','Expected benefit']]) {
@@ -208,7 +215,7 @@ export class AgentLearningView {
       evidence.append(link('Open the source Session (analysis unavailable)',`#/sessions/${encodeURIComponent(memory.source.session_id)}`));
     const editor = this.disclosure(row,'Human review & annotation',`review:${identity}`), form = element('form','agent-form');
     const action = choice(form,'kind','Review action',[
-      ['confirm','Confirm valid'],['correct','Correct content'],['scope','Limit scope'],['tag','Add tag'],['pin','Priority reference'],['reject','Stop using'],
+      ['confirm','Confirm valid'],['correct','Correct content'],['scope','Limit scope'],['tag','Add tag'],['pin','Priority reference'],['reject','Stop using'],['restore','Restore reference'],
     ]);
     const value = field(form,'value','Correction, scope, tag, or review note',true); value.maxLength = 4000;
     const key = `memory:${memory.source.evaluation_id}:${memory.source.record_id}`;
@@ -219,13 +226,93 @@ export class AgentLearningView {
       event.preventDefault(); const needsValue = ['correct','scope','tag'].includes(action.value);
       if (needsValue && !value.value.trim()) {form.querySelector('[role="status"]').textContent='Enter the correction, scope, or tag.';return;}
       await this.save(form,async()=>{
-        await this.api.post(this.detail.id,'memory/annotations',{command_id:uuid(),evaluation_id:memory.source.evaluation_id,
+        if (memory.memory_id) {
+          const operation = {confirm:'CONFIRM',correct:'REVISE',scope:'REVISE',tag:'TAG',pin:'PIN',reject:'RETIRE',restore:'RESTORE'}[action.value];
+          const payload = {memory_id:memory.memory_id,version_id:memory.version_id,expected_revision:memory.revision,reason:value.value,value:value.value};
+          if (['correct','scope'].includes(action.value)) {
+            const full = await this.api.get(this.detail.id,`memory/items/${encodeURIComponent(memory.memory_id)}${this.memorySessionQuery()}`,this.abort.signal);
+            const original = full.versions.find(v=>v.version_id === memory.version_id);
+            payload.record = Object.fromEntries(['kind','title','summary','scope','basis','validation','preconditions','steps','revalidate_when','claim'].filter(k=>original[k] !== undefined).map(k=>[k,original[k]]));
+            if (action.value === 'correct') {payload.record.summary=value.value;delete payload.record.claim;}
+            else {payload.record.scope += `; Human limitation: ${value.value}`;payload.record.runtime_blocked=true;}
+          }
+          await this.api.post(this.detail.id,'memory/commands',{command_id:uuid(),operation,payload,session_id:this.state.session_id || ''});
+        } else await this.api.post(this.detail.id,'memory/annotations',{command_id:uuid(),evaluation_id:memory.source.evaluation_id,
           record_id:memory.source.record_id,content_digest:memory.source.content_digest,expected_revision:memory.source.annotation_revision || 0,
           kind:action.value,...(needsValue ? {value:value.value} : {reason:value.value})});
         this.drafts.delete(key); await this.loadLibrary();
       });
     });
     return row;
+  }
+  renderMemoryProposals(root) {
+    const box=this.disclosure(root,'Memory consolidation proposals','memory-proposals');let loading=false;
+    box.append(element('p','muted small','Semantic comparisons remain proposals until calibration passes or a person accepts a specific merge.'));
+    const content=element('div');box.append(content);
+    const load=async()=>{
+      if(!box.open || loading)return;loading=true;content.textContent='Loading proposals…';
+      try {
+        const answer=await this.api.get(this.detail.id,`memory/proposals${this.memorySessionQuery()}`,this.abort.signal);
+        if(!this.current || !box.isConnected)return;content.replaceChildren();
+        for(const proposal of answer.proposals || []) {
+          const entry=element('article','agent-learning-entry');entry.append(element('p','small',`Consolidation: ${proposal.state}`));
+          for(const comparison of proposal.result?.comparisons || []) {
+            entry.append(element('p','small',`${comparison.relation}: ${comparison.reason}`));
+            if(proposal.state === 'shadow' && comparison.relation === 'equivalent') {
+              const form=element('form');this.message(form);
+              form.append(button('Accept this merge',()=>this.save(form,async()=>{
+                await this.api.post(this.detail.id,'memory/proposals',{command_id:uuid(),job_id:proposal.id,
+                  candidate_version_id:comparison.candidate_version_id,session_id:this.state.session_id || ''});
+                await this.loadLibrary();await load();
+              })));entry.append(form);
+            }
+          }
+          content.append(entry);
+        }
+        if(!content.childNodes.length)content.textContent='No consolidation proposals.';
+      } catch(error) {if(error.name !== 'AbortError')content.textContent=`Load failed: ${error.message}`;}
+      finally {loading=false;}
+    };
+    box.addEventListener('toggle',load);
+  }
+  memorySessionQuery() {
+    return this.state.session_id ? `?session_id=${encodeURIComponent(this.state.session_id)}` : '';
+  }
+  lazyKnowledge(root,memory) {
+    let loaded=false,loading=false;
+    const load=async()=>{
+      if (!root.open || loaded || loading) return;
+      loading=true; const status=element('p','muted small','Loading versions & evidence…');root.append(status);
+      try {
+        const detail=await this.api.get(this.detail.id,`memory/items/${encodeURIComponent(memory.memory_id)}${this.memorySessionQuery()}`,this.abort.signal);
+        if (!this.current || !root.isConnected) return;
+        for (const version of detail.versions || []) {
+          const section=element('section','agent-memory-version');
+          section.append(element('h5','',`Version ${version.content_revision || version.revision} · ${version.lifecycle}`),element('p','',version.summary));
+          if(version.valid_from || version.valid_to)section.append(element('p','muted small',`Valid: ${version.valid_from || 'unknown'} → ${version.valid_to || 'unknown'}`));
+          for(const citation of version.citations || [])section.append(element('blockquote','agent-memory-quote',citation.quote));
+          for(const support of version.supports || [])section.append(element('p','muted small',`Evidence ${support.evidence_group_id} · ${support.available ? 'available' : 'withdrawn'}`));
+          for(const conflict of version.conflicts || []) {
+            section.append(element('p','small',`Conflict ${conflict.id} · ${conflict.state}`));
+            if(conflict.state === 'open') {
+              const form=element('form','agent-form'),reason=field(form,'reason','Evidence supporting this resolution',true);this.message(form);
+              form.append(button('Resolve using this version',()=>{
+                if(!reason.value.trim()){form.querySelector('[role="status"]').textContent='Explain the evidence that resolves the conflict.';return;}
+                this.save(form,async()=>{
+                  await this.api.post(this.detail.id,'memory/commands',{command_id:uuid(),operation:'RESOLVE',session_id:this.state.session_id || '',payload:{
+                    memory_id:version.memory_id,version_id:version.version_id,expected_revision:version.revision,conflict_id:conflict.id,reason:reason.value}});
+                  await this.loadLibrary();
+                });
+              }));section.append(form);
+            }
+          }
+          root.append(section);
+        }
+        loaded=true;status.remove();
+      } catch(error) {if(error.name !== 'AbortError')status.textContent=`Load failed: ${error.message}. Close and reopen to retry.`;}
+      finally {loading=false;}
+    };
+    root.addEventListener('toggle',load);if(root.open)load();
   }
   renderGuidance() {
     const root = panel(this.root,'Human principles & methods',true); root.classList.add('agent-human-guidance');

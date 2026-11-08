@@ -124,7 +124,7 @@ def commit_records(memory, unit, response, *, schema=None, finish_reason=None):
             elif anchored:
                 key = identity(cid)
             else:
-                key = identity(kind, {k: record[k] for k in FIELDS[kind]["items"]["properties"]})
+                key = identity(kind, {k: record[k] for k in FIELDS[kind]["items"]["properties"] if k in record})
             record.update(id="memory:" + key, kind=kind, unit_id=unit["id"], **{
                 k: memory["identity"][source] for k, source in (("source_digest", "source"), ("run_id", "run_id"), ("graph_revision", "graph_revision"))
             })

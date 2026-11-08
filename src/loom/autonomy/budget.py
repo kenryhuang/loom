@@ -74,12 +74,12 @@ class BudgetLedger:
                 goal = json.loads(goal_row[0]) if goal_row else None
             objective_id = (goal or {}).get("long_term_objective_id", binding.get("objective_id"))
             stage_id = (goal or {}).get("stage_id", binding.get("stage_id"))
-            if stage_id and category not in {"learning", "method_learning"}:
+            if stage_id and category not in {"learning", "method_learning", "memory_consolidation"}:
                 stage_row = db.execute("SELECT body FROM agent_stages WHERE id=? AND agent_id=?", (stage_id, agent["id"])).fetchone()
                 if stage_row and json.loads(stage_row[0])["state"] in {"paused", "cancelled", "superseded", "blocked"}:
                     raise ServiceError("Stage is not runnable; new calls are deferred", 409, "AGENT_CONTROL")
             objective = next((o for o in agent["role"]["long_term_objectives"] if o["id"] == objective_id), {})
-            if (category not in {"learning", "method_learning"} and (stage_id or (goal or {}).get("stage_discovery"))
+            if (category not in {"learning", "method_learning", "memory_consolidation"} and (stage_id or (goal or {}).get("stage_discovery"))
                     and objective.get("stage_planning", {}).get("mode") != "autonomous"):
                 raise ServiceError("Automatic stage planning is disabled; new calls are deferred", 409, "AGENT_CONTROL")
             window = self.clock().astimezone(ZoneInfo(agent["role"]["timezone"])).date().isoformat()
@@ -111,7 +111,7 @@ class BudgetLedger:
                     block["id"] = identifier
                     db.execute("INSERT INTO agent_budget_blocks VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
                                (binding["evaluation_id"], agent["id"], canonical(block)))
-                elif category not in {"learning", "method_learning"} and binding.get("work_package_id"):
+                elif category not in {"learning", "method_learning", "memory_consolidation"} and binding.get("work_package_id"):
                     from loom.service.contracts import canonical
 
                     block.update(id=identifier, at=self.clock().isoformat())

@@ -147,8 +147,9 @@ class SessionSemantic:
                 with self.store.transaction() as db:
                     db.execute("UPDATE semantic_jobs SET body=? WHERE id=?", (canonical(body), body["id"]))
                     db.execute("INSERT OR IGNORE INTO skill_dirty_sessions VALUES(?)", (body['session_id'],))
-                    if db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_versions'").fetchone():
-                        db.execute("UPDATE memory_versions SET value=value+1 WHERE id='effective'")
+                    from loom.memory.migration import sync_job
+
+                    sync_job(db, body)
                 return
             except sqlite3.OperationalError as exc:
                 code = getattr(exc, 'sqlite_errorcode', 0) & 255
@@ -525,6 +526,9 @@ class SessionSemantic:
             if resume_request_id:
                 body.setdefault("host_resume_requests", []).append(resume_request_id)
             db.execute("INSERT OR REPLACE INTO semantic_jobs VALUES(?,?,?,?)", (body["id"], sid, key, canonical(body)))
+            from loom.memory.migration import sync_job
+
+            sync_job(db, body)
             self.cancels[body["id"]] = threading.Event()
             self.futures[body["id"]] = self.pool.submit(self._work, body)
             return self._public(body)

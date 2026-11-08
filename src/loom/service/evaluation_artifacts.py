@@ -71,6 +71,11 @@ class EvaluationArtifacts:
                 if owner:
                     self.track(db, owner, ref)
         candidates.update(row[0] for row in db.execute("SELECT digest FROM evaluation_artifacts WHERE evaluation_id=?", (identifier,)))
+        from loom.memory.repository import Repository
+        from loom.memory.schema import exists
+
+        if exists(db):
+            Repository(self.store.path).invalidate(db, evaluation_id=identifier)
         db.execute("DELETE FROM semantic_jobs WHERE id=?", (identifier,))
         db.execute("DELETE FROM evaluation_artifacts WHERE evaluation_id=?", (identifier,))
         removed = []

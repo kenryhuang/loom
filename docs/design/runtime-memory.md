@@ -1,4 +1,8 @@
+当前 Memory V2 的代码、迁移状态与验证范围见 [实现记录](../review/2026-11-08-memory-v2-implementation.zh-CN.md)。下文保留 legacy 引用机制说明。
+
 # Deep eval memory 在执行中的复用
+
+后续生命周期重设计见 [Memory V2：有证据、可更新、可失效的知识记忆](memory-v2.zh-CN.md)（已实施的 namespace 使用 V2；本文说明 legacy 兼容路径）。
 
 ## 目标
 

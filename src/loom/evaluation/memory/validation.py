@@ -14,6 +14,13 @@ from loom.evaluation.memory.evidence import sanitize
 
 def validate_record(kind, row, unit):
     validate_schema(row, FIELDS[kind]["items"])
+    if row.get('claim'):
+        from loom.memory.repository import claim_slot
+
+        try:
+            claim_slot({**row, 'kind': kind})
+        except ValueError as exc:
+            raise RuleViolation('memory.atomic_claim', str(exc), path=('claim',)) from exc
     if sanitize(row) != row or "[REDACTED]" in serialized(row):
         raise RuleViolation("memory.credentials", "Memory must not contain credentials or redacted values", path=())
     stages = {s["id"]: s for s in unit["scope"]["stages"]}

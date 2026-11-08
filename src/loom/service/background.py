@@ -20,6 +20,9 @@ class ServiceBackground:
             from loom.service.autonomy import AutonomyService
 
             self.autonomy = self.register(AutonomyService(service, self))
+            from loom.memory.worker import MemoryWorker
+
+            self.memory = self.register(MemoryWorker(self.semantic))
         except BaseException:
             self.close()
             raise

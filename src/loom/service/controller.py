@@ -57,6 +57,13 @@ class LoomService:
         except OSError as exc:
             self.owner.close()
             raise ServiceError("Another supervisor owns this data directory", 409) from exc
+        from loom.memory.migration import migrate_database
+
+        with self.store.read() as db:
+            legacy = db.execute("SELECT 1 FROM sqlite_master WHERE name='semantic_jobs'").fetchone()
+            migrated = db.execute('SELECT 1 FROM memory_namespaces WHERE checkpoint IS NOT NULL LIMIT 1').fetchone()
+        backup = self.store.directory / 'service.before-memory-v2.sqlite'
+        migrate_database(self.store.path, backup=backup if legacy and not migrated and not backup.exists() else None)
         self.config_path = str(Path(config_path).resolve()) if config_path else None
         self.store.knowledge.config_path = self.config_path
         self.capacity = max_active_runs

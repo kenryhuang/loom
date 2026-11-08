@@ -51,6 +51,9 @@ class SessionStore:
             # The queue is normally tiny relative to historical snapshots.
             # SQLite maintains membership atomically with every body update.
             db.execute(f'CREATE INDEX IF NOT EXISTS sessions_admission ON sessions(id) WHERE {SCHEDULING_PREDICATE}')
+            from loom.memory.schema import migrate as migrate_memory
+
+            migrate_memory(db)
 
     @contextmanager
     def transaction(self):
@@ -101,6 +104,10 @@ class SessionStore:
             from loom.autonomy.results import record_session_state
 
             record_session_state(db, state)
+        if state.get('deleted_at'):
+            from loom.memory.repository import Repository
+
+            Repository(self.path).invalidate(db, session_id=state['session_id'])
         if state.get('deleted_at') and db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_versions'").fetchone():
             db.execute("UPDATE memory_versions SET value=value+1 WHERE id='effective'")
         db.execute("UPDATE sessions SET body=? WHERE id=?", (canonical(state), state["session_id"]))

@@ -68,6 +68,11 @@ class MemoryStore:
         self.workspace = canonical_path(workspace)
         self.session_id = session_id
 
+    def query_service(self):
+        from loom.memory.query import MemoryQueryService
+
+        return MemoryQueryService(self.database, workspace=self.workspace, session_id=self.session_id)
+
     def _scope_matches(self, workspace, session_id):
         if self.workspace:
             return canonical_path(workspace) == self.workspace
@@ -76,6 +81,11 @@ class MemoryStore:
     def epoch(self):
         try:
             with closing(sqlite3.connect(self.database.as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
+                db.row_factory = sqlite3.Row
+                service = self.query_service()
+                state = service.state(db)
+                if state and state['mode'] == 'runtime_v2':
+                    return service.epoch()
                 if db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_versions'").fetchone():
                     return db.execute("SELECT value FROM memory_versions WHERE id='effective'").fetchone()[0]
         except (sqlite3.Error, OSError):
@@ -163,6 +173,10 @@ class MemoryStore:
             from loom.memory.annotations import effective
 
             results = effective(results, annotations, suppressions)
+        if apply_annotations:
+            from loom.memory.query import denial_overlay
+
+            results = denial_overlay(self.database, self.workspace, self.session_id, results)
         return results, scan_limit is not None and len(rows) > scan_limit, issues
 
     def search(self, query, *, limit=6):
@@ -170,6 +184,11 @@ class MemoryStore:
             raise MemoryError("memory.query_invalid", "Memory query must contain 1–20000 characters")
         if type(limit) is not int or not 1 <= limit <= 6:
             raise MemoryError("memory.query_invalid", "Memory limit must be between 1 and 6")
+        try:
+            if self.query_service().enabled(runtime=True):
+                return self.query_service().search(query, limit=limit)
+        except (sqlite3.Error, OSError) as exc:
+            raise MemoryError('memory.store_unavailable', str(exc)) from exc
         candidates, truncated, issues = self._records()
         terms = tokens(query)
         ranked = []
@@ -210,12 +229,14 @@ class MemoryStore:
                 break
         return dict(instruction=POLICY, records=selected, available_records=len(candidates), truncated=truncated, issues=issues[:10])
 
-    def browse(self, *, query='', kind='', review='', offset=0, limit=20, cache=None):
+    def browse(self, *, query='', kind='', review='', offset=0, limit=20, cache=None, cursor=None, lifecycle='current'):
         """Paginated review library; unlike runtime search it does not require a matching query."""
         if (not isinstance(query, str) or len(query) > 20000 or kind not in {'', 'facts', 'lessons', 'workflows'}
                 or review not in {'', 'unreviewed', 'reviewed'} or type(offset) is not int or offset < 0
                 or type(limit) is not int or not 1 <= limit <= 50):
             raise MemoryError('memory.query_invalid', 'Invalid memory library filters or pagination')
+        if self.query_service().enabled():
+            return self.query_service().browse(query=query, kind=kind, review=review, offset=offset, limit=limit, cursor=cursor, lifecycle=lifecycle)
         # Library pagination covers all scoped history; runtime retrieval keeps
         # its separate, bounded candidate window. Filter kind before decoding.
         rows, truncated, issues = cache.records(self) if cache is not None else self._records(scan_limit=None, kind=kind)
@@ -237,10 +258,17 @@ class MemoryStore:
         return dict(records=deepcopy(records[offset:end]), total=len(records), next_offset=end if end < len(records) else None,
                     truncated=truncated, issues=deepcopy(issues[:10]))
 
-    def read(self, evaluation_id, record_id, *, offset=0, limit=6000):
+    def read(self, evaluation_id=None, record_id=None, *, memory_id=None, version_id=None, offset=0, limit=6000):
+        if memory_id is not None or version_id is not None:
+            if (not isinstance(memory_id, str) or not isinstance(version_id, str) or type(offset) is not int or offset < 0
+                    or type(limit) is not int or not 1 <= limit <= 6000 or evaluation_id is not None or record_id is not None):
+                raise MemoryError('memory.query_invalid', 'Supply either canonical memory_id/version_id or legacy evaluation_id/record_id')
+            return self.query_service().read_version(memory_id, version_id, offset=offset, limit=limit)
         if (not isinstance(evaluation_id, str) or not isinstance(record_id, str)
                 or type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 6000):
             raise MemoryError("memory.query_invalid", "Use evaluation_id, record_id, nonnegative offset and limit between 1 and 6000")
+        if self.query_service().enabled(runtime=True):
+            return self.query_service().original(evaluation_id, record_id, offset=offset, limit=limit)
         records, _, issues = self._records((evaluation_id, record_id))
         if issues:
             raise MemoryError("memory.record_invalid", issues[0]['message'])

@@ -120,6 +120,12 @@ class SkillStore:
     def dependencies_valid(self, version_id, *, db, visiting=()):
         if version_id in visiting:
             return False
+        from loom.memory.query import available
+        from loom.memory.schema import exists
+
+        if exists(db) and any(not available(db, r[0]) for r in db.execute(
+                'SELECT memory_version_id FROM memory_skill_dependencies WHERE skill_version_id=?', (version_id,))):
+            return False
         for dep in db.execute('SELECT source_id,source_revision FROM skill_version_dependencies WHERE version_id=?', (version_id,)):
             source = self.version(dep[0], db=db)
             if (source['revision'] != dep[1] or source['state'] not in {'active', 'trial', 'candidate'}
@@ -135,6 +141,16 @@ class SkillStore:
         if not session or json.loads(session[0]).get('deleted_at'):
             return False
         provenance = case['provenance']
+        from loom.memory.query import available
+        from loom.memory.schema import exists
+
+        if exists(db) and provenance.get('record_id'):
+            refs = db.execute('''SELECT DISTINCT s.version_id FROM memory_sources src
+                JOIN memory_observations o ON o.source_id=src.id JOIN memory_supports s ON s.observation_id=o.id
+                WHERE src.evaluation_id=? AND src.record_id=?''',
+                (provenance['evaluation_id'], provenance['record_id'])).fetchall()
+            if refs and not any(available(db, r[0]) for r in refs):
+                return False
         if not provenance.get('record_id'):
             return True
         row = db.execute('SELECT body FROM semantic_jobs WHERE id=?', (provenance['evaluation_id'],)).fetchone()
@@ -184,6 +200,9 @@ class SkillStore:
                        (identifier, job['skill_id'], job['workspace'], canonical(body)))
             for case in job['delivered_cases']:
                 db.execute('INSERT OR IGNORE INTO skill_dependencies VALUES(?,?,?)', (identifier, case['id'], case['revision']))
+                from loom.memory.dependencies import bind_skill
+
+                bind_skill(db, identifier, case)
         return identifier
 
     def transition(self, identifier, state, revision):

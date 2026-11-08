@@ -1,0 +1,73 @@
+{
+  "environment": {
+    "system": "Darwin",
+    "machine": "x86_64",
+    "python": "3.14.3"
+  },
+  "snapshot": {
+    "observations": 4101,
+    "knowledge": 4101,
+    "issues": 5,
+    "queries": {
+      "all": {
+        "median_ms": 15.11,
+        "p95_ms": 34.33,
+        "total": 4043
+      },
+      "facts": {
+        "median_ms": 13.0,
+        "p95_ms": 18.44,
+        "total": 3274
+      },
+      "reviewed": {
+        "median_ms": 9.28,
+        "p95_ms": 12.3,
+        "total": 0
+      },
+      "keyword": {
+        "median_ms": 9.76,
+        "p95_ms": 11.2,
+        "total": 88
+      },
+      "runtime": {
+        "median_ms": 75.15,
+        "p95_ms": 83.71,
+        "total": 200
+      }
+    }
+  },
+  "scale_100k": {
+    "all": {
+      "first_call_ms": 568.98,
+      "median_ms": 242.85,
+      "p95_ms": 248.08
+    },
+    "facts": {
+      "first_call_ms": 236.22,
+      "median_ms": 236.81,
+      "p95_ms": 340.7
+    },
+    "runtime": {
+      "first_call_ms": 935.7,
+      "median_ms": 111.7,
+      "p95_ms": 129.54
+    }
+  },
+  "migration": {
+    "observations": 4168,
+    "knowledge": 4168,
+    "issues": 5,
+    "namespaces": 6,
+    "backup": "runs/service/service.before-memory-v2.sqlite",
+    "mode": "runtime_v2",
+    "checkpoint": "complete",
+    "observation_digest_mismatches": 0,
+    "http_facts_ms": 37,
+    "http_facts_count": 3329
+  },
+  "limitations": [
+    "No remote LLM or embedding requests made for these measurements",
+    "100k dataset synthetically repeats record shapes; not a semantic-quality benchmark",
+    "First-call timings do not flush the OS page cache; hot P95 uses 20 subsequent queries"
+  ]
+}
