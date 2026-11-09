@@ -72,7 +72,7 @@ class MissingRouteProvider:
 
 
 def routing_failure_provider_factory(state):
-    return FakeProvider(state) if state["run"].get("failure") else MissingRouteProvider()
+    return FakeProvider(state) if state["run"].get("stop_code") == "MODEL_RESPONSE_INVALID" else MissingRouteProvider()
 
 
 class TransportFailureProvider:

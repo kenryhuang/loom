@@ -19,6 +19,34 @@ PROTOCOL = StructuredProtocol('agent_acceptance_fixture', 1, {
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('cap, expected', [(None, 393216), (8192, 8192), (500000, 393216)])
+async def test_agent_output_limit_is_optional_and_preserves_model_configuration(agent_service, cap, expected):
+    service, _, aid, _ = agent_service
+    requests = []
+    async def http(_url, request):
+        requests.append(request['body'])
+        return {'ok': True, 'json': {'choices': [{'message': {'content': 'done'}, 'finish_reason': 'stop'}],
+                                   'usage': {'prompt_tokens': 10, 'completion_tokens': 2, 'total_tokens': 12}}}
+    original = OpenAIProvider(api_key='fixture', model='fixture', max_completion_tokens=393216, http_client=http)
+    wrapper = BudgetProvider(original, BudgetLedger(service.store.path), {'agent_id': aid, 'output_tokens': cap})
+    assert (await wrapper.chat([])).ok
+    assert requests[0]['max_completion_tokens'] == expected
+    assert wrapper.output_tokens == expected
+    assert original.max_completion_tokens == 393216
+    adapted = wrapper.with_provider(original)
+    assert adapted.output_limit == cap and adapted.provider.max_completion_tokens == expected
+
+
+def test_unconfigured_provider_does_not_receive_a_hidden_generation_cap():
+    original = OpenAIProvider(api_key='fixture', model='fixture')
+    wrapper = BudgetProvider(original, None, {})
+    assert wrapper.output_limit is None
+    assert wrapper.provider.max_completion_tokens is None
+    assert 'max_completion_tokens' not in wrapper.provider._request_body([], None, None, stream=False)
+    assert wrapper.output_tokens > 0  # Accounting estimate only, never sent as a generation cap.
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('denied', [False, True])
 async def test_acceptance_retains_native_format_limits_and_agent_budget(agent_service, denied):
     service, facade, aid, path = agent_service
@@ -34,7 +62,7 @@ async def test_acceptance_retains_native_format_limits_and_agent_budget(agent_se
     original = OpenAIProvider(api_key='fixture', model='qwen3.8-max', base_url='https://dashscope.aliyuncs.com/compatible-mode/v1',
                               max_completion_tokens=65536, request_options={'enable_thinking': True}, http_client=http)
     ledger = BudgetLedger(service.store.path)
-    wrapped = BudgetProvider(original, ledger, {'agent_id': aid, 'goal_id': 'g', 'work_package_id': 'w'}, category='acceptance')
+    wrapped = BudgetProvider(original, ledger, {'agent_id': aid, 'goal_id': 'g', 'work_package_id': 'w', 'output_tokens': 8192}, category='acceptance')
     assembly = TaskAssembly(TaskRequest('Verify candidate', workspace=path), plan_mode='off')
     assembly.configure_acceptance(wrapped)
     runtime = SimpleNamespace(run_id='r', loop_id='l', trace_id='t', trace_sink=Sink(), cancellation=None)

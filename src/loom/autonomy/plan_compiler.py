@@ -77,11 +77,13 @@ def schema(envs, payload=None):
             verification["properties"]["unresolved_requirements"], maxItems=0,
             description="Must be [] for an executable contract. Unknown project facts belong in discovery scope/assumptions. "
                         "If verification itself cannot be specified, return request_input or wait instead of publishing work.")
-        variants.append(obj(dict(key=TEXT, objective=TEXT, acceptance=TEXTS,
+        variants.append(obj(dict(key=TEXT, objective=TEXT,
+            reason={**TEXT, "description": "Business rationale for this specific work package: the goal gap it addresses and how its output "
+                    "contributes to the parent Goal. Exclude planning retries, schema corrections and framework diagnostics."}, acceptance=TEXTS,
             environment={"enum": [mode]}, execution_tools=TEXTS,
             verification=verification,
             estimated_seconds={"type": "integer", "minimum": 30, "maximum": 14400}),
-            ["key", "objective", "acceptance", "environment", "execution_tools", "verification", "estimated_seconds"]))
+            ["key", "objective", "reason", "acceptance", "environment", "execution_tools", "verification", "estimated_seconds"]))
     goal["properties"]["work_packages"] = dict(type="array", minItems=1, maxItems=3, items={"anyOf": variants})
     goal["required"].append("work_packages")
     # Repair is expressed as another complete proposal, not a second planner.
@@ -225,7 +227,7 @@ def compile_plan(service, agent, payload, proposal, envs, run_id, now):
             work = dict(id=wid, agent_id=agent["id"], goal_id=gid, stage_id=sid, objective_id=objective["id"],
                         plan_id=plan_id, engine_version=2, contract_revision=1, goal_revision=1,
                         agent_run_id=run_id, role_revision=agent["role_revision"], state="pending", order=wi,
-                        objective=item_work["objective"], acceptance=item_work["acceptance"], reason=proposal["reason"],
+                        objective=item_work["objective"], acceptance=item_work["acceptance"], reason=item_work["reason"],
                         created_at=now, run_ids=[], read_only=item_work["environment"] == "inspect",
                         estimated_seconds=item_work["estimated_seconds"], estimate_basis="model",
                         estimated_tokens=agent["role"]["budget"]["work_tokens"], token_estimate_basis="role_budget_fallback")

@@ -22,6 +22,40 @@ def failed_work(agent_service, *, legacy=False, failure=None):
     return service, facade, aid, work, sid
 
 
+def test_model_format_pause_resumes_checkpoint_with_bounded_agent_recovery(agent_service):
+    service, facade, aid, work, sid = paused_work(agent_service, "Malformed model decision", stop_code="MODEL_RESPONSE_INVALID")
+    before = service.store.snapshot(sid)
+    report = assess(before)
+    assert report['mode'] == 'resume' and report['reset'] == []
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    resumed = service.store.snapshot(sid)
+    assert resumed['task']['state'] == 'queued'
+    assert resumed['run']['checkpoint'] == before['run']['checkpoint']
+    assert resumed['task']['task_spec'] == before['task']['task_spec']
+    assert not resumed.get('recovery_context')
+    with facade.store.sessions.transaction() as db:
+        agent = facade.store.get(db, 'agents', aid)
+        agent['role']['scheduling_policy']['max_recovery_attempts'] = 1
+        facade.store.put(db, 'agents', agent)
+    def pause_again(state, emit, db):
+        state['task']['state'] = 'paused'
+        state['run'].update(state='suspended', stop_code='MODEL_RESPONSE_INVALID')
+    service.store.update(sid, pause_again)
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    saved = facade.snapshot(aid)['work_packages'][0]
+    assert saved['recovery']['attempts'] == 1 and saved['recovery']['exhausted']
+
+
+def test_output_limit_is_distinct_from_format_errors_and_does_not_blindly_resume(agent_service):
+    service, facade, aid, _, sid = paused_work(agent_service, 'Output was truncated', stop_code='MODEL_OUTPUT_LIMIT')
+    report = assess(service.store.snapshot(sid))
+    assert report['mode'] == 'manual'
+    assert report['causes'] == [dict(code='MODEL_OUTPUT_LIMIT', details={})]
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    assert service.store.snapshot(sid)['task']['state'] == 'paused'
+    assert 'Output limit reached' in facade.snapshot(aid)['scheduler']['reason']
+
+
 @pytest.mark.parametrize('legacy', [False, True])
 def test_retryable_provider_failure_resumes_checkpoint_without_reassembling(agent_service, legacy):
     service, facade, aid, work, sid = failed_work(agent_service, legacy=legacy)

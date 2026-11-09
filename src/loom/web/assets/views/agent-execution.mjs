@@ -83,7 +83,7 @@ export function renderExecution(root,d,view) {
     const fill=work=>{
       const w=work,context=w.latest_context;
       detail.append(element('p','',w.objective),element('code','agent-roadmap-id',w.id));
-      if(w.reason)detail.append(element('p','',`Orchestration rationale: ${w.reason}`));
+      if(w.reason)detail.append(element('p','',`Goal contribution: ${w.reason}`));
       if(reason && w.state!=='succeeded')detail.append(element('p','',`Current blocker: ${reason}`));
       if(w.binding)detail.append(element('p','',`Binding: ${w.binding.source==='recommended'?'recommended':'fallback'}${w.binding.rationale?` · ${w.binding.rationale}`:w.binding.reason?` · ${w.binding.reason}`:''}`));
       detail.append(element('p','',`Shared daily token budget · ${w.recovery?.attempts || 0}/${Math.max(w.recovery?.attempt_limit || 0,policy.max_recovery_attempts ?? 3)} recoveries`));

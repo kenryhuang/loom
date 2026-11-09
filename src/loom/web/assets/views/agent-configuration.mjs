@@ -1,5 +1,5 @@
 import {element} from '../markdown.mjs';
-import {field, selectField, preset} from './agent-setup.mjs';
+import {field, selectField, preset, outputTokenLimit} from './agent-setup.mjs';
 import {agentResourceChoices} from './agent-resources.mjs';
 import {selectedTools} from './external-tools.mjs';
 
@@ -58,6 +58,7 @@ export class AgentConfigurationEditor {
       this.evaluation=selectField(p,'evaluation_model','Evaluation model',[['','Loading models…']]);
     } else if(this.section==='budget') {
       this.daily=preset(p,'daily_tokens','Daily token limit',budgets,r.budget?.daily_tokens || 1000000);
+      this.outputTokens=outputTokenLimit(p,r.budget?.output_tokens);
       p.append(element('p','muted small',`Planning, execution, acceptance, and learning share the daily allowance, resetting at midnight ${r.timezone || 'UTC'}.`));
     } else if(this.section==='scheduling') {
       const s=r.scheduling_policy || {};
@@ -120,7 +121,7 @@ export class AgentConfigurationEditor {
     const f=this.form.elements,r=this.role;
     if(this.section==='identity')return {name:f.name.value.trim(),role_text:f.role_text.value.trim(),methods:lines(f.methods.value)};
     if(this.section==='models')return {model:this.model.value || null,evaluation_model:this.evaluation.value || null};
-    if(this.section==='budget')return {budget:{daily_tokens:this.daily.value()}};
+    if(this.section==='budget')return {budget:{daily_tokens:this.daily.value(),output_tokens:this.outputTokens.value()}};
     if(this.section==='scheduling')return {interval_seconds:this.interval.value(),timezone:this.zone.value,
       scheduling_policy:{enabled:this.enabled.value==='true',tick_seconds:this.tick.value(),max_recovery_attempts:this.recovery.value()}};
     if(this.section==='learning')return {method_learning:this.methodLearning.value==='true',learning_policy:{

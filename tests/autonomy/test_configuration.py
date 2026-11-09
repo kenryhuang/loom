@@ -55,6 +55,16 @@ def test_settings_are_idempotent_revision_checked_and_merged_by_section(agent_se
     assert current['configuration']['role']['long_term_objectives'] == before['role']['long_term_objectives']
 
 
+def test_output_limit_defaults_to_model_and_can_be_set_or_cleared(agent_service):
+    _, facade, aid, _ = agent_service
+    assert facade.snapshot(aid)['role']['budget']['output_tokens'] is None
+    for cap in (65536, None):
+        save(facade, aid, 'budget', {'budget': {'output_tokens': cap}}, cid=f'cap-{cap}')
+        with facade.store.sessions.transaction() as db:
+            activate(facade.store, db, aid)
+        assert facade.snapshot(aid)['role']['budget']['output_tokens'] == cap
+
+
 def test_pending_work_uses_new_settings_without_revising_delivery_contract(agent_service):
     service, facade, aid, path = agent_service
     (path / 'src').mkdir()

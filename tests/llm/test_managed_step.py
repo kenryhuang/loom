@@ -33,9 +33,11 @@ class Provider:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
+        self.tool_choices = []
 
     async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
         self.calls.append(list(messages))
+        self.tool_choices.append(tool_choice)
         return ok(self.responses.pop(0))
 
 
@@ -104,7 +106,7 @@ def test_structured_plan_block_stops_remaining_tool_batch(tmp_path):
         update = dict(explanation='Missing execution capability', items=[dict(id=item.id, content=item.content,
             status='blocked', blocker=dict(code='TOOLS_UNAVAILABLE', tool_ids=['process_execute']))])
         provider = Provider([LlmResponse('', (LlmToolCall('block', 'update_plan', json.dumps(update)),
-                                               LlmToolCall('later', 'shell_execute', '{}')))])
+                                               LlmToolCall('later', 'shell_execute', '{"command":"echo later"}')))])
         result = await run_managed(tmp_path, provider, Execution(), {'shell_execute': effect}, planning=planning)
         assert result.ok and result.value.control.kind == 'paused'
         assert not calls
@@ -402,22 +404,124 @@ def test_pause_at_question_checkpoint_preserves_pending_request(tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("finish_reason", ["length", "stop"])
+def test_progress_review_recovers_incomplete_report_with_complete_native_finish(tmp_path, finish_reason):
+    async def scenario():
+        from loom.tasks.tools import make_task_tools
+
+        planning = PlanningRuntime("auto")
+        planning.route.select_react("Inspect changes").unwrap()
+        planning.route.mark_task_execution_started()
+        planning.request_route_review("tool_budget", "12 task tool calls").unwrap()
+        incomplete = LlmResponse('{"action":{"kind":"tool","target":"finish","input":{"report":"unfinished',
+                                 finish_reason=finish_reason)
+        provider = Provider([incomplete, LlmResponse("", (LlmToolCall("finish", "finish", '{"report":"Concise complete report"}'),))])
+        execution = Execution()
+        tools = make_task_tools(TaskRequest("Summarize changes", workspace=tmp_path))
+        result = await run_managed(tmp_path, provider, execution, tools, planning)
+        assert result.ok and result.value.control.kind == "completed"
+        assert result.value.output == "Concise complete report"
+        assert execution.operations == ["finish"]
+        assert provider.tool_choices == ["required", "required"]
+        feedback = provider.calls[1][-1].content
+        assert "complete native tool call" in feedback and "Preserve all required outcomes" in feedback
+        if finish_reason == "length":
+            assert "truncated at the output token limit" in feedback
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "max_tokens"])
+def test_exhausted_truncated_workflow_reports_preserve_failure_details(tmp_path, finish_reason):
+    async def scenario():
+        invalid = LlmResponse('{"action":', finish_reason=finish_reason, usage=TokenUsage(1, 8192, 8193))
+        execution = Execution()
+        result = await run_managed(tmp_path, Provider([invalid] * 3), execution, planning=PlanningRuntime("auto"))
+        assert result.ok and result.value.control.kind == "paused"
+        assert result.value.control.reason_code == "MODEL_OUTPUT_LIMIT"
+        assert execution.checkpoint["response_recovery"]["finish_reason"] == finish_reason
+        assert execution.checkpoint["response_recovery"]["completion_tokens"] == 8192
+        assert "truncated at the output token limit" in result.value.control.reason
+        assert not execution.operations
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("content", [
+    "I will call finish next",
+    '{"action":{"kind":"tool","target":[],"input":{}}}',
+    '{"action":{"kind":[]}}',
+    '{"action":{"kind":"none"},"alternatives":17}',
+    '{"action":{"kind":"none"},"alternatives":[{"kind":[]}]}',
+    '{"action":{"kind":"tool","target":"read_file","input":{"path":NaN}}}',
+    '{"action":{"kind":"none","input":{"report":"partial"}},"unfinished":',
+])
+def test_malformed_decisions_are_corrected_without_accepting_nested_fragments(tmp_path, content):
+    async def scenario():
+        provider = Provider([LlmResponse(content), final("Complete corrected report")])
+        execution = Execution()
+        result = await run_managed(tmp_path, provider, execution)
+        assert result.ok and result.value.output["action"]["input"]["report"] == "Complete corrected report"
+        assert len(provider.calls) == 2 and not execution.operations
+        assert "not submitted for acceptance" in provider.calls[1][-1].content
+    asyncio.run(scenario())
+
+
+def test_format_pause_resume_preserves_completed_tools_and_usage(tmp_path):
+    async def scenario():
+        calls = []
+        async def read(value, _options):
+            calls.append(value)
+            return ok(Observation("evidence", "read_file", {"content": "committed evidence"}, "now"))
+        invalid = LlmResponse('{"action":', usage=TokenUsage(2, 1, 3))
+        execution = Execution()
+        provider = Provider([LlmResponse("", (LlmToolCall("read", "read_file", '{"path":"a"}'),)), *([invalid] * 3)])
+        paused = await run_managed(tmp_path, provider, execution, {"read_file": read})
+        assert paused.ok and paused.value.control.reason_code == "MODEL_RESPONSE_INVALID"
+        assert execution.checkpoint["phase"] == "before_llm"
+        assert len(execution.checkpoint["observations"]) == 1
+        assert execution.checkpoint["usage"].total_tokens == 9
+        resumed_provider = Provider([final("Evidence-backed report")])
+        resumed = await run_managed(tmp_path, resumed_provider, execution, {"read_file": read})
+        assert resumed.ok and resumed.value.control.kind == "completed"
+        assert calls == [{"path": "a"}] and execution.operations == ["read"]
+        assert any("committed evidence" in (m.content or "") for m in resumed_provider.calls[0])
+        assert execution.checkpoint["usage"].total_tokens == 9
+    asyncio.run(scenario())
+
+
+def test_invalid_native_batch_is_corrected_before_any_side_effect(tmp_path):
+    async def scenario():
+        calls = []
+        async def read(value, _options):
+            calls.append(value)
+            return ok(Observation("read", "read_file", {}, "now"))
+        bad = LlmResponse("", (LlmToolCall("valid", "read_file", '{"path":"a"}'), LlmToolCall("broken", "read_file", '{')))
+        provider = Provider([bad, final()])
+        result = await run_managed(tmp_path, provider, Execution(), {"read_file": read})
+        assert result.ok and not calls
+        feedback = [m for m in provider.calls[1] if m.role == "tool"]
+        assert [m.tool_call_id for m in feedback] == ["valid", "broken"]
+        assert all("No action was executed" in m.content for m in feedback)
+    asyncio.run(scenario())
+
+
 def test_resume_exhausted_workflow_response_requests_model_again_and_preserves_usage(tmp_path):
     async def scenario():
         execution = Execution()
         invalid = LlmResponse(final("old answer").content, usage=TokenUsage(2, 1, 3))
-        failed = await run_managed(tmp_path, Provider([invalid, invalid]), execution, planning=PlanningRuntime("auto"))
-        assert not failed.ok and failed.error.code == "WORKFLOW_ROUTE_FAILED"
-        assert execution.checkpoint["phase"] == "after_llm"
-        assert execution.checkpoint["missing_retries"] == 1
+        failed = await run_managed(tmp_path, Provider([invalid] * 3), execution, planning=PlanningRuntime("auto"))
+        assert failed.ok and failed.value.control.reason_code == "MODEL_RESPONSE_INVALID"
+        assert execution.checkpoint["phase"] == "before_llm"
+        assert execution.checkpoint["response_repair_paused"]
         execution.inputs = [{"seq": 10, "content": "Now run the query sample"}]
         provider = Provider([LlmResponse("", (LlmToolCall("route", "continue_react", '{"reason":"Run query"}'),))])
         resumed = await run_managed(tmp_path, provider, execution, planning=PlanningRuntime("auto"))
         assert resumed.ok and resumed.value.control.kind == "continue"
         assert len(provider.calls) == 1
         assert any(message.role == "user" and "Now run the query sample" in message.content for message in provider.calls[0])
-        assert execution.checkpoint["llm_calls"] == 3
-        assert execution.checkpoint["usage"].total_tokens == 6
+        assert execution.checkpoint["llm_calls"] == 4
+        assert execution.checkpoint["usage"].total_tokens == 9
         assert execution.operations == ["route"]
 
     asyncio.run(scenario())
@@ -438,7 +542,7 @@ def test_resume_keeps_valid_route_response_after_a_missing_tool_retry(tmp_path):
         provider = Provider([final(), LlmResponse("", (LlmToolCall("route", "continue_react", '{"reason":"Direct"}'),))])
         paused = await run_managed(tmp_path, provider, execution, planning=PlanningRuntime("auto"))
         assert paused.ok and paused.value.control.kind == "paused"
-        assert execution.checkpoint["missing_retries"] == 1
+        assert execution.checkpoint["response_repair_attempts"] == 1
         execution.pause = False
         resumed = await run_managed(tmp_path, provider, execution, planning=PlanningRuntime("auto"))
         assert resumed.ok and resumed.value.control.kind == "continue"
@@ -499,11 +603,11 @@ def test_yakdb_progress_review_failure_is_bounded_and_resume_corrects_field_only
         fields_only = LlmResponse(json.dumps({
             "reasoning": "Update verified, history incomplete", "evidence_gap": "Three commits unidentified", "next_action": "Read full git log",
         }), usage=TokenUsage(2, 1, 3))
-        provider = Provider([wrong_action, fields_only])
+        provider = Provider([wrong_action, fields_only, fields_only])
         failed = await run_managed(tmp_path, provider, execution, planning=planning)
-        assert not failed.ok and failed.error.code == "WORKFLOW_ROUTE_FAILED"
-        assert len(provider.calls) == 2 and execution.operations == []
-        assert tuple(failed.error.cause["available_tools"]) == ("enter_plan", "continue_react", "finish")
+        assert failed.ok and failed.value.control.reason_code == "MODEL_RESPONSE_INVALID"
+        assert len(provider.calls) == 3 and execution.operations == []
+        assert tuple(execution.checkpoint["response_recovery"]["available_tools"]) == ("enter_plan", "continue_react", "finish")
         selected = LlmResponse("", (LlmToolCall("route", "continue_react", json.dumps({
             "reason": "Read-only lookup", "evidence_gap": "Three commits unidentified", "next_action": "Read full git log",
         })),))
@@ -511,14 +615,14 @@ def test_yakdb_progress_review_failure_is_bounded_and_resume_corrects_field_only
         resumed = await run_managed(tmp_path, retry_provider, execution, planning=PlanningRuntime("auto"))
         assert resumed.ok and resumed.value.control.kind == "continue"
         assert "No executable tool call was found" in retry_provider.calls[0][-1].content
-        assert execution.checkpoint["llm_calls"] == 3
-        assert execution.checkpoint["usage"].total_tokens == 6
+        assert execution.checkpoint["llm_calls"] == 4
+        assert execution.checkpoint["usage"].total_tokens == 9
         assert execution.operations == ["route"]
 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("arguments", ['{"path":"a", }', '[]', '{"path":"a"'])
+@pytest.mark.parametrize("arguments", ['{"path":"a", }', '[]', '{"path":"a"', '{}', '{"path":17}'])
 def test_malformed_tool_arguments_return_feedback_without_executing_and_can_recover(tmp_path, arguments):
     async def scenario():
         calls = []
@@ -584,7 +688,7 @@ def test_time_reserve_in_tool_batch_keeps_recovery_code(tmp_path):
             def boundary(self, checkpoint):
                 return {**super().boundary(checkpoint), 'active_seconds': 91 if checkpoint.get('calls') else 0}
 
-        provider = Provider([LlmResponse('', (LlmToolCall('read', 'read_file', '{}'),)), LlmResponse('Partial report')])
+        provider = Provider([LlmResponse('', (LlmToolCall('read', 'read_file', '{"path":"a"}'),)), LlmResponse('Partial report')])
         async def read(*args):
             pytest.fail('The reserved time must not execute another tool')
         result = await run_managed(tmp_path, provider, TimedExecution(), {'read_file': read}, limits={'max_duration_seconds': 100})

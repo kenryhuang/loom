@@ -313,7 +313,8 @@ export class AgentsView {
       ['Automatic method learning',r.method_learning?'On':'Off']]);
     this.configurationPanel(root,d,'resources',[['Source paths',(r.source_routes || []).flatMap(route=>route.paths || []).join(', ') || 'Not set'],
       ['Knowledge bases',(r.knowledge_base_ids || []).join(', ') || 'Not set'],['External tools',(r.external_tool_ids || []).join(', ') || 'Not set']]);
-    const budget=this.configurationPanel(root,d,'budget',[['Daily token limit',number(r.budget.daily_tokens)]],true);
+    const budget=this.configurationPanel(root,d,'budget',[['Daily token limit',number(r.budget.daily_tokens)],
+      ['Per-response output limit',r.budget.output_tokens == null ? 'Use model configuration' : number(r.budget.output_tokens)]],true);
     const daily=d.daily_budget;
     cards(budget,[['Current daily limit',number(daily?.limit ?? d.role.budget.daily_tokens)],['Used & reserved today',number(daily?.used ?? 0)],
       ['Remaining today',number(daily?.remaining ?? d.role.budget.daily_tokens)],['Total model calls',number(d.budget.reduce((sum,row)=>sum+row.calls,0))],
@@ -428,7 +429,7 @@ export class AgentsView {
     const node=table(root,['Work package','Status','Execution time','Tokens used'],works.map(w=>{
       const name=element('div');
       name.append(element('span','',w.objective));
-      if(w.reason) name.append(element('p','muted',`Orchestration rationale: ${w.reason}`));
+      if(w.reason) name.append(element('p','muted',`Goal contribution: ${w.reason}`));
       if(w.blocked_reason && !['succeeded','completed'].includes(w.state)) name.append(element('p','notice',w.blocked_reason));
       const state=badge(w.superseded_contract?'Superseded contract · '+label(w.state):label(w.state),w.state);
       const stateCell=w.session_id ? link('',`#/sessions/${encodeURIComponent(w.session_id)}`) : state;

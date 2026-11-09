@@ -95,6 +95,10 @@ workflow:
 
 持久 session 保存模型消息、工具游标及所有插件状态。重启后复用已提交的工具结果，输入等待继续使用原 request。不能确认执行效果时进入恢复核验，不会因 resume 盲目再次执行。
 
+持久执行器将模型回复视为需要验证的输入：在执行工具批次前检查输出截断、完整决策 JSON、工具可见性、参数对象和工具 schema。接受完整 JSON 或 Markdown 代码块中的完整 JSON，不从破损外层回复中提取局部对象执行。无效回复记录 `llm.response.rejected`，给出具体字段错误和纠正要求；整批不执行，也不进入验收。长错误文本在纠正上下文中缩略，原始回复保留在执行事件中。
+
+同一错误轮次最多自动纠正两次，仍无效则保存检查点，以 `MODEL_RESPONSE_INVALID` 暂停；已有观察、工具结果、消息和累计用量继续保留。Resume 从新的模型请求继续，不重放错误回复或已完成的工具。Agent 调度器可在既有恢复次数与预算上限内恢复此类暂停，不重组执行合同；人工暂停、待确认执行效果和缺少检查点仍阻止自动恢复。
+
 ## 注册扩展
 
 结构接口见 [task_plugins.py](../../src/loom/runtime/task_plugins.py)，执行参数与 binding 见 [execution_contracts.py](../../src/loom/runtime/execution_contracts.py)。插件必须提供匹配的 manifest 和可序列化快照；恢复会校验 plugin/version/schema/config digest。registry 只接受宿主代码注册的 factory，不从任务文件导入模块。

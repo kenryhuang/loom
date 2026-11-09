@@ -92,6 +92,9 @@ def allocate(store, db, agent, work, *, requested=None):
 
 
 def parent_block(store, db, agent, work, requested):
+    # With inherited model output limits, only test remaining allowance here;
+    # BudgetProvider reserves the actual request estimate before dispatch.
+    requested = requested if requested is not None else 1
     aid, budget = agent["id"], agent["role"]["budget"]
     window = store.clock().astimezone(ZoneInfo(agent["role"]["timezone"])).date().isoformat()
     checks = [("daily", "Daily", "window=?", (window,), budget["daily_tokens"])]

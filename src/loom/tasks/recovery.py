@@ -11,7 +11,7 @@ TOOL_COLLECTIONS = {
     'fetch_url': 'web_research', 'create_report': 'document_outputs', 'finish': 'task_control',
 }
 BUDGET_CODES = {'ACCEPTANCE_BUDGET_EXHAUSTED', 'ACCEPTANCE_INPUT_BUDGET', 'ACCEPTANCE_OUTPUT_BUDGET', 'ACCEPTANCE_TIMEOUT'}
-MANUAL_CODES = {'EXECUTION_UNKNOWN', 'ACCEPTANCE_EXTERNAL_DEPENDENCY', 'ACCEPTANCE_UNKNOWN_GAP', 'ACCEPTANCE_BINDING_UNAVAILABLE',
+MANUAL_CODES = {'MODEL_OUTPUT_LIMIT', 'EXECUTION_UNKNOWN', 'ACCEPTANCE_EXTERNAL_DEPENDENCY', 'ACCEPTANCE_UNKNOWN_GAP', 'ACCEPTANCE_BINDING_UNAVAILABLE',
                 'ACCEPTANCE_SOURCE_CHANGED'}
 PLAN_CODES = {'TOOLS_UNAVAILABLE', 'TOKEN_BUDGET', 'ACCEPTANCE_CONTRACT', 'EXTERNAL_DEPENDENCY', 'EXECUTION_UNKNOWN'}
 
@@ -31,6 +31,10 @@ def assess(state, *, failure=None):
     failure = failure if failure is not None else (state.get('run') or {}).get('failure') or {}
     if (state.get('run') or {}).get('stop_code') == 'ACTIVE_TIME_BUDGET_EXCEEDED':
         add('ACTIVE_TIME_BUDGET')
+    if (state.get('run') or {}).get('stop_code') == 'MODEL_RESPONSE_INVALID':
+        add('MODEL_RESPONSE_INVALID')
+    if (state.get('run') or {}).get('stop_code') == 'MODEL_OUTPUT_LIMIT':
+        add('MODEL_OUTPUT_LIMIT')
     if (failure.get('code') in {'LLM_FAILED', 'LLM_TRANSPORT_ERROR', 'TIMEOUT'}
             and failure.get('retryable') is True):
         add('PROVIDER_TRANSIENT', failure=failure)
@@ -80,7 +84,7 @@ def assess(state, *, failure=None):
     mode = 'reassemble'
     if any(c['code'] in MANUAL_CODES | {'EXTERNAL_DEPENDENCY', 'UNKNOWN'} for c in causes):
         mode = 'manual'
-    elif ({c['code'] for c in causes} <= {'ACCEPTANCE_BUDGET', 'TOKEN_BUDGET', 'PROVIDER_TRANSIENT', 'ACTIVE_TIME_BUDGET'}
+    elif ({c['code'] for c in causes} <= {'ACCEPTANCE_BUDGET', 'TOKEN_BUDGET', 'PROVIDER_TRANSIENT', 'ACTIVE_TIME_BUDGET', 'MODEL_RESPONSE_INVALID'}
           and not any(c['details'].get('plan_item_id') for c in causes)
           and code not in {'ACCEPTANCE_INPUT_BUDGET', 'ACCEPTANCE_OUTPUT_BUDGET'}):
         mode = 'resume'

@@ -17,6 +17,7 @@ def proposal():
                    scope=["Current workspace"], non_goals=["Modify source files"], assumptions=[], acceptance=["Cite recorded implementation evidence"],
                    stop_conditions=["Workspace unavailable"], goals=[dict(key="inspect", objective="Inspect current source and report facts",
                        acceptance=["Cite notes.txt"], depends_on=[], work_packages=[dict(key="inspect", objective="Read notes.txt and report evidence",
+                           reason="Establish the implementation baseline so the next delivery addresses documented capability gaps",
                            acceptance=["Cite notes.txt"], environment="inspect", execution_tools=["read_file"], estimated_seconds=120,
                            verification=dict(criteria=[dict(id="read", description="Read implementation evidence", verifier="tool_call", scope=[],
                                check=dict(tool_id="read_file", min_calls=1), required=True, required_tools=["read_file"])],
@@ -54,6 +55,39 @@ def test_default_engine_publishes_whole_discovery_stage_before_dispatch(unified)
     assert session["autonomy"]["contract_digest"] == work["contract_digest"]
     facade.supervisor.scheduler.advance(aid, manual=True)
     assert len(service.store.list_sessions()) == 1
+
+
+def test_work_packages_keep_their_business_reasons_separate_from_plan_revision(unified):
+    service, facade, aid, _ = unified
+    value = proposal()
+    value["reason"] = "Correct stage.kind and replace finish as an acceptance tool"
+    works = value["stage"]["goals"][0]["work_packages"]
+    following = deepcopy(works[0])
+    following.update(key="gaps", objective="Map implementation gaps to the target capabilities",
+                     reason="Identify missing capabilities so subsequent implementation can target the remaining goal requirements")
+    works.append(following)
+    service.agent_plan_provider = lambda *_: value
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    snapshot = facade.store.snapshot(aid)
+    published = sorted(snapshot["work_packages"], key=lambda w: w["order"])
+    assert [w["reason"] for w in published] == [w["reason"] for w in works]
+    assert all(w["reason"] != value["reason"] for w in published)
+    assert snapshot["plan_revisions"][0]["proposal"]["reason"] == value["reason"]
+
+
+@pytest.mark.parametrize("reason", [None, ""])
+def test_work_package_requires_its_own_nonempty_business_reason(unified, reason):
+    service, facade, aid, _ = unified
+    value = proposal()
+    work = value["stage"]["goals"][0]["work_packages"][0]
+    if reason is None:
+        work.pop("reason")
+    else:
+        work["reason"] = reason
+    service.agent_plan_provider = lambda *_: value
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    snapshot = facade.store.snapshot(aid)
+    assert not snapshot["work_packages"] and not snapshot["plan_revisions"]
 
 
 def test_invalid_proposal_creates_no_partial_queue_and_does_not_repeat(unified):

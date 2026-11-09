@@ -12,6 +12,8 @@ import json
 import time
 from dataclasses import replace
 
+from jsonschema import Draft202012Validator
+
 from loom.core import Decision, Observation, StepResult, ToolRef, Trace, err, freeze_context, make_loom_error, new_context_id, now_iso, ok, thaw_json
 from loom.llm.api import (
     LlmMessage,
@@ -41,6 +43,8 @@ INPUT_TOOL = ToolRef(
         "additionalProperties": False,
     },
 )
+
+RESPONSE_REPAIR_ATTEMPTS = 2
 
 
 class ManagedStep:
@@ -79,19 +83,95 @@ class ManagedStep:
         unavailable = (target,) if target and target not in visible else ()
         return calls, False, unavailable
 
-    def _required_tool_feedback(self, cp, policy, unavailable):
-        visible = list(cp.get("visible_tool_ids", (t.id for t in cp["context"].affordances.tools)))
-        detail = (
-            f"Tool selection rejected: {', '.join(unavailable)} is unavailable in this workflow phase."
-            if unavailable
-            else "No executable tool call was found. Reasoning, evidence_gap and next_action alone do not select a tool."
-        )
+    def _response_problem(self, cp, policy):
+        """Validate a complete decision before any tool in its batch can run."""
         response = cp["response"]
-        cp["messages"].append(LlmMessage("assistant", response.content or "", tool_calls=response.tool_calls))
+        visible = set(cp.get("visible_tool_ids", (t.id for t in cp["context"].affordances.tools))) | {INPUT_TOOL.id}
+        if response.finish_reason in {"length", "max_tokens"}:
+            return dict(kind="truncated", reason="Response was truncated at the output token limit. Return a shorter complete decision; "
+                        "preserve required outcomes and evidence references.", output_limit=getattr(self.provider, "max_completion_tokens", None),
+                        completion_tokens=response.usage.completion_tokens)
+        if response.tool_calls:
+            calls = response.tool_calls
+        else:
+            content = (response.content or "").strip()
+            if content.startswith("```") and content.endswith("```"):
+                content = "\n".join(content.splitlines()[1:-1]).strip()
+            try:
+                decision = json.loads(content)
+                canonical(decision)  # Reject non-JSON numeric constants before dispatch.
+            except (ValueError, TypeError) as exc:
+                return dict(kind="invalid_json", reason=f"Decision JSON is incomplete or invalid: {exc}. "
+                            "Return one complete JSON action or a native tool call.")
+            action = decision.get("action") if isinstance(decision, dict) else None
+            if not isinstance(action, dict) or action.get("kind") not in ("tool", "none", "custom", "loop", "context", "knowledge"):
+                return dict(kind="invalid_decision", reason="No executable tool call was found. Decision must contain an action object with a valid kind; "
+                            "reasoning and next_action alone do not select a tool.")
+            alternatives = decision.get("alternatives", [])
+            if alternatives is not None and (not isinstance(alternatives, list) or any(
+                    not isinstance(a, dict) or not isinstance(a.get("kind", "custom"), str) for a in alternatives)):
+                return dict(kind="invalid_decision", reason="alternatives must be an array of action objects, or omitted.")
+            if action["kind"] != "tool":
+                if policy and policy.require_tool_call:
+                    return dict(kind="missing_tool", reason="No executable tool call was found. "
+                                "Select an available workflow tool using action.target and action.input.")
+                return None
+            target = action.get("target")
+            if not isinstance(target, str) or not target.strip():
+                return dict(kind="invalid_decision", reason="action.target must be a non-empty tool ID.")
+            arguments = action.get("input")
+            if not isinstance(arguments, dict):
+                return dict(kind="invalid_arguments", reason="action.input must be a JSON object matching the selected tool schema.")
+            calls = [LlmToolCall("decision", target, canonical(arguments))]
+        for call in calls:
+            if not isinstance(call.name, str) or call.name not in visible:
+                return dict(kind="unavailable_tool", reason=f"{call.name} is unavailable in this workflow phase.")
+            try:
+                arguments = json.loads(call.arguments)
+                canonical(arguments)
+                if not isinstance(arguments, dict):
+                    raise ValueError("arguments must be an object")
+                if call.name == INPUT_TOOL.id and (not isinstance(arguments.get("question"), str) or not arguments["question"].strip()):
+                    raise ValueError("question must be non-empty text")
+            except (ValueError, TypeError) as exc:
+                return dict(kind="invalid_arguments", reason=f"Invalid arguments for {call.name}: {exc}. Match the tool's JSON schema.")
+            schema = cp.get("visible_tool_schemas", {}).get(call.name)
+            if call.name == INPUT_TOOL.id:
+                schema = thaw_json(INPUT_TOOL.input_schema)
+            if schema and (error := next(Draft202012Validator(schema).iter_errors(arguments), None)):
+                return dict(kind="invalid_arguments", reason=f"Invalid arguments for {call.name} at {error.json_path}: {error.message[:500]}")
+        return None
+
+    async def _repair_response(self, cp, runtime, problem, policy):
+        response = cp["response"]
+        attempts = cp.get("response_repair_attempts", 0)
+        feedback = {**problem, "finish_reason": response.finish_reason,
+                    "attempt": attempts + 1, "available_tools": cp.get("visible_tool_ids", [])}
+        await self._emit(runtime, "llm.response.rejected", rejection=feedback)
+        content = response.content or ""
+        if len(content) > 4000:
+            content = content[:2000] + "\n[Invalid response abbreviated; full response retained in execution events]\n" + content[-1000:]
+        cp["messages"].append(LlmMessage("assistant", content, tool_calls=response.tool_calls))
+        detail = (problem["reason"] + " No action was executed from this response; it was not submitted for acceptance. "
+                  "Return one complete native tool call or valid JSON decision. Keep arguments concise; "
+                  "Preserve all required outcomes and evidence references. Do not use a partial report or truncation placeholder. "
+                  "Do not repeat previously completed tools. Available tools: " + ", ".join(cp.get("visible_tool_ids", [])))
         for call in response.tool_calls:
-            cp["messages"].append(LlmMessage("tool", canonical({"ok": False, "error": detail}), name=call.name, tool_call_id=call.id))
-        cp["messages"].append(LlmMessage("user", f"{detail} Available tools: {', '.join(visible)}. {policy.retry_prompt}", name="workflow_tool_required"))
-        return {"available_tools": visible, "unavailable_tools": list(unavailable), "reason": detail}
+            cp["messages"].append(LlmMessage("tool", canonical(dict(ok=False, error=detail)), name=call.name, tool_call_id=call.id))
+        if policy and policy.require_tool_call:
+            detail += " " + policy.retry_prompt
+        cp["messages"].append(LlmMessage("user", detail, name="workflow_tool_required"))
+        cp.update(phase="before_llm", response=None, calls=[], tool_index=0, response_repair_attempts=attempts + 1,
+                  response_recovery=feedback)
+        if attempts >= RESPONSE_REPAIR_ATTEMPTS:
+            cp["response_repair_paused"] = True
+            self._checkpoint(cp)
+            truncated = problem["kind"] == "truncated"
+            reason = ("Model output limit reached; progress saved. Increase the configured output limit or split the delivery. "
+                      if truncated else "Model response needs correction; progress saved. ")
+            return self._result(cp, runtime, "paused", reason + problem["reason"],
+                                reason_code="MODEL_OUTPUT_LIMIT" if truncated else "MODEL_RESPONSE_INVALID")
+        return None
 
     async def _terminal(self, cp, runtime):
         cursor = cp.get("input_cursor", 0)
@@ -483,6 +563,8 @@ class ManagedStep:
             cp["messages"][0] = self.assembly.context_manager.project(cp["context"])[0]
             self._checkpoint(cp)
         cp.pop("partial_report", None)
+        if restored and cp.pop("response_repair_paused", False):
+            cp["response_repair_attempts"] = 0
         if restored and self.planning and hasattr(self.planning, "project_context"):
             if self.assembly:
                 self.planning.configure_normal_tool_refs(self.assembly.context_tools())
@@ -495,15 +577,6 @@ class ManagedStep:
             value = thaw_json(observation.value)
             if observation.source == "finish" and isinstance(value, dict) and value.get("completed") and value.get("accepted", True):
                 return await self._finish(cp, runtime, value)
-        if restored and cp["phase"] == "after_llm" and self.planning:
-            policy = self.planning.step_policy(cp["context"])
-            if policy and policy.require_tool_call and cp["missing_retries"] >= policy.missing_tool_call_retries:
-                calls, _, unavailable = self._response_calls(cp)
-                if not calls:
-                    # An exhausted routing response cannot make progress by being
-                    # replayed. Retry the model, retaining observations and usage.
-                    self._required_tool_feedback(cp, policy, unavailable)
-                    cp.update(phase="before_llm", response=None, missing_retries=0)
         while True:
             suspended = await self._boundary(cp, runtime)
             if suspended is not None:
@@ -531,6 +604,7 @@ class ManagedStep:
                 refs = self.assembly.resolve_tools(cp["context"]) if self.assembly else cp["context"].affordances.tools
                 tools = to_llm_tools((*refs, INPUT_TOOL))
                 cp["visible_tool_ids"] = [ref.id for ref in refs]
+                cp["visible_tool_schemas"] = {ref.id: thaw_json(ref.input_schema) for ref in refs if ref.input_schema}
                 policy = self.planning.step_policy(cp["context"]) if self.planning else None
                 if policy and policy.require_tool_call and cp["messages"][-1].name != "workflow_tool_required":
                     cp["messages"].append(LlmMessage("user", policy.retry_prompt, name="workflow_tool_required"))
@@ -561,6 +635,8 @@ class ManagedStep:
                     messages=tuple(cp["messages"]),
                     tools=tools,
                     tool_choice=policy.tool_choice if policy else None,
+                    output_limit=getattr(self.provider, "max_completion_tokens", None),
+                    agent_output_limit=getattr(self.provider, "output_limit", None),
                 )
                 request = asyncio.create_task(
                     request_llm_response(
@@ -614,6 +690,11 @@ class ManagedStep:
             if cp["phase"] == "after_llm":
                 response = cp["response"]
                 policy = self.planning.step_policy(cp["context"]) if self.planning else None
+                if problem := self._response_problem(cp, policy):
+                    suspended = await self._repair_response(cp, runtime, problem, policy)
+                    if suspended is not None:
+                        return suspended
+                    continue
                 if policy and policy.require_tool_call:
                     calls, cp["native"], unavailable = self._response_calls(cp)
                 else:
@@ -623,25 +704,21 @@ class ManagedStep:
                     if not calls:
                         calls, _, unavailable = self._response_calls(cp)
                 if calls:
+                    cp["response_repair_attempts"] = 0
+                    cp.pop("response_recovery", None)
                     cp["calls"] = calls
                     cp["tool_index"] = 0
                     cp["messages"].append(LlmMessage("assistant", response.content or "", tool_calls=tuple(calls) if cp["native"] else ()))
                     cp["phase"] = "tool_batch"
                     continue
                 if policy and policy.require_tool_call:
-                    if cp["missing_retries"] >= policy.missing_tool_call_retries:
-                        return err(
-                            make_loom_error(
-                                policy.failure_code,
-                                "Model did not select the required workflow tool",
-                                retryable=False,
-                                cause={"available_tools": cp.get("visible_tool_ids", []), "unavailable_tools": list(unavailable)},
-                            )
-                        )
-                    cp["missing_retries"] += 1
-                    self._required_tool_feedback(cp, policy, unavailable)
-                    cp["phase"] = "before_llm"
+                    suspended = await self._repair_response(cp, runtime, dict(kind="missing_tool",
+                        reason="No executable tool call was found. Select an available workflow tool."), policy)
+                    if suspended is not None:
+                        return suspended
                     continue
+                cp["response_repair_attempts"] = 0
+                cp.pop("response_recovery", None)
                 parsed = _parse_decision(response.content, cp["trace_id"])
                 if parsed["action"].kind == "tool":
                     # An unavailable JSON tool action is not a completion candidate.

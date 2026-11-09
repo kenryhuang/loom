@@ -23,6 +23,10 @@ workspace_observation, source_status and reported_observation are planning refer
 For completed reviews, copy criterion_id/criterion_revision and eligible source_refs from acceptance_support.
 An empty acceptance_support source_refs list means that criterion is not proven; do not invent receipts.
 Each work package includes environment (inspect or workspace), execution_tools, and a complete verification plan.
+Each work package's reason explains its business contribution to the parent Goal: what gap it addresses and how its
+output supports the goal outcome. Be specific to that package; do not merely repeat its objective. Keep planning
+revision history, schema corrections, tool-contract repairs and evidence-protocol diagnostics in the top-level reason,
+never in a work package's reason.
 For executable work, verification.unresolved_requirements must be []. Unknown project facts belong in discovery
 scope/assumptions and can be investigated by that work; they are not unresolved verification requirements.
 If an actual verification requirement cannot be met, return request_input or wait with the missing condition.

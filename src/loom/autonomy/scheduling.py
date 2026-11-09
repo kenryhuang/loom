@@ -301,6 +301,9 @@ class QueueScheduler:
                 recovery_report = assess(state, failure=failure_details(db, state))
                 acceptance_repair = recovery_report is not None and recovery_report['mode'] == 'reassemble'
                 if recovery_report and recovery_report['mode'] == 'manual':
+                    if any(c['code'] == 'MODEL_OUTPUT_LIMIT' for c in recovery_report['causes']):
+                        raise ServiceError("Output limit reached; increase the per-response limit or split the delivery before resuming", 409,
+                                           code=Code.EXECUTION_INPUT)
                     raise ServiceError("Recovery needs external dependencies or unknown execution results handled first", 409, code=Code.EXECUTION_INPUT)
                 if not acceptance_repair and not run.get("checkpoint") and not state.get("context"):
                     raise ServiceError("Missing a persistent checkpoint or recovery context; cannot safely auto-resume", 409, code=Code.EXECUTION_CHECKPOINT)

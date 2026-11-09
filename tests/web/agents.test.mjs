@@ -226,7 +226,7 @@ test('Budget cancel closes immediately after focused editing and polling retains
  try{
   await view.open();await view.select('a');await view.createForm(data,'budget');
   const form=view.root.querySelector('.agent-configuration-form');
-  assert.deepEqual([...form.querySelectorAll('input,select,textarea')].map(input=>input.name),['daily_tokens','daily_tokens_custom']);
+  assert.deepEqual([...form.querySelectorAll('input,select,textarea')].map(input=>input.name),['daily_tokens','daily_tokens_custom','output_tokens','output_tokens_custom']);
   form.elements.daily_tokens.value='10000000';form.elements.daily_tokens.focus();
   data={...data,activity:'planning'};document.activeElement.blur();await view.refresh();
   assert.equal(view.root.querySelector('.agent-configuration-form'),form);
@@ -238,7 +238,7 @@ test('Budget cancel closes immediately after focused editing and polling retains
  }finally{view.close();dom.window.close();}
 });
 
-test('Budget save stages only daily tokens and displays the pending value',async()=>{
+test('Budget save stages daily tokens and the optional output limit',async()=>{
  let data=fixture(),sent,pathSent;
  const original=structuredClone(data.role);
  const {dom,view}=setup({json:async(path,options)=>{
@@ -254,7 +254,7 @@ test('Budget save stages only daily tokens and displays the pending value',async
   const form=view.root.querySelector('.agent-configuration-form');form.elements.daily_tokens.value='10000000';
   form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await tick();
   assert.equal(pathSent,'/v1/agents/a/configuration/budget');assert.equal(sent.expected_revision,2);
-  assert.deepEqual(sent.changes,{budget:{daily_tokens:10000000}});assert.ok(sent.command_id);
+  assert.deepEqual(sent.changes,{budget:{daily_tokens:10000000,output_tokens:null}});assert.ok(sent.command_id);
   assert.deepEqual(data.role,original);assert.equal(view.root.querySelector('.agent-configuration-form'),null);
   const budget=view.root.querySelector('[data-configuration-section=budget]');
   assert.match(budget.textContent,/10,000,000/);assert.match(budget.textContent,/Applies to next task/);
@@ -668,7 +668,7 @@ test('Work rationale remains text and stale blocker does not override a successf
  const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
  try{
   await view.open();await view.select('a');view.tab='Work';view.render();expandQueues(view,dom);
-  assert.match(view.root.textContent,/Orchestration rationale: Verify before integration/);
+  assert.match(view.root.textContent,/Goal contribution: Verify before integration/);
   const row=view.root.querySelector('[data-queue-id="w"]');assert.match(row.textContent,/Delivered work/);assert.match(row.textContent,/Accepted/);
   assert.doesNotMatch(view.root.textContent,/Current blocker: failed/);
  }finally{view.close();dom.window.close();}
@@ -740,12 +740,14 @@ test('Execution reassessment submits the exact work and agent revision',async()=
 test('Goal work packages link to their session and show execution metrics',()=>{
  const {dom,view}=setup({});const root=document.createElement('div');
  try{
-  view.renderGoalWork(root,{work_packages:[{goal_id:'g',objective:'First',state:'running',session_id:'s/1',execution_seconds:75,actual_tokens:1234},
+  view.renderGoalWork(root,{work_packages:[{goal_id:'g',objective:'First',reason:'Establish the capability baseline for the implementation plan',state:'running',session_id:'s/1',execution_seconds:75,actual_tokens:1234},
    {goal_id:'g',objective:'Pending',state:'pending'}]},{id:'g'});
   const table=root.querySelector('.agent-goal-work-table');
   assert.deepEqual([...table.querySelectorAll('th')].map(x=>x.textContent),['Work package','Status','Execution time','Tokens used']);
   const rows=table.tBodies[0].rows;
   assert.equal(rows[0].cells[0].querySelector('a'),null);
+  assert.match(rows[0].cells[0].textContent,/Goal contribution: Establish the capability baseline for the implementation plan/);
+  assert.doesNotMatch(table.textContent,/Orchestration rationale/);
   assert.equal(rows[0].cells[1].querySelector('a').getAttribute('href'),'#/sessions/s%2F1');
   assert.equal(rows[0].cells[2].textContent,'1 m 15 s');assert.equal(rows[0].cells[3].textContent,(1234).toLocaleString());
   assert.equal(rows[1].cells[1].querySelector('a'),null);assert.equal(rows[1].cells[2].textContent,'—');

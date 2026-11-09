@@ -212,11 +212,14 @@ class BudgetProvider:
     """Wrap every physical provider request, including streaming and verification."""
 
     def __init__(self, provider, ledger, binding, *, category="execution", output_tokens=None):
-        output_tokens = output_tokens or binding.get("output_tokens", 8192)
-        if is_dataclass(provider) and hasattr(provider, "max_completion_tokens"):
+        output_tokens = output_tokens if output_tokens is not None else binding.get("output_tokens")
+        if output_tokens is not None and is_dataclass(provider) and hasattr(provider, "max_completion_tokens"):
             provider = replace(provider, max_completion_tokens=min(getattr(provider, "max_completion_tokens", None) or output_tokens, output_tokens))
         self.provider, self.ledger, self.binding = provider, ledger, binding
-        self.category, self.output_tokens = category, output_tokens
+        self.category, self.output_limit = category, output_tokens
+        # Reservation is an estimate when the provider declares no output limit;
+        # it must never silently become an API generation cap. Settle actual usage.
+        self.output_tokens = getattr(provider, "max_completion_tokens", None) or output_tokens or getattr(provider, "context_window_tokens", None) or 32768
         self.model = provider.model
         for name in ("verification_provider", "visual_verification_provider"):
             child = getattr(provider, name, None)
@@ -228,7 +231,7 @@ class BudgetProvider:
         return self.provider
 
     def with_provider(self, provider):
-        return BudgetProvider(provider, self.ledger, self.binding, category=self.category, output_tokens=self.output_tokens)
+        return BudgetProvider(provider, self.ledger, self.binding, category=self.category, output_tokens=self.output_limit)
 
     def __getattr__(self, name):
         if name == "stream_chat":

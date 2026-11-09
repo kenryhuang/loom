@@ -47,6 +47,12 @@ export function preset(parent, name, title, choices, value, {min = 1, max = 1000
 }
 
 /** Uses New Session's setup blocks, settings grid, resource choices and actions. */
+export function outputTokenLimit(parent, value) {
+  const input = preset(parent, 'output_tokens', 'Per-response output limit', [['','Use model configuration']], value, {optional:true});
+  parent.append(element('p','muted small','Leave this at the model configuration to avoid an additional Agent output cap. A custom value caps each response and may truncate long reports.'));
+  return input;
+}
+
 export class AgentSetupView {
   constructor(root, {api, edit = null, save, cancel}) {
     Object.assign(this, {root, api, edit, save});
@@ -107,6 +113,7 @@ export class AgentSetupView {
     const budget = block(form, 'Budget').body;
     budget.id = 'agent-budget-settings';
     this.daily = preset(budget, 'daily', 'Daily token limit', budgets, r.budget?.daily_tokens || 1000000);
+    this.outputTokens = outputTokenLimit(budget, r.budget?.output_tokens);
     budget.append(element('p', 'muted small', 'Planning, execution, acceptance, and learning share one daily token total. Usage resets at midnight in the chosen timezone; history is kept, and long-term objectives, goals, and work packages have no cumulative token cap.'));
     const learning = block(form, 'Learning & Deep Eval recovery').body;
     this.learningResumes = preset(learning, 'learning_resumes', 'Max auto-resumes per evaluation per day', [['0','0'],['1','1'],['2','2'],['3','3'],['5','5']], r.learning_policy?.max_resumes ?? 3, {min:0,max:10});
@@ -247,7 +254,7 @@ export class AgentSetupView {
         max_recovery_attempts:this.recoveryAttempts.value()},
       learning_policy:{...prior.learning_policy,max_resumes:this.learningResumes.value(),
         max_attempts:this.learningAttempts.value(),max_evaluation_calls:this.learningCalls.value()},
-      budget:{...prior.budget,daily_tokens:this.daily.value()}};
+      budget:{...prior.budget,daily_tokens:this.daily.value(),output_tokens:this.outputTokens.value()}};
     delete role.schema_version;
     role.plan_mode = f.plan_mode.value || 'auto';
     if (this.execChoicesLoaded) {

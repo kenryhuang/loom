@@ -255,21 +255,28 @@ def test_route_failure_can_retry_and_new_guidance_is_applied(tmp_path, command_t
     service = LoomService(tmp_path / "data", provider_factory=routing_failure_provider_factory).start()
     try:
         sid = service.create("route", {"objective": "Maintain", "workspace": str(tmp_path)})["session_id"]
-        failed = wait_state(service, sid, "failed")
+        failed = wait_state(service, sid, "paused")
         deadline = time.monotonic() + 3
         while sid in service.active:
             assert time.monotonic() < deadline
             time.sleep(0.02)
-        assert failed["run"]["failure"]["code"] == "WORKFLOW_ROUTE_FAILED"
-        assert failed["token_budget"]["used"] == 6
+        assert failed["run"]["stop_code"] == "MODEL_RESPONSE_INVALID"
+        assert not failed["run"].get("failure")
+        assert failed["token_budget"]["used"] == 9
+        if command_type == "resume":
+            service.close()
+            service = LoomService(tmp_path / "data", provider_factory=routing_failure_provider_factory).start()
+            assert service.snapshot(sid)["run"]["stop_code"] == "MODEL_RESPONSE_INVALID"
         payload = {"content": "Run the new query sample"} if command_type == "submit_message" else {}
         receipt = command(service, sid, command_type, **payload)
+        if command_type == "submit_message":
+            command(service, sid, "resume")
         done = wait_state(service, sid, "idle")
         assert done["run"]["id"] == failed["run"]["id"]
         assert "failure" not in done["run"]
-        assert done["token_budget"]["used"] == 6
+        assert done["token_budget"]["used"] == 9
         events = service.events(sid, limit=1000)
-        assert sum(event["type"] == "llm.requested" and event.get("payload", {}).get("usage_role") != "verification" for event in events) == 4
+        assert sum(event["type"] == "llm.requested" and event.get("payload", {}).get("usage_role") != "verification" for event in events) == 5
         if command_type == "submit_message":
             message = next(message for message in done["messages"] if message["command_id"] == receipt["command_id"])
             assert message["state"] == "applied"

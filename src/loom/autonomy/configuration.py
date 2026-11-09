@@ -15,7 +15,7 @@ SECTIONS = {
     'resources': {'source_routes', 'knowledge_base_ids', 'external_tool_ids'},
 }
 NESTED = {
-    'budget': {'daily_tokens'},
+    'budget': {'daily_tokens', 'output_tokens'},
     'scheduling_policy': {'enabled', 'tick_seconds', 'max_recovery_attempts'},
     'learning_policy': {'max_resumes', 'max_attempts', 'max_evaluation_calls'},
 }
