@@ -800,3 +800,23 @@ test('Planning validation diagnostics are shown once when already present in the
   assert.doesNotMatch(view.root.textContent,/Waiting for review/);
  }finally{view.close();dom.window.close();}
 });
+
+test('Budget waiting shows the allowance and automatic reset instead of review',async()=>{
+ const data=fixture();data.planning_engine=2;data.role.timezone='Asia/Shanghai';
+ data.role.long_term_objectives=[{id:'primary',desired_outcome:'Inspect implementation',stage_planning:{mode:'autonomous'}}];
+ data.objective_planning=[{id:'p',objective_id:'primary',revision:14,state:'waiting',revision_requested:true,
+  reason:'Agent daily token budget exhausted: internal details',next_review_at:'2026-11-09T16:00:00+00:00',
+  blocker:{code:'PLANNING_BUDGET',recovery:'wait_budget',details:{scopes:[{
+   scope:'daily',used:977754,limit:1000000,remaining:22246,requested:133083,
+  }]}}}];
+ const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');view.tab='Goals';view.render();
+  assert.match(view.root.textContent,/Waiting for daily budget/);
+  assert.ok(view.root.textContent.includes(`${(977754).toLocaleString()} / ${(1000000).toLocaleString()} tokens used today`));
+  assert.ok(view.root.textContent.includes(`must reserve ${(133083).toLocaleString()} tokens`));
+  assert.match(view.root.textContent,/Automatic budget check after/);
+  assert.match(view.root.textContent,/plan revision is saved and will continue automatically/);
+  assert.doesNotMatch(view.root.textContent,/Waiting for review|Next review:|A plan revision is pending|internal details/);
+ }finally{view.close();dom.window.close();}
+});

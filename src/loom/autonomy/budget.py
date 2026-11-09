@@ -2,6 +2,7 @@
 
 import inspect
 import json
+import logging
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -10,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from loom.core import err, make_loom_error
+from loom.core.sqlite import is_busy, write_transaction
 from loom.llm.api import LlmProviderError
 from loom.service.contracts import ServiceError
 
@@ -21,17 +23,8 @@ class BudgetLedger:
 
     @contextmanager
     def transaction(self):
-        db = sqlite3.connect(self.database, timeout=10)
-        db.row_factory = sqlite3.Row
-        try:
-            db.execute("BEGIN IMMEDIATE")
+        with write_transaction(self.database) as db:
             yield db
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-        finally:
-            db.close()
 
     @contextmanager
     def read(self):
@@ -254,7 +247,17 @@ class BudgetProvider:
     def _settle(self, identifier, response):
         usage = getattr(response, "usage", None)
         tokens = getattr(usage, "total_tokens", None)
-        self.ledger.settle(identifier, tokens if tokens and tokens > 0 else None)
+        try:
+            self.ledger.settle(identifier, tokens if tokens and tokens > 0 else None)
+        except sqlite3.OperationalError as exc:
+            if not is_busy(exc):
+                raise
+            # Admission already durably reserved the full allowance. Keep that
+            # conservative charge; never discard a paid reply or resend the call
+            # merely because accounting competed with an external writer.
+            logging.getLogger(__name__).warning(
+                "Budget settlement busy; reservation retained: call=%s actual=%s", identifier, tokens,
+            )
 
     async def chat(self, messages, tools=None, cancellation=None, tool_choice=None):
         try:
@@ -266,11 +269,11 @@ class BudgetProvider:
             kwargs["tool_choice"] = tool_choice
         try:
             response = await self.provider.chat(messages, **kwargs)
-            self._settle(identifier, response.value if response.ok else None)
-            return response
         except BaseException:
-            self.ledger.settle(identifier, None)
+            self._settle(identifier, None)
             raise
+        self._settle(identifier, response.value if response.ok else None)
+        return response
 
     @staticmethod
     def _admission_error(exc):
@@ -294,4 +297,4 @@ class BudgetProvider:
                 yield event
         finally:
             if not settled:
-                self.ledger.settle(identifier, None)
+                self._settle(identifier, None)

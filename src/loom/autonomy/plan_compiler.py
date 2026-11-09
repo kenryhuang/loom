@@ -17,6 +17,7 @@ from loom.autonomy.store import digest
 from loom.core import thaw_json
 from loom.service.contracts import ServiceError
 from loom.tasks.acceptance import AcceptanceController
+from loom.tasks.acceptance_contract import evidence_check
 from loom.tasks.acceptance_protocols import plan_protocol
 
 
@@ -59,6 +60,10 @@ def schema(envs, payload=None):
         value["properties"]["source_refs"] = reference_schema(payload)
         value["properties"]["checks"]["items"]["properties"]["source_refs"] = reference_schema(payload)
     value["properties"]["action"]["enum"] = ["propose_stage", "review_stage", "wait", "request_input", "complete_objective"]
+    if payload and payload.get("revision_requested"):
+        value["properties"]["action"]["enum"].remove("review_stage")
+    if payload and payload.get("stage"):
+        value["properties"]["action"]["enum"].remove("complete_objective")
     stage = value["properties"]["stage"]
     stage["properties"]["kind"] = {"enum": ["discovery", "delivery"]}
     stage["required"].append("kind")
@@ -101,7 +106,7 @@ def validate_proposal(value, payload, envs):
     if value["action"] != "propose_stage":
         return
     if payload.get("stage") and any(g["state"] not in {"completed", "cancelled", "blocked", "queued", "active"}
-                                   for g in payload.get("existing_goals", [])):
+                                   for g in payload.get("existing_goals", []) if g.get("stage_id") == payload["stage"]["id"]):
         raise CompileError("Current stage cannot be revised in this state")
     for gi, goal in enumerate(value["stage"]["goals"]):
         keys = set()
@@ -129,6 +134,19 @@ def validate_proposal(value, payload, envs):
                 raise CompileError(str(exc), path + "/verification") from exc
             if work["verification"].get("unresolved_requirements"):
                 raise CompileError("Unresolved verification requirements must become a request_input or wait decision", path)
+    proposed_checks = [c for g in value["stage"]["goals"] for w in g["work_packages"] for c in w["verification"]["criteria"]]
+    for requirement in payload.get("required_verification", []):
+        old = requirement["criterion"]
+        # A legacy completion/control prerequisite was never a valid evidence
+        # obligation. Its business outcome remains inherited by the Goal.
+        if old["verifier"] == "tool_call" and any(
+                (env["assembly"].bindings.get(old["check"]["tool_id"])) is not None
+                and env["assembly"].bindings[old["check"]["tool_id"]].placement == "control" for env in envs.values()):
+            continue
+        if not any(c["verifier"] == old["verifier"] and evidence_check(c) == evidence_check(old)
+                   and set(old.get("required_tools", [])) <= set(c.get("required_tools", [])) for c in proposed_checks):
+            raise CompileError(f"Unproven concrete evidence requirement {old['id']} from {requirement['work_package_id']} "
+                               "must be retained; semantic assertions cannot replace it", "/stage/goals")
 
 
 def compile_plan(service, agent, payload, proposal, envs, run_id, now):
@@ -236,6 +254,8 @@ def compile_plan(service, agent, payload, proposal, envs, run_id, now):
                 raise CompileError(str(exc), "/stage/goals") from exc
             work.update(required_tools=sorted(required), compiled_payload=payload_work, verification_plan=plan,
                         binding_fingerprint=binding_fingerprint(env["assembly"]))
+            if payload.get("prior_attempts"):
+                work["prior_attempts"] = deepcopy(payload["prior_attempts"])
             work["input_refs"] = ([dict(kind="verified_result", work_package_id=works[-1]["id"],
                 contract_digest=works[-1]["contract_digest"])] if wi else [ref for k in item["depends_on"] for ref in outputs[k]])
             work["expected_outputs"] = [dict(kind="verified_result", name="result")]

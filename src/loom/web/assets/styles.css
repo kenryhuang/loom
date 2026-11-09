@@ -2323,9 +2323,13 @@ section.setup-block { padding: 20px; }
 
 /* Agent details reuse the Evaluation / Evolve shell and dashboard primitives. */
 #agents-list { display: grid; gap: 6px; }
-#agents-heading { flex-wrap: wrap; flex-shrink: 0; }
+/* Spacing lives on the header (outside the scroller): padding-top on the
+   .trajectory-page scroll container would trap the sticky tab bar 20px below
+   the scrollport top, letting scrolled content show through the gap. */
+#agents-heading { flex-wrap: wrap; flex-shrink: 0; padding-bottom: 32px; }
 #agents-heading > div:first-child { min-width: 0; flex: 1; }
 #agents-heading h1 { overflow-wrap: anywhere; }
+#agents-page { padding-top: 0; }
 .agent-actions { justify-content: flex-end; padding-top: 9px; }
 .agent-schedule-feedback { flex-basis: 100%; text-align: right; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .agent-tabs { overflow-x: auto; scrollbar-width: thin; flex-shrink: 0; }

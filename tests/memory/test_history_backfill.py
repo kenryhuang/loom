@@ -21,8 +21,7 @@ def test_paid_response_survives_budget_settlement_lock(tmp_path):
     receipt = tmp_path / "paid-response.json"
     provider = history.ReceiptBudgetProvider(SimpleNamespace(model="test"), LockedLedger(), {}, receipt=receipt, metadata={"tasks": ["job-a"]})
     response = LlmResponse(content='{"results":[]}', usage=TokenUsage(total_tokens=123))
-    with pytest.raises(sqlite3.OperationalError):
-        provider._settle("call-a", response)
+    provider._settle("call-a", response)
     saved = json.loads(receipt.read_text())
     assert saved["reservation_id"] == "call-a"
     assert saved["response"]["usage"]["total_tokens"] == 123

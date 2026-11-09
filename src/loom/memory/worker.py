@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+import logging
 import threading
 
+from loom.core.sqlite import is_busy
 from loom.memory.consolidation import Consolidator
 from loom.memory.repository import now
 
@@ -25,6 +27,7 @@ class MemoryWorker:
 
     def run(self):
         while not self.closed.is_set():
+            row = None
             try:
                 self.consolidator.recover()
                 with self.consolidator.repo.connect() as db:
@@ -54,7 +57,12 @@ class MemoryWorker:
                         self.loop.close()
                         self.loop = self.task = None
             except Exception as exc:
-                if "row" in locals() and row:
-                    with self.consolidator.repo.connect(write=True) as db:
-                        db.execute("UPDATE memory_jobs SET state='failed',error=? WHERE id=? AND state='pending'", (str(exc), row["id"]))
+                if not is_busy(exc):
+                    logging.getLogger(__name__).exception("Memory worker iteration failed")
+                    if row:
+                        try:
+                            with self.consolidator.repo.connect(write=True) as db:
+                                db.execute("UPDATE memory_jobs SET state='failed',error=? WHERE id=? AND state='pending'", (str(exc), row["id"]))
+                        except Exception:
+                            logging.getLogger(__name__).exception("Could not persist memory worker failure; worker will continue")
             self.closed.wait(1)

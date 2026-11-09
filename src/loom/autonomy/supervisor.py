@@ -77,7 +77,7 @@ class AgentSupervisor:
     def _timer_loop(self):
         # Independent of model planning latency; controls still use service admission.
         while not self.stopped.wait(0.5):
-            with self.store.sessions.transaction() as db:
+            with self.store.sessions.read() as db:
                 ids = [r[0] for r in db.execute("SELECT id FROM agents")]
             for aid in ids:
                 try:

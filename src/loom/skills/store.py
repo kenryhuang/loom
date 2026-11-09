@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from loom.core import now_iso
+from loom.core.sqlite import write_transaction
 from loom.skills.contracts import canonical, digest
 
 SCHEMA = '''
@@ -51,18 +52,8 @@ class SkillStore:
 
     @contextmanager
     def transaction(self):
-        db = sqlite3.connect(self.path, timeout=10)
-        db.row_factory = sqlite3.Row
-        try:
-            db.execute('PRAGMA busy_timeout=10000')
-            db.execute('BEGIN IMMEDIATE')
+        with write_transaction(self.path) as db:
             yield db
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-        finally:
-            db.close()
 
     def cases(self, workspace, *, after='', limit=100):
         with self.read() as db:

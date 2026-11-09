@@ -3,7 +3,7 @@
 from loom.autonomy.acceptance import support
 from loom.autonomy.store import digest
 
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 
 
 def prepare(payload):

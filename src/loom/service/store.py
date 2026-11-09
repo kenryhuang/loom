@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from loom.core import now_iso
+from loom.core.sqlite import write_lock, write_transaction
 from loom.service.artifacts import ServiceArtifacts
 from loom.service.contracts import EDITABLE_TASK_FIELDS, EVENT_SCHEMA, ServiceError, canonical, new_id, object_value, text, validate_command, validate_create
 
@@ -30,7 +31,7 @@ class SessionStore:
 
         self.external_tools = ExternalToolStore(self.directory / "external_tools")
         self.knowledge = KnowledgeStore(self.directory / "knowledge")
-        self.lock = threading.RLock()
+        self.lock = write_lock(self.path)
         self.changed = threading.Condition(self.lock)
         # WAL persists in the database header: readers never block writers and
         # writers never block readers, so polling and analytics cannot stall runs.
@@ -58,20 +59,11 @@ class SessionStore:
     @contextmanager
     def transaction(self):
         with self.lock:
-            db = sqlite3.connect(self.path, timeout=10)
-            db.row_factory = sqlite3.Row
-            try:
-                db.execute("PRAGMA busy_timeout=10000")
-                db.execute("BEGIN IMMEDIATE")
+            with write_transaction(self.path) as db:
                 yield db
-                db.commit()
-                if db.total_changes:
-                    self.changed.notify_all()
-            except BaseException:
-                db.rollback()
-                raise
-            finally:
-                db.close()
+                changed = db.total_changes
+            if changed:
+                self.changed.notify_all()
 
     @contextmanager
     def read(self):

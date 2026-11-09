@@ -44,6 +44,8 @@ def assess(state, *, failure=None):
         add('TOKEN_BUDGET')
     if code in {'ACCEPTANCE_PROTOCOL', 'ACCEPTANCE_FAILED', 'ACCEPTANCE_VERIFICATION_ERROR'}:
         add('ACCEPTANCE_PROTOCOL', protocol=acceptance.get('protocol', {}))
+    if code == 'ACCEPTANCE_CONTRACT_INVALID':
+        add('ACCEPTANCE_CONTRACT', reason=acceptance.get('reason'))
     if (state.get('run') or {}).get('stop_code') == 'PLAN_INCOMPLETE':
         add('PLAN_INCOMPLETE')
     for result in acceptance.get('results', []):

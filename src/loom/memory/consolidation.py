@@ -229,9 +229,13 @@ class Consolidator:
             return merged
 
     def recover(self):
+        cutoff = now()
+        with self.repo.connect() as db:
+            if not db.execute("SELECT 1 FROM memory_jobs WHERE state='running' AND lease_until<? LIMIT 1", (cutoff,)).fetchone():
+                return
         with self.repo.connect(write=True) as db:
             db.execute(
                 "UPDATE memory_jobs SET state='interrupted',error='Response may have been paid; explicit retry required' "
                 "WHERE state='running' AND lease_until<?",
-                (now(),),
+                (cutoff,),
             )

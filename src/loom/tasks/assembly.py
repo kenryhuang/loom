@@ -653,13 +653,16 @@ class TaskAssembly:
             refs = (*refs, *self.skills.refs())
         if self.agent_context:
             refs = (*refs, *self.agent_context.refs())
+        if (self.request.metadata.get("autonomy") or {}).get("engine_version") == 2:
+            return refs  # The plan owner controls the compiled acceptance contract.
         return (
             *refs,
             ToolRef(
                 "revise_acceptance_plan",
                 "Add task-specific acceptance checks discovered during execution. "
-                "Preserve existing criterion IDs, descriptions and required status. You may repair verifier, check or scope; "
-                "the host revalidates evidence against the original requirements. goal is host-owned and must be omitted.",
+                "Preserve existing criterion IDs, descriptions, required tools and concrete verifier/check assertions. "
+                "You may add checks or update cache scopes; changing concrete evidence requires a new task contract. "
+                "goal is host-owned and must be omitted.",
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -1103,6 +1106,10 @@ class TaskAssembly:
         from loom.tasks.runner import _report_from_decision_output
 
         candidate = _report_from_decision_output(thaw_json(candidate)) or format_result_text(thaw_json(candidate))
+        if self.context is not None:
+            self.acceptance.goal(self.context)
+        self.acceptance.data["candidate_ref"] = self.publish_artifact({"candidate": str(candidate or "")}, "candidate")
+        self.persist_acceptance()
         try:
             if reason := self.output_error():
                 self.acceptance.data.update(state="needs_repair", reason=reason, candidate=str(candidate or ""), results=[{

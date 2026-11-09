@@ -1149,3 +1149,21 @@ test("Fold all stays effective when failed acceptance arrives and history replay
     assert.equal(root.querySelectorAll('details[open]').length, 0);
   } finally {feed.destroy(); dom.window.close();}
 });
+
+
+test('acceptance distinguishes unevaluated criteria from passed or pending review', () => {
+  const dom = setup();
+  try {
+    const panels = new PanelsView(document.getElementById('panels'), builtinPanels(), {});
+    panels.update({...state(), acceptance_run_id:'run', acceptance:{state:'needs_repair', reason:'Source acquisition failed',
+      plan:{criteria:[{id:'read',description:'Source was read',verifier:'tool_call'},{id:'goal',description:'Report is correct',verifier:'semantic'}]},
+      results:[{criterion_id:'read',status:'failed',reason:'No successful read'},{criterion_id:'goal',status:'not_run',deferred:true,reason:'Skipped after failed prerequisite'}]}});
+    const panel=document.querySelector('[data-panel="acceptance"]');
+    assert.match(panel.textContent,/0 of 2 checks passed/);
+    assert.match(panel.textContent,/1 not evaluated/);
+    const row=panel.querySelector('[data-criterion-id="goal"]');
+    assert.equal(row.dataset.status,'not_run');
+    assert.match(row.querySelector('summary').getAttribute('aria-label'),/^Not evaluated:/);
+    assert.doesNotMatch(row.textContent,/recorded check/);
+  } finally {dom.window.close();}
+});

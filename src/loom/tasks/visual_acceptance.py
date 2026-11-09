@@ -73,8 +73,8 @@ def visual_gap(row):
     missing = [m for m in row.get("missing_evidence") or [] if isinstance(m, str) and m.strip()]
     return {"kind": "missing_evidence", "targets": [{"kind": "tool", "value": "browser_capture"}],
             "required_fact": "; ".join(missing) or row.get("reason", "Observable visual state"),
-            "suggested_action": "Repair the visual scenario (e.g. add interaction steps via revise_acceptance_plan) "
-                                "or make the required state observable in the workspace, then verify again"}
+            "suggested_action": "Make the required state observable in the workspace and verify again. "
+                                "If the verification scenario is wrong, request an owner-issued contract revision."}
 
 
 async def verify_visual(controller, criterion, runtime):

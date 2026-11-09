@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from loom.core.sqlite import write_transaction
 from loom.memory.store import MemoryError, canonical_path, serialized, tokens
 
 
@@ -107,18 +108,15 @@ class Repository:
 
     @contextmanager
     def connect(self, *, write=False):
-        uri = str(self.path) if write else self.path.as_uri() + "?mode=ro"
-        db = sqlite3.connect(uri, uri=not write, timeout=10)
+        if write:
+            with write_transaction(self.path) as db:
+                yield db
+            return
+        db = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=10)
         db.row_factory = sqlite3.Row
         try:
-            db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            db.execute("BEGIN")
             yield db
-            if write:
-                db.commit()
-        except BaseException:
-            if write:
-                db.rollback()
-            raise
         finally:
             db.close()
 

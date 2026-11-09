@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from loom.autonomy.acceptance import objective_view
-from loom.autonomy.blockers import from_exception
+from loom.autonomy.blockers import Code, from_exception, make
 from loom.autonomy.contracts import scheduling_policy, stage_enabled
 from loom.autonomy.plan_compiler import capabilities, compile_plan, environments
 from loom.autonomy.plan_evidence import PROTOCOL_VERSION
@@ -81,6 +81,8 @@ class ObjectiveCoordinator:
             return scheduler.finish(aid, "running", "A compiled work package is running.", work=active_work)
         if snapshot.get("pending_configuration"):
             return scheduler.finish(aid, "waiting", "Waiting for a safe configuration boundary.")
+        if self.reconcile_contracts(snapshot):
+            snapshot = self.store.snapshot(aid)
         # A local gate does not starve independent objectives. All still share one execution slot.
         for objective in snapshot["role"]["long_term_objectives"]:
             with self.store.sessions.transaction() as db:
@@ -119,6 +121,56 @@ class ObjectiveCoordinator:
         gates += [w.get("blocker") for w in latest["work_packages"] if w.get("blocker") and not w.get("superseded_contract")]
         scheduler.finish(aid, "waiting" if gates else "idle", gates[0]["message"] if gates else "No runnable work; waiting for a relevant change.",
                          blockers=gates)
+
+    def reconcile_contracts(self, snapshot):
+        """Old published contracts use the same rules as a new proposal.
+
+        A detected contract fault requests one owner-side revision. Its stable
+        marker prevents every queue tick from buying another planning attempt.
+        """
+        from copy import deepcopy
+
+        from loom.autonomy.binding import validated_assembly
+        from loom.tasks.acceptance import AcceptanceController
+        from loom.tasks.acceptance_contract import RULES_VERSION, InvalidAcceptanceContract
+
+        changed = False
+        for work in snapshot["work_packages"]:
+            if (work.get("engine_version") != 2 or work.get("superseded_contract") or work["state"] in {"succeeded", "cancelled"}
+                    or work["verification_plan"].get("rules_version", 0) >= RULES_VERSION):
+                continue
+            try:
+                _, assembly = validated_assembly(self.service, work["compiled_payload"])
+                controller = AcceptanceController(assembly)
+                controller.data["plan"] = deepcopy(work["verification_plan"])
+                controller.validate_retained_contract()
+            except InvalidAcceptanceContract as exc:
+                with self.service.lock, self.store.sessions.transaction() as db:
+                    agent = self.store.get(db, "agents", snapshot["id"])
+                    objective = next(o for o in agent["role"]["long_term_objectives"] if o["id"] == work["objective_id"])
+                    state = planning_state(self.store, db, agent, objective)
+                    stage = self.store.get(db, "agent_stages", state["stage_id"], agent["id"]) if state.get("stage_id") else None
+                    latest_work = self.store.get(db, "agent_work_packages", work["id"], agent["id"])
+                    marker = digest([work["id"], work["contract_digest"], RULES_VERSION])
+                    if (agent["generation"] != snapshot["generation"] or state.get("manual_pause")
+                            or not stage or stage["state"] != "active" or stage.get("plan_id") != work["plan_id"]
+                            or latest_work["state"] in {"succeeded", "cancelled"} or latest_work.get("superseded_contract")
+                            or latest_work["contract_digest"] != work["contract_digest"]
+                            or marker in state.get("invalid_contracts", [])):
+                        continue
+                    state.setdefault("invalid_contracts", []).append(marker)
+                    state["answers"].append(dict(type="contract_invalid", producer="host", work_package_id=work["id"],
+                                                 criterion_id=exc.criterion_id, reason=str(exc), rules_version=RULES_VERSION))
+                    state.update(revision_requested=True, state="ready", last_input=None, next_review_at="", blocker=None,
+                                 reason=str(exc), revision=state["revision"] + 1)
+                    self.store.put(db, "agent_objective_planning", state)
+                    wake(self.store, agent)
+                    self.store.put(db, "agents", agent)
+                    self.store.event(db, agent["id"], "plan.contract.invalid", dict(work_package_id=work["id"], reason=str(exc)))
+                    changed = True
+            except (ServiceError, ValueError):
+                continue  # Environment admission has its own capability/source gates.
+        return changed
 
     def enabled(self, agent, objective, state, stage):
         if stage_enabled(objective):
@@ -184,6 +236,29 @@ class ObjectiveCoordinator:
             goals = [g for g in store.rows(db, "agent_goals", aid) if g["long_term_objective_id"] == oid]
             history = [s for s in store.rows(db, "agent_stages", aid) if s["objective_id"] == oid]
             records = evidence(store, db, aid, goals)
+            prior_attempts = []
+            required_verification = []
+            by_goal = {g["id"]: g for g in goals}
+            for work in store.rows(db, "agent_work_packages", aid):
+                if not stage or work.get("stage_id") != stage["id"] or work.get("superseded_contract"):
+                    continue
+                from loom.autonomy.acceptance import recorded_verdict
+
+                goal = by_goal[work["goal_id"]]
+                proven = (recorded_verdict(db, work) and goal.get("source_key") == digest(sources)
+                          and goal.get("role_signature") == role_signature(agent["role"]))
+                if not proven:
+                    required_verification.extend(dict(work_package_id=work["id"], criterion=c)
+                        for c in work.get("verification_plan", {}).get("criteria", []) if c["verifier"] != "semantic")
+                if not work.get("session_id") or work["state"] == "succeeded":
+                    continue
+                row = db.execute("SELECT seq,json_extract(body,'$.payload.input.report') FROM events WHERE session_id=? "
+                    "AND json_extract(body,'$.type')='tool.started' AND json_extract(body,'$.payload.tool_id')='finish' "
+                    "ORDER BY seq DESC LIMIT 1", (work["session_id"],)).fetchone()
+                if row and isinstance(row[1], str):
+                    prior_attempts.append(dict(work_package_id=work["id"], session_id=work["session_id"],
+                                               event_cursor=row[0], candidate=row[1][:16000], truncated=len(row[1]) > 16000,
+                                               status="unverified_candidate"))
             local = store.clock().astimezone(ZoneInfo(agent["role"]["timezone"]))
             day = local.date().isoformat()
             if not stage and state["daily_stages"].get(day, 0) >= objective["stage_planning"]["max_new_stages_per_day"]:
@@ -213,6 +288,9 @@ class ObjectiveCoordinator:
                            existing_goals=goals, history=history, answers=state["answers"], required_revision=state.get("required_revision"),
                            context=dict(source_routes=agent["role"]["source_routes"]), source_status=sources,
                            requested_goals=state.get("requested_goals", []),
+                           revision_requested=state.get("revision_requested", False),
+                           prior_attempts=prior_attempts[-3:],
+                           required_verification=required_verification,
                            delivery_index=delivery_index([s for s in history if not stage or s["id"] != stage["id"]],
                                [g for g in goals if not stage or g.get("stage_id") != stage["id"]]))
         try:
@@ -342,6 +420,8 @@ class ObjectiveCoordinator:
                 wake(store, agent)
             else:
                 state["next_review_at"] = ""
+                state["blocker"] = make(Code.REVIEW_GAP, stage["id"], decision["reason"])
+                state["blocker"]["allowed_actions"] = [dict(type="replan", objective_id=objective["id"], expected_revision=state["revision"])]
         elif action == "complete_objective":
             state["state"] = "completed"
         elif action == "request_input":
@@ -350,6 +430,8 @@ class ObjectiveCoordinator:
         else:
             seconds = objective.get("schedule", {}).get("every_seconds", objective["stage_planning"]["review_seconds"])
             state.update(state="waiting", next_review_at=(store.clock() + timedelta(seconds=seconds)).isoformat())
+            if state.get("revision_requested"):
+                state["blocker"] = make(Code.EXECUTION_CONTRACT, state["id"], decision["reason"])
 
     def retire(self, db, aid, stage):
         for work in self.store.rows(db, "agent_work_packages", aid):

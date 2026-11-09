@@ -40,6 +40,7 @@
 
 ## 验收与视觉观察
 
+- [2026-11-09-acceptance-contract.zh-CN.md](2026-11-09-acceptance-contract.zh-CN.md) — 简化验收协议：提交候选结果、验证已有事实、提交完成；共享规则防循环，合同错误由计划所有者修订
 - [2026-10-10-runtime-acceptance-gate-design.md](2026-10-10-runtime-acceptance-gate-design.md) / [中文](2026-10-10-runtime-acceptance-gate-design.zh-CN.md) — 主 loop 的任务验收与 verify gate
 - [acceptance-method-repair.zh-CN.md](acceptance-method-repair.zh-CN.md) — 验收条件、验证方案与证据复用（任务类型无关）
 - [acceptance-tool-evidence.zh-CN.md](acceptance-tool-evidence.zh-CN.md) — 工具调用验收与证据保留

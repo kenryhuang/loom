@@ -3,7 +3,7 @@ import {panel, badge, number, disclosure} from './dashboard.mjs';
 
 const terminal = new Set(['completed','cancelled','superseded']);
 const states = {active:'In progress',ready:'Ready to plan',planning:'Planning',reviewing:'In acceptance review',completed:'Delivered',blocked:'Needs attention',
-  waiting:'Waiting for review',awaiting_input:'Waiting for an answer',deferred:'Deferred',paused:'Paused',cancelled:'Cancelled',superseded:'Superseded',queued:'Queued'};
+  waiting:'Waiting for the next check',awaiting_input:'Waiting for an answer',deferred:'Deferred',paused:'Paused',cancelled:'Cancelled',superseded:'Superseded',queued:'Queued'};
 const name = state => states[state] || state || 'Ready to plan';
 const button = (title,action,cls='quiet') => {const b=element('button',cls,title);b.type='button';b.addEventListener('click',action);return b;};
 const lines = value => String(value || '').split('\n').map(x=>x.trim()).filter(Boolean);
@@ -11,7 +11,16 @@ function field(form,key,title,value='') {
   const label=element('label','agent-field',title),input=element('textarea');input.name=key;input.rows=3;input.value=value;
   label.append(input);form.append(label);return input;
 }
-const time = value => value && Number.isFinite(new Date(value).getTime()) ? new Date(value).toLocaleString(undefined,{hour12:false}) : '';
+const time = (value,timezone) => value && Number.isFinite(new Date(value).getTime())
+  ? new Date(value).toLocaleString(undefined,{hour12:false,...(timezone?{timeZone:timezone,timeZoneName:'short'}:{})}) : '';
+const waitingBudget = state => ['waiting','deferred'].includes(state?.state) &&
+  (state.blocker?.recovery==='wait_budget' || state.blocker?.code==='PLANNING_BUDGET' && state.blocker.recovery!=='adjust_budget');
+function budgetReason(state) {
+  const daily=state.blocker?.details?.scopes?.find(s=>s.scope==='daily');
+  return daily && [daily.used,daily.limit,daily.remaining,daily.requested].every(Number.isFinite)
+    ? `${number(daily.used)} / ${number(daily.limit)} tokens used today; ${number(daily.remaining)} remaining. The next planning request must reserve ${number(daily.requested)} tokens.`
+    : state.reason || 'Waiting for the daily budget to become available.';
+}
 
 export function editableStage(d,stage) {
   return !!stage && !terminal.has(stage.state) &&
@@ -122,7 +131,7 @@ function controls(root,d,objective,state,view) {
   const usage=d.objective_budget?.objectives?.find(b=>b.objective_id===objective.id);
   if(usage) manage.append(element('p','muted',`Total tokens: ${number(usage.actual_tokens)} · reserved or unknown: ${number(usage.reserved_or_unknown)} · no cumulative cap · calls: ${number(usage.calls)}`));
   if(d.objective_budget?.unattributed_historical_calls) manage.append(element('p','muted',`Another ${d.objective_budget.unattributed_historical_calls} historical calls cannot be attributed to a specific long-term objective; their usage is not zero.`));
-  if(state.next_review_at) manage.append(element('p','muted',`Next review: ${time(state.next_review_at)}`));
+  if(state.next_review_at && !waitingBudget(state)) manage.append(element('p','muted',`Next review: ${time(state.next_review_at)}`));
 }
 
 export function renderRoadmaps(root,d,view) {
@@ -132,7 +141,9 @@ export function renderRoadmaps(root,d,view) {
     const current=stages.find(s=>s.id===state?.stage_id) || stages.at(-1);
     const roadmap=(d.roadmaps || []).find(r=>r.id===state?.roadmap_id);
     const enabled=objective.stage_planning?.mode==='autonomous';
-    const statusName=d.planning_engine===2 && state?.state==='waiting' && ['MODEL_PROTOCOL','CONTRACT_INVALID'].includes(state.blocker?.code)
+    const budgetWaiting=waitingBudget(state);
+    const statusName=budgetWaiting ? 'Waiting for daily budget'
+      : d.planning_engine===2 && state?.state==='waiting' && ['MODEL_PROTOCOL','CONTRACT_INVALID'].includes(state.blocker?.code)
       ? 'Planning needs correction' : name(state?.state);
     const block=panel(root,'Delivery roadmap',true);block.classList.add('agent-roadmap');block.dataset.objectiveId=objective.id || '';
     const header=block.querySelector('header');header.append(badge(enabled?statusName:'Auto-progress not enabled',state?.state));
@@ -148,8 +159,12 @@ export function renderRoadmaps(root,d,view) {
         {command_id:crypto.randomUUID(),expected_revision:d.revision,type:'enable'}))));
     }
     if(state && ['blocked','awaiting_input','deferred','paused','waiting'].includes(state.state))
-      block.append(element('p','notice',`${statusName}: ${state.reason || 'Waiting for the next planning update'}`));
-    if(state?.revision_requested) block.append(element('p','notice','A plan revision is pending. The previous contract remains in history; new work starts after the replacement plan passes validation.'));
+      block.append(element('p','notice',`${statusName}: ${budgetWaiting?budgetReason(state):state.reason || 'Waiting for the next planning update'}`));
+    if(budgetWaiting && state.next_review_at)
+      block.append(element('p','muted',`Automatic budget check after ${time(state.next_review_at,d.role.timezone)}.`));
+    if(state?.revision_requested) block.append(element('p','notice',budgetWaiting
+      ? 'The plan revision is saved and will continue automatically when daily budget is available. New work starts after the revised plan passes validation.'
+      : 'A plan revision is pending. The previous contract remains in history; new work starts after the replacement plan passes validation.'));
     if(state?.blocker?.details?.issues?.length) for(const issue of state.blocker.details.issues) {
       const detail=`${issue.path}: ${issue.message}`;
       if(!state.reason?.includes(detail)) block.append(element('p','muted',detail));

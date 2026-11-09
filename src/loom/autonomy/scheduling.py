@@ -8,6 +8,7 @@ from loom.autonomy.contracts import scheduling_policy
 from loom.autonomy.execution_budget import allocate, execution_block, parent_block, restore_budget_stage
 from loom.autonomy.goals import sources_ready
 from loom.autonomy.stages import role_signature, runnable
+from loom.core.sqlite import is_busy
 from loom.service.contracts import ServiceError, new_id
 
 
@@ -55,19 +56,31 @@ class QueueScheduler:
                 )
                 self.store.put(db, "agents", agent)
                 self.store.event(db, aid, "schedule.started", agent["scheduler"])
+                budget_cursor = db.execute("SELECT COALESCE(MAX(rowid),0) FROM agent_budget_calls WHERE agent_id=?", (aid,)).fetchone()[0]
             try:
                 self._cycle(aid)
             except Exception as exc:
                 with self.store.sessions.transaction() as db:
                     current = self.store.get(db, "agents", aid)
+                    # Planner cleanup may already have released its lease. A
+                    # reservation also proves a call could have been sent.
+                    planning_call = db.execute(
+                        "SELECT 1 FROM agent_budget_calls WHERE agent_id=? AND rowid>? "
+                        "AND category IN ('planning','stage_planning') LIMIT 1", (aid, budget_cursor),
+                    ).fetchone()
+                    retry_storage = is_busy(exc) and not current.get("planner_lease") and not planning_call
                     if current.get("planner_lease"):
                         run = self.store.get(db, "agent_runs", current["planner_lease"], aid)
                         run.update(state="failed", reason=str(exc))
                         self.store.put(db, "agent_runs", run)
                         current["planner_lease"] = None
-                    current.update(error=str(exc), activity="degraded")
-                    current["scheduler"]["retry_generation"] = current["generation"]
+                    current.update(error=None if retry_storage else str(exc), activity="waiting" if retry_storage else "degraded")
+                    if not retry_storage:
+                        current["scheduler"]["retry_generation"] = current["generation"]
                     self.store.put(db, "agents", current)
+                if retry_storage:
+                    self.finish(aid, "waiting", "Database is busy; the next scheduled check will retry.")
+                    return True
                 self.finish(aid, "intervention", str(exc), steps=["Fix the original error in the configuration or input, then run a manual check."],
                             blockers=[from_exception(exc, aid, None, None)])
             return True

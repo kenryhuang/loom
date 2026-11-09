@@ -54,6 +54,8 @@ def normalize_plan(value):
 
 
 def plan_protocol(assembly):
+    from loom.tasks.acceptance_contract import evidence_tool_ids
+
     variants = []
 
     def criterion(kind, check):
@@ -68,8 +70,9 @@ def plan_protocol(assembly):
         criterion("visual", obj({"scenario": SCENARIO_SCHEMA}))
     criterion("artifact", obj({"path": STRING, "nonempty": {"type": "boolean", "enum": [True]}, "contains": STRINGS}))
     criterion("source", obj({"urls": STRINGS}))
-    if assembly.bindings:
-        criterion("tool_call", obj({"tool_id": {"type": "string", "enum": list(assembly.bindings)}, "min_calls": {"type": "integer"}}))
+    if tools := evidence_tool_ids(assembly):
+        criterion("tool_call", obj({"tool_id": {"type": "string", "enum": tools},
+                                   "min_calls": {"type": "integer", "minimum": 1, "maximum": 1000}}))
     for tool in ("shell_execute", "process_execute"):
         if tool in assembly.bindings:
             # Use the actual registered input contract. Native schema compilation
@@ -101,7 +104,7 @@ def plan_protocol(assembly):
                     changes.append({"path": f"/criteria/{i}/check/input/{key}", "rule": "native_optional_null"})
         return value, changes
 
-    return StructuredProtocol("acceptance_plan", 1,
+    return StructuredProtocol("acceptance_plan", 2,
                               obj({"criteria": {"type": "array", "items": {"anyOf": variants}}, "unresolved_requirements": STRINGS}),
                               normalize)
 

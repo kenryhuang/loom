@@ -106,6 +106,12 @@ def test_method_revision_preserves_original_assertions_and_cannot_relabel_condit
     controller.data["pending_verification"] = {"obsolete": True}
     runtime = SimpleNamespace(run_id="run", loop_id="loop", trace_id="trace", trace_sink=Sink())
     revised = {**original, "verifier": "semantic", "scope": [], "check": {}}
+    before = deepcopy(controller.snapshot())
+    with pytest.raises(ValueError, match="concrete evidence requirement"):
+        asyncio.run(controller.revise({"base_revision": 1, "reason": "Use report evidence", "criteria": [revised]}, runtime))
+    assert controller.snapshot() == before
+    # Cache dependencies can change without replacing the required artifact assertion.
+    revised = {**original, "scope": ["answer.md", "references.md"]}
     asyncio.run(controller.revise({"base_revision": 1, "reason": "Use observed report evidence", "criteria": [revised]}, runtime))
     assert controller.data["revision"] == 2
     assert "pending_verification" not in controller.data

@@ -10,6 +10,7 @@ from copy import deepcopy
 from loom.core import now_iso, thaw_json
 from loom.llm.context_budget import estimate_message_tokens, model_context_window
 from loom.llm.request_options import materialize_request_options
+from loom.tasks.acceptance_contract import RULES_VERSION, InvalidAcceptanceContract, preserve_evidence_requirements, require_evidence_tool
 from loom.tasks.workspace_probe import ManifestUnavailable, bound_path, digest, manifest, probe
 
 DEFAULTS = {
@@ -254,7 +255,7 @@ class AcceptanceController:
             old = self.data.get("plan")
             if old:
                 self.data["history"].append(old)
-            for key in ("decision", "assessed_progress", "cause_code", "evidence_manifest_ref", "resume_feedback_pending"):
+            for key in ("decision", "assessed_progress", "cause_code", "evidence_manifest_ref", "resume_feedback_pending", "candidate_ref"):
                 self.data.pop(key, None)
             if self.data.get("feedback"):
                 self.data["feedback"]["state"] = "superseded"
@@ -328,6 +329,7 @@ class AcceptanceController:
                 "input_budget": deepcopy(self.data.get("input_budget")),
                 "cache": deepcopy(self.data.get("cache")),
                 "cause_code": self.data.get("cause_code"),
+                "candidate_ref": deepcopy(self.data.get("candidate_ref")),
                 "feedback": deepcopy(self.data.get("feedback")), "decision": deepcopy(self.data.get("decision"))}
 
     def input_budget(self, prompt="", content="", *, provider=None, images=()):
@@ -445,6 +447,8 @@ class AcceptanceController:
                 raise ValueError("Invalid acceptance criterion fields")
             if not isinstance(row.get("id"), str) or not row["id"] or row["id"] in ids:
                 raise ValueError("Acceptance criterion IDs must be unique; goal is reserved")
+            if row["id"] in {"candidate", "tool-call-coverage"} or row["id"].startswith(("tool:", "report:")):
+                raise InvalidAcceptanceContract("Acceptance criterion IDs cannot collide with host evidence IDs", row["id"])
             if not isinstance(row.get("description"), str) or not row["description"].strip():
                 raise ValueError("Acceptance criteria need a description")
             if row.get("required", True) is not True:
@@ -469,6 +473,7 @@ class AcceptanceController:
             if kind == "tool_call":
                 if set(check) - {"tool_id", "min_calls"} or check.get("tool_id") not in self.assembly.bindings:
                     raise ValueError("Tool-call checks need an available check.tool_id and optional min_calls")
+                require_evidence_tool(self.assembly, check["tool_id"], row["id"])
                 count = check.get("min_calls", 1)
                 if type(count) is not int or not 1 <= count <= 1000:
                     raise ValueError("Tool-call min_calls must be an integer between 1 and 1000")
@@ -545,10 +550,29 @@ class AcceptanceController:
                 "check": {},
             }
         )
-        return {"criteria": result, "unresolved_requirements": normalized_unresolved}
+        return {"criteria": result, "unresolved_requirements": normalized_unresolved, "rules_version": RULES_VERSION}
+
+    def validate_retained_contract(self):
+        """Old checkpoints are data, not an exemption from current rules."""
+        plan = self.data.get("plan")
+        if not plan:
+            return
+        try:
+            self.validate_plan(dict(criteria=[c for c in plan["criteria"] if c["id"] != "goal"],
+                                    unresolved_requirements=plan.get("unresolved_requirements", [])))
+        except ValueError as exc:
+            self.data.pop("decision", None)
+            self.data.update(state="blocked", reason=str(exc), cause_code=InvalidAcceptanceContract.code)
+            raise InvalidAcceptanceContract(str(exc), getattr(exc, "criterion_id", None)) from exc
+        if plan.get("rules_version") != RULES_VERSION:
+            plan["rules_version"] = RULES_VERSION
+            self.invalidate("Acceptance rules changed; fresh verification required")
+            self.data.pop("assessed_progress", None)
+            self.data.pop("pending_verification", None)
 
     async def prepare(self, context, runtime):
         self.goal(context)
+        self.validate_retained_contract()
         declared = (self.assembly.request.metadata.get('autonomy') or {}).get('required_tools', [])
         unavailable = set(declared) - self.assembly.available_tool_ids()
         if unavailable:
@@ -566,8 +590,6 @@ class AcceptanceController:
 
             contract = self.assembly.request.metadata.get('autonomy') or {}
             if contract.get('engine_version') == 2:
-                from loom.tasks.workspace_probe import digest
-
                 if (self.data['plan'].get('contract_digest') != contract.get('contract_digest')
                         or self.data['plan'].get('verification_digest') != digest(contract.get('verification_plan'))):
                     raise AcceptanceBlocked('Checkpoint verification differs from the compiled contract', code='EXECUTION_CONTRACT')
@@ -577,8 +599,6 @@ class AcceptanceController:
         recovery = self.assembly.request.metadata.get('recovery_context') or {}
         contract = self.assembly.request.metadata.get('autonomy') or {}
         if contract.get('engine_version') == 2:
-            from loom.tasks.workspace_probe import digest
-
             pinned = contract.get('verification_plan')
             if not pinned or not contract.get('contract_digest'):
                 raise AcceptanceBlocked('Compiled work is missing its verification contract', code='EXECUTION_CONTRACT')
@@ -690,6 +710,7 @@ class AcceptanceController:
         existing = self.data["plan"]["criteria"]
         if any(c["id"] not in proposed or any(proposed[c["id"]][k] != c[k] for k in ("description", "required")) for c in existing):
             raise ValueError("Required acceptance criteria cannot be removed or weakened; preserve existing criteria")
+        preserve_evidence_requirements(self.data["plan"], plan)
         from loom.tasks.visual_migration import review_removed
 
         migration = await review_removed(self, self.data["plan"], plan, runtime)
@@ -853,6 +874,8 @@ class AcceptanceController:
                     try:
                         async with asyncio.timeout(remaining):
                             row, detail = await self.check(criterion, runtime)
+                    except InvalidAcceptanceContract:
+                        raise
                     except (TimeoutError, OSError, ValueError) as exc:
                         row, detail = {"status": "blocked", "reason": str(exc) or "Check timed out"}, {}
                     finally:
@@ -915,6 +938,13 @@ class AcceptanceController:
                     if row["status"] == "pending":
                         row.update(status="blocked", deferred=True, reason="Outcome judgment skipped because another requirement did not pass")
                         await self.emit(runtime, "verification.completed", result=row)
+                evaluated = {r["criterion_id"] for r in self.data["results"]}
+                for criterion in self.data["plan"]["criteria"]:
+                    if criterion["id"] not in evaluated:
+                        row = dict(criterion_id=criterion["id"], status="not_run", deferred=True, method=criterion["verifier"],
+                                   reason="Verification skipped because a prerequisite check did not pass", evidence_ids=[])
+                        self.data["results"].append(row)
+                        await self.emit(runtime, "verification.completed", result=row)
             self.data["evidence_manifest_ref"] = evidence_ref
             self.data.pop("pending_verification", None)
             self.data["attempts"] += 1
@@ -951,7 +981,7 @@ class AcceptanceController:
                 producer="loom.acceptance.v1",
                 binding=after,
                 results=self.data["results"],
-                assurance="checks_and_model_judgment",
+                assurance="checks_and_model_judgment" if any(r.get("assurance") == "model_judgment" for r in self.data["results"]) else "checks_only",
             )
             return passed
         finally:
@@ -967,6 +997,7 @@ class AcceptanceController:
         if kind == "tool_call":
             from loom.tasks.acceptance_evidence import matching_calls
 
+            require_evidence_tool(self.assembly, check["tool_id"], criterion["id"])
             rows = matching_calls(self.assembly, check["tool_id"])
             successful = [r for r in rows if r["ok"]]
             minimum = check.get("min_calls", 1)

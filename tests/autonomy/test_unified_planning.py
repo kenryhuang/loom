@@ -353,6 +353,53 @@ def test_budget_wait_requires_new_budget_or_day_not_another_schedule_click(unifi
     assert len(facade.store.snapshot(aid)['plan_revisions']) == 1
 
 
+def test_budget_reset_automatically_continues_pending_revision_without_dispatching_old_work(unified):
+    from datetime import UTC, datetime
+
+    from loom.autonomy.plan_commands import request_revision
+    from tests.autonomy.helpers import Clock
+
+    service, facade, aid, _ = unified
+    clock = Clock()
+    clock.value = datetime(2026, 11, 9, 15, 59, 59, tzinfo=UTC)
+    facade.store.clock = clock
+    with facade.store.sessions.transaction() as db:
+        agent = facade.store.get(db, 'agents', aid)
+        agent['role']['timezone'] = 'Asia/Shanghai'
+        facade.store.put(db, 'agents', agent)
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    original = facade.store.snapshot(aid)
+    state = original['objective_planning'][0]
+    request_revision(facade, aid, 'quality', dict(command_id='revise-after-reset', expected_revision=state['revision'],
+                                               reason='Revise the inspection method'))
+    calls = []
+
+    def no_budget(*_):
+        calls.append(True)
+        error = ServiceError('Daily planning budget unavailable', 409, code='AGENT_BUDGET')
+        error.budget_block = dict(scopes=[dict(scope='daily')])
+        raise error
+
+    service.agent_plan_provider = no_budget
+    for _ in range(3):
+        facade.supervisor.scheduler.advance(aid, manual=True)
+    waiting = facade.store.snapshot(aid)
+    assert calls == [True]
+    assert waiting['objective_planning'][0]['revision_requested']
+    assert waiting['objective_planning'][0]['next_review_at'] == '2026-11-09T16:00:00+00:00'
+    assert not waiting['scheduler']['manual_required']
+    assert waiting['work_packages'][0]['state'] == 'pending'
+    assert not waiting['work_packages'][0].get('session_id')
+    service.agent_plan_provider = lambda *_: proposal()
+    clock.advance(2)
+    facade.supervisor.scheduler.advance(aid)  # Timer, without a new user command.
+    resumed = facade.store.snapshot(aid)
+    assert len(resumed['plan_revisions']) == 2
+    assert not resumed['objective_planning'][0]['revision_requested']
+    assert resumed['work_packages'][0]['superseded_contract']
+    assert resumed['plan_revisions'][0]['work_packages'][0]['contract_digest'] == original['work_packages'][0]['contract_digest']
+
+
 def test_result_reference_rejects_success_without_recorded_receipt(unified):
     from loom.autonomy.plan_inputs import resolve
 
@@ -498,13 +545,12 @@ def test_initial_plan_can_cite_registered_workspace_observation(unified):
 
 
 def test_workspace_observation_cannot_complete_a_stage(unified):
-    from loom.autonomy.plan_commands import request_revision
+    from loom.autonomy.goals import observe
 
     service, facade, aid, _ = unified
     facade.supervisor.scheduler.advance(aid, manual=True)
-    state = facade.store.snapshot(aid)['objective_planning'][0]
-    request_revision(facade, aid, 'quality', dict(command_id='review-unproven', expected_revision=state['revision'],
-                                               reason='Review the new workspace observations'))
+    observe(facade.store, aid, 'new-observation', dict(objective_id='quality', indicator='quality',
+            value='unknown', state='unknown', source='human'))
     def false_review(_agent, payload):
         observation = next(e['id'] for e in payload['evidence'] if e['kind'] == 'workspace_observation')
         assert all(not c['source_refs'] for c in payload['acceptance_support'])
@@ -604,3 +650,122 @@ def test_executable_verification_schema_disallows_unresolved_requirements(unifie
     assert Draft202012Validator(contract).is_valid(value)
     value['stage']['goals'][0]['work_packages'][0]['verification']['unresolved_requirements'] = ['A required verifier is unavailable']
     assert not Draft202012Validator(contract).is_valid(value)
+
+
+def test_historical_superseded_goal_does_not_block_current_stage_revision(unified):
+    from loom.autonomy.plan_commands import request_revision
+
+    _, facade, aid, _ = unified
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    snap = facade.store.snapshot(aid)
+    with facade.store.sessions.transaction() as db:
+        historical = deepcopy(snap['goals'][0])
+        historical.update(id='historical-discovery', stage_id=None, state='superseded')
+        facade.store.put(db, 'agent_goals', historical)
+    state = snap['objective_planning'][0]
+    request_revision(facade, aid, 'quality', dict(command_id='revise-current', expected_revision=state['revision'], reason='Update the current report method'))
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    assert len(facade.store.snapshot(aid)['plan_revisions']) == 2
+
+
+def test_compiler_refuses_self_referential_completion_check_before_publication(unified):
+    service, facade, aid, _ = unified
+    invalid = proposal()
+    criterion = invalid['stage']['goals'][0]['work_packages'][0]['verification']['criteria'][0]
+    criterion.update(check=dict(tool_id='finish', min_calls=1), required_tools=['finish'])
+    service.agent_plan_provider = lambda *_: invalid
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    snap = facade.store.snapshot(aid)
+    assert not snap['work_packages'] and not snap['stages']
+    assert snap['objective_planning'][0]['blocker']
+
+
+def test_old_invalid_contract_uses_one_owner_revision_and_retains_candidate(unified):
+
+
+    service, facade, aid, _ = unified
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    snap = facade.store.snapshot(aid)
+    work = snap['work_packages'][0]
+    with facade.store.sessions.transaction() as db:
+        # Model an already published v1-rules plan. No invalid new proposal can
+        # enter through the compiler; this is persisted legacy data.
+        work['verification_plan'].pop('rules_version', None)
+        work['verification_plan']['criteria'][0]['check']['tool_id'] = 'finish'
+        work['verification_plan']['criteria'][0]['required_tools'] = ['finish']
+        work['state'] = 'failed'
+        session = facade.service.store._load(db, work['session_id'])
+        session['task']['state'] = 'failed'
+        facade.service.store.append(db, session, 'tool.started', dict(tool_id='finish', input=dict(report='Retained unverified report')))
+        facade.service.store._save(db, session)
+        facade.store.put(db, 'agent_work_packages', work)
+    calls = []
+    def corrected(_agent, payload):
+        calls.append(payload)
+        return proposal()
+    service.agent_plan_provider = corrected
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    snap = facade.store.snapshot(aid)
+    assert len(calls) == 1 and len(snap['plan_revisions']) == 2
+    assert calls[0]['revision_requested']
+    assert any(a['type'] == 'contract_invalid' for a in calls[0]['answers'])
+    assert calls[0]['prior_attempts'][0]['candidate'] == 'Retained unverified report'
+    assert calls[0]['prior_attempts'][0]['status'] == 'unverified_candidate'
+    assert next(w for w in snap['work_packages'] if w['id'] == work['id'])['superseded_contract']
+
+
+def test_invalid_contract_does_not_buy_endless_replanning_attempts(unified):
+    service, facade, aid, _ = unified
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    with facade.store.sessions.transaction() as db:
+        work = facade.store.rows(db, 'agent_work_packages', aid)[0]
+        work['verification_plan'].pop('rules_version', None)
+        work['verification_plan']['criteria'][0]['check']['tool_id'] = 'finish'
+        facade.store.put(db, 'agent_work_packages', work)
+    calls = []
+    def still_invalid(*_):
+        calls.append(True)
+        value = proposal()
+        value['stage']['goals'][0]['work_packages'][0]['verification']['criteria'][0]['check']['tool_id'] = 'finish'
+        return value
+    service.agent_plan_provider = still_invalid
+    for _ in range(3):
+        facade.supervisor.scheduler.advance(aid, manual=True)
+    assert len(calls) == 1
+    assert len(facade.store.snapshot(aid)['plan_revisions']) == 1
+
+
+def test_plan_revision_cannot_replace_required_execution_with_prose(unified):
+    from loom.autonomy.plan_commands import request_revision
+
+    service, facade, aid, _ = unified
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    state = facade.store.snapshot(aid)['objective_planning'][0]
+    request_revision(facade, aid, 'quality', dict(command_id='keep-evidence', expected_revision=state['revision'], reason='Update report structure'))
+    def weaker(*_):
+        value = proposal()
+        criterion = value['stage']['goals'][0]['work_packages'][0]['verification']['criteria'][0]
+        criterion.update(verifier='semantic', check={})
+        return value
+    service.agent_plan_provider = weaker
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    snap = facade.store.snapshot(aid)
+    assert len(snap['plan_revisions']) == 1
+    assert 'concrete evidence requirement' in snap['objective_planning'][0]['reason']
+
+
+def test_revision_wait_keeps_a_visible_contract_gate(unified):
+    from loom.autonomy.plan_commands import request_revision
+
+    service, facade, aid, _ = unified
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    state = facade.store.snapshot(aid)['objective_planning'][0]
+    request_revision(facade, aid, 'quality', dict(command_id='wait-revision', expected_revision=state['revision'],
+                                               reason='Wait for a changed external premise'))
+    service.agent_plan_provider = lambda *_: dict(action='wait', reason='Required source is not available yet', source_refs=[])
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    snap = facade.store.snapshot(aid)
+    assert snap['objective_planning'][0]['blocker']['code'] == 'EXECUTION_CONTRACT'
+    assert snap['scheduler']['state'] == 'waiting'

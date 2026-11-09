@@ -46,12 +46,12 @@ def decide(controller, *, origin="completion", completion_id=None):
     outcome, code, reason = "pause", data.get("cause_code") or "ACCEPTANCE_BLOCKED", data["reason"]
     if binding.get("unavailable"):
         code, reason = "ACCEPTANCE_BINDING_UNAVAILABLE", binding["unavailable"]
-    elif data["state"] == "passed":
-        outcome, code = "accept", "ACCEPTANCE_PASSED"
     elif data.get("pending_operations"):
         code = "EXECUTION_UNKNOWN"
     elif data.get("cause_code"):
         pass
+    elif data["state"] == "passed":
+        outcome, code = "accept", "ACCEPTANCE_PASSED"
     elif data["model_calls"] >= controller.config["max_model_calls"] or data["elapsed_seconds"] >= controller.config["max_seconds"]:
         code = "ACCEPTANCE_BUDGET_EXHAUSTED"
         reason = (f"Acceptance budget exhausted: model calls {data['model_calls']}/{controller.config['max_model_calls']}; "
@@ -60,7 +60,10 @@ def decide(controller, *, origin="completion", completion_id=None):
         gaps = []
         criteria = {c["id"]: c for c in ((data.get("plan") or {}).get("criteria") or []) if isinstance(c, dict)}
         for row in blockers:
-            scope = [p for p in (criteria.get(row.get("criterion_id"), {}).get("scope") or []) if isinstance(p, str) and p.strip()]
+            criterion = criteria.get(row.get("criterion_id"), {})
+            # Only an artifact check defines a deliverable path. Cache scopes
+            # describe dependencies and cannot select a repair action.
+            scope = [criterion["check"]["path"]] if criterion.get("verifier") == "artifact" else []
             gap = row.get("gap") or {"kind": "deliverable_mismatch" if row["status"] == "failed" else "unknown",
                                       "targets": [dict(kind="workspace_path", value=p) for p in scope][:32],
                                       "required_fact": row.get("reason", ""),
@@ -74,7 +77,10 @@ def decide(controller, *, origin="completion", completion_id=None):
         if unresolved_driven:
             gaps = [_unresolved_gap(requirement, index) for index, requirement in enumerate(unresolved)]
         kinds = {g["kind"] for g in gaps}
-        if "external_dependency" in kinds:
+        if "verification_method" in kinds:
+            code = "ACCEPTANCE_CONTRACT_INVALID"
+            reason = "Verification method needs an owner-issued contract revision: " + data["reason"]
+        elif "external_dependency" in kinds:
             code = "ACCEPTANCE_EXTERNAL_DEPENDENCY"
         elif not gaps or kinds & {"unknown", "insufficient_evidence_view"}:
             code = "ACCEPTANCE_EVIDENCE_VIEW" if "insufficient_evidence_view" in kinds else "ACCEPTANCE_UNKNOWN_GAP"
