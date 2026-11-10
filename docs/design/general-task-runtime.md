@@ -99,6 +99,8 @@ workflow:
 
 同一错误轮次最多自动纠正两次，仍无效则保存检查点，以 `MODEL_RESPONSE_INVALID` 暂停；已有观察、工具结果、消息和累计用量继续保留。Resume 从新的模型请求继续，不重放错误回复或已完成的工具。Agent 调度器可在既有恢复次数与预算上限内恢复此类暂停，不重组执行合同；人工暂停、待确认执行效果和缺少检查点仍阻止自动恢复。
 
+`finish_reason=length/max_tokens` 单独归类为输出触顶，记录有效输出上限及实际 completion token 数，不归因于模型格式错误。两次精简重试后仍触顶，以 `MODEL_OUTPUT_LIMIT` 暂停；调度器提示增加单次输出上限或拆分交付，不在配置未变时反复自动恢复。有限输出不等于界面折叠，未闭合的工具参数不能执行或当作已交付报告。
+
 ## 注册扩展
 
 结构接口见 [task_plugins.py](../../src/loom/runtime/task_plugins.py)，执行参数与 binding 见 [execution_contracts.py](../../src/loom/runtime/execution_contracts.py)。插件必须提供匹配的 manifest 和可序列化快照；恢复会校验 plugin/version/schema/config digest。registry 只接受宿主代码注册的 factory，不从任务文件导入模块。

@@ -265,7 +265,9 @@ resume 路径要求 checkpoint 或持久恢复上下文；acceptance repair 走�
 
 ### 7.1 每日唯一 token 配额
 
-`budget.daily_tokens` 是 Agent 唯一的累计 token 上限，默认 1,000,000。规划、阶段规划、执行、验收、自动评估、方法学习，以及自动派发/修复的配置推荐共用这份额度。每次请求仍受输出长度限制，默认 `output_tokens=8192`；时间、步骤、无进展和模型单次调用等运行约束保持。
+`budget.daily_tokens` 是 Agent 唯一的累计 token 上限，默认 1,000,000。规划、阶段规划、执行、验收、自动评估、方法学习，以及自动派发/修复的配置推荐共用这份额度。`budget.output_tokens` 默认 `null`，继承模型配置的单次输出上限；显式正整数只会进一步收紧上限，不会覆盖模型更小的限制。Agent 的预算编辑器显示该字段，可选择 `Use model configuration` 清除角色附加限制。已有角色中的显式数值（包括历史默认 8192）保持可见，不自动迁移；设置按原有配置机制在后续任务边界生效，已派发 Session 保留绑定值。
+
+请求事件记录模型有效输出上限与 Agent 附加上限。模型没有声明输出上限时，账本使用上下文窗口大小或 32768 作为输出预留估算，再结算实际用量；该估算不写入模型请求，不构成新的生成限制。时间、步骤、无进展和模型单次调用等运行约束保持。
 
 `goal_tokens`、`work_tokens`、`learning_tokens`、`objective_tokens`、每日 `max_calls` 及对应自动扩容字段只为旧 Role 的读取兼容保留，不参与预算准入。长期目标、Goal、工作包和学习不再有独立累计额度，也不再申请子额度扩容。已有 Agent Session 迁移为 `limits.max_tokens=null`；独立人工 Session 的原限制保留。
 
@@ -503,7 +505,7 @@ uv run loom serve --data-dir .loom/service --config /absolute/path/to/config.yam
     "interval_seconds": 86400,
     "budget": {
       "daily_tokens": 100000000,
-      "output_tokens": 8192
+      "output_tokens": null
     },
     "scheduling_policy": {
       "enabled": true,

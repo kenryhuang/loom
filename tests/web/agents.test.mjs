@@ -224,7 +224,9 @@ test('Budget cancel closes immediately after focused editing and polling retains
   if(options?.body)posts++;return path==='/v1/agents'?{agents:[data]}:structuredClone(data);
  }});
  try{
-  await view.open();await view.select('a');await view.createForm(data,'budget');
+  await view.open();await view.select('a');
+  const edit=view.root.querySelector('[data-configuration-section="budget"] button[aria-label="Edit Daily budget"]');
+  assert.ok(edit && !edit.disabled);edit.click();await tick();
   const form=view.root.querySelector('.agent-configuration-form');
   assert.deepEqual([...form.querySelectorAll('input,select,textarea')].map(input=>input.name),['daily_tokens','daily_tokens_custom','output_tokens','output_tokens_custom']);
   form.elements.daily_tokens.value='10000000';form.elements.daily_tokens.focus();
@@ -820,5 +822,39 @@ test('Budget waiting shows the allowance and automatic reset instead of review',
   assert.match(view.root.textContent,/Automatic budget check after/);
   assert.match(view.root.textContent,/plan revision is saved and will continue automatically/);
   assert.doesNotMatch(view.root.textContent,/Waiting for review|Next review:|A plan revision is pending|internal details/);
+ }finally{view.close();dom.window.close();}
+});
+
+test('Planning activity updates inside the expanded basis and isolates objective histories',async()=>{
+ const data=fixture();data.planning_engine=2;data.view='goals';data.role.timezone='Asia/Shanghai';
+ data.role.long_term_objectives=[{id:'primary',desired_outcome:'Build next stage',stage_planning:{mode:'autonomous'}},
+  {id:'other',desired_outcome:'Other objective',stage_planning:{mode:'autonomous'}}];
+ data.objective_planning=[{objective_id:'primary',revision:1,state:'ready'}];
+ data.planning_activity=[{id:'run-1',objective_id:'primary',kind:'unified_plan',state:'planning',created_at:'2026-11-10T01:00:00Z',events:[]},
+  {id:'run-other',objective_id:'other',kind:'stage_review',state:'committed',reason:'Other review result',events:[]}];
+ const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');await view.changeTab('Goals');
+  let activity=view.root.querySelector('[data-planning-objective="primary"]');
+  const basis=activity.closest('details');assert.equal(basis.querySelector('summary').textContent,'Current state & planning basis');
+  basis.open=true;basis.dispatchEvent(new dom.window.Event('toggle'));
+  assert.match(activity.textContent,/Planning in progress|Planning started/);
+  assert.doesNotMatch(activity.textContent,/Other review result/);
+  data.planning_activity[0].events=[
+   {type:'plan.protocol.rejected',at:'2026-11-10T01:01:00Z',attempt:1,message:'Output truncated <img src=x>'},
+   {type:'plan.protocol.retrying',at:'2026-11-10T01:01:00Z',attempt:1},
+   {type:'plan.protocol.requesting',at:'2026-11-10T01:01:01Z',attempt:2}];
+  await view.refresh();activity=view.root.querySelector('[data-planning-objective="primary"]');
+  assert.equal(activity.closest('details').open,true);
+  assert.match(activity.textContent,/Attempt 1 · Response rejected/);
+  assert.match(activity.textContent,/Retrying with correction feedback/);
+  assert.match(activity.textContent,/Attempt 2 · Waiting for the planning model/);
+  assert.equal(activity.querySelector('img'),null);
+  data.planning_activity[0].state='committed';
+  data.planning_activity[0].events.push({type:'plan.protocol.completed',at:'2026-11-10T01:02:00Z',attempt:2},
+   {type:'plan.finished',at:'2026-11-10T01:02:00Z'});
+  await view.refresh();activity=view.root.querySelector('[data-planning-objective="primary"]');
+  assert.match(activity.textContent,/Plan validation passed/);assert.match(activity.textContent,/Decision recorded/);
+  assert.doesNotMatch(activity.textContent,/Planning in progress/);
  }finally{view.close();dom.window.close();}
 });

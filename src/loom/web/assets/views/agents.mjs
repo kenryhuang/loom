@@ -233,7 +233,7 @@ export class AgentsView {
   }
   configurationPanel(root,detail,section,rows,wide=false) {
     const node=panel(root,configurationTitles[section],wide);node.dataset.configurationSection=section;
-    const edit=button('Edit',()=>this.editConfiguration(detail,section));edit.setAttribute('aria-label',`Edit ${configurationTitles[section]}`);
+    const edit=button('Edit',()=>this.editConfiguration(detail,section),'agent-configuration-edit');edit.setAttribute('aria-label',`Edit ${configurationTitles[section]}`);
     edit.disabled=detail.state==='archived';node.firstChild.append(edit);
     if(detail.pending_configuration?.sections?.[section])node.firstChild.append(badge('Applies to next task'));
     table(node,['Setting','New-task configuration'],rows);return node;
@@ -314,14 +314,15 @@ export class AgentsView {
     this.configurationPanel(root,d,'resources',[['Source paths',(r.source_routes || []).flatMap(route=>route.paths || []).join(', ') || 'Not set'],
       ['Knowledge bases',(r.knowledge_base_ids || []).join(', ') || 'Not set'],['External tools',(r.external_tool_ids || []).join(', ') || 'Not set']]);
     const budget=this.configurationPanel(root,d,'budget',[['Daily token limit',number(r.budget.daily_tokens)],
-      ['Per-response output limit',r.budget.output_tokens == null ? 'Use model configuration' : number(r.budget.output_tokens)]],true);
+      ['Per-response output limit',r.budget.output_tokens == null ? 'Use model configuration' : number(r.budget.output_tokens)]]);
+    budget.append(element('p','muted small',`All tasks share the daily allowance. Resets at midnight ${d.role.timezone || 'UTC'}.`));
+    const usage=panel(root,'Budget usage');
     const daily=d.daily_budget;
-    cards(budget,[['Current daily limit',number(daily?.limit ?? d.role.budget.daily_tokens)],['Used & reserved today',number(daily?.used ?? 0)],
+    table(usage,['Metric','Current value'],[['Current daily limit',number(daily?.limit ?? d.role.budget.daily_tokens)],['Used & reserved today',number(daily?.used ?? 0)],
       ['Remaining today',number(daily?.remaining ?? d.role.budget.daily_tokens)],['Total model calls',number(d.budget.reduce((sum,row)=>sum+row.calls,0))],
       ['Calls with unknown usage',number(d.budget.reduce((sum,row)=>sum+(row.unknown_calls || 0),0))]]);
-    budget.append(element('p','muted',`All tasks share the daily allowance; usage resets at midnight ${d.role.timezone || 'UTC'} and the historical ledger is kept. Long-term objectives, Goals, work packages, and learning have no separate token quotas.`));
-    if(daily?.resets_at)budget.append(element('p','muted',`Current window: ${daily.window} · Next reset: ${new Date(daily.resets_at).toLocaleString()}`));
-    this.renderBudgetUsage(budget,d);
+    if(daily?.resets_at)usage.append(element('p','muted small',`Next reset: ${new Date(daily.resets_at).toLocaleString(undefined,{timeZone:d.role.timezone || 'UTC',timeZoneName:'short'})}`));
+    this.renderBudgetUsage(root,d);
     const history = panel(root,'Orchestration history',true);
     history.firstChild.append(button('View recent orchestration reasons',()=>this.act(async()=>{const {runs}=await this.api.get(d.id,'runs');
       output.replaceChildren();table(output,['Status','Scheduled goal','Orchestration reason','Time'],runs.map(r=>{
@@ -342,7 +343,7 @@ export class AgentsView {
   }
   renderBudgetUsage(root, d) {
     const usage = this.budgetDisclosure(root,'Usage breakdown',d.id,'usage');
-    usage.classList.add('agent-budget-usage');
+    usage.classList.add('agent-budget-usage','dashboard-panel','dashboard-wide');
     usage.append(element('h4','','Daily totals'));
     const days = new Map();
     for (const row of [...d.budget].sort((a,b) => b.window.localeCompare(a.window) || a.category.localeCompare(b.category))) {

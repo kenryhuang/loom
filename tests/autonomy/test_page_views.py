@@ -153,6 +153,40 @@ def test_goal_projection_keeps_route_history_links_and_boolean_types(agent_servi
     assert goals['work_packages'][0]['superseded_contract'] is False
 
 
+def test_planning_activity_is_bounded_scoped_and_refreshes_without_agent_revision_changes(agent_service):
+    service, facade, aid, workspace = agent_service
+    other = facade.store.create('other-planning-agent', role(workspace))
+    with service.store.transaction() as db:
+        for index in range(5):
+            facade.store.put(db, 'agent_runs', dict(id=f'plan-{index}', agent_id=aid, objective_id='quality',
+                kind='unified_plan', state='planning', created_at=facade.store.now(),
+                decision={'private_proposal': 'do-not-transmit' * 10000}, input_snapshot_ref={'private_input': 'hidden'}))
+        for run_id, owner, objective in [('foreign-agent', other['id'], 'quality'), ('foreign-objective', aid, 'other')]:
+            facade.store.put(db, 'agent_runs', dict(id=run_id, agent_id=owner, objective_id=objective,
+                kind='stage_plan', state='planning'))
+    before = page(facade, aid, 'goals')
+    assert [r['id'] for r in before['planning_activity']] == ['plan-4', 'plan-3', 'plan-2']
+    assert before['planning_activity'][0]['events'] == []
+    with service.store.transaction() as db:
+        for attempt in range(25):
+            facade.store.event(db, aid, 'plan.protocol.requesting', dict(agent_run_id='plan-4', attempt=attempt + 1))
+        facade.store.event(db, aid, 'plan.protocol.rejected', dict(agent_run_id='plan-4', attempt=25, code='truncated',
+            issues=[dict(path='/', message='Output truncated')], proposal={'private': 'hidden'}))
+        facade.store.event(db, other['id'], 'plan.protocol.requesting', dict(agent_run_id='plan-4', attempt=999))
+        facade.store.event(db, aid, 'schedule.finished', dict(run_id='plan-4', reason='unrelated schedule'))
+    after = page(facade, aid, 'goals')
+    assert after['revision'] == before['revision']
+    events = after['planning_activity'][0]['events']
+    assert len(events) == 20 and events[0]['attempt'] == 7
+    assert [e['seq'] for e in events] == sorted(e['seq'] for e in events)
+    assert events[-1]['message'] == 'Output truncated'
+    assert events[-1]['code'] == 'truncated'
+    assert all(e['attempt'] != 999 for e in events)
+    assert 'private' not in json.dumps(after['planning_activity'])
+    assert 'unrelated schedule' not in json.dumps(after['planning_activity'])
+    assert 'planning_activity' not in page(facade, aid, 'overview')
+
+
 def test_http_page_reads_do_not_wait_for_the_worker_admission_lock(agent_service):
     service, _, aid, _ = agent_service
     server = ServiceHTTPServer(('127.0.0.1', 0), service, 'page-test')

@@ -178,7 +178,32 @@ def page_snapshot(store, aid, view):
         agent["sessions"] = (
             [dict(r) for r in db.execute("SELECT * FROM agent_sessions WHERE agent_id=?", (aid,))] if view in {"overview", "work", "learning"} else []
         )
+        if view == "goals":
+            agent["planning_activity"] = planning_activity(db, aid, agent["role"]["long_term_objectives"])
         return agent
+
+
+def planning_activity(db, aid, objectives):
+    """Bounded progress records, without model proposals or input snapshots."""
+    activity = []
+    for objective in objectives:
+        runs = project(db, "agent_runs", ["id", "objective_id", "kind", "state", "created_at", "reason"],
+            "WHERE agent_id=? AND json_extract(body,'$.objective_id')=? "
+            "AND json_extract(body,'$.kind') IN ('unified_plan','stage_plan','stage_review') ORDER BY rowid DESC LIMIT 3",
+            (aid, objective["id"]))
+        for run in runs:
+            events = db.execute(
+                "SELECT seq,json_extract(body,'$.at') AS at,json_extract(body,'$.type') AS type,"
+                "json_extract(body,'$.payload.attempt') AS attempt,json_extract(body,'$.payload.code') AS code,"
+                "substr(coalesce(json_extract(body,'$.payload.validation_error'),json_extract(body,'$.payload.reason'),"
+                "json_extract(body,'$.payload.issues[0].message')),1,1200) AS message "
+                "FROM agent_events WHERE agent_id=? "
+                "AND (json_extract(body,'$.type') LIKE 'plan.%' OR json_extract(body,'$.type') LIKE 'stage.%') "
+                "AND coalesce(json_extract(body,'$.payload.agent_run_id'),json_extract(body,'$.payload.run_id'))=? "
+                "ORDER BY seq DESC LIMIT 20", (aid, run["id"])).fetchall()
+            run["events"] = [dict(row) for row in reversed(events)]
+            activity.append(run)
+    return activity
 
 
 VIEW_FIELDS = {name: set(collections) for name, collections in PAGE_COLLECTIONS.items()}

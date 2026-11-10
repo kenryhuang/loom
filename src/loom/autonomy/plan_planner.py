@@ -81,6 +81,7 @@ class PlanPlanner:
             protocol = StructuredProtocol("agent_plan", PROTOCOL_VERSION, schema(envs, payload))
 
             async def send(body, _attempt, mode):
+                await self.record_protocol(agent, run_id, "requesting", dict(attempt=_attempt, mode=mode))
                 bounded = BudgetProvider(protocol_provider(provider, protocol, mode), BudgetLedger(self.store.sessions.path, clock=self.store.clock),
                     dict(agent_id=agent["id"], objective_id=payload["objective"]["id"]), category="stage_planning",
                     output_tokens=agent["role"]["budget"]["output_tokens"])

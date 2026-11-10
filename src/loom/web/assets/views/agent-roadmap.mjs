@@ -38,6 +38,56 @@ function section(root,title,text) {
   const box=element('section','agent-roadmap-section');box.append(element('h5','',title));
   if(text) box.append(element('p','',text));root.append(box);return box;
 }
+function planningActivity(root,d,objective,state) {
+  const box=section(root,'Plan activity');box.classList.add('agent-plan-activity');
+  box.dataset.planningObjective=objective.id;
+  const runs=(d.planning_activity || []).filter(run=>run.objective_id===objective.id);
+  const latest=runs[0];
+  const status=element('p','muted');status.setAttribute('role','status');
+  status.textContent=latest?.state==='planning'
+    ? 'Planning in progress · updates automatically while this page is visible.'
+    : state?.revision_requested && state.state==='ready' ? 'Replan requested · waiting for the next planning attempt.'
+    : 'Recent planning attempts · updates automatically while this page is visible.';
+  box.append(status);
+  if(!runs.length) {
+    box.append(element('p','empty-state',d.planning_activity
+      ? 'No planning attempts recorded yet.' : 'Planning activity is not available from the running service yet.'));
+    return;
+  }
+  const labels={requesting:'Waiting for the planning model',proposed:'Response received · validating the plan',
+    normalized:'Response format adjusted',rejected:'Response rejected',retrying:'Retrying with correction feedback',
+    fallback:'Retrying with a compatible response format',completed:'Plan validation passed',exhausted:'Correction attempts exhausted'};
+  const outcomes={planning:'In progress',committed:'Decision recorded',failed:'Planning failed',superseded:'Inputs changed · attempt superseded'};
+  box.append(element('p','muted small','Latest 3 planning attempts; up to 20 recent events per attempt.'));
+  for(const run of runs) {
+    const record=element('section','agent-plan-attempt');record.dataset.planningRun=run.id;
+    const heading=element('div','agent-roadmap-detail-heading');
+    heading.append(element('strong','',run.kind==='stage_review'?'Stage review':'Stage planning'),badge(outcomes[run.state] || run.state,run.state));
+    record.append(heading);
+    const list=element('ol','agent-plan-events');list.setAttribute('aria-label','Planning events');
+    const messages=new Set();
+    const add=(at,title,message)=>{
+      const row=element('li'),stamp=element('time','muted small',time(at,d.role.timezone));
+      if(at)stamp.dateTime=at;
+      row.append(stamp,element('span','',title));
+      if(message && !messages.has(message)){row.append(element('p','muted',message));messages.add(message);}
+      list.append(row);
+    };
+    add(run.created_at,'Planning started');
+    for(const event of run.events || []) {
+      const phase=event.type?.split('.').at(-1);
+      const title=event.type?.includes('.protocol.') ? labels[phase]
+        : ['plan.finished','stage.planning.finished'].includes(event.type) ? outcomes[run.state] || 'Planning finished'
+        : ['plan.rejected','stage.planning.failed'].includes(event.type) ? 'Planning failed' : null;
+      if(title)add(event.at,`${event.attempt?`Attempt ${event.attempt} · `:''}${title}`,event.message);
+    }
+    record.append(list);
+    if(run.state==='planning' && !(run.events || []).length)
+      record.append(element('p','muted','Preparing the planning request or waiting for the model response.'));
+    if(run.reason && !messages.has(run.reason))record.append(element('p','muted',run.reason));
+    box.append(record);
+  }
+}
 function goalIds(stage,d) {
   return [...new Set([...(stage.goal_ids || []),...d.goals.filter(g=>g.stage_id===stage.id).map(g=>g.id)])];
 }
@@ -209,6 +259,7 @@ export function renderRoadmaps(root,d,view) {
     }
     if(selected)block.append(detail);
     const basis=roadmapDisclosure(view,block,d,`basis:${objective.id}`,'Current state & planning basis');
+    planningActivity(basis,d,objective,state);
     basis.append(element('p','',roadmap?.baseline || 'No stage baseline yet; actual delivery evidence becomes the basis for later planning.'));
     if(roadmap?.reason) section(basis,'Why this route',roadmap.reason);
     if(roadmap?.created_at)basis.append(element('p','muted',`Route updated at ${time(roadmap.created_at)}`));
