@@ -98,7 +98,7 @@ def migrate(db):
                 agent["planner_lease"] = None
                 save("agents", agent)
 
-    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'").fetchone():
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE name='sessions'").fetchone():
         return
     for session in rows("sessions").values():
         binding, run = session.get("autonomy") or {}, session.get("run") or {}

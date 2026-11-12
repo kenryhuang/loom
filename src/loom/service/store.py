@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
-import threading
 from contextlib import contextmanager
 from pathlib import Path
 
 from loom.core import now_iso
-from loom.core.sqlite import write_lock, write_transaction
+from loom.core.sqlite import after_commit, write_lock, write_transaction
+from loom.service import session_storage as storage
 from loom.service.artifacts import ServiceArtifacts
 from loom.service.contracts import EDITABLE_TASK_FIELDS, EVENT_SCHEMA, ServiceError, canonical, new_id, object_value, text, validate_command, validate_create
+from loom.service.session_notifications import Notifications
 
-SCHEDULING_PREDICATE = (
-    "json_extract(body,'$.deleted_at') IS NULL AND "
-    "(json_extract(body,'$.task.state')='queued' OR json_array_length(body,'$.workspace_blocked')>0)"
-)
+SCHEDULING_PREDICATE = storage.ADMISSION
 
 
 class SessionStore:
@@ -29,41 +28,44 @@ class SessionStore:
         from loom.external_tools.store import ExternalToolStore
         from loom.knowledge.store import KnowledgeStore
 
+        self.lock = write_lock(self.path)
+        self.notifications = Notifications()
+        from loom.service.session_migration import upgrade_guard
+
+        with upgrade_guard(self.path):
+            # WAL persists in the database header: readers never block writers and
+            # writers never block readers, so polling and analytics cannot stall runs.
+            with sqlite3.connect(self.path) as db:
+                db.execute("PRAGMA journal_mode=WAL")
+            with self.transaction() as db:
+                schema = """
+                    CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+                    CREATE TABLE IF NOT EXISTS skill_dirty_sessions(session_id TEXT PRIMARY KEY);
+                    CREATE TABLE IF NOT EXISTS commands(
+                        id TEXT PRIMARY KEY, session_id TEXT NOT NULL, input TEXT NOT NULL, receipt TEXT NOT NULL, state TEXT NOT NULL);
+                    CREATE TABLE IF NOT EXISTS events(session_id TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(session_id,seq));
+                    CREATE TABLE IF NOT EXISTS artifacts(session_id TEXT NOT NULL, digest TEXT NOT NULL, ref TEXT NOT NULL, PRIMARY KEY(session_id,digest));
+                    CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, body TEXT NOT NULL);
+                    CREATE TABLE IF NOT EXISTS worker_records(
+                        attempt_id TEXT NOT NULL, record_id TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(attempt_id,record_id));
+                """
+                for statement in schema.split(';'):
+                    if statement.strip():
+                        db.execute(statement)
+                storage.migrate(db)
+                from loom.memory.schema import migrate as migrate_memory
+
+                migrate_memory(db)
         self.external_tools = ExternalToolStore(self.directory / "external_tools")
         self.knowledge = KnowledgeStore(self.directory / "knowledge")
-        self.lock = write_lock(self.path)
-        self.changed = threading.Condition(self.lock)
-        # WAL persists in the database header: readers never block writers and
-        # writers never block readers, so polling and analytics cannot stall runs.
-        with sqlite3.connect(self.path) as db:
-            db.execute("PRAGMA journal_mode=WAL")
-        with self.transaction() as db:
-            db.executescript("""
-                CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, body TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS skill_dirty_sessions(session_id TEXT PRIMARY KEY);
-                CREATE TABLE IF NOT EXISTS commands(
-                    id TEXT PRIMARY KEY, session_id TEXT NOT NULL, input TEXT NOT NULL, receipt TEXT NOT NULL, state TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS events(session_id TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(session_id,seq));
-                CREATE TABLE IF NOT EXISTS artifacts(session_id TEXT NOT NULL, digest TEXT NOT NULL, ref TEXT NOT NULL, PRIMARY KEY(session_id,digest));
-                CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, body TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS worker_records(
-                    attempt_id TEXT NOT NULL, record_id TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(attempt_id,record_id));
-            """)
-            # The queue is normally tiny relative to historical snapshots.
-            # SQLite maintains membership atomically with every body update.
-            db.execute(f'CREATE INDEX IF NOT EXISTS sessions_admission ON sessions(id) WHERE {SCHEDULING_PREDICATE}')
-            from loom.memory.schema import migrate as migrate_memory
-
-            migrate_memory(db)
 
     @contextmanager
     def transaction(self):
-        with self.lock:
-            with write_transaction(self.path) as db:
-                yield db
-                changed = db.total_changes
-            if changed:
-                self.changed.notify_all()
+        with write_transaction(self.path) as db:
+            yield db
+
+    def _notify(self, sid):
+        after_commit(self.path, lambda: self.notifications.notify(sid), key=(self.notifications, sid))
 
     @contextmanager
     def read(self):
@@ -78,21 +80,18 @@ class SessionStore:
         finally:
             db.close()
 
-    def _load(self, db, sid):
-        row = db.execute("SELECT body FROM sessions WHERE id=?", (sid,)).fetchone()
-        if row is None:
-            raise ServiceError("Session not found", 404)
-        state = json.loads(row[0])
-        if state.get("deleted_at"):
-            raise ServiceError("Session not found", 404)
-        return state
+    def _load(self, db, sid, *, lazy=False):
+        return storage.load(db, sid, lazy=lazy)
+
+    def _head(self, db, sid):
+        return storage.head(db, sid)
 
     def _save(self, db, state):
         if state['task']['state'] == 'queued':
             state.setdefault('queued_since', now_iso())
         else:
             state.pop('queued_since', None)
-        if state.get('autonomy'):
+        if state.get('autonomy') and storage.lifecycle_changed(state):
             from loom.autonomy.results import record_session_state
 
             record_session_state(db, state)
@@ -102,7 +101,9 @@ class SessionStore:
             Repository(self.path).invalidate(db, session_id=state['session_id'])
         if state.get('deleted_at') and db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_versions'").fetchone():
             db.execute("UPDATE memory_versions SET value=value+1 WHERE id='effective'")
-        db.execute("UPDATE sessions SET body=? WHERE id=?", (canonical(state), state["session_id"]))
+        storage.save(db, state)
+        if state.get('deleted_at'):
+            self._notify(state["session_id"])
         db.execute("INSERT OR IGNORE INTO skill_dirty_sessions VALUES(?)", (state['session_id'],))
 
     def append(self, db, state, kind, payload, *, command_id=None):
@@ -130,6 +131,7 @@ class SessionStore:
 
             record_outcome(db, event)
         state["event_cursor"] = seq
+        self._notify(sid)
         return event
 
     def _replay(self, db, cid, normalized):
@@ -181,7 +183,7 @@ class SessionStore:
                 "control": None,
                 "input_cursor": 0,
             }
-            db.execute("INSERT INTO sessions VALUES(?,?)", (sid, canonical(state)))
+            storage.save(db, state)
             self.append(db, state, "command.accepted", {"type": "create"}, command_id=command_id)
             if payload["objective"]:
                 self._message(db, state, command_id, payload["objective"], producer=producer)
@@ -199,7 +201,12 @@ class SessionStore:
                    "producer": producer or ('human' if role == 'user' else 'solver')}
         event = self.append(db, state, "message.created", message, command_id=cid)
         message["seq"] = event["seq"]
-        state["messages"].append(message)
+        if isinstance(state, storage.Session) and 'messages' not in state.values_cache:
+            db.execute('INSERT INTO session_messages SELECT ?,COALESCE(MAX(position),-1)+1,?,?,? '
+                       'FROM session_messages WHERE session_id=?',
+                       (state['session_id'], message['seq'], cid, canonical(message), state['session_id']))
+        else:
+            state["messages"].append(message)
         return message
 
     def _restart_configuration(self, task, changes, *, relocation=None):
@@ -234,7 +241,7 @@ class SessionStore:
             replay = self._replay(db, cid, normalized)
             if replay:
                 return replay
-            state = self._load(db, sid)
+            state = self._load(db, sid, lazy=True)
             task = state["task"]
             kind, payload = command["type"], command["payload"]
             request = state.get("input_request")
@@ -507,72 +514,101 @@ class SessionStore:
         if not row or row[0] == "applied":
             return
         db.execute("UPDATE commands SET state='applied' WHERE id=?", (cid,))
-        for message in state["messages"]:
-            if message["command_id"] == cid:
-                message["state"] = "applied"
+        if isinstance(state, storage.Session) and 'messages' not in state.values_cache:
+            db.execute("UPDATE session_messages SET body=json_set(body,'$.state','applied') WHERE session_id=? AND command_id=?",
+                       (state['session_id'], cid))
+        else:
+            for message in state["messages"]:
+                if message["command_id"] == cid:
+                    message["state"] = "applied"
         self.append(db, state, "command.applied", {}, command_id=cid)
 
-    def snapshot(self, sid):
+    def snapshot(self, sid, *, messages_limit=None, context=True):
         with self.read() as db:
-            return self._load(db, sid)
+            return storage.load(db, sid, messages_limit=messages_limit, context=context)
 
-    def list_sessions(self):
+    def status(self, sid):
         with self.read() as db:
-            return [json.loads(row[0]) for row in db.execute("SELECT body FROM sessions WHERE json_extract(body, '$.deleted_at') IS NULL ORDER BY rowid DESC")]
+            row = self._head(db, sid)
+            return dict(session_id=sid, task={'state': row['task_state']}, run={'state': row['run_state']})
+
+    def pending_messages(self, db, state, *, after=0, accepted=False):
+        if isinstance(state, storage.Session) and 'messages' not in state.values_cache:
+            rows = db.execute("SELECT body FROM session_messages WHERE session_id=? AND seq>? "
+                              "AND json_extract(body,'$.role')='user'" +
+                              (" AND json_extract(body,'$.state')='accepted'" if accepted else '') + ' ORDER BY seq',
+                              (state['session_id'], after))
+            return [json.loads(row[0]) for row in rows]
+        return [m for m in state['messages'] if m['role'] == 'user' and m['seq'] > after
+                and (not accepted or m['state'] == 'accepted')]
+
+    def list_sessions(self, *, running_only=False):
+        with self.read() as db:
+            query = "SELECT id FROM session_heads WHERE deleted_at IS NULL"
+            if running_only:
+                query += " AND run_state='running'"
+            return [storage.load(db, row[0]) for row in db.execute(query + ' ORDER BY ordinal DESC')]
 
     def scheduling_sessions(self):
-        """Only queued tasks and resource blockers participate in admission.
-
-        Keep missing resource_claims distinct from an explicitly empty list:
-        old tasks fall back to a workspace claim in ready_sessions().
-        """
         with self.read() as db:
-            rows = db.execute(
-                "SELECT rowid,id,json_extract(body,'$.task.state'),json_extract(body,'$.task.workspace'),"
-                "json_extract(body,'$.task.resource_claims'),json_extract(body,'$.workspace_blocked'),"
-                "json_extract(body,'$.autonomy.agent_id'),json_extract(body,'$.created_at'),json_extract(body,'$.queued_since') "
-                f"FROM sessions WHERE {SCHEDULING_PREDICATE}"
-            )
+            rows = db.execute(f"SELECT * FROM session_heads WHERE {SCHEDULING_PREDICATE} ORDER BY ordinal DESC")
             result = []
-            # ORDER BY rowid in SQL makes SQLite prefer a full table scan to
-            # avoid sorting. Sort the tiny indexed candidate set instead.
-            for _, sid, state, workspace, claims, blocked, agent, created, queued in sorted(rows, key=lambda row: row[0], reverse=True):
-                task = dict(state=state, workspace=workspace)
-                if claims is not None:
-                    task['resource_claims'] = json.loads(claims)
-                result.append(dict(session_id=sid, task=task, workspace_blocked=json.loads(blocked) if blocked else [],
-                                   autonomy=bool(agent), created_at=created, queued_since=queued))
+            for row in rows:
+                task = dict(state=row['task_state'], workspace=row['workspace'])
+                if row['resource_claims'] is not None:
+                    task['resource_claims'] = json.loads(row['resource_claims'])
+                result.append(dict(session_id=row['id'], task=task,
+                    workspace_blocked=json.loads(row['workspace_blocked'] or '[]'), autonomy=bool(row['agent_id']),
+                    created_at=row['created_at'], queued_since=row['queued_since']))
             return result
 
-    def session_page(self, *, offset=0, limit=50):
-        """Project and paginate the catalog in SQL, never decode execution snapshots."""
+    def session_page(self, *, cursor=None, offset=0, limit=50):
+        if type(limit) is not int or not 1 <= limit <= 200 or type(offset) is not int or not 0 <= offset < 2**63:
+            raise ServiceError('Invalid session page')
+        values, clause = [], ''
+        if cursor is not None:
+            if offset:
+                raise ServiceError('Use cursor or offset, not both')
+            try:
+                if not isinstance(cursor, str) or len(cursor) > 1024:
+                    raise ValueError()
+                version, at, ordinal = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+                if type(version) is not int or version != 1 or not isinstance(at, str) or type(ordinal) is not int or not 1 <= ordinal < 2**63:
+                    raise ValueError()
+            except (ValueError, TypeError, UnicodeError) as exc:
+                raise ServiceError('Invalid session cursor') from exc
+            clause = ' AND (last_activity_at,ordinal)<(?,?)'
+            values.extend((at, ordinal))
         with self.read() as db:
-            rows = db.execute(
-                "SELECT id,json_extract(body,'$.title'),json_extract(body,'$.task'),json_extract(body,'$.event_cursor') "
-                "FROM sessions WHERE json_extract(body,'$.deleted_at') IS NULL "
-                "ORDER BY COALESCE((SELECT json_extract(e.body,'$.at') FROM events e "
-                "WHERE e.session_id=sessions.id ORDER BY e.seq DESC LIMIT 1), "
-                "json_extract(body,'$.created_at')) DESC, rowid DESC LIMIT ? OFFSET ?", (limit + 1, offset)
-            ).fetchall()
-            return dict(sessions=[dict(session_id=r[0], title=r[1], task=json.loads(r[2]), event_cursor=r[3]) for r in rows[:limit]],
-                        next_offset=offset + limit if len(rows) > limit else None)
+            rows = db.execute('SELECT id,title,event_cursor,last_activity_at,ordinal FROM session_heads '
+                'WHERE deleted_at IS NULL' + clause + ' ORDER BY last_activity_at DESC,ordinal DESC LIMIT ? OFFSET ?',
+                (*values, limit + 1, offset)).fetchall()
+            sessions = [dict(session_id=r['id'], title=r['title'], event_cursor=r['event_cursor'],
+                task=storage.section(db, r['id'], 'task')) for r in rows[:limit]]
+            more = len(rows) > limit
+            key = [1, rows[limit-1]['last_activity_at'], rows[limit-1]['ordinal']] if more else None
+            next_cursor = base64.urlsafe_b64encode(canonical(key).encode()).decode() if more else None
+            return dict(sessions=sessions, next_cursor=next_cursor, next_offset=offset + limit if more and cursor is None else None)
+
+    def messages(self, sid, *, before=None, limit=200):
+        if type(limit) is not int or not 1 <= limit <= 1000 or (before is not None and (type(before) is not int or not 0 <= before < 2**63)):
+            raise ServiceError('Invalid message cursor or limit')
+        with self.read() as db:
+            self._head(db, sid)
+            clause = ' AND position<?' if before is not None else ''
+            rows = db.execute('SELECT position,body FROM session_messages WHERE session_id=?' + clause +
+                              ' ORDER BY position DESC LIMIT ?', (sid, *((before,) if before is not None else ()), limit + 1)).fetchall()
+            return dict(messages=[json.loads(r[1]) for r in reversed(rows[:limit])],
+                        next_before=rows[limit-1][0] if len(rows) > limit else None)
 
     def list_sessions_by_activity(self):
-        """Most recently active session first; ties and event-less sessions keep newest-created order."""
         with self.read() as db:
-            return [json.loads(row[0]) for row in db.execute(
-                "SELECT body FROM sessions WHERE json_extract(body, '$.deleted_at') IS NULL "
-                "ORDER BY COALESCE((SELECT json_extract(e.body, '$.at') FROM events e "
-                "WHERE e.session_id = sessions.id ORDER BY e.seq DESC LIMIT 1), "
-                "json_extract(body, '$.created_at')) DESC, rowid DESC"
-            )]
+            return [storage.load(db, r[0]) for r in db.execute('SELECT id FROM session_heads WHERE deleted_at IS NULL '
+                'ORDER BY last_activity_at DESC,ordinal DESC')]
 
     def delete(self, sid):
         with self.transaction() as db:
-            row = db.execute("SELECT body FROM sessions WHERE id=?", (sid,)).fetchone()
-            if row is None:
-                raise ServiceError("Session not found", 404)
-            state = json.loads(row[0])
+            state = storage.load(db, sid, lazy=True, deleted=True)
             if state.get("deleted_at"):
                 return {"session_id": sid, "deleted": True}
             if (state["task"]["state"] not in {"idle", "completed", "failed", "paused"}
@@ -592,31 +628,23 @@ class SessionStore:
         if isinstance(after, bool) or not isinstance(after, int) or after < 0 or not 1 <= limit <= 1000:
             raise ServiceError("Invalid event cursor or limit")
         with self.read() as db:
-            state = self._load(db, sid)
+            state = self._head(db, sid)
             if after > state["event_cursor"]:
                 raise ServiceError("Cursor exceeds session history; reload snapshot", 409)
             return [json.loads(row[0]) for row in db.execute("SELECT body FROM events WHERE session_id=? AND seq>? ORDER BY seq LIMIT ?", (sid, after, limit))]
 
     def update(self, sid, callback):
         with self.transaction() as db:
-            state = self._load(db, sid)
+            state = self._load(db, sid, lazy=True)
             result = callback(state, lambda kind, payload: self.append(db, state, kind, payload), db)
             self._save(db, state)
-            return result
+            return storage.materialize(result)
 
     def processes(self, sid):
         """Index execution rounds without loading model token streams."""
         with self.read() as db:
-            state = self._load(db, sid)
-            rows = db.execute(
-                """SELECT body FROM events WHERE session_id=? AND (
-                    json_extract(body,'$.type') IN ('run.started','run.failed','run.stopped','run.recovery.required')
-                    OR (json_extract(body,'$.type')='run.state.changed'
-                        AND json_extract(body,'$.payload.state')!='running')
-                    OR (json_extract(body,'$.type')='message.created'
-                        AND json_extract(body,'$.payload.role')='assistant')) ORDER BY seq""",
-                (sid,),
-            )
+            state = self._head(db, sid)
+            rows = db.execute(f"SELECT body FROM events WHERE session_id=? AND {storage.PROCESS_PREDICATE} ORDER BY seq", (sid,))
             processes, active = [], {}
             for row in rows:
                 event = json.loads(row[0])
@@ -652,13 +680,18 @@ class SessionStore:
         return ref
 
     def save_artifact(self, sid, value, kind):
-        with self.transaction() as db:
-            self._load(db, sid)
-            return self.artifact_in_transaction(db, sid, value, kind)
+        with self.artifacts.prepare(value, kind) as prepared, self.transaction() as db:
+            self._head(db, sid)
+            return self.register_artifact(db, sid, prepared)
+
+    def register_artifact(self, db, sid, prepared):
+        ref = prepared.install()
+        db.execute('INSERT OR IGNORE INTO artifacts VALUES(?,?,?)', (sid, ref['sha256'], canonical(ref)))
+        return ref
 
     def read_artifact(self, sid, digest):
         with self.read() as db:
-            self._load(db, sid)
+            self._head(db, sid)
             if not db.execute("SELECT 1 FROM artifacts WHERE session_id=? AND digest=?", (sid, digest)).fetchone():
                 raise ServiceError("Artifact not referenced by session", 404)
         return self.artifacts.read(digest)
@@ -666,7 +699,7 @@ class SessionStore:
 
     def artifact_ref(self, sid, digest):
         with self.read() as db:
-            self._load(db, sid)
+            self._head(db, sid)
             row = db.execute("SELECT ref FROM artifacts WHERE session_id=? AND digest=?", (sid, digest)).fetchone()
             if not row:
                 raise ServiceError("Artifact not referenced by session", 404)

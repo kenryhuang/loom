@@ -32,6 +32,15 @@ def write_lock(database):
     return _writer(database).lock
 
 
+def after_commit(database, callback, *, key=None):
+    """Run only after the outer writer commits; savepoint rollback discards it."""
+    writer = _writer(database)
+    if getattr(writer.local, "connection", None) is None:
+        callback()
+    else:
+        writer.local.callbacks.append((key, callback))
+
+
 def is_busy(exc):
     if not isinstance(exc, sqlite3.OperationalError):
         return False
@@ -47,6 +56,7 @@ def write_transaction(database):
     with writer.lock:
         current = getattr(writer.local, "connection", None)
         if current is not None:
+            callback_start = len(writer.local.callbacks)
             writer.local.sequence += 1
             savepoint = f"loom_write_{writer.local.sequence}"
             current.execute(f"SAVEPOINT {savepoint}")
@@ -54,20 +64,30 @@ def write_transaction(database):
                 yield current
                 current.execute(f"RELEASE {savepoint}")
             except BaseException:
+                del writer.local.callbacks[callback_start:]
                 current.execute(f"ROLLBACK TO {savepoint}")
                 current.execute(f"RELEASE {savepoint}")
                 raise
             return
         db = sqlite3.connect(database, timeout=10)
         db.row_factory = sqlite3.Row
+        callbacks = []
         try:
             db.execute("BEGIN IMMEDIATE")
             writer.local.connection, writer.local.sequence = db, 0
+            writer.local.callbacks = []
             yield db
             db.commit()
+            callbacks = writer.local.callbacks
         except BaseException:
             db.rollback()
             raise
         finally:
             writer.local.connection = None
+            writer.local.callbacks = []
             db.close()
+    notified = set()
+    for key, callback in callbacks:
+        if key is None or key not in notified:
+            callback()
+            notified.add(key)

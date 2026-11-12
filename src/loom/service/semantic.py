@@ -856,8 +856,8 @@ class SessionSemantic:
             if stop.is_set() or self.closed.is_set():
                 raise InterruptedError("Evaluation stopped; completed stages retained")
             payload = self._result(body, source, result, semantic)
-            with self.store.transaction() as db:
-                ref = self.store.artifact_in_transaction(db, body["session_id"], payload, "trajectory_evaluation")
+            with self.store.artifacts.prepare(payload, 'trajectory_evaluation') as prepared, self.store.transaction() as db:
+                ref = self.store.register_artifact(db, body['session_id'], prepared)
                 self.outputs.track(db, body, ref)
             body.update(state="completed", completed_at=now_iso(), result=ref)
             if body.get("analysis_version") == GRAPH_ENGINE and semantic["coverage"]["status"] != "complete":

@@ -235,7 +235,10 @@ class SessionHandler(BaseHTTPRequestHandler):
                 else:
                     offset = self._number(query, "offset", 0)
                     limit = self._number(query, "limit", 50, 1, 200)
-                    self._json(200, service.store.session_page(offset=offset, limit=limit))
+                    cursor = query.get('cursor')
+                    if cursor is not None and len(cursor) != 1:
+                        raise ServiceError('Invalid session cursor')
+                    self._json(200, service.store.session_page(cursor=cursor[0] if cursor else None, offset=offset, limit=limit))
                 return
             if len(parts) < 4 or parts[:2] != ["v1", "sessions"]:
                 raise ServiceError("Route not found", 404)
@@ -326,6 +329,9 @@ class SessionHandler(BaseHTTPRequestHandler):
                 self._json(200, service.snapshot(sid))
             elif method == "GET" and route == "processes" and len(parts) == 4:
                 self._json(200, {"processes": service.store.processes(sid)})
+            elif method == "GET" and route == "messages" and len(parts) == 4:
+                before = self._number(query, "before", 0) if "before" in query else None
+                self._json(200, service.store.messages(sid, before=before, limit=self._number(query, 'limit', 200, 1, 1000)))
             elif method == "GET" and route == "history" and len(parts) == 4:
                 limit = self._number(query, "limit", 200, 1, 1000)
                 after = self._number(query, "after", 0)
@@ -333,8 +339,8 @@ class SessionHandler(BaseHTTPRequestHandler):
                 run_id = query.get("run_id")
                 if len(view) != 1 or view[0] not in {"raw", "activity"} or (run_id is not None and (len(run_id) != 1 or not run_id[0])):
                     raise ServiceError("Invalid history view or run_id")
-                with service.store.transaction() as db:
-                    state = service.store._load(db, sid)
+                with service.store.read() as db:
+                    state = service.store._head(db, sid)
                     before = self._number(query, "before", state["event_cursor"] + 1, 1)
                     clauses, values = ["session_id=?", "seq<?", "seq>?"], [sid, before, after]
                     if run_id:
@@ -382,14 +388,19 @@ class SessionHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
         with contextlib.suppress(BrokenPipeError, ConnectionResetError, TimeoutError):
-            while not self.server.closing.is_set():
-                events = self.server.service.events(sid, cursor)
-                for event in events:
-                    self.wfile.write(f"id: {event['seq']}\nevent: {event['type']}\ndata: {canonical(event)}\n\n".encode())
-                    self.wfile.flush()
-                    cursor = event["seq"]
-                if not events:
-                    self.wfile.write(b": heartbeat\n\n")
-                    self.wfile.flush()
-                    with self.server.service.store.changed:
-                        self.server.service.store.changed.wait(0.5)
+            store = self.server.service.store
+            with store.notifications.subscribe(sid) as changed:
+                while not self.server.closing.is_set():
+                    # Holding only this session's condition bridges cursor read and
+                    # wait. Commit callbacks run after releasing the writer mutex.
+                    with changed:
+                        events = self.server.service.events(sid, cursor)
+                        if not events:
+                            changed.wait(0.5)
+                    for event in events:
+                        self.wfile.write(f"id: {event['seq']}\nevent: {event['type']}\ndata: {canonical(event)}\n\n".encode())
+                        self.wfile.flush()
+                        cursor = event["seq"]
+                    if not events:
+                        self.wfile.write(b": heartbeat\n\n")
+                        self.wfile.flush()

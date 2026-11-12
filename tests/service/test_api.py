@@ -609,3 +609,22 @@ def test_provider_model_catalog_uses_qualified_ids_and_hides_legacy_aliases(api)
     assert catalog['model_aliases'] == {'main': 'cloud/glm-5.2'}
     assert client._json('/v1/knowledge-bases')['models'] == expected
     assert 'PRIVATE_KEY' not in json.dumps(catalog)
+
+
+def test_history_and_message_pages_are_read_only_and_catalog_accepts_cursor(api, monkeypatch):
+    service, _, client, path = api
+    sids = [new(client, path, f'page-{i}') for i in range(3)]
+    client.command(sids[0], 'submit_message', {'content': 'second'})
+    def forbidden():
+        raise AssertionError('read endpoint acquired the writer')
+    monkeypatch.setattr(service.store, 'transaction', forbidden)
+    first = client.session_page(limit=2)
+    second = client.session_page(cursor=first['next_cursor'], limit=2)
+    assert len(first['sessions'] + second['sessions']) == 3
+    assert second['next_cursor'] is None
+    assert client.history(sids[0])['events']
+    recent = client.messages(sids[0], limit=1)
+    assert recent['messages'][0]['content'] == 'second'
+    older = client.messages(sids[0], before=recent['next_before'], limit=1)
+    assert older['messages'][0]['content'] == 'Maintain'
+    assert older['next_before'] is None

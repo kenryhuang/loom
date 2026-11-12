@@ -360,9 +360,10 @@ class SessionDiagnosis:
                 candidate = next(m["content"] for m in reversed(state["messages"]) if m["role"] == "assistant")
                 report = validate_report(candidate, ledger)
                 job.update(state="completed", report=report, markdown=markdown(report), finished_at=now_iso())
-                with self.runtime.store.transaction() as db:
-                    job["report_ref"] = self.runtime.store.artifact_in_transaction(db, state["session_id"], report, "diagnosis_report")
-                    job["markdown_ref"] = self.runtime.store.artifact_in_transaction(db, state["session_id"], job["markdown"], "diagnosis_markdown")
+                with (self.runtime.store.artifacts.prepare(report, 'diagnosis_report') as report_file,
+                      self.runtime.store.artifacts.prepare(job['markdown'], 'diagnosis_markdown') as markdown_file, self.runtime.store.transaction() as db):
+                    job['report_ref'] = self.runtime.store.register_artifact(db, state['session_id'], report_file)
+                    job['markdown_ref'] = self.runtime.store.register_artifact(db, state['session_id'], markdown_file)
             except (ValueError, StopIteration) as exc:
                 job.update(state="failed", error="Invalid final diagnosis report: " + str(exc), finished_at=now_iso())
         elif state["task"]["state"] == "queued":
@@ -395,19 +396,17 @@ class SessionDiagnosis:
                     if workspace.meta["state"] == "review" and workspace.meta["cleanup"] == "delete":
                         workspace.discard()
             if workspace.meta.get("patch_sha256") and job.get("runtime_session_id") and not job.get("changes_ref"):
-                with self.runtime.store.transaction() as db:
-                    job["changes_ref"] = self.runtime.store.artifact_in_transaction(
-                        db,
-                        job["runtime_session_id"],
-                        {
-                            "patch": (workspace.directory / "changes.patch").read_text(errors="replace"),
-                            "files": workspace.meta["files"],
-                            "patch_sha256": workspace.meta["patch_sha256"],
-                            "baseline": workspace.meta["baseline"],
-                            "checks": workspace.meta["checks"],
-                        },
-                        "diagnosis_changes",
-                    )
+                job["changes_ref"] = self.runtime.store.save_artifact(
+                    job["runtime_session_id"],
+                    {
+                        "patch": (workspace.directory / "changes.patch").read_text(errors="replace"),
+                        "files": workspace.meta["files"],
+                        "patch_sha256": workspace.meta["patch_sha256"],
+                        "baseline": workspace.meta["baseline"],
+                        "checks": workspace.meta["checks"],
+                    },
+                    "diagnosis_changes",
+                )
             job.pop("workspace_error", None)
         except (ValueError, OSError) as exc:
             job["workspace_error"] = redact(str(exc))

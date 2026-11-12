@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 import traceback
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 
@@ -88,7 +89,7 @@ class LoomService:
         self.evaluation_provider_factory = evaluation_provider_factory
         self.setup_recommender = setup_recommender
         self.cleanup_checked = 0
-        for state in self.store.list_sessions():
+        for state in self.store.list_sessions(running_only=True):
             if state["run"] and state["run"]["state"] == "running":
                 self.recover(state["session_id"], "Supervisor restarted")
 
@@ -121,7 +122,7 @@ class LoomService:
             return self.store.delete(sid)
 
     def snapshot(self, sid):
-        state = self.store.snapshot(sid)
+        state = self.store.snapshot(sid, messages_limit=200, context=False)
         counters = decode((state["run"] or {}).get("counters", encode({})))
         used = getattr(counters.get("usage"), "total_tokens", 0)
         limit = state["task"]["limits"]["max_tokens"]
@@ -304,7 +305,7 @@ class LoomService:
     def _save_operation(self, db, sid, oid, op):
         db.execute("INSERT OR REPLACE INTO operations VALUES(?,?,?)", (oid, sid, canonical(op)))
 
-    def _worker_event(self, state, emit, db, value):
+    def _worker_event(self, state, emit, db, value, prepared_events=None):
         run, sid = state["run"], state["session_id"]
         event = plain(value)
         if event.get("event_id"):
@@ -402,7 +403,9 @@ class LoomService:
                     op.update(status="reconciled", result=encode({"ok": True, "value": observation}))
                     self._save_operation(db, sid, oid, op)
         if len(canonical(event).encode()) > 32768:
-            ref = self.store.artifact_in_transaction(db, sid, event, "event_detail")
+            prepared = (prepared_events or {}).get(canonical(event))
+            ref = (self.store.register_artifact(db, sid, prepared) if prepared else
+                   self.store.artifact_in_transaction(db, sid, event, "event_detail"))
             event = {
                 **{k: event[k] for k in ("type", "trace_id", "llm_call_id", "tool_call_id", "tool_id", "at") if k in event},
                 "artifact": ref,
@@ -411,6 +414,56 @@ class LoomService:
         emit(event["type"], event)
 
     def worker_record(self, sid, record):
+        kind = record.get('type')
+        if kind not in {'boundary', 'publish_artifact', 'artifact_upload_finish', 'event', 'event_batch'}:
+            return self._worker_record(sid, record)
+        value = decode(record['payload'])
+        candidates = ([value] if kind == 'event' else value if kind == 'event_batch' else
+                      value.get('task_events', []) if kind == 'boundary' else [])
+        if kind in {'event', 'event_batch'} and (not isinstance(candidates, list) or any(not isinstance(e, dict) for e in candidates)
+                or all(len(canonical(plain(e)).encode()) < 32000 for e in candidates)):
+            return self._worker_record(sid, record)
+        # Validate and replay before doing potentially large filesystem work.
+        # The write transaction repeats validation against concurrent control changes.
+        with self.store.read() as db:
+            state = self.store._load(db, sid, lazy=True)
+            run = state['run']
+            if not run or record['epoch'] != state['epoch'] or record['attempt_id'] != run['attempt_id']:
+                raise ServiceError('Stale executor epoch', 409)
+            previous = db.execute('SELECT response FROM worker_records WHERE attempt_id=? AND record_id=?',
+                                  (record['attempt_id'], record['record_id'])).fetchone()
+            if previous:
+                return decode(json.loads(previous[0]))
+            if run['state'] != 'running':
+                raise ServiceError('Executor already suspended or completed', 409)
+            offsets = dict(run.get('stream_offsets', {})) if candidates else {}
+        with ExitStack() as stack:
+            prepared, events = None, {}
+            if kind == 'boundary':
+                prepared = stack.enter_context(self.store.artifacts.prepare(encode(value), 'execution_checkpoint'))
+            elif kind == 'publish_artifact':
+                prepared = stack.enter_context(self.store.artifacts.prepare(value['value'], value['kind']))
+            elif kind == 'artifact_upload_finish':
+                prepared = stack.enter_context(self.store.artifacts.prepare_upload(record['attempt_id'], value['upload_id']))
+            for candidate in candidates:
+                event = plain(candidate)
+                if event.get('type', '').endswith('.delta') and isinstance(event.get('delta'), str):
+                    key = stream_key(event)
+                    event['offset'] = offsets.get(key, 0)
+                    offsets[key] = event['offset'] + len(event['delta'])
+                elif event.get('type') == 'llm.completed':
+                    prefix = f"{event['llm_call_id']}:"
+                    offsets = {k: v for k, v in offsets.items() if not k.startswith(prefix)}
+                raw = canonical(event)
+                if len(raw.encode()) > 32768:
+                    events[raw] = stack.enter_context(self.store.artifacts.prepare(event, 'event_detail'))
+            return self._worker_record(sid, record, prepared=prepared, prepared_events=events)
+
+    def _worker_record(self, sid, record, *, prepared=None, prepared_events=None):
+        with self.lock:
+            return self._apply_worker_record(sid, record, prepared=prepared, prepared_events=prepared_events)
+
+    def _apply_worker_record(self, sid, record, *, prepared=None, prepared_events=None):
         if record.get('type') in {'agent_context', 'agent_record_use'}:
             from loom.autonomy.context import build_snapshot, record_use
 
@@ -453,15 +506,15 @@ class LoomService:
                     ):
                         raise ServiceError("Invalid worker delta batch")
                     for event in value:
-                        self._worker_event(state, emit, db, event)
+                        self._worker_event(state, emit, db, event, prepared_events)
                 else:
-                    self._worker_event(state, emit, db, value)
+                    self._worker_event(state, emit, db, value, prepared_events)
             elif kind == "boundary":
                 previous = decode(run.get("counters", encode({})))
                 used = getattr(previous.get("usage"), "total_tokens", 0)
-                run["checkpoint"] = self.store.artifact_in_transaction(db, sid, encode(value), "execution_checkpoint")
+                run["checkpoint"] = self.store.register_artifact(db, sid, prepared)
                 for event in value.get("task_events", []):
-                    self._worker_event(state, emit, db, event)
+                    self._worker_event(state, emit, db, event, prepared_events)
                 if run.get("assembly_update_pending") == value.get("assembly_revision"):
                     run.pop("assembly_update_pending", None)
                     run.pop("tool_extension_pending", None)
@@ -473,17 +526,17 @@ class LoomService:
                     state["task"]["goal_revision"] += 1
                     state["task"]["objective"] = value["context"].goal.objective
                     state["task"]["revision"] += 1
-                    applied_inputs = [m for m in state["messages"] if m["role"] == "user" and state["input_cursor"] < m["seq"] <= cursor]
+                    applied_inputs = [m for m in self.store.pending_messages(db, state, after=state['input_cursor']) if m['seq'] <= cursor]
                     state["input_cursor"] = cursor
                     emit("task.goal.revised", {"objective": state["task"]["objective"], "goal_revision": state["task"]["goal_revision"],
                                               "input_cursor": cursor, "applied_command_ids": [m["command_id"] for m in applied_inputs],
                                               "task_episode_id": run.get("task_episode_id")})
-                    for message in state["messages"]:
-                        if message["role"] == "user" and message["seq"] <= cursor:
-                            self.store.applied(db, state, message["command_id"])
+                    for message in self.store.pending_messages(db, state, accepted=True):
+                        if message['seq'] <= cursor:
+                            self.store.applied(db, state, message['command_id'])
                 request = state["input_request"]
                 recovery_command = request.get("command_id") if request and request["kind"] == "recovery" else None
-                inputs = [m for m in state["messages"] if m["role"] == "user" and m["seq"] > cursor and m["command_id"] != recovery_command]
+                inputs = [m for m in self.store.pending_messages(db, state, after=cursor) if m['command_id'] != recovery_command]
                 answer = None
                 if request and request["state"] in {"answered", "superseded"} and request["kind"] == "clarification":
                     answer = {"request_id": request["id"], "answer": request["answer"], "superseded": request["state"] == "superseded"}
@@ -502,7 +555,7 @@ class LoomService:
                     response = decode(op["result"])
                 elif op and op["status"] == "started" and op["effect_kind"] == "side_effecting":
                     raise ServiceError("Uncertain operation requires recovery", 409)
-                elif state["control"] or any(m["role"] == "user" and m["state"] == "accepted" and m["seq"] > state["input_cursor"] for m in state["messages"]):
+                elif state["control"] or bool(self.store.pending_messages(db, state, after=state['input_cursor'], accepted=True)):
                     response = {"defer": True}
                 elif self.operation_limit and (
                     db.execute("SELECT COUNT(*) FROM operations WHERE session_id=?", (sid,)).fetchone()[0] >= self.operation_limit(state)
@@ -553,8 +606,8 @@ class LoomService:
             elif kind == "artifact_upload_start":
                 response = self.store.artifacts.begin_upload(record["attempt_id"], value["sha256"], value["byte_size"], value["media_type"], value["kind"])
             elif kind in {"artifact_upload_chunk", "artifact_upload_finish"}:
-                response = self.store.artifacts.upload(record["attempt_id"], value["upload_id"], offset=value.get("offset"), data=value.get("data"),
-                                                       finish=kind == "artifact_upload_finish")
+                response = (self.store.register_artifact(db, sid, prepared) if kind == 'artifact_upload_finish' else
+                            self.store.artifacts.upload(record['attempt_id'], value['upload_id'], offset=value.get('offset'), data=value.get('data')))
                 if kind == "artifact_upload_finish":
                     db.execute("INSERT OR IGNORE INTO artifacts VALUES(?,?,?)", (sid, response["sha256"], canonical(response)))
                     emit("artifact.created", {"artifact": response})
@@ -568,7 +621,7 @@ class LoomService:
                     raise ServiceError("Invalid image read size or offset")
                 response = {"byte_size": len(raw), "data": base64.b64encode(raw[offset:offset + 49152]).decode()}
             elif kind == "publish_artifact":
-                response = self.store.artifact_in_transaction(db, sid, value["value"], value["kind"])
+                response = self.store.register_artifact(db, sid, prepared)
                 emit("artifact.created", {"artifact": response})
             elif kind == "read_artifact":
                 digest = value["digest"]
@@ -640,7 +693,7 @@ class LoomService:
                     control = replace(control, kind="paused", reason="Step budget exceeded", reason_code="STEP_BUDGET_EXCEEDED")
                 if control.kind == "completed":
                     run["state"] = "completed"
-                    state["task"]["state"] = "queued" if any(m["state"] == "accepted" and m["role"] == "user" for m in state["messages"]) else "idle"
+                    state["task"]["state"] = "queued" if bool(self.store.pending_messages(db, state, accepted=True)) else "idle"
                     self.store._message(db, state, None, _report_from_run_result(value), role="assistant", status="applied")
                 elif control.kind != "continue":
                     if control.kind == "paused" and value.output and (value.context.state.scratch or {}).get("partial_report"):
@@ -762,6 +815,30 @@ class LoomService:
 
     def _tick(self):
         with self.lock:
+            attempts = list(self.active.items())
+        # Filesystem preparation in worker_record must not hold the controller
+        # lock; control commands can proceed while checkpoints are staged.
+        for sid, attempt in attempts:
+            try:
+                while attempt.connection.poll():
+                    record = attempt.connection.recv()
+                    try:
+                        result = self.worker_record(sid, record)
+                        attempt.connection.send({"value": encode(result)})
+                    except (ServiceError, sqlite3.Error) as exc:
+                        attempt.connection.send(_record_error_response(record, exc))
+                    except (EOFError, BrokenPipeError, OSError):
+                        raise
+                    except Exception as exc:
+                        # An unanswered record freezes the worker on future.result()
+                        # forever; unexpected handler failures still owe it an error.
+                        traceback.print_exc()
+                        attempt.connection.send({"error": f"Internal service error: {exc}"})
+            except (EOFError, BrokenPipeError, OSError):
+                pass
+        with self.lock:
+            if self.stopping.is_set():
+                return
             if time.monotonic() - self.cleanup_checked >= 1:
                 self.cleanup_checked = time.monotonic()
                 for state in self.store.scheduling_sessions():
@@ -774,24 +851,7 @@ class LoomService:
 
                         self.store.update(state["session_id"], cleanup)
             for sid, attempt in list(self.active.items()):
-                try:
-                    while attempt.connection.poll():
-                        record = attempt.connection.recv()
-                        try:
-                            result = self.worker_record(sid, record)
-                            attempt.connection.send({"value": encode(result)})
-                        except (ServiceError, sqlite3.Error) as exc:
-                            attempt.connection.send(_record_error_response(record, exc))
-                        except (EOFError, BrokenPipeError, OSError):
-                            raise
-                        except Exception as exc:
-                            # An unanswered record freezes the worker on future.result()
-                            # forever; unexpected handler failures still owe it an error.
-                            traceback.print_exc()
-                            attempt.connection.send({"error": f"Internal service error: {exc}"})
-                except (EOFError, BrokenPipeError, OSError):
-                    pass
-                state = self.store.snapshot(sid)
+                state = self.store.status(sid)
                 if attempt.process.is_alive() and state["run"]["state"] != "running":
                     attempt.terminal_since = attempt.terminal_since or time.monotonic()
                     if time.monotonic() - attempt.terminal_since > 2:
@@ -799,12 +859,14 @@ class LoomService:
                 if not attempt.process.is_alive():
                     attempt.process.join()
                     attempt.connection.close()
-                    state = self.store.snapshot(sid)
+                    state = self.store.status(sid)
                     if state["run"]["state"] == "running":
                         self.recover(sid, f"Worker exited ({attempt.process.exitcode})")
                     else:
                         self.store.update(sid, self._cleanup_groups)
                     self.active.pop(sid)
+            if self.closed:
+                return
             shared = self.shared_active()
             available = min(self.capacity - len(self.active), self.shared_capacity - len(self.active) - len(shared))
             occupied = {**shared, **self.active}
@@ -851,7 +913,7 @@ class LoomService:
                     attempt.process.kill()
                     attempt.process.join(timeout=1)
                 attempt.connection.close()
-                state = self.store.snapshot(sid)
+                state = self.store.status(sid)
                 if state["run"]["state"] == "running":
                     self.recover(sid, "Service shut down")
                 else:

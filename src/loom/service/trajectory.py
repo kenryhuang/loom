@@ -234,9 +234,10 @@ class SessionTrajectory:
             coverage.update(raw_event_count=sum(event_counts.values()), event_type_counts=event_counts, event_counts_by_run=counts_by_run)
             source = evidence_store(records)
             result = analyze_session_trace(source, coverage)
-            with self.store.transaction() as db:
-                refs = {"source": self.store.artifact_in_transaction(db, body["session_id"], records, "trajectory_source"),
-                        "result": self.store.artifact_in_transaction(db, body["session_id"], result, "trajectory_analysis")}
+            with (self.store.artifacts.prepare(records, 'trajectory_source') as source_file,
+                  self.store.artifacts.prepare(result, 'trajectory_analysis') as result_file, self.store.transaction() as db):
+                refs = {'source': self.store.register_artifact(db, body['session_id'], source_file),
+                        'result': self.store.register_artifact(db, body['session_id'], result_file)}
             body.update(state="completed", completed_at=now_iso(), **refs)
             self._remember(body["id"], source, result)
             self._save(body)

@@ -62,7 +62,7 @@ def test_admission_projection_keeps_resource_exclusion_and_index_membership(tmp_
         db.execute("UPDATE sessions SET body=json_set(body,'$.deleted_at','now') WHERE id=?", (ids[2],))
     assert ids[2] not in {s['session_id'] for s in store.scheduling_sessions()}
     with store.read() as db:
-        plan = db.execute(f'EXPLAIN QUERY PLAN SELECT id FROM sessions WHERE {SCHEDULING_PREDICATE}').fetchall()
+        plan = db.execute(f'EXPLAIN QUERY PLAN SELECT id FROM session_heads WHERE {SCHEDULING_PREDICATE}').fetchall()
     assert any('sessions_admission' in row[3] for row in plan)
 
 

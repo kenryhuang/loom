@@ -112,14 +112,16 @@ export class SessionApi {
   }
   async sessions(signal) {
     const values = [];
-    let offset = 0;
+    let cursor = null, legacyOffset = null;
     do {
-      const page = await this.json(`/v1/sessions?offset=${offset}&limit=200`, {
-        signal,
-      });
+      const query = new URLSearchParams({ limit: "200" });
+      if (cursor !== null) query.set("cursor", cursor);
+      else if (legacyOffset !== null) query.set("offset", String(legacyOffset));
+      const page = await this.json(`/v1/sessions?${query}`, { signal });
       values.push(...page.sessions);
-      offset = page.next_offset;
-    } while (offset !== null);
+      cursor = page.next_cursor ?? null;
+      legacyOffset = Object.hasOwn(page, "next_cursor") ? null : (page.next_offset ?? null);
+    } while (cursor !== null || legacyOffset !== null);
     return values;
   }
   snapshot(id, signal) {

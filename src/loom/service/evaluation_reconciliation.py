@@ -20,9 +20,8 @@ from loom.service.trajectory import evidence_store
 
 
 def reconcile(store, evaluation_id, *, apply=False):
-    # Serialize with normal service writes. Never touch queued/running jobs or
-    # instantiate a worker manager, which would interrupt other evaluations.
-    with store.transaction() as db:
+    # Build against a read snapshot, then compare-and-swap the settled job.
+    with store.read() as db:
         saved = db.execute('SELECT body FROM semantic_jobs WHERE id=?', (evaluation_id,)).fetchone()
         if not saved:
             raise ServiceError('Evaluation not found', 404)
@@ -54,14 +53,23 @@ def reconcile(store, evaluation_id, *, apply=False):
         payload = SessionSemantic._result(job, source, factual, bundle)
         assert cp['usage'] == original['checkpoint']['usage'] and job['usage'] == original['usage']
 
-        def artifact(value, kind):
-            ref = store.artifact_in_transaction(db, job['session_id'], value, kind)
+    with (store.artifacts.prepare(original, 'evaluation_reconciliation_backup') as backup_file,
+          store.artifacts.prepare(payload, 'trajectory_evaluation') as result_file, store.transaction() as db):
+        current = db.execute('SELECT body FROM semantic_jobs WHERE id=?', (evaluation_id,)).fetchone()
+        if not current or current[0] != saved[0]:
+            raise ServiceError('Evaluation changed during reconciliation; retry', 409)
+        current_parent = db.execute('SELECT body FROM session_analyses WHERE id=? AND session_id=?',
+                                    (job['analysis_id'], job['session_id'])).fetchone()
+        if not current_parent or json.loads(current_parent[0]) != parent:
+            raise ServiceError('Source analysis changed during reconciliation; retry', 409)
+        def artifact(prepared):
+            ref = store.register_artifact(db, job['session_id'], prepared)
             db.execute('INSERT OR IGNORE INTO evaluation_artifacts VALUES(?,?,?)',
                        (job['id'], job['session_id'], ref['sha256']))
             return ref
 
-        backup = artifact(original, 'evaluation_reconciliation_backup')
-        job['result'] = artifact(payload, 'trajectory_evaluation')
+        backup = artifact(backup_file)
+        job['result'] = artifact(result_file)
         job.setdefault('reconciliations', []).append(dict(version=VERSION, at=now_iso(), backup=backup,
                                                          retired_candidates=retired, model_calls=0))
         assessment = status(cp)

@@ -46,8 +46,22 @@ class SessionClient:
     def create(self, payload, *, command_id=None):
         return self._json("/v1/sessions", {"command_id": command_id or uuid.uuid4().hex, "payload": payload})
 
-    def list_sessions(self, *, offset=0, limit=50):
-        return self._json("/v1/sessions?" + urlencode({"offset": offset, "limit": limit}))["sessions"]
+    def session_page(self, *, cursor=None, limit=50, offset=0):
+        query = {"limit": limit}
+        if cursor is not None:
+            query["cursor"] = cursor
+        elif offset:
+            query["offset"] = offset
+        return self._json("/v1/sessions?" + urlencode(query))
+
+    def list_sessions(self, *, cursor=None, offset=0, limit=50):
+        return self.session_page(cursor=cursor, offset=offset, limit=limit)["sessions"]
+
+    def messages(self, sid, *, before=None, limit=200):
+        query = {"limit": limit}
+        if before is not None:
+            query["before"] = before
+        return self._json(self._path(sid, 'messages') + '?' + urlencode(query))
 
     def command(self, sid, kind, payload=None, *, command_id=None, expected_task_revision=None):
         value = {"command_id": command_id or uuid.uuid4().hex, "type": kind, "payload": payload or {}}

@@ -42,7 +42,12 @@ def new_id(prefix: str) -> str:
 
 
 def canonical(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    def mapping(item):
+        if isinstance(item, Mapping):
+            return dict(item.items())
+        raise TypeError(f"Cannot serialize {type(item).__name__}")
+
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False, default=mapping)
 
 
 def stream_key(event: dict) -> str:

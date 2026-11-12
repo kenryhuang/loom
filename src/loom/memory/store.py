@@ -135,7 +135,7 @@ class MemoryStore:
                 db.create_function("memory_scope_matches", 2, self._scope_matches)
                 db.create_function("memory_bound_workspace", 1, lambda task: bound_workspace(json.loads(task)))
                 db.execute('BEGIN')  # Records and annotations must belong to the same read snapshot.
-                tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
                 if 'sessions' not in tables:
                     raise MemoryError("memory.store_unavailable", "Memory source is not a Loom service database (sessions table missing)")
                 if 'semantic_jobs' not in tables:

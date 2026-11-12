@@ -9,9 +9,26 @@ import os
 import re
 import tempfile
 import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from loom.service.contracts import ServiceError, canonical
+
+
+@dataclass
+class PreparedArtifact:
+    temporary: Path
+    target: Path
+    ref: dict
+
+    def install(self):
+        # The caller serializes this rename/reference insertion with deletion.
+        if self.target.exists():
+            self.temporary.unlink(missing_ok=True)
+        else:
+            os.replace(self.temporary, self.target)
+        return self.ref
 
 
 class ServiceArtifacts:
@@ -22,6 +39,27 @@ class ServiceArtifacts:
 
     def publish(self, value, kind: str) -> dict:
         return self._publish(canonical(value).encode(), kind, "application/json", "json")
+
+    @contextmanager
+    def prepare(self, value, kind):
+        with self.prepare_bytes(canonical(value).encode(), kind, 'application/json', 'json') as artifact:
+            yield artifact
+
+    @contextmanager
+    def prepare_bytes(self, raw, kind, media_type, extension):
+        digest = hashlib.sha256(raw).hexdigest()
+        fd, temporary = tempfile.mkstemp(dir=self.root)
+        temporary = Path(temporary)
+        try:
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            ref = {"schema_version": "1", "kind": kind, "relative_path": f"artifacts/{digest}.{extension}",
+                   "sha256": digest, "byte_size": len(raw), **({'media_type': media_type} if extension != 'json' else {})}
+            yield PreparedArtifact(temporary, self.root / f'{digest}.{extension}', ref)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _publish(self, raw, kind, media_type, extension):
         digest = hashlib.sha256(raw).hexdigest()
@@ -79,6 +117,29 @@ class ServiceArtifacts:
         (folder / f"{identifier}.json").write_text(canonical(dict(owner=owner, digest=digest, byte_size=byte_size, media_type=media_type, kind=kind)))
         (folder / f"{identifier}.part").touch(mode=0o600)
         return identifier
+
+    @contextmanager
+    def prepare_upload(self, owner, identifier):
+        from loom.llm.images import image_dimensions
+
+        if not isinstance(identifier, str) or not re.fullmatch('[0-9a-f]{32}', identifier):
+            raise ServiceError('Invalid upload ID')
+        path = self.root / '.uploads' / identifier
+        try:
+            meta = json.loads(path.with_suffix('.json').read_text())
+            if meta['owner'] != owner:
+                raise ServiceError('Image upload does not belong to this worker', 403)
+            raw = path.with_suffix('.part').read_bytes()
+        except (OSError, ValueError) as exc:
+            raise ServiceError('Image upload not found', 404) from exc
+        if len(raw) != meta['byte_size'] or hashlib.sha256(raw).hexdigest() != meta['digest']:
+            raise ServiceError('Image upload integrity failure')
+        image_dimensions(raw, meta['media_type'])
+        with self.prepare_bytes(raw, meta['kind'], meta['media_type'], 'bin') as prepared:
+            yield prepared
+        # Only remove the upload after successful transaction completion.
+        path.with_suffix('.part').unlink(missing_ok=True)
+        path.with_suffix('.json').unlink(missing_ok=True)
 
     def upload(self, owner, identifier, *, offset=None, data=None, finish=False):
         if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{32}", identifier):
