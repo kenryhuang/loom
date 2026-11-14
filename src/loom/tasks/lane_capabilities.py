@@ -65,7 +65,10 @@ def handlers_for(branch):
     async def read(value, _options=None):
         try:
             content = branch.read(value["path"])
-            result = dict(path=value["path"], content=content, bytes_read=len(content.encode()))
+            from loom.tasks.file_read import file_read_payload
+
+            result = file_read_payload(content.encode(), value["path"], value["path"],
+                                       offset_bytes=value.get("offset_bytes", 0), max_bytes=value.get("max_bytes", 20000))
             return ok(Observation(new_trace_id(), "read_file", result, now_iso()))
         except (OSError, ValueError, KeyError) as exc:
             return err(make_loom_error("branch.read_failed", str(exc)))

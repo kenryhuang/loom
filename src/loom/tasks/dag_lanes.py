@@ -95,7 +95,8 @@ async def run_lanes(policy, context, runtime, candidates):
                 path = (Path(assembly.tool_request.workspace) / version["path"]).resolve()
                 path.relative_to(Path(assembly.tool_request.workspace).resolve())
                 raw = await asyncio.to_thread(path.read_bytes)
-                current = hashlib.sha256(raw[:version["bytes_read"]].decode("utf-8", errors="replace").encode()).hexdigest()
+                start, end = version.get("byte_range", [0, version["bytes_read"]])
+                current = hashlib.sha256(raw[start:end].decode("utf-8", errors="replace").encode()).hexdigest()
             except (OSError, ValueError, TypeError):
                 current = None
             if current != version["sha256"]:
@@ -131,15 +132,32 @@ async def run_lanes(policy, context, runtime, candidates):
                     "If main-context knowledge is needed, return an explicit unresolved result. Use complete_branch to return named outputs.")]
             messages.append(LlmMessage("user", seed, name="branch_contract"))
             lane["seeded_node"] = node["id"]
-        manager = BoundedContextManager({}, publish_artifact=assembly.publish_artifact)
-        if lane.get("context_manager"):
+        review_config = assembly.spec["context"].get("working_set")
+        reused_main = key == "main" and review_config is not None
+        manager = (getattr(assembly.context_manager, "manager", assembly.context_manager) if reused_main else
+                   BoundedContextManager({"working_set": review_config} if review_config is not None else {},
+                                         publish_artifact=assembly.publish_artifact, read_artifact=assembly.read_artifact))
+        # The assembly checkpoint is authoritative for the reused main context;
+        # a lane-local snapshot can predate another lane's explicit handoff.
+        if lane.get("context_manager") and not reused_main:
             manager.restore(lane["context_manager"])
+        if manager.working_set is not None:
+            if branch:
+                raise LaneInterrupted("paused", "Review working sets do not support isolated write lanes")
+            from loom.contexts.working_set import notes_tool_ref
+
+            manager.focus = node["objective"]
+            manager.working_set.set_goal(assembly.acceptance.data["goal_digest"])
+            allowed = [*allowed, "record_context_notes", "read_artifact"]
+            tools.extend(to_llm_tools((notes_tool_ref(), assembly.artifact_tool_ref())))
         handlers = handlers_for(branch) if branch else assembly.handlers()
         await emit(lane, "workflow.lane.started", objective=node["objective"])
         while lane["status"] == "running":
             if runtime.cancellation.cancelled:
                 raise LaneInterrupted("stopped", "Task cancelled")
             if lane["phase"] == "before_llm":
+                if manager.working_set is not None and (reason := manager.working_set.pause_reason()):
+                    raise LaneInterrupted("paused", reason)
                 if lane["node_calls"] >= policy.parallel["max_calls_per_node"]:
                     raise LaneInterrupted("continue", "Independent branch call limit reached; continue on main")
                 window, _ = model_context_window(lane_provider)
@@ -201,6 +219,10 @@ async def run_lanes(policy, context, runtime, candidates):
                                   input_fingerprint=lane["input_fingerprint"], read_versions=deepcopy(lane.get("read_versions", {})), status="unverified")
                     if branch:
                         result['branch_directory'] = lane['branch_directory']
+                    if manager.working_set is not None:
+                        result["review_working_set"] = manager.working_set.snapshot()
+                        if not reused_main:
+                            assembly.context_manager.working_set.merge(result["review_working_set"], lane["id"])
                     policy.controller.results[node["id"]] = result
                     node.update(status="succeeded", provenance="Independent read branch returned; parent verification still required")
                     policy.assignments[node["id"]]["status"] = "succeeded"
@@ -209,7 +231,7 @@ async def run_lanes(policy, context, runtime, candidates):
                     for pending in calls[lane["tool_index"]:]:
                         messages.append(LlmMessage("tool", canonical({"recorded": pending.id == call.id, "branch_finished": True}),
                                                    name=pending.name, tool_call_id=pending.id))
-                    lane.update(messages=encode(messages), tool_index=len(calls))
+                    lane.update(messages=encode(messages), tool_index=len(calls), context_manager=manager.snapshot())
                     if key == "main":
                         policy.main_messages = messages
                     persist()
@@ -221,11 +243,19 @@ async def run_lanes(policy, context, runtime, candidates):
                 cid = call.id
                 persist()
                 await emit(lane, "tool.started", tool_id=call.name, tool_call_id=cid, input=value)
-                observation = await handlers[call.name](value, {"metadata": {"tool_call_id": cid, "node_id": node["id"], "lane_id": lane["id"]}})
+                from loom.tasks.context_review import ACTIVE_REVIEW
+
+                token = ACTIVE_REVIEW.set((assembly, manager.working_set)) if manager.working_set is not None else None
+                try:
+                    observation = await handlers[call.name](value, {"metadata": {"tool_call_id": cid, "node_id": node["id"], "lane_id": lane["id"]}})
+                finally:
+                    if token is not None:
+                        ACTIVE_REVIEW.reset(token)
                 if call.name == "read_file" and observation.ok:
                     read = thaw_json(observation.value.value)
                     if isinstance(read, dict) and isinstance(read.get("content"), str) and isinstance(read.get("bytes_read"), int):
                         lane.setdefault("read_versions", {})[read["path"]] = dict(path=read["path"], bytes_read=read["bytes_read"],
+                            byte_range=(read.get("resource") or {}).get("byte_range", [0, read["bytes_read"]]),
                             sha256=hashlib.sha256(read["content"].encode()).hexdigest())
                 await emit(lane, "tool.completed" if observation.ok else "tool.failed", tool_id=call.name, tool_call_id=cid,
                            **({"output": observation.value} if observation.ok else {"error": observation.error}))
@@ -234,7 +264,8 @@ async def run_lanes(policy, context, runtime, candidates):
                     artifact = assembly.publish_artifact({"tool": call.name, "result": text}, "dag_lane_evidence")
                     text = canonical({"excerpt": text[:6000], "artifact": artifact, "truncated": True})
                 messages.append(LlmMessage("tool", text, name=call.name, tool_call_id=call.id))
-                lane.update(messages=encode(messages), tool_index=lane["tool_index"] + 1, receipts=[*lane["receipts"], cid])
+                lane.update(messages=encode(messages), tool_index=lane["tool_index"] + 1, receipts=[*lane["receipts"], cid],
+                            context_manager=manager.snapshot())
                 persist()
             lane["phase"] = "before_llm"
 

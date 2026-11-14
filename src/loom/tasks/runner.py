@@ -359,12 +359,14 @@ def _task_tool_refs() -> tuple[ToolRef, ...]:
         ),
         ToolRef(
             "read_file",
-            "Read a UTF-8 text file from the workspace. Use this before making claims about source or documentation.",
+            "Read a UTF-8 text file from the workspace. Use this before making claims about source or documentation. "
+            "For missing ranges use offset_bytes/next_offset_bytes (file bytes, not artifact character offsets).",
             input_schema={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Workspace-relative file path."},
                     "max_bytes": {"type": "integer", "description": "Maximum bytes to read before truncating."},
+                    "offset_bytes": {"type": "integer", "minimum": 0, "description": "Start at a UTF-8 byte boundary; default 0."},
                 },
                 "required": ["path"],
                 "additionalProperties": False,

@@ -1,7 +1,7 @@
 import {AgentsView} from "./views/agents.mjs";
 import {SettingsView} from "./views/settings.mjs";
 import {ExternalToolsView} from "./views/external-tools.mjs";
-import {canRestartTask} from "./state.mjs";
+import {canReviseTask, executionControl} from "./state.mjs";
 import { SessionApi } from "./api.mjs";
 import { SessionController } from "./controller.mjs";
 import { element, renderResult } from "./markdown.mjs";
@@ -331,56 +331,51 @@ function renderState(state) {
     pending && request.kind === "recovery"
       ? "Answer with the requested resolution JSON."
       : "Ctrl / ⌘ + Enter to send";
-  $("message").disabled = state.task.state === "completed";
+  $("message").disabled = false;
   $("send").disabled = sending || $("message").disabled;
   updateTaskControls(state);
 }
 
 function updateTaskControls(state) {
   if (!state) return;
-  const status = state.task.state;
-  const recovery = state.input_request?.state === "pending" && state.input_request?.kind === "recovery";
-  const allowed = {
-    complete_task: ["idle", "paused"].includes(status) && !recovery,
-    reopen_task: status === "completed",
-    restart_task: Boolean(state.task.objective) && ["idle", "paused", "failed", "completed"].includes(status)
-      && !recovery && !state.workspace_blocked?.length,
-  };
-  for (const [id, enabled] of Object.entries(allowed)) {
-    const button = document.querySelector(`[data-command="${id}"]`);
-    if (button) button.disabled = button.dataset.busy === "true" || !enabled;
+  const control = executionControl(state);
+  const toggle = $("controls").querySelector('[data-execution-toggle]');
+  if (toggle) {
+    toggle.dataset.command = control.command;
+    toggle.textContent = control.label;
+    toggle.title = control.command === "pause" ? "Pause and keep the current context" : "Continue with the saved context";
+    toggle.disabled = toggle.dataset.busy === "true" || !control.enabled;
   }
+  const revise = $("controls").querySelector('[data-command="revise_task"]');
+  if (revise) revise.disabled = revise.dataset.busy === "true" || !canReviseTask(state);
 }
 
 function renderControls() {
   $("controls").replaceChildren();
-  for (const command of catalog.commands) {
-    const button = element(
-      "button",
-      command.id === "stop_run" ? "danger" : "",
-      command.label,
-    );
-    button.dataset.command = command.id;
-    button.title = {
-      complete_task: "Close this task; preserve its run history and verification results",
-      reopen_task: "Reopen for new messages; execution starts when you send a task or choose Restart task",
-      restart_task: "Reassemble the current task with current tool bindings, a fresh plan and budget; keep earlier results as background",
-    }[command.id] || command.label;
+  const toggle = element("button", "", "Pause");
+  toggle.dataset.executionToggle = "true";
+  toggle.disabled = true;
+  const revise = element("button", "", "Revise");
+  revise.dataset.command = "revise_task";
+  revise.title = "Edit conditions, reassemble and run from the beginning";
+  revise.disabled = true;
+  for (const button of [toggle, revise]) {
     button.addEventListener("click", async () => {
       button.dataset.busy = "true";
       button.disabled = true;
       try {
-        await controller.command(command.id);
+        if (button === revise) await editTask();
+        else await controller.command(button.dataset.command);
       } catch (error) {
         showError(error);
       } finally {
         delete button.dataset.busy;
-        button.disabled = false;
         updateTaskControls(controller.projection?.snapshot);
       }
     });
     $("controls").append(button);
   }
+  updateTaskControls(controller?.projection?.snapshot);
 }
 
 async function login(token) {
@@ -503,9 +498,9 @@ function selectedTemplate() {
 }
 function editorMode(editing) {
   sessionSetup.setEditing(editing);
-  $("create-page").querySelector("h2").textContent = editing ? "Edit task" : "New session";
-  $("create-page").setAttribute("aria-label", editing ? "Edit task" : "New session");
-  $("create-submit").textContent = editing ? "Save & restart" : "Create session";
+  $("create-page").querySelector("h2").textContent = editing ? "Revise task" : "New session";
+  $("create-page").setAttribute("aria-label", editing ? "Revise task" : "New session");
+  $("create-submit").textContent = editing ? "Save & run" : "Create session";
   $("create-objective").required = editing;
   $("restart-settings").hidden = !editing;
   $("restart-settings-block").hidden = !editing;
@@ -514,11 +509,11 @@ function editorMode(editing) {
 }
 async function editTask() {
   const active = controller, sid = active?.selectedId;
-  if (!sid || !canRestartTask(active.projection.snapshot)) return;
+  if (!sid || !canReviseTask(active.projection.snapshot)) return;
   const [nextCatalog, bases] = await Promise.all([active.api.catalog(), active.api.json("/v1/knowledge-bases")]);
   if (controller !== active || active.selectedId !== sid) return;
   const snapshot = active.projection.snapshot;
-  if (!canRestartTask(snapshot)) throw new Error("Pause execution before editing the task.");
+  if (!canReviseTask(snapshot)) throw new Error("Pause execution before editing the task.");
   editingTask = {id: sid, revision: snapshot.task.revision, task: structuredClone(snapshot.task)};
   catalog = nextCatalog;
   populateCreate(); editorMode(true);
@@ -654,7 +649,7 @@ $("create-form").addEventListener("submit", async (event) => {
       const active = controller, edit = editingTask;
       if (active?.selectedId !== edit.id) throw new Error("Session changed. Reopen task settings.");
       sessionSetup.restartChanges(payload);
-      await active.api.command(edit.id, "restart_task", {task: payload}, {revision: edit.revision});
+      await active.api.command(edit.id, "revise_task", {task: payload}, {revision: edit.revision});
       if (controller !== active || active.selectedId !== edit.id) return;
       editingTask = null; editorMode(false);
       $("create-form").reset();

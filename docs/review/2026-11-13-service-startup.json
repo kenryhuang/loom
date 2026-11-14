@@ -1,0 +1,54 @@
+{
+  "measurement": "Same consistent database snapshot, new processes; OS page cache not cleared. Core timings include cProfile overhead.",
+  "snapshot_bytes": 5365026816,
+  "rows": {
+    "session_heads": 72,
+    "semantic_jobs": 260,
+    "agent_sessions": 57,
+    "agent_runs": 415
+  },
+  "before": {
+    "seconds": 36.6488,
+    "components": {
+      "LoomService": 0.0538,
+      "SessionTrajectory": 0.0158,
+      "EvaluationArtifacts": 16.172,
+      "SessionSemantic": 34.8985,
+      "SessionSkills": 0.0108,
+      "AgentStore": 0.0038,
+      "AgentSupervisor": 1.657,
+      "MemoryWorker": 0.0015,
+      "ServiceBackground": 36.5947
+    }
+  },
+  "after": {
+    "seconds": 0.3321,
+    "components": {
+      "LoomService": 0.0372,
+      "SessionTrajectory": 0.0171,
+      "EvaluationArtifacts": 0.0051,
+      "SessionSemantic": 0.0104,
+      "SessionSkills": 0.0081,
+      "AgentStore": 0.004,
+      "AgentSupervisor": 0.2535,
+      "MemoryWorker": 0.0006,
+      "ServiceBackground": 0.2947
+    }
+  },
+  "http_ready": [
+    {
+      "seconds": 1.0836,
+      "http_status": 200
+    },
+    {
+      "seconds": 0.5629,
+      "http_status": 200
+    },
+    {
+      "seconds": 0.6412,
+      "http_status": 200
+    }
+  ],
+  "http_scope": "Includes fresh interpreter/module imports and real /web/ HTTP 200; all Agent components initialized, automatic dispatch disabled, no model configuration.",
+  "index_preparation_live_seconds": 12.651
+}

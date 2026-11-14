@@ -48,6 +48,11 @@ def test_default_engine_publishes_whole_discovery_stage_before_dispatch(unified)
     stage, goal, work = snapshot["stages"][0], snapshot["goals"][0], snapshot["work_packages"][0]
     assert stage["kind"] == "discovery" and goal["stage_id"] == work["stage_id"] == stage["id"]
     assert work["state"] == "pending" and work["verification_plan"]
+    with facade.store.sessions.transaction() as db:
+        run = next(r for r in facade.store.rows(db, "agent_runs", aid) if r.get("kind") == "unified_plan")
+    assert run["state"] == "committed"
+    assert run["outcome"]["goal_count"] == run["outcome"]["work_package_count"] == 1
+    assert run["outcome"]["stage_id"] == stage["id"]
     facade.supervisor.scheduler.advance(aid, manual=True)
     work = facade.store.snapshot(aid)["work_packages"][0]
     session = service.snapshot(work["session_id"])
@@ -90,13 +95,21 @@ def test_work_package_requires_its_own_nonempty_business_reason(unified, reason)
     assert not snapshot["work_packages"] and not snapshot["plan_revisions"]
 
 
-def test_invalid_proposal_creates_no_partial_queue_and_does_not_repeat(unified):
+@pytest.mark.parametrize('requirement', ['execution_tools', 'required_tools', 'command'])
+def test_invalid_proposal_creates_no_partial_queue_and_does_not_repeat(unified, requirement):
     service, facade, aid, _ = unified
     calls = []
     def invalid(*_):
         calls.append(True)
         value = proposal()
-        value["stage"]["goals"][0]["work_packages"][0]["execution_tools"] = ["shell_execute"]
+        work = value["stage"]["goals"][0]["work_packages"][0]
+        if requirement == 'execution_tools':
+            work['execution_tools'] = ['shell_execute']
+        elif requirement == 'required_tools':
+            work['verification']['criteria'][0]['required_tools'] = ['shell_execute']
+        else:
+            work['verification']['criteria'][0].update(verifier='command',
+                check=dict(tool_id='shell_execute', input=dict(command='python -m pytest')))
         return value
     service.agent_plan_provider = invalid
     for _ in range(3):
@@ -145,6 +158,8 @@ def test_worker_loads_compiled_verification_without_second_model_plan(unified, p
         if payload["history"]:
             return dict(action="wait", reason="No new delivery requested", source_refs=[])
         value = proposal()
+        value['stage']['goals'][0]['work_packages'][0]['objective'] = (
+            'Audit this repository by reading notes.txt and reporting facts. Do not run commands or modify files.')
         if package_count == 2:
             following = deepcopy(value['stage']['goals'][0]['work_packages'][0])
             following.update(key='summary', objective='Summarize notes.txt with the verified preceding result')
@@ -159,6 +174,13 @@ def test_worker_loads_compiled_verification_without_second_model_plan(unified, p
     assert work["state"] == "succeeded", service.snapshot(work["session_id"]).get("run")
     state = service.snapshot(work["session_id"])
     assert state["acceptance"]["plan"]["origin"] == "compiled_plan"
+    from loom.runtime.checkpoints import decode
+
+    context = decode(service.store.snapshot(work['session_id'])['context'])
+    assert context.metadata['profile'] == 'general'
+    assert not any('smoke' in c.description for c in context.goal.criteria)
+    assert not any('Run relevant' in c.description for c in context.identity.constraints)
+    assert state['task']['task_spec']['tools']['collections'] == ['filesystem', 'task_control']
     facade.supervisor.scheduler.advance(aid, manual=True)
     until(lambda: facade.store.snapshot(aid), lambda s: s["stages"][0]["state"] == "completed")
     works = facade.store.snapshot(aid)['work_packages']

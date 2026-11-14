@@ -30,6 +30,9 @@ def migrate(db):
     for table in sorted(TABLES):
         db.execute(f"CREATE TABLE IF NOT EXISTS {table}(id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, body TEXT NOT NULL)")
         db.execute(f"CREATE INDEX IF NOT EXISTS {table}_agent ON {table}(agent_id)")
+    from loom.service.startup_indexes import require
+
+    require(db, 'agent_runs')
     statements = [
         "CREATE TABLE IF NOT EXISTS agent_commands(id TEXT PRIMARY KEY, input TEXT NOT NULL, receipt TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS agent_revisions(kind TEXT, id TEXT, revision INTEGER, body TEXT NOT NULL, PRIMARY KEY(kind,id,revision))",
@@ -44,14 +47,11 @@ def migrate(db):
         "CREATE TABLE IF NOT EXISTS agent_budget_objectives(call_id TEXT PRIMARY KEY, agent_id TEXT, objective_id TEXT, stage_id TEXT)",
         "CREATE TABLE IF NOT EXISTS memory_annotations(id TEXT PRIMARY KEY, agent_id TEXT, evaluation_id TEXT, "
         "record_id TEXT, digest TEXT, revision INTEGER, body TEXT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS memory_suppressions(agent_id TEXT, lineage TEXT, body TEXT NOT NULL, PRIMARY KEY(agent_id,lineage))",
         "CREATE TABLE IF NOT EXISTS agent_memory_uses(id TEXT PRIMARY KEY, agent_id TEXT, run_id TEXT, body TEXT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS memory_versions(id TEXT PRIMARY KEY, value INTEGER NOT NULL)",
     ]
     for statement in statements:
         db.execute(statement)
-    for table in ("memory_annotations", "memory_suppressions"):
-        db.execute(f"CREATE INDEX IF NOT EXISTS {table}_source ON {table}(json_extract(body,'$.source.source_digest'))")
+    db.execute("CREATE INDEX IF NOT EXISTS memory_annotations_source ON memory_annotations(json_extract(body,'$.source.source_digest'))")
     db.execute("CREATE INDEX IF NOT EXISTS agent_budget_window ON agent_budget_calls(agent_id,window)")
     db.execute("CREATE INDEX IF NOT EXISTS agent_outbox_pending ON agent_outbox(agent_id,kind,state)")
     db.execute("INSERT OR IGNORE INTO autonomy_migrations VALUES(1)")
@@ -64,7 +64,6 @@ def migrate(db):
                    "'$.blocked_reason',NULL) WHERE json_extract(body,'$.state')='succeeded' "
                    "AND json_extract(body,'$.blocked_reason') IS NOT NULL")
         db.execute("INSERT INTO autonomy_migrations VALUES(4)")
-    db.execute("INSERT OR IGNORE INTO memory_versions VALUES('effective',0)")
 
     if not db.execute("SELECT 1 FROM autonomy_migrations WHERE version=5").fetchone():
         from loom.autonomy.migration_v5 import migrate as migrate_v5

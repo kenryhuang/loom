@@ -23,7 +23,8 @@ async def execute(state, bridge, config_path, provider_factory, plugin_registry_
         state = {**state, "task": {**state["task"], "objective": "\n\n".join(m["content"] for m in inputs)}}
         bridge.input_cursor = inputs[-1]["seq"]
     bridge.fresh_turn = fresh_turn
-    bridge.turn_messages = [m for m in state["messages"] if not inputs or m["seq"] < inputs[0]["seq"]]
+    bridge.turn_messages = [m for m in state["messages"]
+                            if m["seq"] > state.get("history_start_seq", 0) and (not inputs or m["seq"] < inputs[0]["seq"])]
     provider = (
         provider_factory(state)
         if provider_factory

@@ -25,11 +25,14 @@ def launcher(tmp_path):
     fake.write_text(
         f"#!{sys.executable}\nimport os,json,signal,time\nfrom pathlib import Path\n"
         'Path(os.environ["TEST_LAUNCH"]).write_text(json.dumps({"pid":os.getpid(),"args":__import__("sys").argv[1:]}))\n'
-        "signal.signal(signal.SIGTERM,lambda *args:exit(0))\nwhile True: time.sleep(.1)\n"
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN if os.environ.get('TEST_IGNORE_TERM') else (lambda *args:exit(0)))\n"
+        "while True: time.sleep(.1)\n"
     )
     curl = bindir / "curl"
     curl.write_text(
-        f"#!{sys.executable}\nimport json,os\nfrom pathlib import Path\n"
+        f"#!{sys.executable}\nimport json,os,sys\nfrom pathlib import Path\n"
+        'if os.environ.get("TEST_PROXY") and (sys.argv[1] != "-q" or "--noproxy" not in sys.argv or sys.argv[sys.argv.index("--noproxy")+1] != "*"):\n'
+        ' print("502",end=""); sys.exit(0)\n'
         'try:\n data=json.loads(Path(os.environ["TEST_LAUNCH"]).read_text()); os.kill(data["pid"],0)\n'
         'except (OSError,ValueError): print("000",end="")\nelse: print("200",end="")\n'
     )
@@ -91,6 +94,28 @@ def test_config_override_precedence(launcher, explicit):
         assert "--config" not in forwarded
     else:
         assert forwarded[-2:] == ["--config", str(root / "environment.yaml")]
+
+
+def test_local_service_probes_bypass_proxy_responses_on_start_status_and_restart(launcher):
+    _, record, run = launcher
+    for command in ('start', 'status', 'restart'):
+        result = run(command, TEST_PROXY='1', http_proxy='http://127.0.0.1:9', all_proxy='http://127.0.0.1:9')
+        assert result.returncode == 0, result.stdout + result.stderr
+        if command == 'status':
+            assert 'status 200' in result.stdout
+    assert record.exists()
+
+
+def test_stop_confirms_forced_exit_before_removing_pid_file(launcher):
+    root, record, run = launcher
+    assert run('start', TEST_IGNORE_TERM='1').returncode == 0
+    pid = json.loads(record.read_text())['pid']
+    stopped = run('stop', LOOM_STOP_TIMEOUT='0')
+    assert stopped.returncode == 0, stopped.stdout + stopped.stderr
+    assert 'sending SIGKILL' in stopped.stdout
+    assert not (root / 'runs/service/loom.pid').exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
 
 
 @pytest.mark.parametrize("stale", [False, True])

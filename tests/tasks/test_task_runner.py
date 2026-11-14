@@ -81,12 +81,12 @@ def test_make_task_context_exposes_exact_edit_file_schema(tmp_path):
     assert item_schema["additionalProperties"] is False
 
 
-def test_auto_profile_selects_project_audit_for_workspace_audit(tmp_path):
+def test_auto_profile_keeps_workspace_audit_requirements_in_the_original_objective(tmp_path):
     request = TaskRequest("Audit this project and suggest improvements", workspace=tmp_path)
 
     profile = select_task_profile(request)
 
-    assert profile.id == "project_audit"
+    assert profile.id == "general"
 
 
 def test_make_task_context_rejects_missing_workspace(tmp_path):
@@ -974,7 +974,7 @@ def test_auto_continue_react_crosses_boundary_before_task_execution(tmp_path):
     assert result.value.output == "read complete"
     assert provider.tool_sets[0] == ("enter_plan", "continue_react")
     assert {"read_file", "finish", "enter_plan"} <= set(provider.tool_sets[1])
-    assert provider.tool_choices[0] == "auto"
+    assert provider.tool_choices[0] == "required"
     assert provider.calls == 2
     route = result.value.run_result.context.state.scratch["workflowRoute"]
     assert route["phase"] == "completed"

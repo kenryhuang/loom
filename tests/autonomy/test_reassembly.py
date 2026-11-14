@@ -49,6 +49,7 @@ def test_combined_tools_budget_and_contract_recovery_is_durable_and_rebuilds(age
     assert state['task']['state'] == 'queued' and state['run'] is None and state['context'] is None
     assert 'shell' in state['task']['task_spec']['tools']['collections']
     assert state['task']['task_spec']['acceptance']['max_model_calls'] == 12
+    assert state['task']['task_spec']['acceptance']['max_output_tokens'] == 524288
     recovery = state['recovery_context']
     assert recovery['acceptance_plan']['criteria'][1]['description'] == 'Original files preserved relative to the starting state'
     assert recovery['audit']['original_plan']['criteria'][1]['description'] == 'Git tree is clean'

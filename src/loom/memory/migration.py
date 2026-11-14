@@ -1,19 +1,55 @@
-"""Resumable legacy projection. Reads never run migrations or model inference.
+"""Offline, resumable one-time import. Stop the service before running this command.
 
 Run: python -m loom.memory.migration --database /path/service.sqlite --backup /path/backup.sqlite
 """
 
 import argparse
+import fcntl
 import json
-import sqlite3
 from pathlib import Path
 
-from loom.memory.repository import Repository, digest, signature
+from loom.memory.repository import Repository, digest
 from loom.memory.schema import exists, migrate
 from loom.memory.store import bound_workspace, serialized
 
 
-def sync_job(db, job, *, mode="runtime_v2"):
+def effective(rows, annotations, suppressions):
+    result = []
+    for row in rows:
+        record, source = dict(row["record"]), dict(row["source"])
+        lineage = digest([source["source_digest"], record["kind"], record["title"], record["summary"], record.get("citations")])
+        if lineage in suppressions:
+            continue
+        applied = []
+        hidden = False
+        for annotation in annotations:
+            ref = annotation["source"]
+            if ref["source_digest"] != source["source_digest"] or ref["content_digest"] != source["content_digest"]:
+                continue
+            kind = annotation["kind"]
+            if kind in {"reject", "retire", "restore"}:
+                hidden = kind != "restore"
+            elif kind == "correct":
+                record.update(summary=annotation["value"], basis="human_asserted", validation="human_asserted")
+            elif kind == "scope":
+                record["scope"] += "; Human limitation: " + annotation["value"]
+            elif kind == "pin":
+                record["pinned"] = True
+            elif kind == "tag":
+                record.setdefault("tags", []).append(annotation["value"])
+            elif kind == "confirm":
+                record["human_confirmed"] = True
+            if kind in {"confirm", "correct"}:
+                record["human_review"] = {key: annotation[key] for key in ("id", "kind", "actor", "agent_id", "created_at")}
+            applied.append(annotation["id"])
+        if not hidden:
+            source["annotation_ids"] = applied
+            source["annotation_revision"] = max((a["revision"] for a in annotations if a["id"] in applied), default=0)
+            result.append(dict(record=record, source=source))
+    return result
+
+
+def import_job(db, job, *, mode="runtime_v2"):
     if not exists(db):
         return
     sid, evaluation = job["session_id"], job["id"]
@@ -29,7 +65,6 @@ def sync_job(db, job, *, mode="runtime_v2"):
     ns = repo.namespace(db, workspace, sid, mode=mode)
     memory = job.get("checkpoint", {}).get("memory", {})
     source_digest = memory.get("identity", {}).get("source")
-    records = memory.get("records", {})
     tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     annotations, suppressions = [], set()
     if source_digest and "memory_annotations" in tables:
@@ -37,82 +72,15 @@ def sync_job(db, job, *, mode="runtime_v2"):
             json.loads(r[0])
             for r in db.execute("SELECT body FROM memory_annotations WHERE json_extract(body,'$.source.source_digest')=? ORDER BY rowid", (source_digest,))
         ]
+    if source_digest and "memory_suppressions" in tables:
         suppressions = {
             r[0] for r in db.execute("SELECT lineage FROM memory_suppressions WHERE json_extract(body,'$.source.source_digest')=?", (source_digest,))
         }
-    fingerprint = digest([workspace, source_digest, records, annotations, sorted(suppressions)])
-    prior = db.execute("SELECT digest FROM memory_source_cursors WHERE evaluation_id=?", (evaluation,)).fetchone()
-    if prior and prior[0] == fingerprint:
-        return
-    from loom.memory.annotations import effective
+    from loom.memory.ingestion import ingest_job
 
-    candidates = []
-    for key, record in records.items():
-        if not isinstance(record, dict) or record.get("kind") not in {"facts", "lessons", "workflows"}:
-            continue
-        if record.get("publication_state", "published") != "published":
-            continue
-        if (
-            record.get("id") != key
-            or record.get("run_id") != job.get("run_id")
-            or not source_digest
-            or record.get("source_digest") != source_digest
-            or not record.get("evidence_refs")
-            or not record.get("citations")
-            or not all(isinstance(record.get(k), str) for k in ("title", "summary", "scope"))
-            or len(serialized(record)) > 64000
-        ):
-            db.execute("INSERT OR REPLACE INTO memory_migration_issues VALUES(?,?,?)", (evaluation, key, "Invalid identity, content or provenance"))
-            continue
-        source = dict(
-            session_id=sid,
-            run_id=job.get("run_id"),
-            analysis_id=job.get("analysis_id"),
-            evaluation_id=evaluation,
-            record_id=key,
-            source_digest=source_digest,
-            content_digest=digest(record),
-            created_at=job.get("created_at"),
-            evaluation_state=job.get("state"),
-        )
-        projected = effective([dict(record=record, source=source)], annotations, suppressions)
-        # Import all denial tombstones BEFORE any accepted knowledge is exposed.
-        if not projected:
-            db.execute("INSERT OR IGNORE INTO memory_tombstones VALUES(?,?,?)", (ns, signature(record), "legacy human rejection"))
-        candidates.append((record, source, projected))
-    current = {(s["record_id"], s["content_digest"]) for _, s, _ in candidates}
-    old = db.execute(
-        "SELECT id,record_id,revision FROM memory_sources WHERE evaluation_id=? AND available=1 AND revision NOT LIKE 'human:%'", (evaluation,)
-    ).fetchall()
-    changed = []
-    for src in old:
-        if (src["record_id"], src["revision"]) not in current:
-            changed.extend(
-                r[0]
-                for r in db.execute(
-                    """SELECT s.version_id FROM memory_supports s
-                JOIN memory_observations o ON o.id=s.observation_id WHERE o.source_id=?""",
-                    (src["id"],),
-                )
-            )
-            db.execute("UPDATE memory_sources SET available=0 WHERE id=?", (src["id"],))
-    repo.refresh_support(db, changed)
-    for original, source, projected in candidates:
-        value = projected[0]["record"] if projected else original
-        added = repo.ingest(db, ns, value, source, denied=not projected)
-        if added and projected:
-            from loom.memory.consolidation import enqueue
-
-            enqueue(db, ns, added, job, shadow=mode == "shadow")
-        # Historical reads must return extraction text, never a rewritten projection.
-        db.execute(
-            "UPDATE memory_observations SET body=? WHERE source_id IN (SELECT id FROM memory_sources WHERE evaluation_id=? AND record_id=? AND revision=?)",
-            (serialized(original), evaluation, source["record_id"], source["content_digest"]),
-        )
-    repo.refresh_support(db, changed)
-    if changed:
-        repo.bump(db, ns, changed)
-    db.execute("INSERT OR REPLACE INTO memory_source_cursors VALUES(?,?)", (evaluation, fingerprint))
+    ingest_job(db, job, workspace, mode=mode,
+               project=lambda record, source: effective([dict(record=record, source=source)], annotations, suppressions),
+               fingerprint_extra=(annotations, sorted(suppressions)))
     # Reviews are durable records, including rejected sources that have no visible item.
     for annotation in annotations:
         matches = db.execute(
@@ -129,37 +97,52 @@ def sync_job(db, job, *, mode="runtime_v2"):
             )
 
 
-def migrate_database(database, *, mode="runtime_v2", backup=None, prepare_only=False):
+def migrate_database(database, *, backup=None):
+    """Offline, resumable one-time conversion. Never called by the service."""
     repo = Repository(database)
+    if not repo.path.is_file():
+        raise ValueError("Service database does not exist")
+    with (repo.path.parent / "supervisor.lock").open("a+") as owner:
+        try:
+            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise ValueError("Stop the Loom service before migrating its database") from exc
+        return _migrate_database(repo, backup=backup)
+
+
+def _migrate_database(repo, *, backup):
+    with repo.connect() as db:
+        table = db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_import_state'").fetchone()
+        if table and db.execute("SELECT 1 FROM memory_import_state WHERE id='complete'").fetchone():
+            return report(db)
     if backup:
-        destination = Path(backup)
-        if destination.exists():
-            raise ValueError("Backup already exists; choose a new path")
-        with sqlite3.connect(repo.path.as_uri() + "?mode=ro", uri=True) as src, sqlite3.connect(destination) as dst:
-            src.backup(dst)
+        from loom.service.session_migration import backup_database
+
+        backup_database(repo.path, Path(backup))
     with repo.connect(write=True) as db:
         migrate(db)
+        db.execute("CREATE TABLE IF NOT EXISTS memory_import_state(id TEXT PRIMARY KEY)")
+        db.execute("CREATE TABLE IF NOT EXISTS memory_import_jobs(id TEXT PRIMARY KEY)")
         present = db.execute("SELECT 1 FROM sqlite_master WHERE name='semantic_jobs'").fetchone()
-        ids = [r[0] for r in db.execute("SELECT id FROM semantic_jobs ORDER BY id")] if present else []
-    # Commit each source and its cursor together: restarts replay only incomplete work.
+        ids = [r[0] for r in db.execute("SELECT id FROM semantic_jobs WHERE id NOT IN (SELECT id FROM memory_import_jobs) ORDER BY id")] if present else []
+    # Each converted evaluation and completion marker commit together. A retry
+    # skips completed jobs BEFORE fetching their potentially huge JSON bodies.
     for identifier in ids:
         with repo.connect(write=True) as db:
             row = db.execute("SELECT body FROM semantic_jobs WHERE id=?", (identifier,)).fetchone()
             if row:
-                sync_job(db, json.loads(row[0]), mode="shadow")
+                import_job(db, json.loads(row[0]), mode="shadow")
+            db.execute("INSERT OR IGNORE INTO memory_import_jobs VALUES(?)", (identifier,))
     with repo.connect(write=True) as db:
-        # Final source reconciliation and cutover share a transaction with writers.
         stale = db.execute("SELECT DISTINCT evaluation_id FROM memory_sources WHERE available=1").fetchall()
         for (identifier,) in stale:
             if not present or not db.execute("SELECT 1 FROM semantic_jobs WHERE id=?", (identifier,)).fetchone():
                 repo.invalidate(db, evaluation_id=identifier)
-        db.execute(
-            "UPDATE memory_namespaces SET mode=?,checkpoint=? WHERE checkpoint IS NULL OR checkpoint='prepared'",
-            ("shadow" if prepare_only else mode, "prepared" if prepare_only else "complete"),
-        )
         from loom.memory.dependencies import migrate_skills
 
         migrate_skills(db)
+        db.execute("UPDATE memory_namespaces SET mode='runtime_v2',checkpoint='complete'")
+        db.execute("INSERT INTO memory_import_state VALUES('complete')")
         return report(db)
 
 
@@ -178,24 +161,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", required=True)
     parser.add_argument("--backup")
-    parser.add_argument("--prepare-only", action="store_true", help="Backfill without switching reads; startup reconciles and activates")
-    parser.add_argument("--mode", choices=["shadow", "library_v2", "runtime_v2"], default="runtime_v2")
     args = parser.parse_args()
-    print(json.dumps(migrate_database(args.database, mode=args.mode, backup=args.backup, prepare_only=args.prepare_only), ensure_ascii=False, indent=2))
+    try:
+        result = migrate_database(args.database, backup=args.backup)
+    except (ValueError, OSError) as exc:
+        parser.exit(1, f"{exc}\n")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
     main()
-
-
-def set_mode(database, namespace, mode):
-    if mode not in {"legacy", "shadow", "library_v2", "runtime_v2"}:
-        raise ValueError("Invalid memory read mode")
-    repo = Repository(database)
-    with repo.connect(write=True) as db:
-        row = db.execute("SELECT * FROM memory_namespaces WHERE id=?", (namespace,)).fetchone()
-        if not row or row["checkpoint"] != "complete":
-            raise ValueError("Namespace must finish migration before changing its read mode")
-        db.execute("UPDATE memory_namespaces SET mode=? WHERE id=?", (mode, namespace))
-        repo.event(db, namespace, "READ_MODE", dict(before=row["mode"], after=mode))
-        repo.bump(db, namespace)

@@ -4,7 +4,7 @@ A completion request submits a candidate. Only earlier execution facts can be
 preconditions; control transitions never supply execution receipts.
 """
 
-RULES_VERSION = 2
+RULES_VERSION = 3
 
 
 class InvalidAcceptanceContract(ValueError):

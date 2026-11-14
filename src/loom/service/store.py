@@ -53,9 +53,9 @@ class SessionStore:
                     if statement.strip():
                         db.execute(statement)
                 storage.migrate(db)
-                from loom.memory.schema import migrate as migrate_memory
+                from loom.memory.schema import initialize as initialize_memory
 
-                migrate_memory(db)
+                initialize_memory(db)
         self.external_tools = ExternalToolStore(self.directory / "external_tools")
         self.knowledge = KnowledgeStore(self.directory / "knowledge")
 
@@ -99,8 +99,6 @@ class SessionStore:
             from loom.memory.repository import Repository
 
             Repository(self.path).invalidate(db, session_id=state['session_id'])
-        if state.get('deleted_at') and db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_versions'").fetchone():
-            db.execute("UPDATE memory_versions SET value=value+1 WHERE id='effective'")
         storage.save(db, state)
         if state.get('deleted_at'):
             self._notify(state["session_id"])
@@ -245,17 +243,15 @@ class SessionStore:
             task = state["task"]
             kind, payload = command["type"], command["payload"]
             request = state.get("input_request")
-            if (kind in {"pause", "stop_run", "resume", "complete_task", "restart_task"}
+            if (kind in {"pause", "stop_run", "resume", "complete_task", "restart_task", "revise_task"}
                     and request and request["kind"] == "recovery" and request["state"] == "pending"):
                 raise ServiceError("Verify the uncertain effects and answer the recovery question first", 409)
-            if kind in {"resume", "answer_input", "restart_task"} and state.get("workspace_blocked"):
+            if kind in {"resume", "answer_input", "restart_task", "revise_task"} and state.get("workspace_blocked"):
                 raise ServiceError("Previous processes have not exited; workspace remains blocked", 409)
             expected = command["expected_task_revision"]
             if expected is not None and expected != task["revision"]:
                 raise ServiceError("Task revision conflict", 409)
             if kind == "submit_message":
-                if task["state"] == "completed":
-                    raise ServiceError("Reopen the completed task first", 409)
                 if (producer == 'human' and state.get('autonomy') and state.get('run')
                         and state['run']['state'] in {'completed', 'failed', 'stopped'}):
                     # An unrelated human delivery must not reopen the last Agent contract.
@@ -273,9 +269,9 @@ class SessionStore:
                     self.knowledge.validate_ids(payload["knowledge_base_ids"])
                 else:
                     self.external_tools.resolve(payload["external_tool_ids"])
-            elif kind == "set_token_budget":
+            elif kind in {"set_token_budget", "set_model_call_budget"}:
                 if task["state"] in {"running", "pausing", "queued"} or (state["run"] and state["run"]["state"] == "running"):
-                    raise ServiceError("Pause execution before changing the token budget", 409)
+                    raise ServiceError("Pause execution before changing the model budget", 409)
             elif kind in {"answer_input", "supersede_input"}:
                 request = state["input_request"]
                 if not request or request["id"] != payload["request_id"] or request["state"] != "pending":
@@ -289,16 +285,16 @@ class SessionStore:
                     raise ServiceError("Execution has not reached a suspension boundary", 409)
                 if task["state"] not in {"paused", "failed", "recovering"}:
                     raise ServiceError("Task cannot resume in this state", 409)
-                if state["input_request"] and state["input_request"]["state"] == "pending":
+                if request and request["state"] == "pending" and request["kind"] == "recovery":
                     raise ServiceError("Answer the pending recovery question first", 409)
             elif kind == "complete_task" and task["state"] not in {"idle", "paused"}:
                 raise ServiceError("Pause or stop active execution before completing", 409)
             elif kind == "reopen_task" and task["state"] != "completed":
                 raise ServiceError("Task is not completed", 409)
-            elif kind == 'restart_task':
+            elif kind in {'restart_task', 'revise_task'}:
                 if not payload.get('task', {}).get('objective', task['objective']):
                     raise ServiceError('Enter a task before restarting', 409)
-                if task['state'] not in {'idle', 'paused', 'failed', 'completed'} or (state['run'] and state['run']['state'] == 'running'):
+                if task['state'] not in {'idle', 'paused', 'failed', 'completed', 'awaiting_input'} or (state['run'] and state['run']['state'] == 'running'):
                     raise ServiceError('Pause or stop active execution before restarting', 409)
                 reassembly = state.get('pending_reassembly') or {}
                 relocation = None
@@ -315,6 +311,8 @@ class SessionStore:
                     if copy.get('path') == str(expected) and copy.get('source') == task['workspace']:
                         relocation = str(expected)
                 updated_task = self._restart_configuration(task, payload.get("task", {}), relocation=relocation)
+            elif kind == "pause" and task["state"] not in {"queued", "running", "pausing", "paused", "awaiting_input"}:
+                raise ServiceError("Only active execution can be paused", 409)
             elif kind in {"pause", "stop_run"} and task["state"] == "completed":
                 raise ServiceError("Task is completed", 409)
             self.append(db, state, "command.accepted", {"type": kind}, command_id=cid)
@@ -329,7 +327,7 @@ class SessionStore:
                     self.append(
                         db, state, "task.goal.revised", {"objective": task["objective"], "goal_revision": task["goal_revision"], "title": state["title"]}
                     )
-                if task["state"] == "idle":
+                if task["state"] in {"idle", "completed"}:
                     task["state"] = "queued"
                 elif task["state"] == "failed" and not state.get("workspace_blocked") and not (request and request["state"] == "pending"):
                     run = state["run"]
@@ -345,7 +343,8 @@ class SessionStore:
                 request["command_id"] = cid
                 self._message(db, state, cid, request["answer"])
                 self.append(db, state, "input.answered" if kind == "answer_input" else "input.superseded", request, command_id=cid)
-                task["state"] = "queued"
+                if task["state"] not in {"paused", "pausing"}:
+                    task["state"] = "queued"
             elif kind in {"pause", "stop_run"}:
                 previous = state["control"] or {}
                 ids = previous.get("command_ids", [previous["command_id"]] if previous.get("command_id") else [])
@@ -381,7 +380,11 @@ class SessionStore:
                     self.append(db, state, 'task.tools.extended', change, command_id=cid)
                 if state['run']:
                     state['run']['acceptance_budget_request'] = cid
-                self.queue_resume(db, state, cid)
+                if request and request["state"] == "pending":
+                    state["control"] = None
+                    task["state"] = "awaiting_input"
+                else:
+                    self.queue_resume(db, state, cid)
             elif kind == "complete_task":
                 task["state"] = "completed"
                 state["control"] = None
@@ -389,7 +392,7 @@ class SessionStore:
                     state["run"]["state"] = "stopped"
             elif kind == "reopen_task":
                 task["state"] = "idle"
-            elif kind == 'restart_task':
+            elif kind in {'restart_task', 'revise_task'}:
                 previous_run = state['run']
                 reassembly = state.pop('pending_reassembly', None)
                 if reassembly_valid:
@@ -398,7 +401,7 @@ class SessionStore:
                 else:
                     state.pop('recovery_context', None)
                 state['restart_episode_id'] = ((previous_run or {}).get('task_episode_id')
-                                               if updated_task['objective'] == task['objective'] else None)
+                                               if kind == 'restart_task' and updated_task['objective'] == task['objective'] else None)
                 if updated_task["objective"] != task["objective"]:
                     task["goal_revision"] += 1
                 task.update(updated_task)
@@ -411,11 +414,15 @@ class SessionStore:
                     self.append(db, state, 'run.stopped', {'reason': 'Restarted from scratch'}, command_id=cid)
                 pending = [m for m in state['messages'] if m['role'] == 'user' and m['seq'] > state['input_cursor']]
                 # Pending guidance belongs to the new goal once, not to an abandoned checkpoint.
-                guidance = [] if "objective" in payload.get("task", {}) else [m['content'] for m in pending if m['content'] != task['objective']]
+                guidance = ([] if kind == "revise_task" or "objective" in payload.get("task", {})
+                            else [m['content'] for m in pending if m['content'] != task['objective']])
                 content = '\n\n'.join([task['objective'], *guidance])
                 for message in pending:
                     self.applied(db, state, message['command_id'])
                 state['input_cursor'] = state['event_cursor']
+                if kind == 'revise_task':
+                    # Keep the audit trail, but start a new conversation scope.
+                    state['history_start_seq'] = state['event_cursor']
                 cleared = ['plan', 'plan_run_id', 'workflow', 'workflow_route', 'acceptance', 'acceptance_run_id',
                            'output_artifacts', 'workspace_profile', 'acceptance_current_check', 'plan_event']
                 for field in cleared:
@@ -460,19 +467,20 @@ class SessionStore:
                     {key: task[key] for key in ("knowledge_base_ids", "external_tool_ids", "external_tool_bindings", "task_spec", "plugin_version_refs")},
                     command_id=cid
                 )
-            elif kind == "set_token_budget":
-                task["limits"]["max_tokens"] = payload["max_tokens"]
-                self.append(db, state, "task.budget.changed", {"max_tokens": payload["max_tokens"]}, command_id=cid)
+            elif kind in {"set_token_budget", "set_model_call_budget"}:
+                field = "max_tokens" if kind == "set_token_budget" else "max_llm_calls"
+                task["limits"][field] = payload[field]
+                self.append(db, state, "task.budget.changed", {field: payload[field]}, command_id=cid)
             task["revision"] += 1
             self.append(db, state, "task.state.changed", {"state": task["state"], "revision": task["revision"]})
             receipt = {"session_id": sid, "command_id": cid, "state": "accepted"}
             db.execute("INSERT INTO commands VALUES(?,?,?,?,?)", (cid, sid, canonical(normalized), canonical(receipt), "accepted"))
-            if kind in {"resume", "reopen_task", "complete_task", "set_token_budget", "set_knowledge_bases", "set_external_tools"} or (
+            if kind in {"resume", "reopen_task", "complete_task", "set_token_budget", "set_model_call_budget", "set_knowledge_bases", "set_external_tools"} or (
                 kind in {"pause", "stop_run"} and task["state"] == "paused"
             ):
                 self.applied(db, state, cid)
             # Human intervention re-arms scheduler recovery for the linked work package.
-            if (kind in {"resume", "restart_task"} and not cid.startswith("schedule_resume")
+            if (kind in {"resume", "restart_task", "revise_task"} and not cid.startswith("schedule_resume")
                     and db.execute("SELECT 1 FROM sqlite_master WHERE name='agent_sessions'").fetchone()):
                 link = db.execute("SELECT agent_id, work_package_id FROM agent_sessions WHERE session_id=?", (sid,)).fetchone()
                 row = link and link["work_package_id"] and db.execute(

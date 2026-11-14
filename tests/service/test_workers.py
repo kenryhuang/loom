@@ -57,6 +57,61 @@ def test_epoch_fencing_and_uncertain_tool_require_recovery(tmp_path):
     service.close()
 
 
+def test_worker_evidence_reads_do_not_write_and_keep_session_and_epoch_fencing(tmp_path, monkeypatch):
+    service = LoomService(tmp_path / 'data', provider_factory=provider_factory)
+    sid = create(service, tmp_path / 'workspace')
+    other = create(service, tmp_path / 'other')
+    service.prepare_attempt(sid)
+    state = service.store.snapshot(sid)
+    ref = service.store.save_artifact(sid, {'fact': 'original evidence'}, 'verification')
+    foreign = service.store.save_artifact(other, {'fact': 'other session'}, 'verification')
+    record = {'attempt_id': state['run']['attempt_id'], 'epoch': state['epoch'], 'record_id': 'read',
+              'type': 'read_artifact', 'payload': encode({'digest': ref['sha256']})}
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(service.store, 'update', lambda *args: pytest.fail('Evidence reads must not save session state'))
+            assert service.worker_record(sid, record) == {'fact': 'original evidence'}
+            assert service.worker_record(sid, record) == {'fact': 'original evidence'}
+            with pytest.raises(ServiceError, match='Stale executor'):
+                service.worker_record(sid, {**record, 'epoch': record['epoch'] + 1})
+            with pytest.raises(ServiceError, match='does not belong'):
+                service.worker_record(sid, {**record, 'payload': encode({'digest': foreign['sha256']})})
+        with service.store.read() as db:
+            assert not db.execute('SELECT 1 FROM worker_records WHERE attempt_id=? AND record_id=?',
+                                  (record['attempt_id'], 'read')).fetchone()
+        service.store.update(sid, lambda state, emit, db: state['run'].update(state='suspended'))
+        with pytest.raises(ServiceError, match='already suspended'):
+            service.worker_record(sid, record)
+    finally:
+        service.close()
+
+
+def test_read_only_control_poll_accounts_unflushed_time_without_double_charging(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    service = LoomService(tmp_path / 'data', provider_factory=provider_factory)
+    sid = create(service, tmp_path / 'workspace')
+    service.prepare_attempt(sid)
+    service.store.update(sid, lambda state, emit, db: state['task']['limits'].update(max_duration_seconds=1))
+    state = service.store.snapshot(sid)
+    attempt = SimpleNamespace(accounted=time.monotonic() - 10)
+    service.active[sid] = attempt
+    record = {'attempt_id': state['run']['attempt_id'], 'epoch': state['epoch'], 'record_id': 'poll',
+              'type': 'poll_control', 'payload': encode({})}
+    accounted = attempt.accounted
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(service.store, 'update', lambda *args: pytest.fail('Control polling must not write'))
+            for _ in range(3):
+                assert service.worker_record(sid, record)['code'] == 'ACTIVE_TIME_BUDGET_EXCEEDED'
+                assert service.worker_record(sid, {**record, 'type': 'check_control'}) is True
+        assert attempt.accounted == accounted
+        assert service.store.snapshot(sid)['run']['active_seconds'] == state['run']['active_seconds']
+    finally:
+        service.active.pop(sid)
+        service.close()
+
+
 def test_worker_failure_isolated(tmp_path):
     service = LoomService(tmp_path / "data", provider_factory=provider_factory).start()
     try:
@@ -152,7 +207,7 @@ def test_controls_cannot_bypass_uncertain_side_effect_recovery(tmp_path):
         }
         service.worker_record(sid, record)
         service.recover(sid, "lost")
-        for kind in ("stop_run", "pause", "resume", "complete_task", "restart_task"):
+        for kind in ("stop_run", "pause", "resume", "complete_task", "restart_task", "revise_task"):
             with pytest.raises(ServiceError):
                 command(service, sid, kind)
         assert service.snapshot(sid)["input_request"]["state"] == "pending"

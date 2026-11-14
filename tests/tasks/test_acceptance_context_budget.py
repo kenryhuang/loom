@@ -91,4 +91,33 @@ def test_reasoning_defaults_leave_room_for_answer_without_overriding_explicit_ca
     assert gate.input_budget()['max_output_tokens'] == 2000
     provider.request_options = {'enable_thinking': False}
     assert gate.config['max_seconds'] == 180
-    assert gate.config['max_output_tokens'] == 4096
+    assert gate.config['max_output_tokens'] == 524288
+
+
+@pytest.mark.parametrize('thinking', [True, False])
+@pytest.mark.parametrize('window,provider_cap,expected', [
+    (2000000, None, 524288),
+    (1000000, None, 400000),
+    (1000000, 65536, 65536),
+])
+def test_large_default_output_respects_provider_and_context_after_restore(thinking, window, provider_cap, expected):
+    provider = SimpleNamespace(model='judge', context_window_tokens=window, max_completion_tokens=provider_cap,
+                               request_options={'enable_thinking': thinking})
+    gate, _ = controller(provider)
+    snapshot = gate.snapshot()
+    snapshot['budget'] = {'max_output_tokens': 8192}
+    gate.restore(snapshot)
+    assert gate.config['max_output_tokens'] == 524288
+    assert gate.input_budget()['max_output_tokens'] == expected
+
+
+@pytest.mark.parametrize('cap', [65536, 524288])
+def test_explicit_large_output_limit_is_accepted(cap):
+    gate, _ = controller(SimpleNamespace(model='judge', context_window_tokens=2000000), {'max_output_tokens': cap})
+    assert gate.input_budget()['max_output_tokens'] == cap
+
+
+@pytest.mark.parametrize('cap', [524289, 0, True, 1.5])
+def test_invalid_output_limit_is_rejected(cap):
+    with pytest.raises(ValueError, match='Acceptance limits'):
+        controller(SimpleNamespace(model='judge'), {'max_output_tokens': cap})

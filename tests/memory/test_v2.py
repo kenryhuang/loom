@@ -4,7 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from loom.autonomy.store import AgentStore
-from loom.memory.migration import migrate_database, sync_job
+from loom.memory.ingestion import sync_job
+from loom.memory.migration import migrate_database
 from loom.memory.operations import MemoryOperations
 from loom.memory.query import MemoryQueryService, available
 from loom.memory.repository import Repository
@@ -18,7 +19,7 @@ def catalog(tmp_path):
     store = SessionStore(tmp_path / "data")
     AgentStore(store)
     workspace = tmp_path / "project"
-    sid = seed(store, workspace)
+    sid = seed(store, workspace, publish=False)
     report = migrate_database(store.path)
     reader = MemoryQueryService(store.path, workspace=workspace)
     return store, workspace, sid, reader, report
@@ -47,7 +48,7 @@ def test_reads_do_not_scan_evaluation_json(catalog, monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("Legacy record scanning is forbidden after cutover")
 
-    monkeypatch.setattr(MemoryStore, "_records", forbidden)
+    monkeypatch.setattr("loom.memory.migration.import_job", forbidden)
     memory = MemoryStore(store.path, workspace=workspace)
     assert memory.browse()["total"] == 1
     assert memory.search("planets")["records"]
@@ -71,10 +72,13 @@ def test_rejection_migrates_before_activation(tmp_path):
 
     store = SessionStore(tmp_path / "data")
     AgentStore(store)
-    seed(store, tmp_path)
+    sid = seed(store, tmp_path, publish=False)
     memory = MemoryStore(store.path, workspace=tmp_path)
-    original = memory._records()[0][0]
-    record, source = original["record"], original["source"]
+    from loom.memory.repository import digest as content_digest
+
+    record = fact()
+    source = dict(session_id=sid, evaluation_id="eval-memory", record_id=record['id'],
+                  source_digest=record['source_digest'], content_digest=content_digest(record))
     lineage = digest([source["source_digest"], record["kind"], record["title"], record["summary"], record["citations"]])
     annotation = dict(id="reject", source=source, actor="human", kind="reject", lineage=lineage, revision=1, created_at="2026-01-01", agent_id="a")
     with store.transaction() as db:
@@ -82,6 +86,7 @@ def test_rejection_migrates_before_activation(tmp_path):
             "INSERT INTO memory_annotations VALUES(?,?,?,?,?,?,?)",
             ("reject", "a", "eval-memory", record["id"], source["content_digest"], 1, json.dumps(annotation)),
         )
+        db.execute("CREATE TABLE memory_suppressions(agent_id TEXT,lineage TEXT,body TEXT)")
         db.execute("INSERT INTO memory_suppressions VALUES(?,?,?)", ("a", lineage, json.dumps(annotation)))
     migrate_database(store.path)
     assert not memory.browse()["records"]
@@ -184,8 +189,12 @@ def test_typed_conflicts_and_conditions(catalog):
 def test_parallel_same_source_is_idempotent(catalog):
     store, workspace, _, reader, _ = catalog
     seed(store, workspace, evaluation="parallel")
+    def publish(_):
+        with store.transaction() as db:
+            sync_job(db, json.loads(db.execute("SELECT body FROM semantic_jobs WHERE id='parallel'").fetchone()[0]))
+
     with ThreadPoolExecutor(max_workers=2) as pool:
-        list(pool.map(lambda _: migrate_database(store.path), range(2)))
+        list(pool.map(publish, range(2)))
     assert reader.browse()["total"] == 1
     with reader.repo.connect() as db:
         assert db.execute("SELECT COUNT(*) FROM memory_observations").fetchone()[0] == 2
@@ -283,13 +292,11 @@ def test_correction_keeps_legacy_original_and_new_canonical_read(catalog):
     assert reader.browse()["total"] == 1
 
 
-def test_denial_survives_legacy_rollback(catalog):
-    from loom.memory.migration import set_mode
-
+def test_denial_survives_repeated_offline_migration(catalog):
     store, workspace, _, reader, _ = catalog
     item = reader.browse()["records"][0]
     MemoryOperations(store.path).execute(reader.ns, "RETIRE", dict(memory_id=item["memory_id"], expected_revision=item["revision"]), command_id="reject")
-    set_mode(store.path, reader.ns, "legacy")
+    migrate_database(store.path)
     assert MemoryStore(store.path, workspace=workspace).browse()["total"] == 0
 
 
@@ -380,17 +387,17 @@ def test_split_preserves_sources_and_source_update_retracts_old(catalog):
     assert reader.browse()["total"] == 0
 
 
-def test_shadow_proposals_are_persisted_once_and_require_budget(catalog):
+def test_shadow_proposals_are_persisted_once_and_require_budget(tmp_path):
     from loom.memory.consolidation import Consolidator
 
-    store, workspace, _, reader, _ = catalog
-    second = fact("second")
-    second["summary"] = "duplicate planets need checking"
-    seed(store, workspace, evaluation="second", records=[second])
+    store = SessionStore(tmp_path / "data")
+    seed(store, tmp_path, publish=False)
+    second = {**fact("second"), "summary": "duplicate planets need checking"}
+    seed(store, tmp_path, evaluation="second", records=[second], publish=False)
     migrate_database(store.path)
-    with reader.repo.connect() as db:
+    with store.read() as db:
         jobs = list(db.execute("SELECT * FROM memory_jobs"))
-        assert jobs and all(r["state"] == "shadow_pending" for r in jobs)
+        assert len(jobs) == 2 and all(r["state"] == "shadow_pending" for r in jobs)
     assert Consolidator(store.path).prepare(jobs[0]["id"]) is None
 
 

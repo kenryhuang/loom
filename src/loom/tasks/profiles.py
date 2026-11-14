@@ -66,11 +66,12 @@ def select_task_profile(request: TaskRequest) -> TaskProfile:
             return profile
         return GENERAL_PROFILE
 
-    objective = request.objective.lower()
-    project_markers = ("audit", "smoke", "project", "repo", "repository", "codebase", "improvement")
-    if request.workspace is not None and any(marker in objective for marker in project_markers):
-        return PROJECT_AUDIT_PROFILE
+    # Auto selects a neutral execution role. Substrings such as "repo" inside
+    # "reports/" must never add smoke tests or other unrequested obligations.
+    # The original objective/constraints remain the acceptance planner's input;
+    # project_audit is available only through an explicit profile selection.
     return GENERAL_PROFILE
+
 
 
 __all__ = [

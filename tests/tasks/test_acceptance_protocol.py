@@ -72,7 +72,7 @@ def test_protocol_exhaustion_restores_pending_verification_without_replaying_com
         assert await restored.acceptance.verify(context, runtime, 'answer')
         assert commands == (['command', 'command'] if change_file else ['command'])
         assert restored.acceptance.data['attempts'] == 1
-        assert restored.acceptance.data['model_calls'] == 4  # plan, two invalid responses, successful retry
+        assert restored.acceptance.data['model_calls'] == 5  # plan, two invalid responses, batch retry, goal review
         assert 'pending_verification' not in restored.acceptance.data
         await assembly.close()
         await restored.close()
@@ -191,7 +191,7 @@ def test_reassembled_acceptance_uses_reviewed_contract_and_fresh_verification(tm
         assert assembly.acceptance.data['state'] != 'passed'
         assert assembly.acceptance.data['plan']['origin'] == 'reviewed_recovery_contract'
         assert await assembly.acceptance.verify(context, runtime, 'Preserved initial files')
-        assert len(judge.calls) == 1
+        assert len(judge.calls) == 2
         assert assembly.acceptance.data['results'][-1]['criterion_id'] == 'goal'
         await assembly.close()
     asyncio.run(exercise())

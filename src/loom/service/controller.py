@@ -58,13 +58,14 @@ class LoomService:
         except OSError as exc:
             self.owner.close()
             raise ServiceError("Another supervisor owns this data directory", 409) from exc
-        from loom.memory.migration import migrate_database
+        from loom.memory.schema import require_ready
 
-        with self.store.read() as db:
-            legacy = db.execute("SELECT 1 FROM sqlite_master WHERE name='semantic_jobs'").fetchone()
-            migrated = db.execute('SELECT 1 FROM memory_namespaces WHERE checkpoint IS NOT NULL LIMIT 1').fetchone()
-        backup = self.store.directory / 'service.before-memory-v2.sqlite'
-        migrate_database(self.store.path, backup=backup if legacy and not migrated and not backup.exists() else None)
+        try:
+            with self.store.read() as db:
+                require_ready(db)
+        except Exception:
+            self.owner.close()
+            raise
         self.config_path = str(Path(config_path).resolve()) if config_path else None
         self.store.knowledge.config_path = self.config_path
         self.capacity = max_active_runs
@@ -164,7 +165,7 @@ class LoomService:
             def after(state, emit, db):
                 binding = state.get('autonomy') or {}
                 if binding.get('engine_version') == 2 and command['type'] in {
-                        'resume', 'restart_task', 'submit_message', 'set_external_tools', 'set_knowledge_bases'}:
+                        'resume', 'restart_task', 'revise_task', 'submit_message', 'set_external_tools', 'set_knowledge_bases'}:
                     row = db.execute('SELECT body FROM agent_work_packages WHERE id=?', (binding['work_package_id'],)).fetchone()
                     work = json.loads(row[0]) if row else {}
                     if not work or work.get('superseded_contract') or work.get('contract_digest') != binding.get('contract_digest'):
@@ -173,9 +174,9 @@ class LoomService:
                         raise ServiceError('Revise the stage plan or take over the Session before changing its execution contract', 409)
                 if command['type'] in {'set_external_tools', 'set_knowledge_bases'} and sid in self.active:
                     raise ServiceError('Wait for the paused worker to exit before changing tools', 409)
-                if command['type'] == 'restart_task' and sid in self.active:
+                if command['type'] in {'restart_task', 'revise_task'} and sid in self.active:
                     raise ServiceError('Wait for the previous worker to exit before restarting', 409)
-                if command['type'] == 'restart_task' and self.config_path and not self.provider_factory:
+                if command['type'] in {'restart_task', 'revise_task'} and self.config_path and not self.provider_factory:
                     from loom.tasks.config import load_task_config
 
                     configured = load_task_config(self.config_path)
@@ -464,6 +465,39 @@ class LoomService:
             return self._apply_worker_record(sid, record, prepared=prepared, prepared_events=prepared_events)
 
     def _apply_worker_record(self, sid, record, *, prepared=None, prepared_events=None):
+        if record.get('type') in {'read_artifact', 'poll_control', 'check_control', 'status'}:
+            # Immutable evidence reads must not rewrite session state or journal
+            # another full copy of the artifact as a worker response. Acceptance
+            # inspects many receipts; those writes used to serialize all readers.
+            value = decode(record['payload'])
+            with self.store.read() as db:
+                state = self.store._load(db, sid, lazy=True)
+                run = state['run']
+                if not run or record['epoch'] != state['epoch'] or record['attempt_id'] != run['attempt_id']:
+                    raise ServiceError('Stale executor epoch', 409)
+                if run['state'] != 'running':
+                    raise ServiceError('Executor already suspended or completed', 409)
+                if record['type'] != 'read_artifact':
+                    # Include time since the last durable write without moving
+                    # accounted: the next mutation still charges all that time.
+                    attempt = self.active.get(sid)
+                    if attempt:
+                        run['active_seconds'] += max(0, time.monotonic() - attempt.accounted)
+                    if record['type'] == 'status':
+                        return {'input_cursor': state['input_cursor']}
+                    control = state['control']
+                    if record['type'] == 'check_control':
+                        return bool(control and control['kind'] == 'stopped') or _time_budget_exceeded(state)
+                    return control or ({'kind': 'paused', 'reason': 'Active time budget exceeded', 'code': 'ACTIVE_TIME_BUDGET_EXCEEDED'}
+                                       if _time_budget_exceeded(state) else None)
+                row = db.execute('SELECT ref FROM artifacts WHERE session_id=? AND digest=?', (sid, value['digest'])).fetchone()
+                if not row:
+                    raise ServiceError('Artifact does not belong to this session. Use knowledge_read with knowledge_base_id and document_id '
+                                       'for knowledge documents; their checksums are not artifact IDs.', 404)
+                media_type = json.loads(row[0]).get('media_type')
+                if media_type:
+                    raise ServiceError(f'Artifact is binary ({media_type}); read_artifact reads text/json artifacts only', 400)
+            return json.loads(self.store.artifacts.read(value['digest']))
         if record.get('type') in {'agent_context', 'agent_record_use'}:
             from loom.autonomy.context import build_snapshot, record_use
 
@@ -623,18 +657,6 @@ class LoomService:
             elif kind == "publish_artifact":
                 response = self.store.register_artifact(db, sid, prepared)
                 emit("artifact.created", {"artifact": response})
-            elif kind == "read_artifact":
-                digest = value["digest"]
-                row = db.execute("SELECT ref FROM artifacts WHERE session_id=? AND digest=?", (sid, digest)).fetchone()
-                if not row:
-                    raise ServiceError(
-                        "Artifact does not belong to this session. Use knowledge_read with knowledge_base_id and document_id "
-                        "for knowledge documents; their checksums are not artifact IDs.", 404,
-                    )
-                media_type = json.loads(row[0]).get("media_type")
-                if media_type:
-                    raise ServiceError(f"Artifact is binary ({media_type}); read_artifact reads text/json artifacts only", 400)
-                response = json.loads(self.store.artifacts.read(digest))
             elif kind == "request_input":
                 existing = state["input_request"]
                 call = plain(value["call"])
@@ -657,14 +679,6 @@ class LoomService:
                     op = json.loads(db.execute("SELECT body FROM operations WHERE id=?", (oid,)).fetchone()[0])
                     op["process"] = {"pid": value["pid"], "identity": process_identity(value["pid"])}
                     self._save_operation(db, sid, oid, op)
-            elif kind == "check_control":
-                response = bool(state["control"] and state["control"]["kind"] == "stopped") or _time_budget_exceeded(state)
-            elif kind == "poll_control":
-                response = state["control"]
-                if not response and _time_budget_exceeded(state):
-                    response = {"kind": "paused", "reason": "Active time budget exceeded", "code": "ACTIVE_TIME_BUDGET_EXCEEDED"}
-            elif kind == "status":
-                response = {"input_cursor": state["input_cursor"]}
             elif kind == "result":
                 run.pop("failure", None)
                 state["context"] = encode(value.context)

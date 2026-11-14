@@ -187,18 +187,25 @@ def planning_activity(db, aid, objectives):
     """Bounded progress records, without model proposals or input snapshots."""
     activity = []
     for objective in objectives:
-        runs = project(db, "agent_runs", ["id", "objective_id", "kind", "state", "created_at", "reason"],
+        runs = project(db, "agent_runs",
+            ["id", "objective_id", "kind", "state", "created_at", "reason", "stream", "outcome", "decision.action", "decision.reason"],
             "WHERE agent_id=? AND json_extract(body,'$.objective_id')=? "
-            "AND json_extract(body,'$.kind') IN ('unified_plan','stage_plan','stage_review') ORDER BY rowid DESC LIMIT 3",
+            "AND json_extract(body,'$.kind') IN ('unified_plan','stage_plan','stage_review','work_plan') ORDER BY rowid DESC LIMIT 3",
             (aid, objective["id"]))
         for run in runs:
+            # Older attempts retain their small decision summary, never the full proposal.
+            action, reason = run.pop("decision.action", None), run.pop("decision.reason", None)
+            if run["state"] == "committed" and not run.get("outcome") and action:
+                run["outcome"] = dict(action=action, reason=(reason or "")[:4000])
             events = db.execute(
                 "SELECT seq,json_extract(body,'$.at') AS at,json_extract(body,'$.type') AS type,"
                 "json_extract(body,'$.payload.attempt') AS attempt,json_extract(body,'$.payload.code') AS code,"
                 "substr(coalesce(json_extract(body,'$.payload.validation_error'),json_extract(body,'$.payload.reason'),"
                 "json_extract(body,'$.payload.issues[0].message')),1,1200) AS message "
                 "FROM agent_events WHERE agent_id=? "
-                "AND (json_extract(body,'$.type') LIKE 'plan.%' OR json_extract(body,'$.type') LIKE 'stage.%') "
+                "AND (json_extract(body,'$.type') LIKE 'plan.%' OR json_extract(body,'$.type') LIKE 'stage.%' "
+                "OR json_extract(body,'$.type')='planning.finished') "
+                "AND json_extract(body,'$.type') NOT LIKE 'plan.stream.%' "
                 "AND coalesce(json_extract(body,'$.payload.agent_run_id'),json_extract(body,'$.payload.run_id'))=? "
                 "ORDER BY seq DESC LIMIT 20", (aid, run["id"])).fetchall()
             run["events"] = [dict(row) for row in reversed(events)]
@@ -216,8 +223,12 @@ def add_work_metrics(db, aid, works):
     sessions = {
         row[0]: row[1:]
         for row in db.execute(
-            "SELECT s.id,json_extract(s.body,'$.run.active_seconds'),json_extract(s.body,'$.run.counters') FROM sessions s "
-            "JOIN agent_sessions a ON a.session_id=s.id WHERE a.agent_id=? AND json_type(s.body,'$.run')='object'",
+            "SELECT s.id,json_extract(seconds.value,'$'),counters.value FROM session_heads s "
+            "JOIN agent_sessions a ON a.session_id=s.id "
+            "JOIN session_fields run ON run.session_id=s.id AND run.scope='root' AND run.name='run' AND run.value<>'null' "
+            "LEFT JOIN session_fields seconds ON seconds.session_id=s.id AND seconds.scope='run' AND seconds.name='active_seconds' "
+            "LEFT JOIN session_fields counters ON counters.session_id=s.id AND counters.scope='run' AND counters.name='counters' "
+            "WHERE a.agent_id=? AND s.deleted_at IS NULL",
             (aid,),
         )
     }
@@ -228,3 +239,19 @@ def add_work_metrics(db, aid, works):
         counters = decode(json.loads(encoded)) if encoded else {}
         work["execution_seconds"] = seconds
         work["actual_tokens"] = getattr(counters.get("usage"), "total_tokens", 0)
+
+
+def execution_session(db, sid):
+    """Execution UI needs small fields and checkpoint presence, never their bodies."""
+    from loom.service.session_storage import Fields, head
+
+    summary = head(db, sid)
+    root, run = Fields(db, sid, 'root'), Fields(db, sid, 'run')
+    present = {(r[0], r[1]) for r in db.execute(
+        "SELECT scope,name FROM session_fields WHERE session_id=? "
+        "AND ((scope='root' AND name='context') OR (scope='run' AND name='checkpoint')) AND value<>'null'", (sid,))}
+    return dict(session_id=sid, task=dict(state=summary['task_state']),
+        run={**{key: run.get(key) for key in ('id', 'state', 'steps', 'active_seconds', 'reason', 'failure')},
+             'checkpoint': ('run', 'checkpoint') in present},
+        context=('root', 'context') in present,
+        **{key: root.get(key) for key in ('autonomy', 'control', 'workspace_blocked', 'input_request')})

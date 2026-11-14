@@ -1,5 +1,5 @@
 import { element } from "../markdown.mjs";
-import { parseBudget, canRestartTask } from "../state.mjs";
+import { parseBudget, canReviseTask } from "../state.mjs";
 import { acceptanceBudgetText } from '../activity/acceptance.mjs';
 import { acceptanceChecklist } from './acceptance-checklist.mjs';
 
@@ -39,14 +39,14 @@ export function builtinPanels() {
       const root = panel("Details"),
         body = element("div");
       root.append(body);
-      const edit = element("button", "primary edit-task-button", "Edit task");
+      const edit = element("button", "primary edit-task-button", "Revise task");
       edit.type = "button"; edit.onclick = () => actions.editTask?.();
       root.querySelector("h2").after(edit);
       let signature;
       return {
         element: root,
         update(state) {
-          edit.disabled = !canRestartTask(state);
+          edit.disabled = !canReviseTask(state);
           const rows = [
             ["Session", state.session_id],
             ["Workspace", state.task.workspace || "—"],

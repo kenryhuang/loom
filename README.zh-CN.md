@@ -63,9 +63,9 @@ uv run loom --workspace /absolute/path/to/project
 1. 使用服务启动时打印的 credential 连接。
 2. 打开新建 Session 页面，填写任务目标，选择 **General**、**Research** 或**Coding**；**Recommend with LLM** 可推荐工具、模型和知识库。需要页面操作或视觉验收时，选择 **Browser & visual evidence** 并绑定 workspace。
 3. 在对话区查看进展，展开 **Process** 检查模型请求、工具参数、结果和错误。
-4. 发送补充要求或回答待处理问题，通过 **Pause**、**Resume**、**Stop** 控制执行。
+4. 发送补充要求或回答待处理问题，通过同一个 **Pause / Resume** 按钮暂停或继续执行，保留当前 context、计划和进度。
 
-**Complete task** 关闭任务；**Restart task** 沿用当前目标创建新 run——重建计划和验收、重置本轮预算，旧对话作为有界背景保留，旧 checkpoint 不沿用，工作区文件不回滚。**Session info → Edit task → Save & restart** 可一次性修改目标、模型、执行预算、plugins、工具集合、知识库和外部工具。CLI 等价命令：`loom session restart SESSION_ID`。
+**Revise → Save & run** 修改目标、模型、执行预算、plugins、工具集合、知识库和外部工具后，重新组装并完整执行。新一轮使用全新的 context、计划、验收和预算；旧消息和结果保留在历史中，不再注入新的执行上下文。工作区文件保持原样。Web 不再提供 Stop run、Complete task、Reopen 或 Restart task 按钮；当前一轮完成后可以直接发送后续消息，无需 Reopen。旧 API/CLI 命令保留兼容。
 
 **Evaluation / Evolve → Session diagnosis** 只读或在隔离 worktree 中调查失败的 Session，并在冲突检查后合并审查过的补丁。**Knowledge bases** 页面管理导入、embedding、网站同步和图谱；**External tools** 页面注册 MCP 与 CLI 连接；**Trajectory** 打开执行分析；**Outputs** 展示已保存报告。详见 [Web 指南](docs/design/web-frontend.md) 和 [Session 创建指南](docs/design/session-setup.md)。
 

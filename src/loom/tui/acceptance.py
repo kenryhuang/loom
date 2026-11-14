@@ -8,7 +8,30 @@ LABELS = {"not_ready": "Ready to work", "verifying": "Verifying", "passed": "Pas
 
 
 ROUND_EVENTS = {"acceptance.verifying", "verification.started", "verification.completed", "acceptance.gate.passed", "acceptance.gate.blocked",
-                "visual.capture.started", "visual.capture.completed", "visual.capture.failed", "acceptance.budget.renewed"}
+                "visual.capture.started", "visual.capture.completed", "visual.capture.failed", "acceptance.budget.renewed",
+                "verification.batch.started", "verification.batch.completed", "verification.pages.planned",
+                "verification.selection.started", "verification.selection.completed"}
+
+
+def progress_text(value):
+    if value.get('state') == 'passed':
+        return 'All required checks and goal review passed'
+    current = (value.get('verification_progress') or {}).get('current') or {}
+    stage = current.get('stage')
+    ids = current.get('criterion_ids', [])
+    names = {c['id']: c['description'] for c in (value.get('plan') or {}).get('criteria', [])}
+    target = '; '.join('Overall goal' if i == 'goal' else names.get(i, i) for i in ids)
+    label = {'select_evidence': 'Selecting evidence', 'verify_page': 'Inspecting evidence',
+             'verify': 'Checking goal coverage and consistency' if 'goal' in ids else 'Judging requirements',
+             'check': 'Running check'}.get(stage, '')
+    if not label:
+        return ''
+    if page := current.get('page'):
+        label = f"Evidence page {page['index']}/{page['total']}"
+        label += ' saved; verdict pending' if current.get('state') == 'saved' else ' · inspecting'
+    if value.get('state') in {'blocked', 'needs_repair'}:
+        label = 'Stopped at: ' + label
+    return label + (' · ' + target if target else '')
 
 
 def round_summary(value):
@@ -21,12 +44,13 @@ def round_summary(value):
     if failed and not_run:
         title = "Acceptance blocked before checks"
     progress = f"{len(criteria)} checks pending · No results yet" if not_run else f"{passed}/{len(criteria)} checks passed"
-    return f"{title} · {progress} · Round {value.get('attempts', 0)}", failed
+    detail = progress_text(value) or f"Round {value.get('attempts', 0)}"
+    return f"{title} · {progress} · {detail}", failed
 
 
 def round_details(value):
     results = {r["criterion_id"]: r for r in value.get("results", [])}
-    lines = [value.get("reason", "")]
+    lines = [value.get("reason", ""), progress_text(value)]
     if budget := value.get('budget'):
         lines.append(f"Acceptance budget: {budget['model_calls']}/{budget['max_model_calls']} model calls · "
                      f"{budget['elapsed_seconds']:.1f}/{budget['max_seconds']}s · "
@@ -102,6 +126,8 @@ class AcceptancePanel(Static):
         if criteria and not any(c["id"] in results for c in criteria):
             progress = f"{len(criteria)} checks pending · No results yet"
         lines = [f"Acceptance · {label} · {progress} · revision {value.get('revision', 0)}"]
+        if progress_text(value):
+            lines.append(progress_text(value))
         if self.current_check:
             lines.append("Checking: " + self.current_check)
         elif value.get("reason"):

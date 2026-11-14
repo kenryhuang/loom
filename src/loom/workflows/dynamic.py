@@ -91,7 +91,10 @@ class DynamicWorkflowPolicy:
         if node and "allowed_tools" in node["executor_config"]:
             # Completion is a workflow control, like revising acceptance; a
             # restriction on work tools must not strand the final node.
-            refs = tuple(ref for ref in refs if ref.id in node["executor_config"]["allowed_tools"] or ref.id in {"revise_acceptance_plan", "finish"})
+            controls = {"revise_acceptance_plan", "finish"}
+            if any(ref.id == "record_context_notes" for ref in refs):
+                controls.update({"record_context_notes", "read_artifact"})
+            refs = tuple(ref for ref in refs if ref.id in node["executor_config"]["allowed_tools"] or ref.id in controls)
         controls = self.tool_refs()
         if node and has_finish:
             if self.is_final_node():

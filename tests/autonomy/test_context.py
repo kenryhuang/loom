@@ -4,7 +4,7 @@ import pytest
 
 from loom.autonomy.context import CONTEXT_MAX_CHARS, _goal_summary, _source_summary, _stage_contract, build_snapshot
 from loom.memory.annotations import annotate
-from loom.memory.store import MemoryError, MemoryStore
+from loom.memory.store import MemoryStore
 from loom.service.contracts import ServiceError
 from tests.autonomy.helpers import goals
 from tests.memory.helpers import seed
@@ -132,29 +132,31 @@ def test_review_confidence_reaches_context_without_rewriting_evaluation(agent_se
     competing = {**fact('other'), 'title': 'duplicate planets rendering duplicate planets', 'summary': 'Check duplicate planets'}
     seed(service.store, path, records=[competing, record])
     memory = MemoryStore(service.store.path, workspace=path)
-    original = next(row for row in memory.browse()['records'] if row['id'] == record['id'])
+    original = next(row for row in memory.browse()['records'] if row['source']['record_id'] == record['id'])
     ref = original['source']
     assert original['effective_confidence'] == 'low'
     assert original['review_state'] == 'unreviewed'
     payload = dict(evaluation_id=ref['evaluation_id'], record_id=ref['record_id'], content_digest=ref['content_digest'])
     annotate(facade.store, aid, 'tag-only', dict(**payload, expected_revision=0, kind='tag', value='needs-review'))
-    assert next(row for row in memory.browse()['records'] if row['id'] == record['id'])['review_state'] == 'unreviewed'
+    assert next(row for row in memory.browse()['records'] if row['source']['record_id'] == record['id'])['review_state'] == 'unreviewed'
     annotate(facade.store, aid, 'human-confirm', dict(**payload, expected_revision=1, kind='confirm'))
     found = memory.search('duplicate planets')['records'][0]
     assert found['source']['record_id'] == record['id']
     assert found['confidence'] == 'low' and found['effective_confidence'] == 'high'
     assert found['basis'] == 'inferred' and found['confidence_basis'] == 'human_review'
-    assert found['human_review']['agent_id'] == aid
+    reviews = memory.query_service().detail(found['memory_id'])['versions'][0]['reviews']
+    assert any(review.get('agent_id') == aid for review in reviews)
     snapshot = build_snapshot(facade.store, aid, goal={'objective': 'duplicate planets'}, purpose='planning')
     assert snapshot['memory']['records'][0]['review_state'] == 'confirmed'
     with service.store.transaction() as db:
         context = facade.store.get(db, 'agent_contexts', snapshot['id'], aid)
-    assert context['memory_refs'][0] == {k: ref[k] for k in ('record_id', 'evaluation_id', 'content_digest')}
+    assert context['memory_refs'][0] == {k: ref[k] for k in ('record_id', 'evaluation_id', 'content_digest', 'memory_id', 'version_id')}
     assert 'request_input' in snapshot['decision_policy']
     annotate(facade.store, aid, 'human-correct', dict(**payload, expected_revision=2, kind='correct', value='Check duplicate planets in this project only'))
     corrected = memory.browse(review='reviewed')['records'][0]
     assert corrected['review_state'] == 'corrected'
-    assert corrected['citations'] == record['citations']
+    detail = json.loads(memory.read(memory_id=corrected['memory_id'], version_id=corrected['version_id'])['text'])
+    assert detail['citations'] == record['citations']
     assert corrected['confidence'] == 'low'
     with service.store.transaction() as db:
         raw = json.loads(db.execute("SELECT body FROM semantic_jobs WHERE id='eval-memory'").fetchone()[0])
@@ -189,13 +191,14 @@ def test_annotations_preserve_source_and_tools_share_view(agent_service):
 
     assert library()['records'][0]['basis'] == 'observed'
     mark("correct", "correct", 0, value="Inspect duplicate planets in the current version; this is a human correction.")
-    assert memory.epoch() > epoch
+    assert memory.epoch() != epoch
     assert facade.snapshot(aid, view='learning')['memory_version'] == memory.epoch()
     found = memory.search("duplicate planets")["records"][0]
     assert found["basis"] == "human_asserted"
     assert library()['records'][0]['basis'] == 'human_asserted'
     assert library()['records'][0]['source']['annotation_revision'] == 1
-    assert "human correction" in memory.read("eval-memory", "memory:planet")["text"]
+    assert "human correction" not in memory.read("eval-memory", "memory:planet")["text"]
+    assert "human correction" in memory.read(memory_id=found['memory_id'], version_id=found['version_id'])['text']
     with service.store.transaction() as db:
         raw = json.loads(db.execute("SELECT body FROM semantic_jobs WHERE id='eval-memory'").fetchone()[0])
         assert raw["checkpoint"]["memory"]["records"]["memory:planet"]["basis"] == "observed"
@@ -204,8 +207,7 @@ def test_annotations_preserve_source_and_tools_share_view(agent_service):
     mark("reject", "reject", 1)
     assert memory.search("duplicate planets")["records"] == []
     assert library()['total'] == 0
-    with pytest.raises(MemoryError):
-        memory.read("eval-memory", "memory:planet")
+    assert memory.read("eval-memory", "memory:planet")["historical"]
     mark("restore", "restore", 2)
     assert memory.search("duplicate planets")["records"]
     assert library()['total'] == 1

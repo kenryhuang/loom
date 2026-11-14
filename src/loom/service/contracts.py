@@ -20,7 +20,9 @@ COMMAND_TYPES = frozenset(
         "complete_task",
         "reopen_task",
         "restart_task",
+        "revise_task",
         "set_token_budget",
+        "set_model_call_budget",
         "set_knowledge_bases",
         "set_external_tools",
     }
@@ -164,7 +166,7 @@ def validate_command(command: Any) -> dict:
     if kind == "submit_message":
         allowed = {"content"}
         text(payload.get("content"), "content")
-    elif kind == "restart_task":
+    elif kind in {"restart_task", "revise_task"}:
         allowed = {"task", "reason"}
         if "task" in payload:
             changes = object_value(payload["task"], "task")
@@ -182,11 +184,12 @@ def validate_command(command: Any) -> dict:
         ids = payload.get("external_tool_ids")
         if not isinstance(ids, list) or len(ids) > 64 or any(not isinstance(item, str) for item in ids) or len(set(ids)) != len(ids):
             raise ServiceError("external_tool_ids must be a unique list of at most 64 IDs")
-    elif kind == "set_token_budget":
-        allowed = {"max_tokens"}
-        value = payload.get("max_tokens")
+    elif kind in {"set_token_budget", "set_model_call_budget"}:
+        field = "max_tokens" if kind == "set_token_budget" else "max_llm_calls"
+        allowed = {field}
+        value = payload.get(field)
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            raise ServiceError("max_tokens must be a positive integer")
+            raise ServiceError(f"{field} must be a positive integer")
     elif kind in {"answer_input", "supersede_input"}:
         allowed = {"request_id", "answer" if kind == "answer_input" else "content"}
         text(payload.get("request_id"), "request_id", max_length=200)

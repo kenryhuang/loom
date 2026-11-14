@@ -108,11 +108,14 @@ class SessionSemantic:
         self.pool = ThreadPoolExecutor(max_workers=EVALUATION_WORKERS, thread_name_prefix="loom-evaluation")
         with self.store.transaction() as db:
             db.execute("CREATE TABLE IF NOT EXISTS semantic_jobs(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, cache_key TEXT UNIQUE, body TEXT NOT NULL)")
-            for row in db.execute("SELECT id,body FROM semantic_jobs").fetchall():
+            from loom.service.startup_indexes import require
+
+            require(db, 'semantic_jobs')
+            for row in db.execute("SELECT id,body FROM semantic_jobs INDEXED BY semantic_jobs_active "
+                                  "WHERE json_extract(body,'$.state') IN ('queued','running')").fetchall():
                 body = json.loads(row["body"])
-                if body["state"] in {"queued", "running"}:
-                    body.update(state="interrupted", error="Service restarted. Resume reuses completed batches.")
-                    db.execute("UPDATE semantic_jobs SET body=? WHERE id=?", (canonical(body), row["id"]))
+                body.update(state="interrupted", error="Service restarted. Resume reuses completed batches.")
+                db.execute("UPDATE semantic_jobs SET body=? WHERE id=?", (canonical(body), row["id"]))
         self.outputs = EvaluationArtifacts(self.store)
 
     def options(self):
@@ -147,7 +150,7 @@ class SessionSemantic:
                 with self.store.transaction() as db:
                     db.execute("UPDATE semantic_jobs SET body=? WHERE id=?", (canonical(body), body["id"]))
                     db.execute("INSERT OR IGNORE INTO skill_dirty_sessions VALUES(?)", (body['session_id'],))
-                    from loom.memory.migration import sync_job
+                    from loom.memory.ingestion import sync_job
 
                     sync_job(db, body)
                 return
@@ -526,7 +529,7 @@ class SessionSemantic:
             if resume_request_id:
                 body.setdefault("host_resume_requests", []).append(resume_request_id)
             db.execute("INSERT OR REPLACE INTO semantic_jobs VALUES(?,?,?,?)", (body["id"], sid, key, canonical(body)))
-            from loom.memory.migration import sync_job
+            from loom.memory.ingestion import sync_job
 
             sync_job(db, body)
             self.cancels[body["id"]] = threading.Event()
@@ -546,8 +549,6 @@ class SessionSemantic:
                     if body["state"] in {"queued", "running"} or (future and not future.done()):
                         raise ServiceError("Cancel the evaluation and wait for it to stop before deleting", 409)
                     self.outputs.prepare(db, body)
-                    if db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_versions'").fetchone():
-                        db.execute("UPDATE memory_versions SET value=value+1 WHERE id='effective'")
                     db.execute('INSERT OR IGNORE INTO skill_dirty_sessions VALUES(?)', (sid,))
                 elif not db.execute(
                     "SELECT 1 FROM evaluation_deletions WHERE id=? AND session_id=? AND analysis_id=?", (identifier, sid, aid)

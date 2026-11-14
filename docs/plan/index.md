@@ -46,3 +46,4 @@
 - [2026-10-03-persistent-service-sessions.md](2026-10-03-persistent-service-sessions.md) — 常驻服务与持续 Session（[设计](../design/2026-10-03-persistent-service-sessions-design.md)）
 - [2026-10-30-autonomous-agent-implementation.zh-CN.md](2026-10-30-autonomous-agent-implementation.zh-CN.md) — 自主 Agent 分阶段实施计划（[设计](../design/2026-10-25-autonomous-agent-design.zh-CN.md)）
 - [2026-11-01-online-task-spec.md](2026-11-01-online-task-spec.md) — 在线 Task Spec 机制实施计划（[设计](../design/2026-11-01-online-task-spec-design.zh-CN.md)）
+- [2026-11-13-context-review-working-set.zh-CN.md](2026-11-13-context-review-working-set.zh-CN.md) — Context 审查工作集（[实现与验证](../review/2026-11-13-context-review-working-set.zh-CN.md)）

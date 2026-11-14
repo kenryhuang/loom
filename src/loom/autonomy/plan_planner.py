@@ -6,6 +6,7 @@ import json
 from loom.autonomy.budget import BudgetLedger, BudgetProvider
 from loom.autonomy.plan_compiler import compile_plan, schema
 from loom.autonomy.plan_evidence import PROTOCOL_VERSION
+from loom.autonomy.planning_stream import planning_response
 from loom.core import thaw_json
 from loom.llm.api import LlmMessage
 from loom.llm.structured import ProtocolError, StructuredProtocol, UnsupportedFormat, output_mode, protocol_provider, request_structured, unsupported_format
@@ -32,9 +33,16 @@ scope/assumptions and can be investigated by that work; they are not unresolved 
 If an actual verification requirement cannot be met, return request_input or wait with the missing condition.
 Use the supplied actual capability descriptions and tool schemas. inspect allows reading, not arbitrary shell commands.
 Use list_directory and read_file for repository inventory; do not invent command-output requirements for that work.
+The published work contract is authoritative: workers do not infer extra audit/smoke-test requirements from task keywords.
+Before proposing work, reconcile its objective, inherited acceptance, stage non-goals, verification checks and environment.
+Read-only inventory must not require command output. When required execution conflicts with a committed non-goal,
+surface the conflict with request_input instead of publishing contradictory work or silently adding capabilities.
 Workspace permissions are authoritative. A copy or a prompt is not a security sandbox. If explicit required commands
 cannot run in the allowed environment, preserve the requirement and use request_input with the exact missing condition.
 Explicit commands, screenshots and external outcomes must retain concrete matching checks, not semantic substitutes.
+Verification scope contains only concrete workspace-relative file/directory paths (e.g. ["src/widget.ts", "tests/widget.test.ts"]).
+Never put prose, acceptance topics, comma-separated lists, command descriptions or "final report" in scope.
+Use [] when file dependencies cannot be named; preserve the full requirement in description and required_tools.
 Every user requirement/constraint and every committed requirement in required_revision/current stage must be preserved.
 Verification methods may change, business requirements may not. Reports can be returned in the final artifact/report;
 writing to a read-only source directory is not required. Use semantic checks for report quality and concrete checks for
@@ -85,7 +93,8 @@ class PlanPlanner:
                 bounded = BudgetProvider(protocol_provider(provider, protocol, mode), BudgetLedger(self.store.sessions.path, clock=self.store.clock),
                     dict(agent_id=agent["id"], objective_id=payload["objective"]["id"]), category="stage_planning",
                     output_tokens=agent["role"]["budget"]["output_tokens"])
-                result = await bounded.chat([LlmMessage("system", PROMPT), LlmMessage("user", json.dumps(body, ensure_ascii=False))])
+                result = await planning_response(self.store, agent, run_id, bounded,
+                    [LlmMessage("system", PROMPT), LlmMessage("user", json.dumps(body, ensure_ascii=False))], _attempt, mode)
                 if not result.ok and unsupported_format(result.error):
                     raise UnsupportedFormat()
                 if not result.ok:

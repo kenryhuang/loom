@@ -61,7 +61,9 @@ def test_missing_evidence_repairs_in_next_task_step_without_resume(tmp_path, fin
     assert result.run_result.metrics.outcome == "pass"
     assert acceptance["feedback"]["state"] == "resolved"
     assert acceptance["budget"]["repair_rounds"] == 1
-    assert judge.feedback_seen and judge.verifications == 2
+    # This judge explicitly demands raw source even at goal, so goal performs
+    # one targeted expansion after its receipt-only initial review.
+    assert judge.feedback_seen and judge.verifications == 4
     assert sum(e["type"] == "acceptance.feedback.applied" for e in sink.events) == 1
     assert sum(e["type"] == "tool.completed" and e.get("tool_id") == "read_file" for e in sink.events) == 1
 
@@ -321,7 +323,7 @@ def test_truncated_evidence_view_is_repaired_without_rereading_source(tmp_path):
             assert (await assembly.handlers()["read_file"]({"path": "source.txt"})).ok
             decision = await assembly.request_completion("Source report")
             assert decision.outcome == "accept"
-            assert judge.verifications == 2
+            assert judge.verifications == 3  # Detail review, goal review, targeted goal evidence expansion.
             assert len(assembly._acceptance_calls) == 1
             assert assembly.acceptance.data["repair_rounds"] == 0
         finally:

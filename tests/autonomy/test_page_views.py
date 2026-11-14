@@ -90,20 +90,58 @@ def test_page_routes_keep_agent_and_cycle_ownership_checks(agent_service):
             facade.dispatch('GET', route, {})
 
 
-@pytest.mark.parametrize('name', ['overview', 'profile', 'knowledge'])
-def test_unrelated_tabs_never_read_session_bodies(agent_service, monkeypatch, name):
+@pytest.mark.parametrize('name', ['overview', 'goals', 'work', 'profile', 'knowledge', 'learning'])
+def test_tabs_never_reconstruct_session_bodies(agent_service, monkeypatch, name):
     service, facade, aid, _ = agent_service
+    work = prepare(facade, aid)
+    facade.supervisor.dispatcher.dispatch(aid, work['id'])
+    sid = facade.store.snapshot(aid)['sessions'][0]['session_id']
+
+    def large_session(state, emit, db):
+        from loom.llm.api import TokenUsage
+        from loom.runtime.checkpoints import encode
+
+        state['context'] = {'large_context': 'not-for-the-agent-page' * 100000}
+        state['run'] = dict(id='projection-run', state='queued', active_seconds=75,
+                            counters=encode({'usage': TokenUsage(total_tokens=1234)}),
+                            checkpoint={'large_checkpoint': 'also-not-for-the-page' * 100000})
+        state['input_request'] = dict(state='pending', id='question', question='Choose direction')
+
+    service.store.update(sid, large_session)
     original = service.store.read
+    statements = []
+    forbidden = []
+
+    def authorize(action, table, column, *_):
+        if action == sqlite3.SQLITE_READ and (table == 'sessions' and column == 'body' or table == 'session_messages'):
+            forbidden.append((table, column))
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
 
     @contextmanager
     def guarded():
         with original() as db:
-            db.set_authorizer(lambda action, table, column, *_:
-                sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and table == 'sessions' and column == 'body' else sqlite3.SQLITE_OK)
+            db.set_authorizer(authorize)
+            db.set_trace_callback(statements.append)
             yield db
 
     monkeypatch.setattr(service.store, 'read', guarded)
-    assert page(facade, aid, name)['pending_decisions'] == []
+    result = page(facade, aid, name)
+    assert not forbidden
+    assert not any('SELECT value' in q and ("name='context'" in q or "name='checkpoint'" in q) for q in statements)
+    assert 'large_context' not in json.dumps(result) and 'large_checkpoint' not in json.dumps(result)
+    if name == 'learning':
+        assert result['pending_decisions'][0]['request']['id'] == 'question'
+    else:
+        assert result['pending_decisions'] == []
+    if name == 'goals':
+        assert result['work_packages'][0]['execution_seconds'] == 75
+        assert result['work_packages'][0]['actual_tokens'] == 1234
+    if name == 'work':
+        runtime = result['execution']['runtime'][0]
+        assert runtime['session_id'] == sid and runtime['active_seconds'] == 75
+        assert runtime['checkpoint_available'] is True
+        assert any(b['code'] == 'SESSION_INPUT' for b in result['execution']['blockers'])
 
 
 def test_page_summaries_omit_work_context_but_scoped_detail_keeps_it(agent_service):
@@ -172,10 +210,16 @@ def test_planning_activity_is_bounded_scoped_and_refreshes_without_agent_revisio
             facade.store.event(db, aid, 'plan.protocol.requesting', dict(agent_run_id='plan-4', attempt=attempt + 1))
         facade.store.event(db, aid, 'plan.protocol.rejected', dict(agent_run_id='plan-4', attempt=25, code='truncated',
             issues=[dict(path='/', message='Output truncated')], proposal={'private': 'hidden'}))
+        for _ in range(25):
+            facade.store.event(db, aid, 'plan.stream.updated', dict(agent_run_id='plan-4', state='streaming'))
+        run = facade.store.get(db, 'agent_runs', 'plan-4', aid)
+        run['stream'] = dict(state='streaming', channels={'content': {'text': 'Draft so far', 'characters': 12}})
+        facade.store.put(db, 'agent_runs', run)
         facade.store.event(db, other['id'], 'plan.protocol.requesting', dict(agent_run_id='plan-4', attempt=999))
         facade.store.event(db, aid, 'schedule.finished', dict(run_id='plan-4', reason='unrelated schedule'))
     after = page(facade, aid, 'goals')
     assert after['revision'] == before['revision']
+    assert after['planning_activity'][0]['stream']['channels']['content']['text'] == 'Draft so far'
     events = after['planning_activity'][0]['events']
     assert len(events) == 20 and events[0]['attempt'] == 7
     assert [e['seq'] for e in events] == sorted(e['seq'] for e in events)
@@ -244,3 +288,14 @@ def test_conditional_page_reads_revalidate_related_records_and_authentication(ag
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_historical_wait_decision_exposes_reason_without_full_proposal(agent_service):
+    _, facade, aid, _ = agent_service
+    with facade.store.sessions.transaction() as db:
+        facade.store.put(db, 'agent_runs', dict(id='old-wait', agent_id=aid, objective_id='quality', kind='unified_plan',
+            state='committed', decision=dict(action='wait', reason='No remaining delivery gap', private='large private proposal')))
+    activity = page(facade, aid, 'goals')['planning_activity'][0]
+    assert activity['outcome'] == dict(action='wait', reason='No remaining delivery gap')
+    assert 'private' not in json.dumps(activity)
+    assert 'goal_count' not in activity['outcome']  # Historical counts were not recorded.

@@ -191,18 +191,9 @@ def report(store, service, db, agent, *, analysis_details=True):
         try:
             sid = work['session_id']
             if sid not in sessions:
-                row = db.execute("SELECT json_object('session_id',id, 'task',json_object('state',json_extract(body,'$.task.state')), "
-                    "'run',json_object('id',json_extract(body,'$.run.id'),'state',json_extract(body,'$.run.state'), "
-                    "'steps',json_extract(body,'$.run.steps'),'active_seconds',json_extract(body,'$.run.active_seconds'), "
-                    "'reason',json_extract(body,'$.run.reason'),'failure',json_extract(body,'$.run.failure'), "
-                    "'checkpoint',json_type(body,'$.run.checkpoint') IS NOT NULL AND json_type(body,'$.run.checkpoint')<>'null'), "
-                    "'context',json_type(body,'$.context') IS NOT NULL AND json_type(body,'$.context')<>'null', "
-                    "'autonomy',json_extract(body,'$.autonomy'),'control',json_extract(body,'$.control'), "
-                    "'workspace_blocked',json_extract(body,'$.workspace_blocked'),'input_request',json_extract(body,'$.input_request')) "
-                    "FROM sessions WHERE id=? AND json_extract(body,'$.deleted_at') IS NULL", (sid,)).fetchone()
-                if row is None:
-                    raise ValueError('Session not found')
-                sessions[sid] = json.loads(row[0])
+                from loom.autonomy.views import execution_session
+
+                sessions[sid] = execution_session(db, sid)
             state = sessions[sid]
         except Exception as exc:
             block("SESSION_MISSING", work["id"], str(exc), [work["session_id"]], ["Restore the original Session and data directory; never treat unknown execution results as not run."])

@@ -19,10 +19,9 @@ class EvaluationArtifacts:
                 PRIMARY KEY(evaluation_id,digest))""")
             db.execute("""CREATE TABLE IF NOT EXISTS evaluation_deletions(
                 id TEXT PRIMARY KEY, session_id TEXT NOT NULL, analysis_id TEXT NOT NULL, digests TEXT NOT NULL)""")
-            for row in db.execute("SELECT body FROM semantic_jobs").fetchall():
-                body = json.loads(row[0])
-                if body.get("result"):
-                    self.track(db, body, body["result"])
+            # Publication/resume tracks ownership in the publishing transaction.
+            # Deletion reconciles the requested session's historical ownership;
+            # startup only resumes already committed cleanup intents.
             pending = [row[0] for row in db.execute("SELECT id FROM evaluation_deletions")]
         for identifier in pending:
             try:

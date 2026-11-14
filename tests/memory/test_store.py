@@ -3,6 +3,8 @@ import sqlite3
 
 import pytest
 
+from loom.memory.ingestion import sync_job
+from loom.memory.repository import Repository
 from loom.memory.store import SUMMARY_CHARS, MemoryError, MemoryStore, serialized
 from loom.service.store import SessionStore
 from tests.memory.helpers import fact, seed
@@ -20,9 +22,10 @@ def test_review_library_browses_beyond_runtime_search_and_keeps_scope(tmp_path):
     assert page['total'] == 25 and len(page['records']) == 20 and page['next_offset'] == 20
     following = memory.browse(kind='facts', offset=20)
     assert len(following['records']) == 5 and following['next_offset'] is None
-    assert not {r['id'] for r in page['records']} & {r['id'] for r in following['records']}
+    assert not {r['memory_id'] for r in page['records']} & {r['memory_id'] for r in following['records']}
     method = memory.browse(kind='workflows')['records'][0]
-    assert method['steps'] == ['Inspect identifiers'] and method['citations']
+    detail = json.loads(memory.read(memory_id=method['memory_id'], version_id=method['version_id'])['text'])
+    assert detail['steps'] == ['Inspect identifiers'] and detail['citations']
     assert not memory.browse(query='unrelated-payments')['records']
     assert not memory.browse(review='reviewed')['records']
     assert all(r['source']['evaluation_id'] == 'eval-memory' for r in memory.browse(limit=50)['records'])
@@ -34,22 +37,22 @@ def test_review_library_browses_beyond_runtime_search_and_keeps_scope(tmp_path):
 def test_library_filters_and_pages_history_outside_runtime_candidate_window(tmp_path):
     store = SessionStore(tmp_path / 'data')
     workspace = tmp_path / 'project'
-    seed(store, workspace, records=[fact(f'new-{i:04}') for i in range(510)], evaluation='new')
     older = {**fact('older'), 'kind': 'lessons', 'summary': 'Unique historical repair needle'}
-    sid = seed(store, workspace, records=[older], evaluation='old')
+    sid = seed(store, workspace, records=[older], evaluation='old', publish=False)
     with store.transaction() as db:
         db.execute("UPDATE semantic_jobs SET body=json_set(body,'$.created_at','2020-01-01') WHERE id='old'")
+        sync_job(db, json.loads(db.execute("SELECT body FROM semantic_jobs WHERE id='old'").fetchone()[0]))
+    seed(store, workspace, records=[{**fact(f'new-{i:04}'), 'summary': f'Planet reference {i}'} for i in range(210)], evaluation='new')
     memory = MemoryStore(store.path, workspace=workspace)
-    assert memory.search('planets')['available_records'] == 500
+    assert memory.search('planets')['available_records'] == 200
     assert memory.search('planets')['truncated']
-    page = memory.browse(offset=500)
-    assert page['total'] == 511 and len(page['records']) == 11
+    page = memory.browse(offset=200)
+    assert page['total'] == 211 and len(page['records']) == 11
     assert page['next_offset'] is None and not page['truncated']
-    assert page['records'][-1]['id'] == 'older'
-    assert memory.browse(query='needle')['records'][0]['id'] == 'older'
+    assert page['records'][-1]['source']['record_id'] == 'older'
+    assert memory.browse(query='needle')['records'][0]['source']['record_id'] == 'older'
     assert memory.browse(kind='lessons')['total'] == 1
-    with store.transaction() as db:
-        db.execute("UPDATE sessions SET body=json_set(body,'$.deleted_at','now') WHERE id=?", (sid,))
+    store.update(sid, lambda state, emit, db: state.update(deleted_at='now'))
     assert memory.browse(query='needle')['total'] == 0
 
 
@@ -69,9 +72,10 @@ def test_quarantined_stale_and_legacy_unverified_records_never_enter_runtime_sea
 def test_scope_citations_partial_chinese_and_delete(tmp_path):
     store = SessionStore(tmp_path / 'data')
     workspace = tmp_path / 'solar'
-    sid = seed(store, workspace)
+    sid = seed(store, workspace, publish=False)
     with store.transaction() as db:
         db.execute("UPDATE semantic_jobs SET body=json_set(body, '$.analysis_id', ?) WHERE id=?", ('analysis-1', 'eval-memory'))
+        sync_job(db, json.loads(db.execute("SELECT body FROM semantic_jobs WHERE id='eval-memory'").fetchone()[0]))
     seed(store, tmp_path / 'other', evaluation='private')
     memory = MemoryStore(store.path, workspace=workspace)
     result = memory.search('修复行星渲染')
@@ -88,13 +92,13 @@ def test_scope_citations_partial_chinese_and_delete(tmp_path):
     assert json.loads(full['text'] + rest['text'])['citations'][0]['quote'] == 'duplicate planet IDs'
     assert rest['next_offset'] is None
     assert not memory.search('unrelated payments')['records']
-    with pytest.raises(MemoryError, match='outside'):
+    with pytest.raises(MemoryError, match='namespace'):
         memory.read('private', 'memory:planet')
     with store.transaction() as db:
         db.execute('DELETE FROM semantic_jobs WHERE id=?', ('eval-memory',))
+        Repository(store.path).invalidate(db, evaluation_id='eval-memory')
     assert not memory.search('planets')['records']
-    with pytest.raises(MemoryError):
-        memory.read('eval-memory', 'memory:planet')
+    assert memory.read('eval-memory', 'memory:planet')['source_available'] is False
 
 
 def test_workspace_canonical_legacy_no_workspace_and_deleted_session(tmp_path):
@@ -111,10 +115,7 @@ def test_workspace_canonical_legacy_no_workspace_and_deleted_session(tmp_path):
     no_workspace = seed(store, None, evaluation='general')
     assert MemoryStore(store.path, session_id=no_workspace).search('planets')['records']
     assert not MemoryStore(store.path, session_id='another').search('planets')['records']
-    with store.transaction() as db:
-        body = json.loads(db.execute('SELECT body FROM sessions WHERE id=?', (sid,)).fetchone()[0])
-        body['deleted_at'] = 'now'
-        db.execute('UPDATE sessions SET body=? WHERE id=?', (json.dumps(body), sid))
+    store.update(sid, lambda state, emit, db: state.update(deleted_at='now'))
     assert not MemoryStore(store.path, workspace=workspace).search('planets')['records']
 
 
@@ -139,7 +140,8 @@ def test_dedup_conflicting_status_budget_and_malformed_record(tmp_path):
     result = MemoryStore(store.path, workspace=tmp_path).search('planets')
     assert len(result['records']) == 2
     assert {r['basis'] for r in result['records']} == {'observed', 'inferred'}
-    assert result['issues'][0]['code'] == 'memory.record_invalid'
+    with store.read() as db:
+        assert db.execute("SELECT record_id FROM memory_migration_issues WHERE evaluation_id='eval-memory'").fetchone()[0] == 'bad'
     many = []
     for i in range(510):
         row = fact('many-' + str(i))
@@ -159,7 +161,7 @@ def test_store_failures_are_explicit_and_never_create_database(tmp_path):
     assert not path.exists()
     with sqlite3.connect(path):
         pass
-    with pytest.raises(MemoryError, match='sessions table missing'):
+    with pytest.raises(MemoryError, match='Memory V2 schema is missing'):
         MemoryStore(path).search('planets')
     store = SessionStore(tmp_path / 'empty')
     assert not MemoryStore(store.path, workspace=tmp_path).search('planets')['records']
@@ -170,13 +172,15 @@ def test_store_failures_are_explicit_and_never_create_database(tmp_path):
 
 def test_actual_execution_binding_controls_legacy_scope(tmp_path):
     store = SessionStore(tmp_path / 'data')
-    sid = seed(store, tmp_path, frozen_scope=False)
+    sid = seed(store, tmp_path, frozen_scope=False, publish=False)
     actual = tmp_path / 'actual'
     actual.mkdir()
     store.update(sid, lambda state, emit, db: state['task'].update(task_spec={
         'session_environment': {'resources': [{'id': 'code', 'kind': 'directory', 'uri': str(actual)}]},
         'execution_runtime': {'workspace_resource': 'code'},
     }))
+    with store.transaction() as db:
+        sync_job(db, json.loads(db.execute("SELECT body FROM semantic_jobs WHERE id='eval-memory'").fetchone()[0]))
     assert not MemoryStore(store.path, workspace=tmp_path).search('planets')['records']
     assert MemoryStore(store.path, workspace=actual).search('planets')['records']
 

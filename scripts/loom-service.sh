@@ -13,6 +13,8 @@
 #   LOOM_DATA_DIR  service data dir   (default <repo>/runs/service)
 #   LOOM_CONFIG    model config file  (default <repo>/config.yaml, then config.yml)
 #   LOOM_BIN       loom executable    (default <repo>/.venv/bin/loom, falls back to `uv run loom`)
+#   LOOM_START_TIMEOUT  readiness wait in seconds (default 120; includes database recovery)
+#   LOOM_STOP_TIMEOUT   graceful shutdown wait in seconds (default 20)
 # Explicit --config overrides LOOM_CONFIG. Restart uses the arguments supplied
 # on that invocation; repeat any extra flags that should remain enabled.
 
@@ -27,7 +29,7 @@ DATA_DIR="${LOOM_DATA_DIR:-$ROOT/runs/service}"
 PID_FILE="$DATA_DIR/loom.pid"
 LOG_FILE="$DATA_DIR/loom.log"
 STOP_TIMEOUT="${LOOM_STOP_TIMEOUT:-20}"
-START_TIMEOUT="${LOOM_START_TIMEOUT:-15}"
+START_TIMEOUT="${LOOM_START_TIMEOUT:-120}"
 
 if [[ -x "${LOOM_BIN:-}" ]]; then
     LAUNCH=("$LOOM_BIN")
@@ -72,7 +74,10 @@ running_pid() {
 
 # Any HTTP response (even 401) means the server is answering on the port.
 port_code() {
-    curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://$HOST:$PORT/" 2>/dev/null || true
+    # This is a local listener check, never a request through the user's proxy.
+    # A proxy's 502/403 would otherwise look like an occupied local port, and a
+    # curlrc redirect/retry setting could also change the probe's meaning.
+    curl -q --noproxy '*' -s -o /dev/null -w '%{http_code}' --max-time 2 "http://$HOST:$PORT/" 2>/dev/null || true
 }
 
 # Resolve before restart stops anything, so a missing config leaves it running.
@@ -173,7 +178,15 @@ cmd_stop() {
     if kill -0 "$pid" 2>/dev/null; then
         echo "did not exit after ${STOP_TIMEOUT}s; sending SIGKILL"
         kill -9 "$pid" 2>/dev/null || true
-        sleep 1
+        waited=0
+        while kill -0 "$pid" 2>/dev/null && (( waited < 5 )); do
+            sleep 1
+            (( waited += 1 ))
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "error: process $pid is still present after SIGKILL; retaining $PID_FILE and refusing to restart" >&2
+            return 1
+        fi
     fi
     rm -f "$PID_FILE"
     echo "loom service stopped"

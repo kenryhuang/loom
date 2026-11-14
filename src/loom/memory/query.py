@@ -44,13 +44,16 @@ class MemoryQueryService:
 
     def state(self, db):
         if not exists(db):
-            return None
-        return db.execute("SELECT * FROM memory_namespaces WHERE id=?", (self.ns,)).fetchone()
+            raise MemoryError('memory.migration_required', 'Memory V2 schema is missing; run the offline migration command')
+        state = db.execute("SELECT * FROM memory_namespaces WHERE id=?", (self.ns,)).fetchone()
+        if state and state['mode'] != 'runtime_v2':
+            raise MemoryError('memory.migration_required', 'Finish the offline migration before reading memory')
+        return state
 
-    def enabled(self, *, runtime=False):
+    def enabled(self):
         with self.repo.connect() as db:
             state = self.state(db)
-            return bool(state and state["mode"] in ({"runtime_v2"} if runtime else {"runtime_v2", "library_v2"}))
+            return state is not None
 
     def epoch(self):
         with self.repo.connect() as db:
@@ -169,6 +172,8 @@ class MemoryQueryService:
             lifecycle=row["lifecycle"],
             freshness=("needs_revalidation" if row["revalidate_after"] and row["revalidate_after"] <= now() else row["freshness"]),
             review_state=row["review_state"],
+            effective_confidence='high' if row['review_state'] in {'confirmed', 'corrected'} else record.get('confidence', 'unknown'),
+            confidence_basis='human_review' if row['review_state'] in {'confirmed', 'corrected'} else 'evaluation',
             support_count=row["support_count"],
             valid_from=row["valid_from"],
             valid_to=row["valid_to"],
@@ -178,10 +183,10 @@ class MemoryQueryService:
 
     def browse(self, *, query="", kind="", review="", offset=0, limit=20, cursor=None, lifecycle="current"):
         with self.repo.connect() as db:
+            state = self.state(db)
             dependencies = bool(db.execute("SELECT 1 FROM memory_relations WHERE namespace_id=? AND kind='depends_on' LIMIT 1", (self.ns,)).fetchone())
             where, args = self._filter(query=query, kind=kind, review=review, lifecycle=lifecycle, dependencies=dependencies)
-            state = self.state(db)
-            epoch = state["epoch"]
+            epoch = state["epoch"] if state else 0
             count_join = LIST_JOIN.replace("memory_projection p ", "memory_projection p INDEXED BY memory_projection_filter ")
             total = db.execute("SELECT COUNT(*) " + count_join + " WHERE " + where, args).fetchone()[0]
             if cursor:
@@ -237,11 +242,12 @@ class MemoryQueryService:
                 + JOIN
                 + " WHERE "
                 + where
-                + " ORDER BY p.pinned DESC,p.created_at DESC LIMIT 200",
+                + " ORDER BY p.pinned DESC,(p.review_state IN ('confirmed','corrected')) DESC,p.created_at DESC LIMIT 200",
                 args,
             ).fetchall()
             terms = tokens(query)
-            rows = sorted(rows, key=lambda r: (r["pinned"], len(terms & tokens(r["title"])) * 2 + len(terms & tokens(r["summary"]))), reverse=True)
+            rows = sorted(rows, key=lambda r: (r["pinned"], r['review_state'] in {'confirmed', 'corrected'},
+                                              len(terms & tokens(r["title"])) * 2 + len(terms & tokens(r["summary"]))), reverse=True)
             selected, conflicts, seen = [], [], set()
             for row in rows:
                 if row["lifecycle"] == "disputed":
@@ -268,13 +274,14 @@ class MemoryQueryService:
                 truncated=len(rows) > len(selected),
                 issues=[],
                 namespace_id=self.ns,
-                epoch=state["epoch"],
+                epoch=state["epoch"] if state else 0,
                 storage="memory_v2",
             )
             return packet(value)
 
     def detail(self, memory_id):
         with self.repo.connect() as db:
+            self.state(db)
             rows = db.execute(
                 "SELECT p.*,v.record,v.conditions,v.revision AS content_revision,i.latest_revision,"
                 "t.lifecycle,t.freshness,t.valid_from,t.valid_to,t.revalidate_after "
@@ -319,6 +326,7 @@ class MemoryQueryService:
             clauses += ["(t.valid_from IS NULL OR t.valid_from<=?)", "(t.valid_to IS NULL OR t.valid_to>?)"]
             args += [valid_at, valid_at]
         with self.repo.connect() as db:
+            self.state(db)
             rows = db.execute(
                 "SELECT v.id AS version_id,v.revision,v.record,t.* FROM memory_items i "
                 "JOIN memory_item_versions v ON v.memory_id=i.id JOIN memory_validity t ON t.version_id=v.id WHERE "
@@ -354,6 +362,7 @@ class MemoryQueryService:
 
     def original(self, evaluation_id, record_id, *, offset=0, limit=6000):
         with self.repo.connect() as db:
+            self.state(db)
             row = db.execute(
                 """SELECT o.body,src.body AS source,src.available,o.id FROM memory_sources src
                 JOIN memory_observations o ON o.source_id=src.id WHERE src.namespace_id=? AND src.evaluation_id=? AND src.record_id=?
@@ -389,16 +398,3 @@ def packet(value):
     result = {k: v for k, v in value.items() if k not in {"packet_id", "packet_digest"}}
     checksum = digest(result)
     return {**result, "packet_id": "mp:" + checksum[:32], "packet_digest": checksum}
-
-
-def denial_overlay(database, workspace, session_id, rows):
-    """A rollback to legacy reads must not undo newer human withdrawals."""
-    from loom.memory.repository import signature
-
-    repo = Repository(database)
-    with repo.connect() as db:
-        if not exists(db):
-            return rows
-        ns = namespace_id(workspace, session_id)
-        denied = {r[0] for r in db.execute("SELECT signature FROM memory_tombstones WHERE namespace_id=?", (ns,))}
-    return [row for row in rows if signature(row["record"]) not in denied]

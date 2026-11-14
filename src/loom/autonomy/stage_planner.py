@@ -7,6 +7,7 @@ from copy import deepcopy
 from loom.autonomy.acceptance import ref_key, support, validate_completion
 from loom.autonomy.budget import BudgetLedger, BudgetProvider
 from loom.autonomy.contracts import strict, strings
+from loom.autonomy.planning_stream import planning_response
 from loom.autonomy.stage_overlap import validate_overlap
 from loom.core import thaw_json
 from loom.llm.api import LlmMessage
@@ -334,7 +335,7 @@ class StagePlanner:
                     category="stage_planning",
                     output_tokens=agent["role"]["budget"]["output_tokens"],
                 )
-                result = await bounded.chat(
+                result = await planning_response(self.store, agent, agent.get("planner_lease"), bounded,
                     [
                         LlmMessage(
                             "system",
@@ -367,7 +368,7 @@ class StagePlanner:
                             "or stage success from Deep eval completion. Learning gaps alone do not prevent progress.",
                         ),
                         LlmMessage("user", json.dumps(body, ensure_ascii=False)),
-                    ]
+                    ], _attempt, mode
                 )
                 if not result.ok and unsupported_format(result.error):
                     raise UnsupportedFormat()

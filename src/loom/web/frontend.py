@@ -6,11 +6,7 @@ from importlib.resources import files
 from loom.service.contracts import COMMAND_TYPES
 from loom.service.session_setup import builtin_templates, capability_catalog
 
-COMMAND_LABELS = {
-    "pause": "Pause", "resume": "Resume", "stop_run": "Stop run",
-    "complete_task": "Complete task", "reopen_task": "Reopen task",
-    "restart_task": "Restart task",
-}
+COMMAND_LABELS = {"pause": "Pause", "resume": "Resume", "revise_task": "Revise"}
 
 
 class WebFrontend:

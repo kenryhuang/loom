@@ -21,7 +21,7 @@ def test_durable_task_loop_repairs_missing_evidence_without_resume(tmp_path):
     try:
         for objective in ('Finish tool', 'Direct answer'):
             sid = service.create(objective, {'objective': objective, 'workspace': str(tmp_path), 'plan_mode': 'off'})['session_id']
-            state = wait_state(service, sid, 'idle')
+            state = wait_state(service, sid, 'idle', timeout=30)
             assert state['acceptance']['state'] == 'passed'
             assert state['acceptance']['feedback']['state'] == 'resolved'
             assert state['acceptance']['budget']['repair_rounds'] == 1
@@ -36,6 +36,7 @@ def test_durable_task_loop_repairs_missing_evidence_without_resume(tmp_path):
 
 def evidence_resume_provider(state):
     from pathlib import Path
+
     from loom.core import err, make_loom_error, ok
     from loom.llm import LlmResponse, LlmToolCall
 
@@ -95,6 +96,43 @@ def provider_factory(state):
     return provider
 
 
+def interrupted_unscoped_provider(state):
+    from pathlib import Path
+
+    provider = provider_factory(state)
+    criteria = provider.verification_provider.criteria
+    criteria[0]['scope'] = []  # External command state must be checked again.
+
+    class InterruptedJudge(Judge):
+        async def chat(self, messages, *args, **kwargs):
+            if messages[0].content.startswith('You independently') and not (Path(state['task']['workspace']) / 'verify-ready').exists():
+                raise TimeoutError()
+            return await super().chat(messages, *args, **kwargs)
+
+    provider.verification_provider = InterruptedJudge(criteria)
+    return provider
+
+
+def test_resume_unscoped_command_rechecks_execution_without_rewording_candidate(tmp_path):
+    (tmp_path / 'check.txt').write_text('pass')
+    service = LoomService(tmp_path / 'data', provider_factory=interrupted_unscoped_provider).start()
+    try:
+        sid = service.create('pending', {'objective': 'Maintain', 'workspace': str(tmp_path), 'plan_mode': 'off'})['session_id']
+        paused = wait_state(service, sid, 'paused', timeout=30)
+        assert paused['acceptance']['cause_code'] == 'ACCEPTANCE_TIMEOUT'
+        events = service.events(sid, limit=1000)
+        solver_calls = sum(e['type'] == 'llm.requested' and e['payload'].get('usage_role') != 'verification' for e in events)
+        (tmp_path / 'verify-ready').touch()
+        command(service, sid, 'resume')
+        done = wait_state(service, sid, 'idle', timeout=30)
+        assert done['acceptance']['state'] == 'passed'
+        events = service.events(sid, limit=1000)
+        assert sum(e['type'] == 'llm.requested' and e['payload'].get('usage_role') != 'verification' for e in events) == solver_calls
+        assert sum(e['type'] == 'tool.started' and e['payload'].get('tool_id') == 'process_execute' for e in events) == 2
+    finally:
+        service.close()
+
+
 def external_acceptance_provider(state):
     from tests.service.test_external_tools import ExternalProvider
 
@@ -137,9 +175,9 @@ def test_durable_command_acceptance_counts_calls_and_journals_checks(tmp_path):
         sid = service.create("verified", {"objective": "Maintain", "workspace": str(workspace), "plan_mode": "off"})["session_id"]
         state = wait_state(service, sid, "idle")
         assert state["acceptance"]["state"] == "passed"
-        assert state["token_budget"]["used"] == 30
+        assert state["token_budget"]["used"] == 45
         events = service.events(sid, limit=1000)
-        assert sum(e["type"] == "llm.requested" for e in events) == 3
+        assert sum(e["type"] == "llm.requested" for e in events) == 4
         with service.store.transaction() as db:
             operations = [json.loads(row[0]) for row in db.execute("SELECT body FROM operations WHERE session_id=?", (sid,))]
         checks = [op for op in operations if op["call"]["name"] == "process_execute"]
@@ -189,19 +227,30 @@ def test_explicit_resume_recovers_exhausted_acceptance_budget_across_service_res
     service = LoomService(directory, provider_factory=provider_factory).start()
     try:
         command(service, sid, 'resume')
+        partial = wait_state(service, sid, 'paused')
+        assert partial['acceptance']['budget']['generation'] == 1
+        assert {r['criterion_id']: r['status'] for r in partial['acceptance']['results']} == {'regression': 'passed'}
+        execution_calls = sum(e['type'] == 'llm.requested' and e['payload'].get('usage_role') != 'verification'
+                              for e in service.events(sid, limit=1000))
+        # A one-call explicit allocation pays for the detail review only. The
+        # next Resume must retain it and spend its single call on the goal gate.
+        command(service, sid, 'resume')
         state = wait_state(service, sid, 'idle')
         assert state['acceptance']['state'] == 'passed'
         assert state['acceptance']['plan'] == original_plan
         assert state['acceptance']['budget']['max_model_calls'] == 1
-        assert state['acceptance']['budget']['generation'] == 1
-        assert state['acceptance']['budget']['total_model_calls'] == 2
+        assert state['acceptance']['budget']['generation'] == 2
+        assert state['acceptance']['budget']['total_model_calls'] == 3
         assert state['token_budget']['used'] > original_usage
         events = service.events(sid, limit=1000)
+        assert sum(e['type'] == 'llm.requested' and e['payload'].get('usage_role') != 'verification'
+                   for e in events) == execution_calls  # Resume reuses the submitted candidate, without another solver turn.
         renewed = [e for e in events if e['type'] == 'acceptance.budget.renewed']
-        assert len(renewed) == 1
+        assert len(renewed) == 2
         archive = json.loads(service.store.read_artifact(sid, renewed[0]['payload']['previous_budget']['sha256']))
         assert archive['budget']['model_calls'] == 1
         assert not any(r['status'] == 'passed' for r in archive['results'])
+        assert sum(e['type'] == 'tool.started' and e['payload'].get('tool_id') == 'process_execute' for e in events) == 1
     finally:
         service.close()
 

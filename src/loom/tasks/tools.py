@@ -58,23 +58,14 @@ def make_task_tools(request: TaskRequest) -> dict[str, Any]:
             raw = await asyncio.to_thread(path.read_bytes)
         except OSError as exc:
             return err(make_loom_error("TOOL_FAILED", f"Failed to read file: {exc}", retryable=False, metadata={"path": str(path)}))
-        content = raw[:max_bytes].decode("utf-8", errors="replace")
-        return ok(
-            Observation(
-                new_trace_id(),
-                "read_file",
-                {
-                    "path": _relative_to_root(root, path),
-                    "content": content,
-                    "bytes_read": min(len(raw), max_bytes),
-                    "truncated": len(raw) > max_bytes,
-                    "resource": {"path": str(path), "after_sha256": hashlib.sha256(raw).hexdigest(),
-                                 "returned_sha256": hashlib.sha256(raw[:max_bytes]).hexdigest(),
-                                 "byte_range": [0, min(len(raw), max_bytes)]},
-                },
-                now_iso(),
-            )
-        )
+        from loom.tasks.file_read import file_read_payload
+
+        try:
+            value = file_read_payload(raw, _relative_to_root(root, path), str(path),
+                                      offset_bytes=data.get("offset_bytes", 0), max_bytes=max_bytes)
+        except ValueError as exc:
+            return err(make_loom_error("VALIDATION_FAILED", str(exc), retryable=False))
+        return ok(Observation(new_trace_id(), "read_file", value, now_iso()))
 
     async def edit_file(input_value: Any, _options: Mapping[str, Any] | None = None) -> Result:
         data = _tool_input(input_value)

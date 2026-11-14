@@ -8,6 +8,27 @@ from loom.service.contracts import canonical
 TERMINAL = {"completed", "incomplete", "failed", "cancelled"}
 
 
+def historical_runs(db, aid, known):
+    """Only inspect unqueued runs; token streams are never terminal evidence."""
+    runs = []
+    for link in db.execute('SELECT * FROM agent_run_links WHERE agent_id=?', (aid,)).fetchall():
+        if link['run_id'] in known:
+            continue
+        params = (link['session_id'], link['run_id'])
+        started = db.execute(
+            "SELECT MIN(rowid) FROM events INDEXED BY events_run "
+            "WHERE session_id=? AND json_extract(body,'$.run_id')=?", params).fetchone()[0]
+        if started is None:
+            continue
+        cursor = db.execute(
+            "SELECT MAX(seq) FROM events INDEXED BY events_type WHERE session_id=? "
+            "AND json_extract(body,'$.type') IN ('run.failed','run.stopped','run.state.changed') "
+            "AND json_extract(body,'$.run_id')=? AND (json_extract(body,'$.type')!='run.state.changed' "
+            "OR json_extract(body,'$.payload.state') IN ('completed','failed','stopped'))", params).fetchone()[0]
+        runs.append(dict(link, started=started, cursor=cursor or 0))
+    return sorted(runs, key=lambda run: run['started'])
+
+
 def enqueue(db, cycle):
     """Append exactly once; manual retries explicitly append a new queue position."""
     if db.execute("SELECT 1 FROM agent_learning_cycles WHERE id=?", (cycle["id"],)).fetchone():
@@ -32,17 +53,11 @@ def reconcile(store, db, aid):
     Existing manual evaluations of that exact snapshot are adopted, not duplicated.
     """
     cycles = {c["run_id"]: c for c in store.rows(db, "agent_learning_cycles", aid)}
-    runs = db.execute(
-        "SELECT l.run_id,l.session_id,l.work_package_id,MIN(e.rowid) AS started,"
-        "MAX(CASE WHEN json_extract(e.body,'$.type') IN ('run.failed','run.stopped') "
-        "OR (json_extract(e.body,'$.type')='run.state.changed' AND json_extract(e.body,'$.payload.state') "
-        "IN ('completed','failed','stopped')) THEN e.seq ELSE 0 END) AS cursor "
-        "FROM agent_run_links l JOIN events e ON e.session_id=l.session_id AND json_extract(e.body,'$.run_id')=l.run_id "
-        "WHERE l.agent_id=? GROUP BY l.run_id ORDER BY started", (aid,)
-    ).fetchall()
+    migrate_order = any('queue_order' not in cycle for cycle in cycles.values())
+    runs = historical_runs(db, aid, set() if migrate_order else cycles)
     # Upgrade legacy positions together, so historical work creation dates do
     # not reorder successive runs of the same work package.
-    if any("queue_order" not in c for c in cycles.values()):
+    if migrate_order:
         order = {r["run_id"]: r["started"] for r in runs}
         for i, cycle in enumerate(sorted(cycles.values(), key=lambda c: order.get(c["run_id"], len(runs))), 1):
             cycle.setdefault("queue_order", order.get(cycle["run_id"], i))
@@ -53,8 +68,9 @@ def reconcile(store, db, aid):
         # A worker emits run.failed before the host commits the final run state.
         # Enqueuing in that gap would preempt record_session_state's atomic
         # work-outcome/outbox commit and leave the work package running forever.
-        live = db.execute("SELECT body FROM sessions WHERE id=?", (run["session_id"],)).fetchone()
-        current_run = (json.loads(live[0]).get("run") or {}) if live else {}
+        live = db.execute("SELECT name,value FROM session_fields WHERE session_id=? AND scope='run' "
+                          "AND name IN ('id','state')", (run['session_id'],))
+        current_run = {row[0]: json.loads(row[1]) for row in live}
         if current_run.get("id") == run["run_id"] and current_run.get("state") not in {"completed", "failed", "stopped"}:
             continue
         work_row = db.execute("SELECT body FROM agent_work_packages WHERE id=? AND agent_id=?", (run["work_package_id"], aid)).fetchone()

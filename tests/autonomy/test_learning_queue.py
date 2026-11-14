@@ -202,3 +202,46 @@ def test_lost_initial_start_reply_adopts_same_job_after_restart(tmp_path):
     saved = store.snapshot(cycle["agent_id"])["learning"][0]
     assert len(calls) == 1 and saved["evaluation_id"] == job["id"]
     assert saved["attempts"] == 1 and saved["state"] == "running"
+
+
+def test_backfill_reads_terminal_events_without_decoding_token_streams(tmp_path):
+    import json
+    import sqlite3
+
+    from loom.autonomy.learning_queue import historical_runs
+
+    db = sqlite3.connect(tmp_path / 'history.sqlite')
+    db.row_factory = sqlite3.Row
+    db.executescript("""
+        CREATE TABLE agent_run_links(run_id TEXT PRIMARY KEY,session_id TEXT,work_package_id TEXT,agent_id TEXT);
+        CREATE TABLE events(session_id TEXT,seq INTEGER,body TEXT,PRIMARY KEY(session_id,seq));
+        CREATE INDEX events_run ON events(session_id,json_extract(body,'$.run_id'),seq);
+        CREATE INDEX events_type ON events(session_id,json_extract(body,'$.type'),seq);
+    """)
+    db.execute("INSERT INTO agent_run_links VALUES('current','s','w','a')")
+    db.execute("INSERT INTO agent_run_links VALUES('old','s','w','a')")
+    rows = [('s', i, json.dumps(dict(run_id='current' if i % 2 else 'old', type='llm.content.delta',
+                                   payload={'delta': 'large stream ' * 100}))) for i in range(1, 2001)]
+    rows.extend([('s', 2001, json.dumps(dict(run_id='current', type='run.state.changed', payload={'state': 'completed'}))),
+                 ('s', 2002, json.dumps(dict(run_id='old', type='run.state.changed', payload={'state': 'suspended'})))])
+    db.executemany('INSERT INTO events VALUES(?,?,?)', rows)
+    # SQLite can answer the start position from the expression index. Only
+    # terminal candidates may reach JSON parsing, regardless of stream size.
+    native = sqlite3.connect(':memory:')
+    parsed = []
+
+    def extract(body, path):
+        value = json.loads(body)
+        assert value['type'] != 'llm.content.delta', 'Backfill decoded token history under the write lock'
+        parsed.append(path)
+        return native.execute('SELECT json_extract(?,?)', (body, path)).fetchone()[0]
+
+    db.create_function('json_extract', 2, extract, deterministic=True)
+    runs = historical_runs(db, 'a', {'old'})
+    assert [(r['run_id'], r['started'], r['cursor']) for r in runs] == [('current', 1, 2001)]
+    assert parsed
+    parsed.clear()
+    assert historical_runs(db, 'a', {'old', 'current'}) == []
+    assert not parsed
+    db.close()
+    native.close()

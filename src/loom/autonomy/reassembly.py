@@ -165,7 +165,8 @@ def build(service, state, report):
         limits = spec.setdefault('acceptance', {})
         budget = (state.get('acceptance') or {}).get('budget') or {}
         for field in ('max_model_calls', 'max_seconds', 'max_output_tokens', 'model_timeout_seconds'):
-            limits[field] = min(100000, max(limits.get(field, DEFAULTS[field]), budget.get(field, 0)) * 2)
+            current = max(limits.get(field, DEFAULTS[field]), budget.get(field, 0))
+            limits[field] = min(max(100000, DEFAULTS[field], current), current * 2)
         if any(c['details'].get('cause_code') == 'ACCEPTANCE_INPUT_BUDGET' for c in report['causes']):
             limits['context_window_percent'] = min(95, limits.get('context_window_percent', DEFAULTS['context_window_percent']) + 15)
             if limits.get('max_prompt_chars'):

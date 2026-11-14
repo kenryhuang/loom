@@ -825,7 +825,7 @@ test('Budget waiting shows the allowance and automatic reset instead of review',
  }finally{view.close();dom.window.close();}
 });
 
-test('Planning activity updates inside the expanded basis and isolates objective histories',async()=>{
+test('Planning activity stays visible and streams drafts before publishing outcomes',async()=>{
  const data=fixture();data.planning_engine=2;data.view='goals';data.role.timezone='Asia/Shanghai';
  data.role.long_term_objectives=[{id:'primary',desired_outcome:'Build next stage',stage_planning:{mode:'autonomous'}},
   {id:'other',desired_outcome:'Other objective',stage_planning:{mode:'autonomous'}}];
@@ -836,25 +836,39 @@ test('Planning activity updates inside the expanded basis and isolates objective
  try{
   await view.open();await view.select('a');await view.changeTab('Goals');
   let activity=view.root.querySelector('[data-planning-objective="primary"]');
-  const basis=activity.closest('details');assert.equal(basis.querySelector('summary').textContent,'Current state & planning basis');
-  basis.open=true;basis.dispatchEvent(new dom.window.Event('toggle'));
+  assert.equal(activity.closest('details'),null);
   assert.match(activity.textContent,/Planning in progress|Planning started/);
   assert.doesNotMatch(activity.textContent,/Other review result/);
+  data.planning_activity[0].stream={state:'streaming',streaming:true,attempt:2,channels:{content:{text:'draft <img src=x>',characters:123}}};
   data.planning_activity[0].events=[
    {type:'plan.protocol.rejected',at:'2026-11-10T01:01:00Z',attempt:1,message:'Output truncated <img src=x>'},
    {type:'plan.protocol.retrying',at:'2026-11-10T01:01:00Z',attempt:1},
    {type:'plan.protocol.requesting',at:'2026-11-10T01:01:01Z',attempt:2}];
   await view.refresh();activity=view.root.querySelector('[data-planning-objective="primary"]');
-  assert.equal(activity.closest('details').open,true);
+  assert.equal(activity.closest('details'),null);
+  assert.match(activity.textContent,/Receiving planning draft/);
+  assert.match(activity.textContent,/123 characters/);
+  assert.match(activity.textContent,/Draft output is provisional/);
+  assert.doesNotMatch(activity.textContent,/work packages published/);
   assert.match(activity.textContent,/Attempt 1 · Response rejected/);
   assert.match(activity.textContent,/Retrying with correction feedback/);
   assert.match(activity.textContent,/Attempt 2 · Waiting for the planning model/);
   assert.equal(activity.querySelector('img'),null);
   data.planning_activity[0].state='committed';
+  data.planning_activity[0].outcome={action:'propose_stage',goal_count:2,work_package_count:3,reason:'Concrete next delivery'};
   data.planning_activity[0].events.push({type:'plan.protocol.completed',at:'2026-11-10T01:02:00Z',attempt:2},
    {type:'plan.finished',at:'2026-11-10T01:02:00Z'});
   await view.refresh();activity=view.root.querySelector('[data-planning-objective="primary"]');
   assert.match(activity.textContent,/Plan validation passed/);assert.match(activity.textContent,/Decision recorded/);
   assert.doesNotMatch(activity.textContent,/Planning in progress/);
+  assert.match(activity.textContent,/2 goals · 3 work packages published/);
+  assert.match(activity.textContent,/dispatch queue/);
+  assert.doesNotMatch(activity.textContent,/Receiving planning draft/);
+  data.planning_activity[0].outcome={action:'wait',reason:'No valuable gap remains',next_review_at:'2026-11-10T02:00:00Z'};
+  await view.refresh();activity=view.root.querySelector('[data-planning-objective="primary"]');
+  assert.match(activity.textContent,/Waiting for the next check/);
+  assert.match(activity.textContent,/No valuable gap remains/);
+  assert.match(activity.textContent,/Next check:/);
+  assert.doesNotMatch(activity.textContent,/work packages published/);
  }finally{view.close();dom.window.close();}
 });

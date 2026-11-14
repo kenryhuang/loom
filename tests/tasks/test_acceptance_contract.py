@@ -1,4 +1,5 @@
 import asyncio
+import json
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
@@ -98,7 +99,7 @@ def test_unknown_execution_never_accepts_a_cached_pass(tmp_path):
     assert decide(gate).reason_code == 'EXECUTION_UNKNOWN'
 
 
-@pytest.mark.parametrize('identifier', ['candidate', 'tool-call-coverage', 'tool:forged', 'report:forged'])
+@pytest.mark.parametrize('identifier', ['candidate', 'tool-call-coverage', 'tool:forged', 'report:forged', 'verification:forged'])
 def test_criterion_ids_cannot_shadow_host_evidence(tmp_path, identifier):
     gate = AcceptanceController(TaskAssembly(TaskRequest('Report', workspace=tmp_path), plan_mode='off'))
     with pytest.raises(InvalidAcceptanceContract, match='host evidence'):
@@ -138,6 +139,76 @@ def test_compiled_worker_is_not_offered_a_contract_mutation_tool(tmp_path):
     assert 'revise_acceptance_plan' not in {ref.id for ref in assembly.context_tools()}
 
 
+@pytest.mark.parametrize('collections', [['filesystem', 'task_control'], ['filesystem', 'shell', 'task_control']])
+def test_compiled_repository_audit_verifies_only_published_requirements(tmp_path, collections):
+    objective = 'Audit this repository by reading notes.txt. Do not run commands or modify files.'
+    criterion = dict(id='inventory', description='Report observed facts and inspection limits; do not run commands',
+                     verifier='semantic', check={}, scope=[], required=True)
+    request = TaskRequest(objective, workspace=tmp_path,
+        constraints=('Do not read credentials.',), expected_outputs=('An inventory with source citations.',),
+        task_spec=dict(tools=dict(collections=collections), session_environment=dict(plugin='session', resources=[
+            dict(id='workspace', kind='directory', uri=str(tmp_path), access='read-write' if 'shell' in collections else 'read-only')])),
+        metadata={'autonomy': dict(engine_version=2, contract_digest='compiled-contract', required_tools=['read_file'],
+                                   verification_plan=dict(criteria=[criterion], unresolved_requirements=[]))})
+    assembly = TaskAssembly(request, plan_mode='off')
+    judge = Judge()
+    assembly.configure_acceptance(judge)
+    context = make_task_context(request, assembly=assembly, plan_mode='off').unwrap()
+    runtime = SimpleNamespace(run_id='run', loop_id='loop', trace_id='trace', trace_sink=Sink(), cancellation=None)
+    gate = assembly.acceptance
+
+    async def verify():
+        await gate.prepare(context, runtime)
+        assert not judge.calls  # Execution consumes the published plan, without another planner.
+        assert await gate.verify(context, runtime, 'Inventory with source citations and inspection limits')
+
+    asyncio.run(verify())
+    payload = json.loads(judge.calls[-1][1].content)
+    assert payload['goal']['objective'] == objective
+    assert payload['goal']['requirements'] == [dict(id='criterion-1', description='An inventory with source citations.')]
+    constraints = [c['description'] for c in payload['goal']['constraints']]
+    assert 'Do not read credentials.' in constraints
+    assert not any('smoke' in c or 'Run relevant' in c for c in constraints)
+    assert {c['id'] for c in payload['criteria']} == {'goal'}
+    assert {c['id'] for c in json.loads(judge.calls[-2][1].content)['criteria']} == {'inventory'}
+    assert gate.data['plan']['origin'] == 'compiled_plan'
+    assert ('shell_execute' in assembly.available_tool_ids()) == ('shell' in collections)
+
+
+@pytest.mark.parametrize('status', ['passed', 'failed'])
+@pytest.mark.parametrize('autonomy', [None, {'agent_id': 'legacy'}, {'engine_version': 2}])
+def test_restored_compiled_audit_conflict_returns_to_owner_without_spending_budget(tmp_path, status, autonomy):
+    objective = 'Audit this repository without running commands'
+    legacy = make_task_context(TaskRequest(objective, workspace=tmp_path, profile='project_audit'), plan_mode='off').unwrap()
+    assert legacy.metadata['profile'] == 'project_audit'
+    assembly = TaskAssembly(TaskRequest(objective, workspace=tmp_path,
+        metadata={'autonomy': autonomy}), plan_mode='off')
+    gate = assembly.acceptance
+    gate.goal(legacy)
+    result = dict(criterion_id='goal', status=status)
+    if status == 'failed':
+        result.update(reason='Smoke output missing', gap=dict(kind='missing_evidence',
+            targets=[dict(kind='tool', value='shell_execute')], required_fact='Run a smoke command', suggested_action='Add shell'))
+    gate.data.update(plan=gate.validate_plan(dict(criteria=[])), attempts=2, model_calls=3, repair_rounds=1,
+                     candidate='Retained inventory', state='passed' if status == 'passed' else 'needs_repair', results=[result])
+    assembly._acceptance_calls = [dict(id='retained-read', tool='read_file', input='{"path":"notes.txt"}', ok=True,
+                                      goal_digest=gate.data['goal_digest'])]
+    before = gate.snapshot()
+    assembly.acceptance_resume_request = 'resume-old-worker'
+    runtime = SimpleNamespace(run_id='run', loop_id='loop', trace_id='trace', trace_sink=Sink())
+    with pytest.raises(InvalidAcceptanceContract, match='inferred project_audit'):
+        asyncio.run(gate.prepare(legacy, runtime))
+    for field in ('goal_digest', 'plan', 'candidate', 'results', 'attempts', 'model_calls', 'repair_rounds'):
+        assert gate.data[field] == before[field]
+    assert assembly._acceptance_calls[0]['id'] == 'retained-read'
+    decision = decide(gate)
+    assert decision.outcome == 'pause' and decision.reason_code == 'ACCEPTANCE_CONTRACT_INVALID'
+    report = assess(dict(task=dict(revision=1, objective=objective), acceptance=gate.public()))
+    assert report['mode'] == 'reassemble'
+    assert any(c['code'] == 'ACCEPTANCE_CONTRACT' for c in report['causes'])
+    assert not any(c['code'] == 'TOOLS_REQUIRED' for c in report['causes'])
+
+
 def test_method_fault_goes_to_owner_without_spending_solver_repairs(tmp_path):
     assembly = TaskAssembly(TaskRequest('Report', workspace=tmp_path), plan_mode='off')
     gate = assembly.acceptance
@@ -147,3 +218,17 @@ def test_method_fault_goes_to_owner_without_spending_solver_repairs(tmp_path):
     decision = decide(gate)
     assert decision.outcome == 'pause' and decision.reason_code == 'ACCEPTANCE_CONTRACT_INVALID'
     assert gate.data['repair_rounds'] == 0 and gate.data['feedback'] is None
+
+
+@pytest.mark.parametrize('objective', ['Write reports/review.md from the existing notes without running commands.',
+                                      'Review this repository using only list_directory and read_file.'])
+@pytest.mark.parametrize('autonomy', [None, {'agent_id': 'legacy'}, {'engine_version': 2}])
+def test_auto_report_and_inspection_do_not_invent_smoke_test_requirements(tmp_path, objective, autonomy):
+    request = TaskRequest(objective, workspace=tmp_path, metadata={'autonomy': autonomy})
+    context = make_task_context(request, plan_mode='off').unwrap()
+    assert context.goal.objective == objective
+    assert context.metadata['profile'] == 'general'
+    assert not any('smoke' in r.description or 'Run relevant' in r.description for r in (*context.goal.criteria, *context.identity.constraints))
+    explicit = make_task_context(TaskRequest(objective, workspace=tmp_path, profile='project_audit'), plan_mode='off').unwrap()
+    assert explicit.metadata['profile'] == 'project_audit'
+    assert any('smoke' in r.description for r in explicit.goal.criteria)

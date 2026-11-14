@@ -12,7 +12,7 @@ TOOL_COLLECTIONS = {
 }
 BUDGET_CODES = {'ACCEPTANCE_BUDGET_EXHAUSTED', 'ACCEPTANCE_INPUT_BUDGET', 'ACCEPTANCE_OUTPUT_BUDGET', 'ACCEPTANCE_TIMEOUT'}
 MANUAL_CODES = {'MODEL_OUTPUT_LIMIT', 'EXECUTION_UNKNOWN', 'ACCEPTANCE_EXTERNAL_DEPENDENCY', 'ACCEPTANCE_UNKNOWN_GAP', 'ACCEPTANCE_BINDING_UNAVAILABLE',
-                'ACCEPTANCE_SOURCE_CHANGED'}
+                'ACCEPTANCE_SOURCE_CHANGED', 'MODEL_CALL_BUDGET_EXCEEDED'}
 PLAN_CODES = {'TOOLS_UNAVAILABLE', 'TOKEN_BUDGET', 'ACCEPTANCE_CONTRACT', 'EXTERNAL_DEPENDENCY', 'EXECUTION_UNKNOWN'}
 
 
@@ -53,7 +53,9 @@ def assess(state, *, failure=None):
     if (state.get('run') or {}).get('stop_code') == 'PLAN_INCOMPLETE':
         add('PLAN_INCOMPLETE')
     for result in acceptance.get('results', []):
-        if result.get('status') == 'passed' or result.get('deferred'):
+        # Results from an invalid contract cannot authorize capability repair.
+        # Keep them in history; the owner must first publish a valid contract.
+        if code == 'ACCEPTANCE_CONTRACT_INVALID' or result.get('status') == 'passed' or result.get('deferred'):
             continue
         gap = result.get('gap') or {}
         targets = gap.get('targets', [])

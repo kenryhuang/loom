@@ -11,12 +11,9 @@ from loom.service.contracts import ServiceError, new_id, text
 
 class AutonomyService:
     def __init__(self, service, background):
-        from loom.memory.library import MemoryLibraryCache
-
         self.service = service
         self.store = AgentStore(service.store, planning_engine=service.agent_planning_engine)
         self.background = background
-        self.memory_library = MemoryLibraryCache()
         self.supervisor = AgentSupervisor(service, self.store, background, planner=service.agent_planner)
 
     def start(self):
@@ -76,10 +73,13 @@ class AutonomyService:
                 result['pause_pending'] = any(r[0] in self.service.active for r in db.execute(
                     'SELECT session_id FROM agent_sessions WHERE agent_id=?', (aid,)))
             rows = db.execute(
-                "SELECT a.session_id,a.work_package_id,a.taken_over,json_extract(s.body,'$.input_request') AS request,"
-                "json_extract(s.body,'$.task.revision') AS task_revision,json_extract(s.body,'$.task.objective') AS objective "
-                "FROM agent_sessions a JOIN sessions s ON s.id=a.session_id WHERE a.agent_id=? "
-                "AND json_extract(s.body,'$.deleted_at') IS NULL AND json_extract(s.body,'$.input_request.state')='pending'", (aid,),
+                "SELECT a.session_id,a.work_package_id,a.taken_over,request.value AS request,"
+                "json_extract(revision.value,'$') AS task_revision,json_extract(objective.value,'$') AS objective "
+                "FROM agent_sessions a JOIN session_heads s ON s.id=a.session_id "
+                "JOIN session_fields request ON request.session_id=s.id AND request.scope='root' AND request.name='input_request' "
+                "LEFT JOIN session_fields revision ON revision.session_id=s.id AND revision.scope='task' AND revision.name='revision' "
+                "LEFT JOIN session_fields objective ON objective.session_id=s.id AND objective.scope='task' AND objective.name='objective' "
+                "WHERE a.agent_id=? AND s.deleted_at IS NULL AND json_extract(request.value,'$.state')='pending'", (aid,),
             ) if view in {None, 'learning'} else []
             result["pending_decisions"] = [{**dict(row), "request": json.loads(row["request"]), "taken_over": bool(row["taken_over"])} for row in rows]
             from loom.autonomy.execution import report
@@ -601,7 +601,7 @@ class AutonomyService:
                 except ValueError as exc:
                     raise ServiceError("Invalid memory library pagination") from exc
                 result = memory.browse(query=query.get("query", [""])[0], kind=query.get("kind", [""])[0],
-                                       review=query.get("review", [""])[0], offset=offset, limit=limit, cache=self.memory_library,
+                                       review=query.get("review", [""])[0], offset=offset, limit=limit,
                                        cursor=query.get('cursor', [None])[0], lifecycle=query.get('lifecycle', ['current'])[0])
                 # Review commands use this Agent's revision even when workspace annotations are shared.
                 with self.store.sessions.read() as db:

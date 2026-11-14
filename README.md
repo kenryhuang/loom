@@ -63,9 +63,9 @@ A new session is saved immediately and waits for your first task.
 1. Connect using the credential printed by `loom serve`.
 2. Open the new-session panel, enter your objective, and pick **General**, **Research**, or **Coding**; **Recommend with LLM** can suggest the tools, model, and knowledge bases. For page interaction or visual acceptance, select **Browser & visual evidence** plus a workspace.
 3. Follow the conversation and expand **Process** to inspect model requests, tool arguments, results, and errors.
-4. Send follow-up guidance or answer pending questions; **Pause**, **Resume**, and **Stop** control execution.
+4. Send follow-up guidance or answer pending questions; one **Pause / Resume** button controls execution while preserving context, plan, and progress.
 
-**Complete task** closes the task; **Restart task** reruns the current goal in a new run with a fresh plan, fresh acceptance checks, and reset budgets — history is retained as bounded background, old checkpoints are not reused, and workspace files stay as they are. **Session info → Edit task → Save & restart** changes the objective, model, limits, plugins, tool collections, knowledge bases, and external tools atomically. CLI equivalent: `loom session restart SESSION_ID`.
+**Revise → Save & run** changes the objective, model, limits, plugins, tool collections, knowledge bases, and external tools, then reassembles and executes from the beginning. The new execution has a fresh context, plan, acceptance checks, and budgets. Earlier messages and results remain in history and are excluded from the new execution context; workspace files stay as they are. The Web controls no longer include Stop run, Complete task, Reopen, or Restart task. Send a follow-up message directly after completion. Legacy API/CLI commands remain compatible.
 
 **Evaluation / Evolve → Session diagnosis** investigates a failed session in a read-only loop or an isolated worktree, and merges reviewed patches back after conflict checks. The **Knowledge bases** view manages imports, embeddings, website sync, and graph exploration; the **External tools** view registers MCP and CLI connections; **Trajectory** opens execution analysis; **Outputs** lists saved reports. Details: [Web guide](docs/design/web-frontend.md) and [session setup guide](docs/design/session-setup.md).
 

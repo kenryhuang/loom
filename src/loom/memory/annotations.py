@@ -1,8 +1,10 @@
 """Human annotations preserve extraction evidence and suppress repeated lineage."""
 
+import json
+
 from loom.autonomy.contracts import strict
 from loom.autonomy.store import digest
-from loom.memory.store import MemoryStore
+from loom.memory.store import MemoryError, MemoryStore
 from loom.service.contracts import ServiceError, canonical, new_id, text
 
 KINDS = {"confirm", "reject", "correct", "scope", "tag", "pin", "retire", "restore"}
@@ -28,10 +30,13 @@ def annotate(store, aid, cid, payload):
         ):
             raise ServiceError("Memory outside Agent scope", 404)
     memory = MemoryStore(store.sessions.path, workspace=agent["role"]["working_directory"], session_id=sid)
-    rows, _, issues = memory._records((payload.get("evaluation_id"), payload.get("record_id")), apply_annotations=False)
-    if not rows or issues:
+    try:
+        original = memory.query_service().original(payload.get("evaluation_id"), payload.get("record_id"), limit=64000)
+    except MemoryError as exc:
+        raise ServiceError("Memory source unavailable or invalid", 404) from exc
+    if not original["source_available"]:
         raise ServiceError("Memory source unavailable or invalid", 404)
-    source, record = rows[0]["source"], rows[0]["record"]
+    source, record = original["source"], json.loads(original["text"])
     if source["content_digest"] != payload.get("content_digest"):
         raise ServiceError("Memory content changed; reload before annotating", 409)
     kind = payload.get("kind")
@@ -67,61 +72,16 @@ def annotate(store, aid, cid, payload):
             "INSERT INTO memory_annotations VALUES(?,?,?,?,?,?,?)",
             (annotation["id"], aid, source["evaluation_id"], source["record_id"], source["content_digest"], prior + 1, canonical(annotation)),
         )
-        if kind in {"reject", "retire"}:
-            db.execute("INSERT OR REPLACE INTO memory_suppressions VALUES(?,?,?)", (aid, lineage, canonical(annotation)))
-        if kind == "restore":
-            db.execute("DELETE FROM memory_suppressions WHERE agent_id=? AND lineage=?", (aid, lineage))
-        db.execute("UPDATE memory_versions SET value=value+1 WHERE id='effective'")
         apply_canonical(db, annotation, store.sessions.path)
         store.event(db, aid, "memory.annotated", annotation)
         return store.receipt(db, cid, request, annotation)
 
 
-def effective(rows, annotations, suppressions):
-    result = []
-    for row in rows:
-        record, source = dict(row["record"]), dict(row["source"])
-        lineage = digest([source["source_digest"], record["kind"], record["title"], record["summary"], record.get("citations")])
-        if lineage in suppressions:
-            continue
-        applied = []
-        hidden = False
-        for annotation in annotations:
-            ref = annotation["source"]
-            if ref["source_digest"] != source["source_digest"] or ref["content_digest"] != source["content_digest"]:
-                continue
-            kind = annotation["kind"]
-            if kind in {"reject", "retire", "restore"}:
-                hidden = kind != "restore"
-            elif kind == "correct":
-                record.update(summary=annotation["value"], basis="human_asserted", validation="human_asserted")
-            elif kind == "scope":
-                record["scope"] += "; Human limitation: " + annotation["value"]
-            elif kind == "pin":
-                record["pinned"] = True
-            elif kind == "tag":
-                record.setdefault("tags", []).append(annotation["value"])
-            elif kind == "confirm":
-                record["human_confirmed"] = True
-            if kind in {"confirm", "correct"}:
-                record["human_review"] = {key: annotation[key] for key in ("id", "kind", "actor", "agent_id", "created_at")}
-            applied.append(annotation["id"])
-        if not hidden:
-            source["annotation_ids"] = applied
-            source["annotation_revision"] = max((a["revision"] for a in annotations if a["id"] in applied), default=0)
-            result.append(dict(record=record, source=source))
-    return result
-
-
 def apply_canonical(db, annotation, database):
-    """Legacy command bridge; shares the annotation transaction and denial boundary."""
-    import json
+    """Source-addressed commands share the canonical transaction and denial boundary."""
 
     from loom.memory.operations import MemoryOperations
-    from loom.memory.schema import exists
 
-    if not exists(db):
-        return
     source = annotation['source']
     rows = db.execute('''SELECT DISTINCT i.id,i.namespace_id,i.latest_revision FROM memory_sources src
         JOIN memory_observations o ON o.source_id=src.id JOIN memory_supports s ON s.observation_id=o.id
@@ -132,7 +92,8 @@ def apply_canonical(db, annotation, database):
         kind = annotation['kind']
         operation = {'confirm': 'CONFIRM', 'reject': 'RETIRE', 'retire': 'RETIRE', 'restore': 'RESTORE',
                      'correct': 'REVISE', 'scope': 'REVISE', 'pin': 'PIN', 'tag': 'TAG'}[kind]
-        payload = dict(memory_id=row['id'], expected_revision=row['latest_revision'], reason=annotation.get('reason', ''), value=annotation.get('value'))
+        payload = dict(memory_id=row['id'], expected_revision=row['latest_revision'], reason=annotation.get('reason', ''),
+                       value=annotation.get('value'), agent_id=annotation['agent_id'])
         if kind in {'correct', 'scope'}:
             record = json.loads(db.execute('SELECT record FROM memory_item_versions WHERE memory_id=? ORDER BY revision DESC LIMIT 1',
                                            (row['id'],)).fetchone()[0])

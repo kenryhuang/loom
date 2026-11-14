@@ -38,7 +38,7 @@ class AgentSupervisor:
 
             for row in db.execute("SELECT session_id FROM agent_sessions").fetchall():
                 try:
-                    state = store.sessions._load(db, row[0])
+                    state = store.sessions._load(db, row[0], lazy=True)
                 except Exception:
                     continue
                 record_session_state(db, state)
@@ -51,12 +51,12 @@ class AgentSupervisor:
                     agent["scheduler"].update(state="interrupted", reason="Service restart; next check reconciles actual Session state")
                     agent.update(next_schedule_at=store.now(), schedule_requested=True)
                     store.put(db, "agents", agent)
-            for row in db.execute("SELECT body FROM agent_runs").fetchall():
+            for row in db.execute("SELECT body FROM agent_runs INDEXED BY agent_runs_planning "
+                                  "WHERE json_extract(body,'$.state')='planning'").fetchall():
                 run = json.loads(row[0])
-                if run["state"] == "planning":
-                    recoverable = run.get("kind") in {"stage_plan", "stage_review", "unified_plan"}
-                    run.update(state="recoverable" if recoverable else "superseded", reason="Service restart")
-                    store.put(db, "agent_runs", run)
+                recoverable = run.get("kind") in {"stage_plan", "stage_review", "unified_plan"}
+                run.update(state="recoverable" if recoverable else "superseded", reason="Service restart")
+                store.put(db, "agent_runs", run)
 
     def start(self):
         if self.thread is None and not self.stopped.is_set():
@@ -171,6 +171,8 @@ class AgentSupervisor:
                 id=new_id("agent_run"),
                 agent_id=aid,
                 state="planning" if goal else "no_action",
+                kind="work_plan",
+                objective_id=goal["long_term_objective_id"] if goal else None,
                 generation=agent["generation"],
                 role_revision=agent["role_revision"],
                 created_at=self.store.now(),
@@ -193,10 +195,11 @@ class AgentSupervisor:
         from loom.autonomy.context import build_snapshot
 
         context = build_snapshot(self.store, aid, goal=goal, purpose="planning")
-        proposal = self.planner.propose(agent, goal, context)
+        proposal = self.planner.propose(dict(agent, planner_lease=run["id"]), goal, context)
         with self.store.sessions.transaction() as db:
             latest = self.store.get(db, "agents", aid)
             latest_goal = self.store.get(db, "agent_goals", goal["id"], aid)
+            run = self.store.get(db, "agent_runs", run["id"], aid)
             if (
                 self.stopped.is_set()
                 or latest["state"] != "enabled"
@@ -233,7 +236,9 @@ class AgentSupervisor:
                     self.store.put(db, "agent_work_packages", work)
                     db.execute("INSERT INTO agent_outbox VALUES(?,?,?,?,?)", (wid, aid, "dispatch", "pending", canonical(work)))
                     refs.append(wid)
-                run.update(state="committed", work_package_ids=refs, context_ref=context["id"])
+                run.update(state="committed", work_package_ids=refs, context_ref=context["id"],
+                    outcome=dict(action="work_plan", reason="Work packages published for the selected goal",
+                                 committed_at=self.store.now(), goal_count=0, work_package_count=len(refs)))
                 latest_goal.update(state="active", revision=latest_goal["revision"] + 1)
                 self.store.put(db, "agent_goals", latest_goal)
                 latest.update(activity="working", error=None)

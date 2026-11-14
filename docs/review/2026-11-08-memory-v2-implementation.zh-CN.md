@@ -1,5 +1,7 @@
 # Memory V2 实现与迁移记录
 
+> 迁移流程已于 2026-11-13 调整为[离线一次性迁移](2026-11-13-memory-offline-migration.zh-CN.md)。下文的启动迁移、prepared 切换与 legacy 回退属于历史实现，当前已删除。
+
 日期：2026-11-08。关联：[设计](../design/memory-v2.zh-CN.md)、[原实施计划](../plan/2026-11-08-memory-v2.md)、[性能原始数据](2026-11-08-memory-v2-benchmark.json)。
 
 ## 已实现

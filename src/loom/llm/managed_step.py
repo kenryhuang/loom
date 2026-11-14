@@ -559,6 +559,19 @@ class ManagedStep:
                 return self._result(cp, runtime, "paused", str(exc), reason_code=getattr(exc, 'code', 'ACCEPTANCE_PROTOCOL'))
             if self.assembly.acceptance.data.get("resume_feedback_pending"):
                 return await self.assembly.resume_feedback_result(self._context(cp), runtime)
+            if self.assembly.acceptance.data.pop('resume_verification_pending', False):
+                gate = self.assembly.acceptance
+                pending = gate.data.get('pending_verification') or gate.data.get('verification_ledger')
+                candidate = gate.data.get('candidate')
+                cursor = cp.get('input_cursor', 0)
+                suspended = await self._boundary(cp, runtime)
+                if suspended is not None:
+                    return suspended
+                if (cp['phase'] == 'before_llm' and candidate and pending
+                        and cp.get('input_cursor', 0) == cursor and gate.fingerprint(candidate) == pending['binding']):
+                    # Resume the submitted candidate, not a newly worded solver
+                    # report that invalidates all paid evidence/page bindings.
+                    return await self._finish(cp, runtime, {'report': candidate})
             cp["context"] = self.assembly.project_acceptance(cp["context"])
             cp["messages"][0] = self.assembly.context_manager.project(cp["context"])[0]
             self._checkpoint(cp)
@@ -597,7 +610,7 @@ class ManagedStep:
                 if signal:
                     return await self._wrap_up(cp, runtime, signal[0], reason_code=signal[1])
                 if cp["llm_calls"] >= self.limits["max_llm_calls"]:
-                    return self._result(cp, runtime, "paused", "LLM call budget exceeded")
+                    return self._result(cp, runtime, "paused", "LLM call budget exceeded", reason_code="MODEL_CALL_BUDGET_EXCEEDED")
                 cp["messages"] = [m for m in cp["messages"] if m.name != "execution_progress"]
                 if self.assembly:
                     cp["messages"].append(LlmMessage("user", guidance(cp, self.limits), name="execution_progress"))
@@ -610,6 +623,14 @@ class ManagedStep:
                     cp["messages"].append(LlmMessage("user", policy.retry_prompt, name="workflow_tool_required"))
                 if self.assembly:
                     try:
+                        from loom.tasks.context_review import sync_goal
+
+                        review = sync_goal(self.assembly)
+                        if review is not None and (reason := review.pause_reason()):
+                            review.data["stalled_reads"] = 0  # Explicit resume gets a fresh chance to consume existing evidence.
+                            review.changed()
+                            self._checkpoint(cp)
+                            return self._result(cp, runtime, "paused", reason, reason_code="CONTEXT_REVIEW_STALLED")
                         window, compacted = self.assembly.context_manager.compact(
                             cp["messages"], self.limits["max_window_chars"], schema_chars=len(json.dumps(tools))
                         )
@@ -858,6 +879,9 @@ class ManagedStep:
                 if not isinstance(observation, Observation):
                     observation = Observation(f"{call.id}-observation", call.name, observation, runtime.now())
                 if persisted and result.ok and self.assembly:
+                    from loom.tasks.context_review import replay
+
+                    observation = replay(self.assembly, observation)
                     self.assembly.ingest_tool_result(call.name, observation)
                     observation = self.assembly.project_tool_result(call.name, observation)
                 controlled = await _apply_observation_policy(self.planning.observe_tool if self.planning else None, cp["context"], observation)

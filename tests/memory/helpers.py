@@ -14,7 +14,7 @@ def fact(identifier='memory:planet', **changes):
                 evidence_refs=[{'line_number': 12, 'field_path': 'output', 'source_sha256': 'trace-digest'}], **changes)
 
 
-def seed(store, workspace, *, records=None, evaluation='eval-memory', session=None, state='incomplete', frozen_scope=True):
+def seed(store, workspace, *, records=None, evaluation='eval-memory', session=None, state='incomplete', frozen_scope=True, publish=True):
     if workspace:
         workspace.mkdir(parents=True, exist_ok=True)
     sid = session or store.create(evaluation, {'workspace': str(workspace) if workspace else None})['session_id']
@@ -26,7 +26,14 @@ def seed(store, workspace, *, records=None, evaluation='eval-memory', session=No
         body['memory_scope'] = {'workspace': str(workspace) if workspace else None}
     with store.transaction() as db:
         db.execute('CREATE TABLE IF NOT EXISTS semantic_jobs(id TEXT PRIMARY KEY, session_id TEXT, cache_key TEXT, body TEXT)')
+        from loom.service.startup_indexes import require
+
+        require(db, 'semantic_jobs')
         db.execute('INSERT INTO semantic_jobs VALUES(?,?,?,?)', (evaluation, sid, evaluation, json.dumps(body)))
+        if publish:
+            from loom.memory.ingestion import sync_job
+
+            sync_job(db, body)
     return sid
 
 

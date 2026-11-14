@@ -41,6 +41,10 @@ def artifact_page(value, digest, *, view="auto", offset=0, limit=PAGE_CHARS):
     text = value if isinstance(value, str) else None
     if isinstance(value, dict):
         text = value.get("text", value.get("content"))
+        if not isinstance(text, str) and isinstance(value.get("output"), dict) and "input" in value:
+            # Acquisition receipts retain input + output. Text offsets refer
+            # only to the acquired text, never to bytes in the original file.
+            text = value["output"].get("text", value["output"].get("content"))
     if view == "text" and not isinstance(text, str):
         raise ValueError("Artifact has no text field; use view=json")
     if view == "json" or not isinstance(text, str):

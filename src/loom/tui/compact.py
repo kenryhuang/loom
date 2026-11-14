@@ -497,12 +497,17 @@ class CompactEventFeedWidget(EventFeedWidget):
 
     def present(self, event: TuiEvent) -> None:
         kind, data = event.event_type, event.data
-        if kind == "artifact.created" and data.get("artifact", {}).get("kind") == "acceptance_tool_evidence":
+        if kind == "artifact.created" and data.get("artifact", {}).get("kind") in {
+            "acceptance_tool_evidence", "verification_work_input", "verification_work_output", "verification_work_plan",
+            "verification_chunk", "verification_batch_view", "verification_source_inventory", "verification_evidence_selection",
+            "verification_superseded_goal_view",
+        }:
             return
         run = event.run_id or self.current_run
         if kind in ROUND_EVENTS and data.get("acceptance"):
             value = data["acceptance"]
-            key = (run, value.get("goal_digest"), value.get("revision"), value.get('budget', {}).get('generation', 0), value.get("attempts"))
+            key = (run, value.get("goal_digest"), value.get("revision"), value.get('budget', {}).get('generation', 0),
+                   value.get('verification_sequence', value.get("attempts")))
             summary, failed = round_summary(value)
             aggregate = replace(event, data={**data, "view": "acceptance", "summary": summary, "failed": failed})
             group = self._process_group(event)

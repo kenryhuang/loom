@@ -1,3 +1,4 @@
+import { acceptanceProgressText } from "../activity/acceptance.mjs";
 import { element } from "../markdown.mjs";
 
 const states = {
@@ -16,6 +17,25 @@ function statusIcon(symbol) {
 
 export function acceptanceChecklist(current, activeCheck, actions, expanded = new Set()) {
   const root = element("div", "acceptance-checks");
+  const stage = acceptanceProgressText(current);
+  if (stage) {
+    const status = element("p", "acceptance-current-stage", stage);
+    status.setAttribute("role", "status");
+    root.append(status);
+  }
+  const work = current.verification_progress;
+  if (work) {
+    const detail = element("p", "muted", `${work.committed} verification steps saved for recovery`);
+    const pages = work.work?.verify_page;
+    if (pages) detail.append(document.createTextNode(` · ${pages.committed} evidence pages inspected`));
+    if (work.states?.waiting_budget) detail.append(document.createTextNode(" · waiting for budget"));
+    detail.setAttribute("role", "status");
+    root.append(detail);
+  }
+  const taskBudget = current.task_budget;
+  if (taskBudget) {
+    root.append(element("p", "muted", `Task model calls: ${taskBudget.model_calls} / ${taskBudget.max_model_calls} (retained on Resume)`));
+  }
   const criteria = current.plan?.criteria || [];
   const results = new Map((current.results || []).map(result => [result.criterion_id, result]));
   const counts = { passed: 0, pending: 0, blocked: 0, failed: 0, not_run: 0 };

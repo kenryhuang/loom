@@ -113,3 +113,28 @@ def migrate(db):
 
 def exists(db):
     return bool(db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_schema'").fetchone())
+
+
+def initialize(db):
+    """Create fresh storage; upgrading an existing layout is an offline operation."""
+    if not exists(db):
+        for statement in SCHEMA.split(';'):
+            if statement.strip():
+                db.execute(statement)
+        return
+    for table, required in (('memory_projection', 'tags'), ('memory_index_state', 'last_outbox')):
+        if required not in {r[1] for r in db.execute(f'PRAGMA table_info({table})')}:
+            raise RuntimeError('Memory schema requires offline upgrade: python -m loom.memory.migration --database <service.sqlite>')
+
+
+def require_ready(db):
+    """Check small metadata/indexes only; never fetch historical JSON at startup."""
+    incomplete = db.execute("SELECT 1 FROM memory_namespaces WHERE mode!='runtime_v2' LIMIT 1").fetchone()
+    importing = db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_import_state'").fetchone()
+    if importing:
+        incomplete = incomplete or not db.execute("SELECT 1 FROM memory_import_state WHERE id='complete'").fetchone()
+    elif not db.execute('SELECT 1 FROM memory_namespaces LIMIT 1').fetchone():
+        jobs = db.execute("SELECT 1 FROM sqlite_master WHERE name='semantic_jobs'").fetchone()
+        incomplete = jobs and db.execute('SELECT 1 FROM semantic_jobs LIMIT 1').fetchone()
+    if incomplete:
+        raise RuntimeError('Memory requires offline migration: stop the service and run python -m loom.memory.migration --database <service.sqlite>')

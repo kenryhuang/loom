@@ -20,11 +20,11 @@ Optional global configuration selects a model alias defined under `models` (defa
 verification_model: judge
 ```
 
-Task specifications can override these independent acceptance limits:
+Task specifications can override these independent acceptance limits. The default output ceiling is 512K tokens for both reasoning and non-reasoning models; provider limits, remaining context capacity and task token budgets can lower the effective request limit:
 
 ```json
 {"acceptance": {"max_checks": 8, "max_model_calls": 6, "max_seconds": 180,
-  "max_repairs": 2, "context_window_percent": 60, "max_prompt_chars": null, "max_output_tokens": 4096,
+  "max_repairs": 2, "context_window_percent": 60, "max_prompt_chars": null, "max_output_tokens": 524288,
   "command_timeout_seconds": 60}}
 ```
 

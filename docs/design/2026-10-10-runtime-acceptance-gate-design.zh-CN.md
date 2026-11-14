@@ -18,11 +18,11 @@
 verification_model: judge
 ```
 
-任务规格支持以下默认值的覆盖：
+任务规格支持以下默认值的覆盖。思考与非思考模型的默认输出上限统一为 512K tokens（524288）；实际请求仍受模型配置、剩余上下文空间和任务 token 预算约束：
 
 ```json
 {"acceptance": {"max_checks": 8, "max_model_calls": 6, "max_seconds": 180,
-  "max_repairs": 2, "max_prompt_chars": 48000, "max_output_tokens": 4096,
+  "max_repairs": 2, "context_window_percent": 60, "max_prompt_chars": null, "max_output_tokens": 524288,
   "command_timeout_seconds": 60}}
 ```
 

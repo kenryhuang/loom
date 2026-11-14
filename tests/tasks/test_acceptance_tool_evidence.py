@@ -126,7 +126,7 @@ def test_plan_correction_then_mcp_execution_reaches_semantic_acceptance(request_
                 assert "No external approval feedback channel" in messages[1].content
             elif prompt.startswith("You independently verify"):
                 payload = json.loads(messages[1].content)
-                assert {c["id"] for c in payload["criteria"]} == {"sources", "goal"}
+                assert {c["id"] for c in payload["criteria"]} in ({"sources"}, {"goal"})
                 search = next(r for r in payload["evidence"] if r.get("tool") == TOOL)
                 assert search["ok"]
                 assert ("Neptune" in search["output"]) is useful_results

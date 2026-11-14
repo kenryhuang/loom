@@ -151,17 +151,19 @@ def test_pause_can_interrupt_active_model_request(tmp_path):
 def test_active_time_budget_interrupts_model_and_resume_grants_another_allowance(tmp_path):
     service = LoomService(tmp_path / "data", provider_factory=resume_provider_factory).start()
     try:
-        sid = service.create("budget", {"objective": "slow-model", "workspace": str(tmp_path), "plan_mode": "off", "limits": {"max_duration_seconds": 3}})[
+        # Leave room for independent acceptance and durable checkpoints on a
+        # loaded host after Resume; the first request still blocks for 30s.
+        sid = service.create("budget", {"objective": "slow-model", "workspace": str(tmp_path), "plan_mode": "off", "limits": {"max_duration_seconds": 6}})[
             "session_id"
         ]
-        paused = wait_state(service, sid, "paused", timeout=5)
-        assert paused["run"]["active_seconds"] >= 2.4  # Cooperative stopping reserves the final 20%.
+        paused = wait_state(service, sid, "paused", timeout=8)
+        assert paused["run"]["active_seconds"] >= 4.8  # Cooperative stopping reserves the final 20%.
         command(service, sid, "resume")
         done = wait_state(service, sid, "idle")
         assert done["run"]["id"] == paused["run"]["id"]
         assert done["run"]["time_budget_start_seconds"] == paused["run"]["active_seconds"]
         assert done["run"]["active_seconds"] > paused["run"]["active_seconds"]
-        assert done["task"]["limits"]["max_duration_seconds"] == 3
+        assert done["task"]["limits"]["max_duration_seconds"] == 6
     finally:
         service.close()
 
@@ -603,5 +605,24 @@ def test_tick_still_replies_when_a_record_handler_crashes(tmp_path, monkeypatch)
         service._tick()
         assert replies and "unexpected crash" in replies[0].get("error", "")
         service.active.pop(sid)
+    finally:
+        service.close()
+
+
+def test_call_budget_change_preserves_paused_run_and_checkpoint(tmp_path):
+    service = LoomService(tmp_path / 'data', provider_factory=provider_factory).start()
+    try:
+        sid = service.create('call-budget', {'objective': 'token-budget', 'workspace': str(tmp_path),
+                             'plan_mode': 'off', 'limits': {'max_tokens': 5, 'max_llm_calls': 200}})['session_id']
+        paused = wait_state(service, sid, 'paused')
+        request = {'command_id': uuid.uuid4().hex, 'type': 'set_model_call_budget', 'payload': {'max_llm_calls': 220}}
+        first = service.submit(sid, request)
+        assert service.submit(sid, request) == first
+        updated = service.snapshot(sid)
+        assert updated['task']['limits']['max_llm_calls'] == 220
+        assert updated['task']['state'] == 'paused'
+        for field in ('id', 'checkpoint', 'counters', 'active_seconds'):
+            assert updated['run'].get(field) == paused['run'].get(field)
+        assert sum(e['type'] == 'task.budget.changed' for e in service.events(sid)) == 1
     finally:
         service.close()

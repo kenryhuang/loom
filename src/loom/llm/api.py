@@ -460,9 +460,17 @@ def create_llm_step_function(
         tool_observations: list[Observation] = []
         missing_tool_call_attempts = 0
         invalid_tool_call_attempts = 0
+        review_pause = None
 
         while True:
             if context_manager:
+                review = getattr(context_manager, "working_set", None)
+                if review is not None and (reason := review.pause_reason()):
+                    review_pause = reason
+                    review.data["stalled_reads"] = 0
+                    review.changed()
+                    final_response = final_response or LlmResponse("")
+                    break
                 try:
                     messages, compaction = context_manager.compact(
                         messages, context_manager.config.get("max_window_chars", 240_000), schema_chars=len(json.dumps(tools or ()))
@@ -718,7 +726,13 @@ def create_llm_step_function(
                     step_boundary_requested = True
                     break
             messages.append(LlmMessage("assistant", "" if final_response.content is None else final_response.content))
-            messages.append(LlmMessage("assistant", _json_tool_result_feedback(tuple(json_tool_results))))
+            if getattr(context_manager, "working_set", None) is not None:
+                # Keep observations individually addressable by the context
+                # policy, without rewriting the committed observations/trace.
+                messages.extend(LlmMessage("user", json.dumps(thaw_json(observation.value), ensure_ascii=False), name=observation.source)
+                                for _, observation in json_tool_results)
+            else:
+                messages.append(LlmMessage("assistant", _json_tool_result_feedback(tuple(json_tool_results))))
             if step_boundary_requested:
                 break
 
@@ -730,6 +744,9 @@ def create_llm_step_function(
             tracker.add(tool_selection_result.token_usage)
 
         parsed = _parse_decision(final_response.content, trace_id)
+        if review_pause:
+            parsed = _parse_decision("", trace_id)
+            parsed.update(output="", reasoning=review_pause)
         ended_at = runtime.now()
 
         # Build trace metadata including tool selection info
@@ -802,7 +819,7 @@ def create_llm_step_function(
             duration_ms=0,
             input_context_id=context.id,
             output_context_id=next_context.id,
-            outcome="pass",
+            outcome="paused" if review_pause else "pass",
             observations=observations,
             decisions=(decision,),
             actions=(decision.action,),
@@ -812,6 +829,11 @@ def create_llm_step_function(
         emitted = await _emit_llm_events(runtime, trace, observations, decision)
         if not emitted.ok:
             return emitted
+        if review_pause:
+            from loom.runtime.control import StepControl
+
+            return ok(StepResult(next_context, trace, llm_observation, parsed["output"],
+                                 control=StepControl("paused", review_pause, reason_code="CONTEXT_REVIEW_STALLED")))
         return ok(StepResult(next_context, trace, llm_observation, parsed["output"]))
 
     return llm_step

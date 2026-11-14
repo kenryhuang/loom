@@ -932,7 +932,7 @@ test("panels show workspace second, dynamic workflow and extension widgets", () 
   assert.equal(root.querySelector('[data-panel="domain"]').textContent, "one");
   assert.equal(root.querySelector('[data-panel="knowledge"] button'), null);
   assert.equal(root.querySelector('[data-panel="external-tools"] button'), null);
-  assert.equal(root.querySelector('[data-panel="info"] .edit-task-button').textContent, 'Edit task');
+  assert.equal(root.querySelector('[data-panel="info"] .edit-task-button').textContent, 'Revise task');
   dom.window.close();
 });
 
@@ -1166,4 +1166,43 @@ test('acceptance distinguishes unevaluated criteria from passed or pending revie
     assert.match(row.querySelector('summary').getAttribute('aria-label'),/^Not evaluated:/);
     assert.doesNotMatch(row.textContent,/recorded check/);
   } finally {dom.window.close();}
+});
+
+test("batched verification exposes page progress without flooding the feed or implying a pass", () => {
+  const dom = setup(), root = document.getElementById("feed"), feed = new FeedView(root);
+  const value = {state: "verifying", attempts: 0, verification_sequence: 3, revision: 1, goal_digest: "g",
+    plan: {criteria: [{id: "analysis", description: "Seven-dimension analysis"}, {id: "goal", description: "Whole goal"}]}, results: []};
+  const start = event(1, "verification.batch.started", {acceptance: value, criterion_ids: ["analysis"], stage: "verify_page", page: {index: 2, total: 6}});
+  const complete = event(40, "verification.batch.completed", {acceptance: value, criterion_ids: ["analysis"], stage: "verify_page", page: {index: 2, total: 6}});
+  const internal = Array.from({length: 30}, (_, i) => event(i + 2, "artifact.created", {artifact: {kind: "verification_work_output", sha256: `internal-${i}`}}));
+  feed.append(start);
+  assert.match(root.textContent, /Inspecting evidence page 2\/6.*Seven-dimension analysis/);
+  for (const e of internal) feed.append(e);
+  feed.append(complete);
+  assert.equal(root.querySelectorAll('.event-row').length, 1);
+  assert.match(root.textContent, /Evidence page 2\/6 saved; verdict pending/);
+  assert.doesNotMatch(root.textContent, /Artifact saved|verification batch started/i);
+  const end = event(41, "acceptance.gate.passed", {acceptance: {...value, state: "passed", attempts: 1,
+    results: [{criterion_id: "analysis", status: "passed"}, {criterion_id: "goal", status: "passed"}]}});
+  feed.append(end);
+  assert.equal(root.querySelectorAll('.event-row').length, 1); // attempts increments at completion, sequence stays stable
+  assert.match(root.textContent, /Acceptance passed.*2\/2 checks passed/);
+  feed.restore({snapshot: state(), events: [start, ...internal, complete, end].reverse()});
+  assert.equal(root.querySelectorAll('.event-row').length, 1);
+  assert.match(root.textContent, /Acceptance passed/);
+  dom.window.close();
+});
+
+test("verification evidence updates one lazy entry across traces and keeps the newest receipt on replay", () => {
+  const dom = setup(), root = document.getElementById("feed"), feed = new FeedView(root);
+  const rows = Array.from({length: 12}, (_, i) => ({...event(i + 1, "artifact.created", {
+    artifact: {kind: "verification_evidence", sha256: `proof-${i}`}}), trace_id: `trace-${i}`}));
+  for (const row of rows) feed.append(row);
+  assert.equal(root.querySelectorAll('.event-row').length, 1);
+  let record = [...feed.groups.values()][0].records.values().next().value;
+  assert.equal(record.descriptor.artifact.sha256, 'proof-11');
+  feed.restore({snapshot: state(), events: rows.reverse()});
+  record = [...feed.groups.values()][0].records.values().next().value;
+  assert.equal(record.descriptor.artifact.sha256, 'proof-11');
+  dom.window.close();
 });

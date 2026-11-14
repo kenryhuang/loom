@@ -342,6 +342,11 @@ class ObjectiveCoordinator:
                                        execution_facts(store, db, aid, oid), trigger))
                     store.put(db, "agent_objective_planning", current)
                     saved["state"] = "committed"
+                    saved["outcome"] = dict(action=decision["action"], reason=decision["reason"],
+                        committed_at=store.now(), stage_id=current.get("stage_id"),
+                        goal_count=len(compiled["goals"]) if compiled else 0,
+                        work_package_count=len(compiled["work_packages"]) if compiled else 0,
+                        next_review_at=current.get("next_review_at"))
                 else:
                     saved.update(state="superseded", reason="Planning inputs changed")
                 if latest.get("planner_lease") == rid:
@@ -408,7 +413,8 @@ class ObjectiveCoordinator:
                 state["daily_stages"][day] = state["daily_stages"].get(day, 0) + 1
             state.pop("required_revision", None)
             wake(store, agent)
-            store.event(db, aid, "plan.committed", dict(plan_id=compiled["id"], stage_id=stage["id"], objective_id=objective["id"]))
+            store.event(db, aid, "plan.committed", dict(agent_run_id=rid, plan_id=compiled["id"], stage_id=stage["id"], objective_id=objective["id"],
+                goal_count=len(compiled["goals"]), work_package_count=len(compiled["work_packages"])))
         elif action == "review_stage":
             stage = store.get(db, "agent_stages", state["stage_id"], aid)
             stage.update(state="completed" if decision["result"] == "completed" else "active", revision=stage["revision"] + 1)

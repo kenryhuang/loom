@@ -35,6 +35,26 @@ flowchart LR
 
 验证规则集中在 `src/loom/tasks/acceptance_contract.py`，`RULES_VERSION=2`。验收方案 wire protocol 为 v2，统一规划 protocol 为 v5。模型可以提出业务计划和评价内容质量；协议合法性、权限、修复次数和完成提交由宿主控制。
 
+## 工作包合同与执行模板一致性（2026-11-12）
+
+v2 工作包的目标、继承条件、阶段边界和 verification 由计划所有者发布。Worker 的自动 profile 固定使用通用执行规则，
+不再因为任务文字包含 `audit`、`repo` 等关键词套用 `project_audit`，额外要求执行 smoke 命令或交付包含测试结果的报告。
+显式请求约束、交付要求、已编译具体验证检查和宿主总目标检查仍然保留。
+
+规划器需要在发布前对齐工作包目标、继承验收、阶段 non-goals、验证方法和环境。只读盘点使用读取凭证与报告内容验证；
+若明确要求执行命令，编译器仍会检查 execution_tools、required_tools 和 command verifier 是否得到所选环境支持，
+不允许通过缺少 shell 自动省略命令义务。真实业务要求与既定 non-goals 冲突时，应返回 request_input 说明冲突。
+自然语言之间的一致性由规划器负责；运行时不再通过关键词推断添加业务要求，工具可用性由宿主程序化校验。
+
+恢复旧 v2 检查点时，如果仍携带自动推断的 `project_audit` 合同，在执行或续租验收预算之前报告
+`ACCEPTANCE_CONTRACT_INVALID`，交给现有计划所有者修订路径。保留原候选结果、证据和预算记录，
+不通过给只读任务追加 shell 解决合同冲突，也不把旧失败改成通过；新工作包重新验收。
+普通独立 Session 的自动 profile 与显式指定 profile 行为不变。
+
+本轮相关合同、运行器、统一规划与恢复回归 92 项通过，Ruff 与 diff 检查通过。
+另有 1 项既有测试 `test_auto_continue_react_crosses_boundary_before_task_execution` 的 tool_choice 断言失败，
+在未修改的 HEAD 独立 worktree 中复现后从本轮通过集合排除。未重启服务或修改在线 Session。
+
 ## 合同错误恢复
 
 `ObjectiveCoordinator.reconcile_contracts()` 在安全调度边界检查旧版未完成合同，发现问题后向既有统一规划入口提交一次带身份的修订请求。去重身份包含 work ID、合同指纹和规则版本。重复 Schedule now 不会再次购买相同修订。

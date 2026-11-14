@@ -72,12 +72,12 @@ def test_broad_tree_with_secret_is_not_read_or_required_for_command_verification
             assembly.acceptance.validate_plan({"criteria": [command([path])]})
 
 
-def test_zero_exit_code_is_reviewed_against_condition_in_same_judgment_call(tmp_path):
+def test_zero_exit_code_is_reviewed_before_independent_goal_judgment(tmp_path):
     class OutcomeJudge(Judge):
         async def chat(self, messages, tools=None, cancellation=None, **kwargs):
             if messages[0].content.startswith("You independently"):
                 payload = json.loads(messages[1].content)
-                assert {c["id"] for c in payload["criteria"]} == {"condition", "goal"}
+                assert {c["id"] for c in payload["criteria"]} == {"condition"}
                 observed = next(e for e in payload["evidence"] if e["id"] == "condition")
                 assert observed["detail"]["exit_code"] == 0
                 return ok(LlmResponse(content=json.dumps({"results": [
@@ -93,6 +93,7 @@ def test_zero_exit_code_is_reviewed_against_condition_in_same_judgment_call(tmp_
     acceptance = result.run_result.context.state.scratch["acceptance"]
     row = next(r for r in acceptance["results"] if r["criterion_id"] == "condition")
     assert row["status"] == "failed" and row["execution_check"]["status"] == "passed"
+    assert next(r for r in acceptance['results'] if r['criterion_id'] == 'goal')['status'] == 'not_run'
     assert acceptance["state"] != "passed"
 
 

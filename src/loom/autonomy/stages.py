@@ -509,6 +509,12 @@ class StageCoordinator:
                         current["blocker"]["dependency_key"] = fingerprint
                     store.put(db, "agent_objective_planning", current)
                     run["state"] = "committed"
+                    run["outcome"] = dict(action=decision["action"], reason=decision["reason"],
+                        committed_at=store.now(), stage_id=current.get("stage_id"),
+                        next_review_at=current.get("next_review_at"))
+                    previous_ids = {g["id"] for g in current_goals}
+                    run["outcome"].update(goal_count=sum(g["id"] not in previous_ids for g in store.rows(db, "agent_goals", aid)
+                        if g["long_term_objective_id"] == oid), work_package_count=0)
                 else:
                     run.update(state="superseded", reason="Planning inputs changed")
                 if latest.get("planner_lease") == rid:

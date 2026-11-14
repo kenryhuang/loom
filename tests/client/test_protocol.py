@@ -44,6 +44,9 @@ def test_budget_changes_and_usage_are_projected_without_resetting_run():
     assert projection.snapshot["token_budget"] == {"limit": 10000000, "used": 120000, "remaining": 9880000}
     projection.apply(event(2, "run.usage.changed", {"total_tokens": 130000}))
     assert projection.snapshot["token_budget"]["used"] == 130000
+    projection.apply(event(3, "task.budget.changed", {"max_llm_calls": 220}))
+    assert projection.snapshot["task"]["limits"]["max_llm_calls"] == 220
+    assert projection.snapshot["token_budget"] == {"limit": 10000000, "used": 130000, "remaining": 9870000}
 
 
 def test_resume_keeps_usage_but_a_new_run_resets_it():

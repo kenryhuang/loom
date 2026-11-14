@@ -1,6 +1,6 @@
 /** Order-independent lifecycle projection, scoped by the owning process. */
 export function activityKey(descriptor, event) {
-  if (["plan", "acceptance", "run-status"].includes(descriptor.kind)) return descriptor.key;
+  if (descriptor.aggregate || ["plan", "acceptance", "run-status"].includes(descriptor.kind)) return descriptor.key;
   const scope = event?.payload?.trace_id || event?.trace_id;
   return scope ? `${scope}:${descriptor.key}` : descriptor.key;
 }

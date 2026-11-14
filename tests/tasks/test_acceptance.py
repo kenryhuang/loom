@@ -253,6 +253,25 @@ def test_unavailable_external_approval_is_rejected_before_execution(tmp_path):
     assert len(provider.calls) == 2  # One plan correction; no solver or verification calls.
 
 
+def test_real_command_timeout_pauses_instead_of_repairing_code(tmp_path):
+    import sys
+
+    judge = Judge([{'id': 'tests', 'description': 'Tests pass', 'verifier': 'command', 'scope': [],
+                    'check': {'tool_id': 'process_execute', 'input': {
+                        'argv': [sys.executable, '-c', 'import time; time.sleep(30)'], 'timeout_seconds': 1}}}], finish=True)
+    sink = Sink()
+    result = asyncio.run(run_generic_task(TaskRequest('Verify tests', workspace=tmp_path), provider=judge,
+        options=TaskRunOptions(plan_mode='off', max_steps=3), trace_sink=sink)).unwrap()
+    acceptance = result.run_result.context.state.scratch['acceptance']
+    assert result.run_result.metrics.outcome == 'paused'
+    assert acceptance['cause_code'] == 'ACCEPTANCE_COMMAND_TIMEOUT'
+    assert acceptance['budget']['failed_attempts'] == 0
+    assert acceptance['feedback'] is None
+    commands = [e for e in sink.events if e['type'] == 'tool.started' and e.get('tool_id') == 'process_execute']
+    assert len(commands) == 1
+    assert not any(e['type'] in {'acceptance.feedback.applied', 'run.completed'} for e in sink.events)
+
+
 def test_invalid_semantic_evidence_cannot_pass(tmp_path):
     class InventedEvidence(Judge):
         async def chat(self, messages, tools=None, cancellation=None, **kwargs):
@@ -565,7 +584,7 @@ def test_invalid_process_input_is_corrected_before_execution_using_actual_schema
         run_generic_task(TaskRequest("Check project data", workspace=tmp_path), provider=judge, options=TaskRunOptions(plan_mode="off"), trace_sink=sink)
     ).unwrap()
     assert result.run_result.metrics.outcome == "pass"
-    assert len(judge.calls) == 4  # Plan, bounded schema correction, solver, semantic verification.
+    assert len(judge.calls) == 5  # Plan, correction, solver, command judgment, independent goal review.
     schemas = {tool["id"]: tool["input_schema"] for tool in judge.plan_payloads[0]["command_tools"]}
     assert schemas["process_execute"]["type"] == "object"
     assert "argv" in schemas["process_execute"]["properties"]

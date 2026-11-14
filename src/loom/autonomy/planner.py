@@ -5,6 +5,7 @@ import json
 
 from loom.autonomy.budget import BudgetLedger, BudgetProvider
 from loom.autonomy.contracts import strict, strings
+from loom.autonomy.planning_stream import planning_response
 from loom.llm.api import LlmMessage
 from loom.llm.structured import (
     ProtocolError,
@@ -131,10 +132,17 @@ class AgentPlanner:
                     ),
                     LlmMessage("user", json.dumps(payload, ensure_ascii=False)),
                 ]
-                result = await bounded.chat(messages)
+                result = await planning_response(self.store, agent, agent.get("planner_lease"), bounded, messages, _attempt, mode)
                 if not result.ok and unsupported_format(result.error):
                     raise UnsupportedFormat()
                 return result.unwrap()
+
+            async def event(kind, data):
+                if agent.get("planner_lease"):
+                    safe = {k: v for k, v in data.items() if k != "proposal"}
+                    with self.store.sessions.transaction() as db:
+                        self.store.event(db, agent["id"], "plan.protocol." + kind,
+                                         dict(agent_run_id=agent["planner_lease"], **safe))
 
             try:
                 result = asyncio.run(
@@ -143,6 +151,7 @@ class AgentPlanner:
                         payload=dict(role=agent["role"], goal=goal, context=context,
                                      **({"execution_environment": environment} if environment else {})),
                         send=send,
+                        event=event,
                         validate=validate_tools,
                         mode=output_mode(provider),
                         max_corrections=1,

@@ -146,8 +146,6 @@ class Repository:
                 "INSERT INTO memory_outbox(namespace_id,version_id,epoch,body) VALUES(?,?,?,?)",
                 (ns, version, epoch, serialized(dict(version_id=version, namespace_id=ns, epoch=epoch))),
             )
-        if db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_versions'").fetchone():
-            db.execute("UPDATE memory_versions SET value=value+1 WHERE id='effective'")
 
     @staticmethod
     def validity(db, version, *, lifecycle=None, freshness=None, valid_from=None, valid_to=None, replace_interval=False):

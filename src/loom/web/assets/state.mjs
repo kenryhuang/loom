@@ -1,9 +1,20 @@
 /** Protocol projection, independent of transport and DOM. */
 export class EventGap extends Error {}
-export function canRestartTask(state) {
-  return ["idle", "paused", "failed", "completed"].includes(state.task.state)
+export function canReviseTask(state) {
+  return ["idle", "paused", "failed", "completed", "awaiting_input"].includes(state.task.state)
     && state.run?.state !== "running" && !state.workspace_blocked?.length
     && !(state.input_request?.state === "pending" && state.input_request.kind === "recovery");
+}
+export function executionControl(state) {
+  const status = state.task.state;
+  const pending = state.input_request?.state === "pending";
+  const recovery = pending && state.input_request.kind === "recovery";
+  const resume = ["paused", "failed", "recovering"].includes(status);
+  const command = resume ? "resume" : "pause";
+  const enabled = !recovery && (resume
+    ? Boolean(state.task.objective) && state.run?.state !== "running" && !state.workspace_blocked?.length
+    : ["queued", "running", "awaiting_input"].includes(status));
+  return {command, label: status === "pausing" ? "Pausing…" : resume ? "Resume" : "Pause", enabled};
 }
 export function canUpdateTaskTools(state) {
   return ["idle", "completed", "paused"].includes(state.task.state)
@@ -80,7 +91,9 @@ export class SessionProjection {
       Object.assign(state.task, structuredClone(data));
       if (kind === "task.configuration.changed") { state.title = data.title; this.budget(); }
     } else if (kind === "task.budget.changed") {
-      state.task.limits.max_tokens = data.max_tokens;
+      for (const key of ["max_tokens", "max_llm_calls"]) {
+        if (Object.hasOwn(data, key)) state.task.limits[key] = data[key];
+      }
       this.budget();
     } else if (kind === "task.outputs.changed")
       state.output_artifacts = structuredClone(data.artifacts);

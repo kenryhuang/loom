@@ -10,11 +10,92 @@ from loom.tasks.runner import make_task_context
 from tests.tasks.test_acceptance import Judge, Sink
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('requested,cap,expected', [(900, None, 900), (600, None, 600), (None, None, 60),
+                                                   (900, 30, 30), (10, 30, 10), (None, 30, 30)])
+async def test_command_deadline_and_allocation_share_explicit_limit_policy(tmp_path, requested, cap, expected):
+    from loom.core import Observation, now_iso, ok
+    from loom.tasks.acceptance_budget import allocation_plan
+
+    assembly, _, runtime = setup_gate(tmp_path)
+    gate = assembly.acceptance
+    criterion = {'id': 'test', 'verifier': 'command', 'scope': [], 'check': {'tool_id': 'shell_execute', 'input': {'command': 'test'}}}
+    if requested is not None:
+        criterion['check']['input']['timeout_seconds'] = requested
+    if cap is not None:
+        gate._configured_limits['command_timeout_seconds'] = cap
+    gate.data['plan'] = {'criteria': [criterion]}
+
+    async def call_tool(tool, value, **kwargs):
+        assert value['timeout_seconds'] == expected
+        return ok(Observation('test', tool, {'exit_code': 0}, now_iso()))
+
+    runtime.call_tool = call_tool
+    try:
+        row, _ = await gate.check(criterion, runtime)
+        assert row['status'] == 'passed'
+        allocation = allocation_plan(gate.config, gate.data['plan'], configured=gate._configured_limits)
+        assert allocation['command_seconds'] == (gate.config['max_repairs'] + 1) * expected
+        implicit = effective_limits(DEFAULTS, {k: v for k, v in gate._configured_limits.items() if k != 'max_seconds'}, gate.data['plan'])
+        assert implicit['max_seconds'] == allocation['planned_seconds']
+    finally:
+        await assembly.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('detail,code', [({'exit_code': 124, 'timed_out': True}, 'ACCEPTANCE_COMMAND_TIMEOUT'),
+                                       ({'exit_code': -15, 'cancelled': True}, 'ACCEPTANCE_INTERRUPTED'),
+                                       ({'exit_code': 127, 'status': 'launch_failed'}, 'ACCEPTANCE_COMMAND_UNAVAILABLE')])
+async def test_command_interruption_retains_evidence_and_pauses_without_repair(tmp_path, detail, code):
+    from loom.core import Observation, now_iso, ok
+    from loom.tasks.acceptance_feedback import decide
+
+    assembly, context, runtime = setup_gate(tmp_path)
+    gate = assembly.acceptance
+    gate.data['plan'] = gate.validate_plan({'criteria': [{'id': 'test', 'description': 'Tests pass', 'verifier': 'command',
+        'scope': [], 'check': {'tool_id': 'shell_execute', 'input': {'command': 'test', 'timeout_seconds': 900}}}]})
+
+    async def call_tool(tool, value, **kwargs):
+        return ok(Observation('test', tool, detail, now_iso()))
+
+    runtime.call_tool = call_tool
+    try:
+        assert not await gate.verify(context, runtime, 'candidate')
+        assert gate.data['state'] == 'blocked'
+        assert gate.data['failed_attempts'] == 0
+        assert gate.data['results'][0]['artifact']
+        assert gate.data['cause_code'] == code
+        decision = decide(gate)
+        assert decision.outcome == 'pause' and decision.reason_code == code
+        assert gate.data['feedback'] is None
+    finally:
+        await assembly.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('code', ['ACTIVE_TIME_BUDGET_EXCEEDED', 'ACCEPTANCE_TIMEOUT'])
+async def test_check_does_not_erase_control_or_provider_blocker(tmp_path, code):
+    assembly, context, runtime = setup_gate(tmp_path)
+
+    async def check(*args):
+        raise AcceptanceBlocked('Interrupted check', code=code)
+
+    assembly.acceptance.check = check
+    try:
+        with pytest.raises(AcceptanceBlocked) as caught:
+            await assembly.acceptance.verify(context, runtime, 'candidate')
+        assert caught.value.code == code
+        assert assembly.acceptance.data['failed_attempts'] == 0
+    finally:
+        await assembly.close()
+
+
 def setup_gate(tmp_path):
     assembly = TaskAssembly(TaskRequest('Verify candidate', workspace=tmp_path), plan_mode='off')
     assembly.configure_acceptance(Judge())
     context = make_task_context(assembly.request, assembly=assembly, plan_mode='off').unwrap()
     gate = assembly.acceptance
+    gate._configured_limits.update(max_model_calls=6, max_seconds=180)
     gate.goal(context)
     gate.data['plan'] = gate.validate_plan({'criteria': [{'id': 'output', 'description': 'Correct deliverable', 'verifier': 'artifact',
                                                         'scope': [], 'check': {'path': 'output.txt'}}]})
@@ -86,8 +167,8 @@ async def test_repeated_assessment_is_cached_and_verdict_does_not_consume_repair
 def test_visual_defaults_cover_repair_rounds_without_overriding_explicit_limits():
     plan = {'criteria': [{'verifier': 'visual'}]}
     assert effective_limits(DEFAULTS, {}, None)['max_model_calls'] == 6
-    assert effective_limits(DEFAULTS, {}, plan)['max_model_calls'] == 20
-    assert effective_limits(DEFAULTS, {}, plan)['max_seconds'] == 600
+    assert effective_limits(DEFAULTS, {}, plan)['max_model_calls'] == 57
+    assert effective_limits(DEFAULTS, {}, plan)['max_seconds'] == 7920
     configured = effective_limits(DEFAULTS, {'max_model_calls': 2, 'max_seconds': 10}, plan)
     assert configured['max_model_calls'] == 2 and configured['max_seconds'] == 10
 
@@ -111,13 +192,19 @@ async def test_budget_preflight_stops_before_paid_tools_and_reports_actual_limit
 
 
 @pytest.mark.asyncio
-async def test_pending_pause_does_not_consume_a_model_request(tmp_path):
+@pytest.mark.parametrize('code', [None, 'ACTIVE_TIME_BUDGET_EXCEEDED', 'STEP_BUDGET_EXCEEDED'])
+async def test_pending_pause_does_not_consume_a_model_request(tmp_path, code):
     assembly, _, runtime = setup_gate(tmp_path)
-    assembly.execution = SimpleNamespace(poll_control=lambda: {'reason': 'pause'})
+    assembly.execution = SimpleNamespace(poll_control=lambda: {'reason': 'pause', 'code': code})
     try:
-        with pytest.raises(AcceptanceBlocked, match='pause'):
+        with pytest.raises(AcceptanceBlocked, match='pause') as blocked:
             await assembly.acceptance.model(runtime, 'visual', 'Prompt', {})
+        assert blocked.value.code == (code or 'ACCEPTANCE_INTERRUPTED')
         assert assembly.acceptance.data['model_calls'] == 0
+        with pytest.raises(AcceptanceBlocked, match='pause') as blocked:
+            await assembly.acceptance_model_request(runtime, 'verify', 'Prompt', '{}', 10)
+        assert blocked.value.code == (code or 'ACCEPTANCE_INTERRUPTED')
+        assert assembly._local_calls == 0
     finally:
         await assembly.close()
 
@@ -221,6 +308,30 @@ async def test_acceptance_timeout_records_nonempty_failure_and_effective_request
         assert failed['error']['code'] == 'ACCEPTANCE_TIMEOUT'
         assert failed['error']['timeout_seconds'] == 0.01
         assert 'model=slow-judge' in failed['error']['message']
-        assert 'output_limit=4096 tokens' in failed['error']['message']
+        assert 'output_limit=8192 tokens' in failed['error']['message']
+    finally:
+        await assembly.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('code', ['ACCEPTANCE_INPUT_BUDGET', 'ACCEPTANCE_TIMEOUT', 'ACCEPTANCE_BUDGET_EXHAUSTED'])
+async def test_resume_incomplete_verification_does_not_replay_older_repair_feedback(tmp_path, code):
+    from copy import deepcopy
+
+    assembly, context, runtime = setup_gate(tmp_path)
+    gate = assembly.acceptance
+    feedback = {'id': 'old-repair', 'state': 'applied', 'candidate_ref': {'sha256': 'old-candidate'}, 'gaps': ['old gap']}
+    pending = {'binding': {'candidate': 'new-candidate'}, 'results': [{'criterion_id': 'command', 'status': 'pending'}],
+               'reviews': {'completed-page': {'artifact': {'sha256': 'retained-page'}}}}
+    gate.data.update(state='blocked', cause_code=code, model_calls=2, elapsed_seconds=40, feedback=deepcopy(feedback),
+                     candidate='New candidate after repairs', pending_verification=deepcopy(pending))
+    assembly.acceptance_resume_request = 'resume-verification'
+    try:
+        await gate.prepare(context, runtime)
+        assert gate.data['feedback'] == feedback
+        assert gate.data['pending_verification'] == pending
+        assert not gate.data.get('resume_feedback_pending')
+        assert gate.data['candidate'] == 'New candidate after repairs'
+        assert gate.data['budget_generation'] == 1
     finally:
         await assembly.close()

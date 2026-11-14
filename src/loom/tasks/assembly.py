@@ -106,7 +106,11 @@ def normalize_task_spec(spec=None, *, workspace=None, plan_mode="auto"):
         type(acceptance["context_window_percent"]) is not int or not 1 <= acceptance["context_window_percent"] <= 95
     ):
         raise ValueError("Acceptance context_window_percent must be an integer between 1 and 95")
-    if any(type(v) is not int or v < (0 if k in {"max_checks", "max_repairs"} else 1) or v > 100000
+    # A paginated allocation includes many separately bounded model requests;
+    # its total time may exceed the old 100,000-second configuration ceiling.
+    acceptance_maxima = {"max_output_tokens": ACCEPTANCE_DEFAULTS["max_output_tokens"], "max_seconds": 365 * 24 * 3600}
+    if any(type(v) is not int or v < (0 if k in {"max_checks", "max_repairs"} else 1)
+           or v > acceptance_maxima.get(k, 100000)
            for k, v in acceptance.items() if not (k == "max_prompt_chars" and v is None)):
         raise ValueError("Acceptance limits must be bounded integers (only max_checks and max_repairs may be zero)")
     return spec
@@ -248,7 +252,8 @@ class TaskAssembly:
                     raise ValueError("Duplicate tool entrypoint")
                 self.entrypoints[entrypoint] = handler
         if harness and harness.allowed_tools is not None:
-            unknown = set(harness.allowed_tools) - self.bindings.keys() - {"read_artifact"} - (
+            context_controls = {"read_artifact"} | ({"record_context_notes"} if "working_set" in self.spec["context"] else set())
+            unknown = set(harness.allowed_tools) - self.bindings.keys() - context_controls - (
                 self.memory.allowed if self.memory else set()) - (self.skills.allowed if self.skills else set())
             if unknown:
                 raise ValueError(f"Unknown allowed tools: {sorted(unknown)}")
@@ -273,6 +278,13 @@ class TaskAssembly:
             if not set(binding.required_capabilities).issubset(self.runtime.manifest.capabilities):
                 raise ValueError(f"Runtime lacks required capabilities for {binding.id}")
         self.context_manager = self.registry.create("context", self.spec["context"], publish_artifact=self.publish_artifact)
+        review = getattr(self.context_manager, "working_set", None)
+        if review is not None:
+            if "record_context_notes" in self.bindings:
+                raise ValueError("Tool collection conflicts with context control record_context_notes")
+            if not self.expose_artifacts or (harness and harness.allowed_tools is not None and "record_context_notes" not in harness.allowed_tools):
+                raise ValueError("Review working set requires read_artifact and record_context_notes in the tool allowlist")
+            review.read_artifact = self.read_artifact
         self.workflow = self.registry.create(
             "workflow",
             self.spec["workflow"],
@@ -286,6 +298,8 @@ class TaskAssembly:
         if isinstance(self.workflow, AdaptiveDagWorkflow):
             from loom.contexts.conversation import ConversationContext
 
+            if review is not None and self.workflow.parallel["isolated_writes"]:
+                raise ValueError("Review working set supports read-only DAG lanes; isolated_writes must be false")
             self.workflow.assembly = self
             self.context_manager = ConversationContext(self.context_manager, self.workflow)
         self.workflow.completion_check = self.completion_error
@@ -327,6 +341,8 @@ class TaskAssembly:
             execution.binding_effects = {name: binding.effect_kind for name, binding in self.bindings.items()}
             execution.binding_effects.update({ref.id: "service_control" for ref in self.workflow.tool_refs()})
             execution.binding_effects["revise_acceptance_plan"] = "service_control"
+            if review is not None:
+                execution.binding_effects["record_context_notes"] = "service_control"
             if self.memory:
                 execution.binding_effects.update({name: "read_only" for name in self.memory.allowed})
             if self.skills:
@@ -584,6 +600,10 @@ class TaskAssembly:
 
         if self.expose_artifacts:
             handlers["read_artifact"] = read_evidence
+        if getattr(self.context_manager, "working_set", None) is not None:
+            from loom.tasks.context_review import notes_handler
+
+            handlers["record_context_notes"] = notes_handler(self)
 
         async def revise_acceptance(value, _options=None):
             try:
@@ -643,6 +663,10 @@ class TaskAssembly:
 
     def context_tools(self):
         refs = (*self.normal_refs, self.artifact_tool_ref()) if self.expose_artifacts else self.normal_refs
+        if getattr(self.context_manager, "working_set", None) is not None:
+            from loom.contexts.working_set import notes_tool_ref
+
+            refs = (*refs, notes_tool_ref())
         if self.memory:
             required = set((self.request.metadata.get('autonomy') or {}).get('required_tools', []))
             required.update(t for c in (self.acceptance.data.get('plan') or {}).get('criteria', [])
@@ -956,6 +980,31 @@ class TaskAssembly:
 
         return json_value(evidence(self))
 
+    def acceptance_task_budget(self):
+        cp = self._acceptance_cp
+        usage = (cp or {}).get('usage', self._local_usage)
+        calls = (cp or {}).get('llm_calls', self._local_calls)
+        return {'model_calls': calls, 'max_model_calls': self.acceptance_limits.get('max_llm_calls', 10000),
+                'tokens': usage.total_tokens,
+                'max_tokens': self.acceptance_limits.get('max_tokens') or (self.context.goal.budget.max_tokens if self.context else None),
+                'reserved_tokens': getattr(self.workflow, 'reserved_tokens', 0),
+                'renewal': 'Task-wide usage is retained on Resume; exhausted task limits require an explicit budget change.'}
+
+    def require_acceptance_model_budget(self):
+        from loom.tasks.acceptance import AcceptanceBlocked
+
+        budget = self.acceptance_task_budget()
+        if budget['model_calls'] >= budget['max_model_calls']:
+            raise AcceptanceBlocked(
+                f"Task model budget exhausted before acceptance verification: calls {budget['model_calls']}/{budget['max_model_calls']}. "
+                "Verification progress is saved. Resume does not renew task-wide call limits; explicitly change the task budget to continue.",
+                code='MODEL_CALL_BUDGET_EXCEEDED')
+        limit = budget['max_tokens']
+        if limit is not None and budget['tokens'] + budget['reserved_tokens'] >= limit:
+            raise AcceptanceBlocked(
+                f"Task token budget exhausted before acceptance verification: {budget['tokens']} used + "
+                f"{budget['reserved_tokens']} reserved / {limit}. Verification progress is saved.", code='TOKEN_BUDGET_EXCEEDED')
+
     async def acceptance_model_request(self, runtime, stage, prompt, content, timeout, *, protocol=None, mode="text", provider=None, images=()):
         from loom.evaluation.provider import evaluator_provider
         from loom.llm import LlmMessage, OpenAIProvider, TokenUsage, request_llm_response
@@ -969,11 +1018,9 @@ class TaskAssembly:
             raise AcceptanceBlocked("Acceptance model is unavailable")
         cp = self._acceptance_cp
         usage = cp["usage"] if cp else self._local_usage
-        calls = cp["llm_calls"] if cp else self._local_calls
         token_limit = self.acceptance_limits.get("max_tokens") or (self.context.goal.budget.max_tokens if self.context else None)
         reserved = getattr(self.workflow, "reserved_tokens", 0)
-        if (token_limit is not None and usage.total_tokens + reserved >= token_limit) or calls >= self.acceptance_limits.get("max_llm_calls", 10000):
-            raise AcceptanceBlocked("Task model budget exhausted before acceptance verification", code='TOKEN_BUDGET_EXCEEDED')
+        self.require_acceptance_model_budget()
         image_input = 0
         if images:
             from loom.llm.context_budget import estimate_message_tokens
@@ -983,7 +1030,7 @@ class TaskAssembly:
             if token_limit is not None and usage.total_tokens + reserved + image_input >= token_limit:
                 raise AcceptanceBlocked("Task token budget insufficient for visual input", code='TOKEN_BUDGET_EXCEEDED')
         if self.execution and (poll := getattr(self.execution, "poll_control", None)) and (directive := poll()):
-            raise AcceptanceBlocked(directive.get("reason", "Task interrupted"))
+            raise AcceptanceBlocked(directive.get("reason", "Task interrupted"), code=directive.get("code") or "ACCEPTANCE_INTERRUPTED")
         identifier = f"{runtime.trace_id}:acceptance:{uuid.uuid4().hex}"
         messages = [LlmMessage("system", prompt), LlmMessage("user", content, name="acceptance_contract", images=tuple(images))]
         metadata = {
@@ -1007,6 +1054,9 @@ class TaskAssembly:
             )
         ).unwrap()
         cap = self.acceptance.input_budget(provider=selected_provider)["max_output_tokens"]
+        if stage.removesuffix('_repair') in {'verify_page', 'select_evidence', 'verify'}:
+            limit = 'review_max_output_tokens' if stage.removesuffix('_repair') == 'verify' else 'page_max_output_tokens'
+            cap = min(cap, self.acceptance.config[limit])
         if token_limit:
             cap = min(cap, max(1, token_limit - usage.total_tokens - image_input))
         stream = not hasattr(selected_provider, "chat")
@@ -1030,7 +1080,7 @@ class TaskAssembly:
                     while self.execution and getattr(self.execution, "poll_control", None) and not task.done():
                         await asyncio.wait({task}, timeout=0.1)
                         if directive := self.execution.poll_control():
-                            raise AcceptanceBlocked(directive.get("reason", "Task interrupted"))
+                            raise AcceptanceBlocked(directive.get("reason", "Task interrupted"), code=directive.get("code") or "ACCEPTANCE_INTERRUPTED")
                     response = await task
                 finally:
                     if not task.done():

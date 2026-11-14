@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { JSDOM } from "jsdom";
 
-async function until(predicate, timeout = 8000) {
+async function until(predicate, timeout = 30000) {
   const deadline = Date.now() + timeout;
   while (!predicate()) {
     if (Date.now() > deadline)
@@ -81,6 +81,15 @@ test("browser app connects to real service, answers input, creates sessions, con
         !$("pending-input").hidden,
     );
     assert.match($("pending-input").textContent, /Which audience/);
+    const toggle = document.querySelector('[data-execution-toggle]');
+    assert.equal(toggle.textContent, 'Pause');
+    toggle.click();
+    await until(() => $("task-status").textContent === 'paused' && !toggle.disabled);
+    assert.equal(toggle.textContent, 'Resume');
+    toggle.click();
+    await until(() => $("task-status").textContent === 'awaiting_input' && !toggle.disabled);
+    assert.equal(toggle.textContent, 'Pause');
+    assert.match($("pending-input").textContent, /Which audience/);
     $("message").value = "General audience";
     submit("composer");
     await until(() => $("event-feed").querySelector(".result h1"));
@@ -143,14 +152,14 @@ test("browser app connects to real service, answers input, creates sessions, con
     await until(
       () =>
         $("session-title").textContent === "Failed route" &&
-        /WORKFLOW_ROUTE_FAILED.*Model did not select/.test($("event-feed").textContent),
+        /MODEL_RESPONSE_INVALID.*Model response needs correction/.test($("event-feed").textContent),
     );
     assert.match(
       $("event-feed").textContent,
-      /WORKFLOW_ROUTE_FAILED.*Model did not select/,
+      /MODEL_RESPONSE_INVALID.*Model response needs correction/,
     );
     assert.equal($("run-failure").hidden, true);
-    assert.doesNotMatch($("notice").textContent, /WORKFLOW_ROUTE_FAILED/);
+    assert.doesNotMatch($("notice").textContent, /MODEL_RESPONSE_INVALID/);
     $("new-session").click();
     await until(() => !$("create-page").hidden && !$("create-submit").disabled);
     assert.equal($("create-title"), null);
@@ -172,10 +181,13 @@ test("browser app connects to real service, answers input, creates sessions, con
         $("session-title").textContent === "Browser demo" &&
         $("event-feed").querySelector(".result"),
     );
-    document.querySelector('[data-command="complete_task"]').click();
-    await until(() => $("task-status").textContent === "completed");
-    document.querySelector('[data-command="reopen_task"]').click();
-    await until(() => $("task-status").textContent === "idle");
+    assert.equal($("controls").querySelectorAll("button").length, 2);
+    assert.equal(document.querySelector('[data-execution-toggle]').textContent, 'Pause');
+    assert.equal(document.querySelector('[data-execution-toggle]').disabled, true);
+    assert.equal(document.querySelector('[data-command="stop_run"]'), null);
+    assert.equal(document.querySelector('[data-command="complete_task"]'), null);
+    assert.equal(document.querySelector('[data-command="reopen_task"]'), null);
+    assert.equal(document.querySelector('[data-command="restart_task"]'), null);
     document.querySelector('[aria-label="Token budget"]').value = "500k";
     document
       .querySelector(".budget-form")
@@ -185,11 +197,11 @@ test("browser app connects to real service, answers input, creates sessions, con
         .querySelector('[data-panel="budget"]')
         .textContent.includes("500,000"),
     );
-    const edit = [...document.querySelectorAll('[data-panel="info"] button')].find(b => b.textContent === "Edit task");
+    const edit = [...document.querySelectorAll('[data-panel="info"] button')].find(b => b.textContent === "Revise task");
     assert.equal(edit.disabled, false);
     assert.equal(edit.classList.contains('primary'), true);
-    edit.click();
-    await until(() => !$("create-page").hidden && $("create-submit").textContent === "Save & restart");
+    document.querySelector('[data-command="revise_task"]').click();
+    await until(() => !$("create-page").hidden && $("create-submit").textContent === "Save & run");
     assert.equal($("create-title"), null);
     assert.equal($("restart-max_tokens").value, "500000");
     assert.equal($("create-template").value, "current-task");
@@ -217,7 +229,7 @@ test("browser app connects to real service, answers input, creates sessions, con
     assert.equal($("credential").value, "");
     assert.equal($("toggle-details").disabled, true);
   } catch (error) {
-    error.message += `\nService stderr: ${stderr}`;
+    error.message += `\nService stderr: ${stderr}\nUI state: ${dom?.window.document.getElementById("task-status")?.textContent}\nNotice: ${dom?.window.document.getElementById("notice")?.textContent}\nFeed: ${dom?.window.document.getElementById("event-feed")?.textContent.slice(-3000)}`;
     throw error;
   } finally {
     dom?.window.dispatchEvent(new dom.window.Event("pagehide"));

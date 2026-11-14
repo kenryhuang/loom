@@ -15,6 +15,14 @@ The capability catalog comes from the installed plugin registry without instanti
 
 Binding reasons are display-only metadata. Empty `null`/`[]` reason maps are normalized to `{}`, plugin reasons keyed by a selected plugin ID are mapped to their context/workflow kind, and reasons for unselected bindings are discarded. Actual binding selections are still checked against the installed catalog. Invalid reason objects or selected reason values produce an error naming the affected field.
 
+## Pause, resume and revise
+
+The Web session toolbar has two controls: one **Pause / Resume** toggle and **Revise**. Pause waits for a suspension boundary; Resume continues the saved context, checkpoint, plan, and usage. While pausing, the toggle is disabled. A pending ordinary question survives pause/resume. Answering while paused stores the answer without starting execution; Resume then continues. Uncertain side effects still require recovery before execution or revision can proceed.
+
+**Revise → Save & run** submits `revise_task` with the edited `task` and `expected_task_revision`. Stop active execution with Pause before revising. Saving validates the new configuration atomically, reassembles with current registered capabilities, and starts a new execution episode with fresh context, plan, acceptance state, and budgets. Pending guidance from the previous execution is discarded. Messages and results remain in the session history, but a durable history boundary excludes them from both the revised execution and later follow-ups. Workspace files are not reset.
+
+Completion is an execution outcome; it does not require a Complete/Reopen cycle. A follow-up message can be sent directly after completion. Internal task/run states and legacy commands remain available for existing clients and Agent recovery, but are not separate Web controls. Legacy `restart_task` retains its prior background/recovery semantics; user revision uses `revise_task`.
+
 ## API
 
 `GET /v1/web/catalog` adds `tool_collections`, `plugins`, `external_tools` and `setup_recommendation` alongside existing templates and model choices.

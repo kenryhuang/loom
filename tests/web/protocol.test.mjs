@@ -492,3 +492,41 @@ test('restart clears current execution projections while retaining durable messa
   assert.equal(projection.snapshot.token_budget.used, 0);
   assert.equal(projection.snapshot.messages[0].content, 'Previous report');
 });
+
+test('one execution toggle follows the lifecycle and protects pending recovery', async () => {
+  const {executionControl, canReviseTask} = await import('../../src/loom/web/assets/state.mjs');
+  const state = {task: {state: 'running', objective: 'Work'}, run: {state: 'running'}};
+  assert.deepEqual(executionControl(state), {command: 'pause', label: 'Pause', enabled: true});
+  assert.equal(canReviseTask(state), false);
+  state.task.state = 'pausing';
+  assert.deepEqual(executionControl(state), {command: 'pause', label: 'Pausing…', enabled: false});
+  state.task.state = 'paused';
+  assert.equal(executionControl(state).enabled, false);
+  state.run.state = 'suspended';
+  assert.deepEqual(executionControl(state), {command: 'resume', label: 'Resume', enabled: true});
+  assert.equal(canReviseTask(state), true);
+  state.input_request = {state: 'pending', kind: 'recovery'};
+  assert.equal(executionControl(state).enabled, false);
+  assert.equal(canReviseTask(state), false);
+  state.input_request.kind = 'question';
+  assert.equal(executionControl(state).enabled, true);
+  state.task.state = 'awaiting_input';
+  assert.equal(executionControl(state).command, 'pause');
+  assert.equal(canReviseTask(state), true);
+  state.input_request = null;
+  for (const status of ['idle', 'completed']) {
+    state.task.state = status;
+    state.run.state = 'completed';
+    assert.equal(executionControl(state).enabled, false);
+    assert.equal(canReviseTask(state), true);
+  }
+});
+
+test("call budget changes preserve token limits and usage", () => {
+  const projection = new SessionProjection(snapshot());
+  projection.apply(event(1, "run.usage.changed", { total_tokens: 20 }));
+  projection.apply(event(2, "task.budget.changed", { max_tokens: 50 }));
+  projection.apply(event(3, "task.budget.changed", { max_llm_calls: 220 }));
+  assert.equal(projection.snapshot.task.limits.max_llm_calls, 220);
+  assert.deepEqual(projection.snapshot.token_budget, { used: 20, limit: 50, remaining: 30 });
+});
