@@ -160,13 +160,17 @@ def test_explicit_evidence_target_stays_ahead_of_unrelated_scopes():
 @pytest.mark.parametrize('target', [dict(kind='workspace_path', value='extra.txt'), dict(kind='tool', value='read_file')])
 async def test_gap_repair_only_reviews_affected_criterion_and_retains_initial_verdicts(tmp_path, target):
     assembly, context, runtime = await setup(tmp_path, [criterion(0), criterion(1)])
-    (tmp_path / 'extra.txt').write_text('decisive extra fact')
+    (tmp_path / 'extra.txt').write_text('decisive extra fact' + ' evidence' * 4000)
     judgments = []
     interrupted = True
 
     async def request(runtime, stage, prompt, content, timeout, **kwargs):
         payload = json.loads(content)
         ids = [c['id'] for c in payload['criteria']]
+        if stage == 'select_evidence':
+            path = 'extra.txt' if payload.get('evidence_request') else 'input.txt'
+            selected = next(r['id'] for r in payload['source_catalogue'] if path in r['paths'])
+            return LlmResponse(json.dumps({'evidence_ids': [selected], 'reason': 'Select the requested source'}))
         judgments.append(ids)
         result = passed(payload)
         if ids == ['c0', 'c1']:
@@ -182,7 +186,7 @@ async def test_gap_repair_only_reviews_affected_criterion_and_retains_initial_ve
     assembly.acceptance_model_request = request
     try:
         await assembly.handlers()['read_file']({'path': 'input.txt'})
-        await assembly.handlers()['read_file']({'path': 'extra.txt'})
+        await assembly.handlers()['read_file']({'path': 'extra.txt', 'max_bytes': 40000})
         with pytest.raises(AcceptanceBlocked):
             await assembly.acceptance.verify(context, runtime, 'answer')
         assert {r['criterion_id']: r['status'] for r in assembly.acceptance.data['results']} == {'c0': 'passed', 'c1': 'blocked'}
@@ -483,11 +487,13 @@ async def test_overlapping_views_read_immutable_artifacts_once_but_recheck_file_
     try:
         for group in ([items[0]], items, [items[1]]):
             assert any('initial' in (r.get('output') or '') for r in batch.view(group))
-        assert len(reads) == 1
+        source_sha = assembly._acceptance_calls[0]['artifact']['sha256']
+        assert reads.count(source_sha) == 1
         (tmp_path / 'input.txt').write_text('changed after acquisition')
         view = batch.view(items)
         source = next(r for r in view if r['id'].startswith('tool:'))
         assert source['stale'] and source['output'] is None
-        assert len(reads) == 1
+        source_sha = assembly._acceptance_calls[0]['artifact']['sha256']
+        assert reads.count(source_sha) == 1
     finally:
         await assembly.close()

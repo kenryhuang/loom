@@ -937,7 +937,12 @@ class AcceptanceController:
                     if not preservation['unchanged']:
                         raise AcceptanceBlocked('Original workspace differs from the validation baseline', code='ACCEPTANCE_SOURCE_CHANGED')
                     evidence.append(preservation)
-                evidence.extend(self.assembly.acceptance_evidence())
+                from loom.tasks.acceptance_evidence import current_calls
+
+                if policy or not current_calls(self.assembly):
+                    evidence.extend(self.assembly.acceptance_evidence())
+                # Indexed receipts are selected lazily by the shared directory;
+                # don't load a broad historical sample before any batch starts.
                 for path in self.assembly._workspace_reports:
                     document = bound_path(self.root, path)
                     report_limit = self.config['max_evidence_pages'] * self.config['batch_max_input_tokens'] * 3

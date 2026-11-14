@@ -64,6 +64,9 @@ class BatchReview:
         self.sources = {}
         self.source_cache = OrderedDict()
         self.source_cache_chars = 0
+        from loom.tasks.acceptance_sources import SourceDirectory
+
+        self.directory = SourceDirectory(self)
 
     def read_source(self, sha):
         # View planning revisits overlapping source sets. Cache immutable bytes
@@ -106,11 +109,9 @@ class BatchReview:
 
     def view(self, criteria, *, targets=(), target_tools=(), target_sources=(), expanded=False, receipts=()):
         from loom.tasks.acceptance_evidence import current_calls
-        from loom.tasks.acceptance_evidence import evidence as tool_evidence
 
         ids = {c['id'] for c in criteria}
         goal = 'goal' in ids
-        scopes = [p for c in criteria for p in c['scope']]
         check_ids = {c['id'] for c in self.gate.data['plan']['criteria']}
         view = []
         for row in self.evidence:
@@ -125,11 +126,7 @@ class BatchReview:
                     view.append({'id': identifier, 'result': result, 'artifact': result.get('artifact')})
                 elif identifier in ids:
                     view.append(row)
-            elif identifier.startswith('report:') and scopes and all(c['scope'] for c in criteria) and not goal:
-                path = identifier.removeprefix('report:')
-                if any(path == p or path.startswith(p.rstrip('/') + '/') for p in scopes):
-                    view.append(row)
-            else:
+            elif not identifier.startswith('report:') or self.policy:
                 view.append(row)
         if self.policy:
             # Diagnosis policies own their evidence selection and reference rules.
@@ -148,28 +145,54 @@ class BatchReview:
                          'note': 'Original sources remain available through targeted evidence gaps. '
                                  'Judge whole-goal coverage and cross-criterion consistency independently from the receipts; '
                                  'request paths/tools/sources for any decisive fact not established by them.'})
-        elif current_calls(self.assembly):
-            # Without detail receipts, retain the ordinary initial source view. Targeted
-            # goal repair can retrieve original evidence just like a detail batch.
-            view.extend(tool_evidence(self.assembly, criteria=criteria if not goal else self.gate.data['plan']['criteria'],
-                                      targets=targets, target_tools=target_tools, target_sources=target_sources,
-                                      expanded=expanded, full=not goal or expanded, read_artifact=self.read_source))
         else:
-            view.extend(e for e in self.evidence if e['id'].startswith('tool:') or e['id'] == 'tool-call-coverage')
+            # Every batch can discover every source in this frozen snapshot.
+            # Scope is a query hint, not a hard source-existence filter.
+            sources = self.directory.candidates(criteria, targets=targets, target_tools=target_tools,
+                                                target_ids=target_sources, broad=bool(target_sources))
+            calls = current_calls(self.assembly)
+            if calls:
+                view.append({'id': 'tool-call-coverage', 'total_calls': len(calls), 'reviewed_calls': 0,
+                             'omitted_calls': len(calls), 'note': 'Source directory is not inspected evidence.'})
+            # Small directories need no selection call; larger ones remain lazy
+            # until bounded catalogue selection chooses their original bytes.
+            if sum(r['content_bytes'] for r in sources) <= self.gate.config['batch_max_input_tokens']:
+                sources = [self.directory.materialize(r) for r in sources]
+                represented = sum(len(r.get('equivalent_call_ids', [r['id']])) for r in sources if r['id'].startswith('tool:'))
+                for row in view:
+                    if row['id'] == 'tool-call-coverage':
+                        row.update(reviewed_calls=represented, omitted_calls=len(calls)-represented,
+                                   evidence_items=sum(r['id'].startswith('tool:') for r in sources))
+            source_ids = {row['id'] for row in sources}
+            view = [row for row in view if row['id'] not in source_ids]
+            view.extend(sources)
+            if not calls:
+                view.extend(e for e in self.evidence if e['id'].startswith('tool:') or e['id'] == 'tool-call-coverage')
         view.extend(receipts)
         return view
 
     async def request(self, stage, prompt, criteria, evidence, *, page_chars=None, extra=None):
         from loom.service.contracts import ServiceError
         from loom.tasks.acceptance import AcceptanceBlocked
+        from loom.tasks.acceptance_sources import citation_view, receipt_view, resolve_citations, validate_receipt
 
-        payload = {**self.payload(criteria, evidence), **(extra or {})}
-        protocol = page_protocol(criteria, evidence, page_chars) if page_chars is not None else verification_protocol(criteria, evidence)
+        self.ledger.validate_sources(evidence)
+        wire_evidence, aliases = citation_view(evidence)
+        payload = {**self.payload(criteria, wire_evidence), **(extra or {}),
+                   'citation_ids': [row['id'] for row in wire_evidence],
+                   'citation_rule': 'Cite only citation_ids in this request. Cite the receipt ID for its observations; '
+                                    'IDs in source text or earlier receipts are provenance, not directly citable here.'}
+        if 'criterion_results' in payload:
+            payload['criterion_results'] = receipt_view(payload['criterion_results'])
+        protocol = (page_protocol(criteria, wire_evidence, page_chars) if page_chars is not None
+                    else verification_protocol(criteria, wire_evidence))
         key = digest({'prompt': prompt, 'payload': payload, 'protocol': protocol.identity})
         saved = self.saved.get(key)
         if saved:
             try:
-                manifest = self.assembly.read_artifact(saved['artifact']['sha256'])
+                manifest = self.ledger.read(saved['artifact'])
+                self.ledger.validate_sources(manifest)
+                saved['rows'] = validate_receipt(manifest, self.assembly)
                 for row in manifest['evidence']:
                     if row.get('artifact'):
                         self.assembly.read_artifact(row['artifact']['sha256'])
@@ -181,10 +204,12 @@ class BatchReview:
                                      description=criterion['description'], batch_id=key, stage=stage)
             await self.gate.emit(self.runtime, 'verification.batch.started', batch_id=key,
                                  criterion_ids=[c['id'] for c in criteria], stage=stage, page=(extra or {}).get('page'))
-            validate = (lambda value: validate_page(value, criteria, evidence)) if page_chars is not None else (
-                lambda value: validate_verification(value, criteria, evidence, self.assembly))
+            validate = (lambda value: validate_page(value, criteria, wire_evidence)) if page_chars is not None else (
+                lambda value: validate_verification(value, criteria, wire_evidence, self.assembly))
             rows = await self.gate.structured(self.runtime, stage, prompt, payload, protocol, validate)
-            artifact = self.assembly.publish_artifact({**payload, 'binding_before': self.binding, 'results': rows}, 'verification_evidence')
+            rows = resolve_citations(rows, aliases)
+            artifact = self.assembly.publish_artifact({**payload, 'evidence': evidence, 'citation_aliases': aliases,
+                                                       'binding_before': self.binding, 'results': rows}, 'verification_evidence')
             saved = self.saved[key] = {'rows': deepcopy(rows), 'artifact': artifact}
             # Persist each validated response BEFORE attempting a view repair or
             # the next batch. A later failure cannot erase already paid progress.
@@ -335,15 +360,16 @@ class BatchReview:
 
         key = digest(criteria)
         jobs = self.pending.setdefault('batches', {})
-        # Upgrade only the unfinished goal's old broad-source view. Component
-        # receipts and all paid page artifacts remain intact and auditable.
-        goal = any(c['id'] == 'goal' for c in criteria)
-        if goal and jobs.get(key, {}).get('view_version') != 2:
+        from loom.tasks.acceptance_sources import VIEW_VERSION
+
+        # Old incomplete views may have dropped shared sources. Retain paid work
+        # for audit, but don't repeat a known-empty view after an upgrade.
+        if jobs.get(key, {}).get('view_version') != VIEW_VERSION:
             old = jobs.pop(key, None)
             if old:
-                self.pending.setdefault('superseded_goal_views', []).append(
-                    self.assembly.publish_artifact(old, 'verification_superseded_goal_view'))
-        job = jobs.setdefault(key, {'phase': 'initial', 'outputs': [], 'repair_next': 0, 'view_version': 2})
+                self.pending.setdefault('superseded_views', []).append(
+                    self.assembly.publish_artifact(old, 'verification_superseded_view'))
+        job = jobs.setdefault(key, {'phase': 'initial', 'outputs': [], 'repair_next': 0, 'view_version': VIEW_VERSION})
         if job['phase'] == 'initial':
             if 'view_ref' not in job:
                 gap = next((r.get('gap') for r in self.gate.data['results'] if len(criteria) == 1
@@ -394,6 +420,7 @@ class BatchReview:
 
     async def run(self, criteria):
         from loom.tasks.acceptance import VERIFY_PROMPT
+        from loom.tasks.acceptance_sources import validate_receipt
 
         receipts = []
         completed = set()
@@ -402,7 +429,9 @@ class BatchReview:
                 ref = row['judgment_artifact']
                 # A restored pending binding is validated by the controller.
                 # Read the actual receipt, never trust a bare passed flag.
-                manifest = self.assembly.read_artifact(ref['sha256'])
+                manifest = self.ledger.read(ref)
+                self.ledger.validate_sources(manifest)
+                validate_receipt(manifest, self.assembly)
                 if row['criterion_id'] in {r['criterion_id'] for r in manifest['results'] if r['status'] == 'passed'}:
                     for source in manifest['evidence']:
                         if source.get('artifact'):
@@ -455,7 +484,10 @@ class BatchReview:
                 self.gate.data['results'].append(row)
                 await self.gate.emit(self.runtime, 'verification.completed', result=row)
         return self.assembly.publish_artifact({'binding_before': self.binding,
-                                              'evidence': [*self.evidence, *self.used.values(), *self.sources.values()],
+                                              'evidence': [*self.evidence, *self.used.values(), *self.sources.values(),
+                                                  *([{'id': 'verification:source-registry', 'artifact': self.pending['source_directory'],
+                                                      'assurance': 'directory_only_not_evidence_coverage'}]
+                                                    if self.pending.get('source_directory') else [])],
                                               'results': self.gate.data['results']}, 'verification_evidence')
 
 

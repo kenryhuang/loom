@@ -118,7 +118,9 @@ def verification_protocol(criteria, evidence):
                "status": {"type": "string", "enum": ["passed", "failed", "blocked"]}, "reason": STRING,
                "evidence_ids": {"type": "array", "items": {"type": "string", "enum": [e["id"] for e in evidence]}},
                "gap": {"anyOf": [gap, {"type": "null"}]}})
-    return StructuredProtocol("acceptance_verification", 2, obj({"results": {"type": "array", "items": row}}), normalize_verification)
+    return StructuredProtocol("acceptance_verification", 3,
+                              obj({"results": {"type": "array", "minItems": len(criteria), "maxItems": len(criteria), "items": row}}),
+                              normalize_verification)
 
 
 GAP_KINDS = ["missing_evidence", "stale_evidence", "insufficient_evidence_view", "deliverable_mismatch",
@@ -143,7 +145,7 @@ def validate_verification(value, criteria, evidence, assembly=None):
     rows = value.get("results")
     expected = {c["id"] for c in criteria}
     if not isinstance(rows, list) or len(rows) != len(expected) or any(not isinstance(r, dict) for r in rows):
-        raise ValueError("Verifier must return one result per semantic criterion")
+        raise ValueError(f"Verifier must return exactly {len(expected)} results, one for each criterion: {sorted(expected)}")
     if any(not isinstance(r.get("criterion_id"), str) for r in rows) or {r["criterion_id"] for r in rows} != expected:
         raise ValueError("Verifier returned missing, duplicate or unknown criteria")
     available = {e["id"] for e in evidence}
@@ -153,9 +155,15 @@ def validate_verification(value, criteria, evidence, assembly=None):
         refs = row.get("evidence_ids", [])
         if (not isinstance(refs, list) or any(not isinstance(r, str) or r not in available for r in refs)
                 or (row["status"] == "passed" and not refs)):
-            raise ValueError("Semantic verification requires registered evidence")
+            unknown = [ref for ref in refs if isinstance(ref, str) and ref not in available] if isinstance(refs, list) else []
+            raise ValueError(f"Semantic verification requires registered evidence; unknown references: {unknown[:8]}; "
+                             f"cite only current request evidence IDs: {sorted(available)[:24]}")
         gap = row.get("gap")
         if row["status"] == "passed":
+            metadata = {r['id'] for r in evidence if r.get('directory_only') or r['id'] in {'evidence-selection', 'tool-call-coverage'}
+                        or r.get('assurance') == 'directory_only_not_evidence_coverage'}
+            if not set(refs) - metadata:
+                raise ValueError("Passed criteria require inspected evidence, not only a source directory or selection metadata")
             if gap is not None:
                 raise ValueError("Passed criteria cannot have gaps")
             continue

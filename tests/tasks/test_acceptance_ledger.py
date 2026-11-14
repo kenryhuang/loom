@@ -422,7 +422,7 @@ async def test_task_call_limit_does_not_consume_acceptance_calls_or_work_retries
             assert '9/9' in str(exc.value)
             gate.restore(gate.snapshot())
         assert gate.data['model_calls'] == calls_before
-        items = list(gate.data['verification_ledger']['items'].values())
+        items = [i for i in gate.data['verification_ledger']['items'].values() if i['kind'] != 'discover_sources']
         assert len(items) == 1 and items[0]['state'] == 'waiting_budget' and items[0]['attempts'] == 0
         assert gate.public()['task_budget']['model_calls'] == 9
         assert assembly._local_calls == 9

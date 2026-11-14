@@ -199,7 +199,33 @@ def evidence(assembly, *, targets=(), target_tools=(), target_sources=(), expand
                "omitted_calls": len(rows) - len(chosen), "tools": summaries,
                "note": "Call success proves execution only. Assess source relevance and deliverable correctness separately; "
                        "missing or truncated supporting content cannot establish a claim."}]
-    for row in chosen:
+    result.extend(materialize_calls(assembly, chosen, full=full, expanded=expanded, read_artifact=read_artifact))
+    # Leave half of the verification context for the goal, criteria, candidate and
+    # deterministic checks. The full artifacts remain available outside this prompt.
+    token_budget = assembly.acceptance.input_budget()["max_input_tokens"] // 2
+    while not full and estimate_message_tokens("", json.dumps(result, ensure_ascii=False)) > token_budget and len(result) > 1:
+        largest = max(result[1:], key=lambda r: len(r.get("output") or "") + len(r.get("input", "")))
+        if len(largest.get("output") or "") > 512:
+            largest["output"] = largest["output"][:len(largest["output"]) // 2]
+            largest["truncated"] = True
+        elif len(largest.get("input", "")) > 256:
+            largest["input"] = largest["input"][:len(largest["input"]) // 2]
+            largest["input_truncated"] = True
+        else:
+            result.pop()
+    represented = sum(len(row.get('equivalent_call_ids', [row['id']])) for row in result[1:])
+    result[0].update(reviewed_calls=represented, omitted_calls=len(rows) - represented,
+                     evidence_items=len(result) - 1, deduplicated_calls=represented - (len(result) - 1))
+    return result
+
+
+def materialize_calls(assembly, rows, *, full=False, expanded=False, read_artifact=None):
+    """Load registered receipts with source freshness checks, independent of selection."""
+    from loom.tasks.context_review import sync_goal
+
+    review = sync_goal(assembly)
+    result = []
+    for row in rows:
         # Dependency fingerprints are host validity metadata, not model evidence.
         dependencies = row.get("dependencies")
         row = {k: v for k, v in row.items() if k != "dependencies"}
@@ -226,20 +252,4 @@ def evidence(assembly, *, targets=(), target_tools=(), target_sources=(), expand
         raw = json.dumps(stored["output"] if row["artifact_format"] == "call" else stored, ensure_ascii=False)
         cap = len(raw) if full else assembly.acceptance.input_budget()["max_input_tokens"] if expanded else 6000
         result.append({**row, "output": raw[:cap], "truncated": len(raw) > cap})
-    # Leave half of the verification context for the goal, criteria, candidate and
-    # deterministic checks. The full artifacts remain available outside this prompt.
-    token_budget = assembly.acceptance.input_budget()["max_input_tokens"] // 2
-    while not full and estimate_message_tokens("", json.dumps(result, ensure_ascii=False)) > token_budget and len(result) > 1:
-        largest = max(result[1:], key=lambda r: len(r.get("output") or "") + len(r.get("input", "")))
-        if len(largest.get("output") or "") > 512:
-            largest["output"] = largest["output"][:len(largest["output"]) // 2]
-            largest["truncated"] = True
-        elif len(largest.get("input", "")) > 256:
-            largest["input"] = largest["input"][:len(largest["input"]) // 2]
-            largest["input_truncated"] = True
-        else:
-            result.pop()
-    represented = sum(len(row.get('equivalent_call_ids', [row['id']])) for row in result[1:])
-    result[0].update(reviewed_calls=represented, omitted_calls=len(rows) - represented,
-                     evidence_items=len(result) - 1, deduplicated_calls=represented - (len(result) - 1))
     return result

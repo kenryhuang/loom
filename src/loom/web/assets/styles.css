@@ -2424,6 +2424,14 @@ section.setup-block { padding: 20px; }
 .agent-roadmap-section { margin:16px 0; min-width:0; }
 .agent-roadmap-section h5,.agent-roadmap-goal h5 { font-size:12px; margin:14px 0 8px; color:var(--muted); font-weight:500; }
 .agent-roadmap-section > p { line-height:1.7; margin:8px 0; }
+.agent-plan-activity { border:1px solid var(--line); border-radius:8px; padding:16px 18px; margin:0 0 16px; background:var(--panel); }
+.agent-plan-activity > summary { display:flex; align-items:center; flex-wrap:wrap; gap:8px 14px; list-style:none; color:var(--text); font-size:14px; font-weight:600; }
+.agent-plan-activity > summary::-webkit-details-marker { display:none; }
+.agent-plan-activity > summary::before { content:'›'; color:var(--muted); font-size:20px; line-height:1; transition:transform .15s; }
+.agent-plan-activity[open] > summary::before { transform:rotate(90deg); }
+.agent-plan-activity[open] > summary { padding-bottom:14px; border-bottom:1px solid var(--line); }
+.agent-plan-status { color:var(--accent); font-size:12px; font-weight:500; }
+.agent-plan-objective { color:var(--muted); font-size:12px; font-weight:400; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; margin-left:auto; }
 .agent-plan-attempt { border-left:2px solid var(--border); padding:8px 0 8px 14px; margin:12px 0; }
 .agent-plan-events { list-style:none; padding:0; margin:10px 0; }
 .agent-plan-events li { display:grid; grid-template-columns:minmax(130px,180px) minmax(0,1fr); gap:4px 12px; padding:6px 0; overflow-wrap:anywhere; }

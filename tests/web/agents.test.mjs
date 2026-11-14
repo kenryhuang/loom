@@ -825,7 +825,7 @@ test('Budget waiting shows the allowance and automatic reset instead of review',
  }finally{view.close();dom.window.close();}
 });
 
-test('Planning activity stays visible and streams drafts before publishing outcomes',async()=>{
+test('Planning block defaults closed, preserves expansion and updates its current status',async()=>{
  const data=fixture();data.planning_engine=2;data.view='goals';data.role.timezone='Asia/Shanghai';
  data.role.long_term_objectives=[{id:'primary',desired_outcome:'Build next stage',stage_planning:{mode:'autonomous'}},
   {id:'other',desired_outcome:'Other objective',stage_planning:{mode:'autonomous'}}];
@@ -836,8 +836,12 @@ test('Planning activity stays visible and streams drafts before publishing outco
  try{
   await view.open();await view.select('a');await view.changeTab('Goals');
   let activity=view.root.querySelector('[data-planning-objective="primary"]');
-  assert.equal(activity.closest('details'),null);
-  assert.match(activity.textContent,/Planning in progress|Planning started/);
+  assert.equal(activity.tagName,'DETAILS');
+  assert.equal(activity.open,false);
+  assert.equal(activity.closest('.agent-roadmap'),null);
+  assert.match(activity.querySelector('summary').textContent,/Planning.*Preparing plan/);
+  assert.doesNotMatch(activity.querySelector('summary').textContent,/Planning started|Draft output/);
+  assert.match(activity.textContent,/Planning started/);
   assert.doesNotMatch(activity.textContent,/Other review result/);
   data.planning_activity[0].stream={state:'streaming',streaming:true,attempt:2,channels:{content:{text:'draft <img src=x>',characters:123}}};
   data.planning_activity[0].events=[
@@ -845,9 +849,16 @@ test('Planning activity stays visible and streams drafts before publishing outco
    {type:'plan.protocol.retrying',at:'2026-11-10T01:01:00Z',attempt:1},
    {type:'plan.protocol.requesting',at:'2026-11-10T01:01:01Z',attempt:2}];
   await view.refresh();activity=view.root.querySelector('[data-planning-objective="primary"]');
-  assert.equal(activity.closest('details'),null);
+  assert.equal(activity.open,false); // Polling updates the collapsed status without opening it.
+  assert.match(activity.querySelector('summary').textContent,/Receiving planning draft/);
+  activity.open=true;activity.dispatchEvent(new dom.window.Event('toggle'));
+  data.planning_activity[0].stream.channels.content={text:'new live draft',characters:456};
+  await view.refresh();activity=view.root.querySelector('[data-planning-objective="primary"]');
+  assert.equal(activity.open,true);
+  assert.match(activity.textContent,/new live draft/);
+  assert.equal(view.root.querySelector('[data-planning-objective="other"]').open,false);
   assert.match(activity.textContent,/Receiving planning draft/);
-  assert.match(activity.textContent,/123 characters/);
+  assert.match(activity.textContent,/456 characters/);
   assert.match(activity.textContent,/Draft output is provisional/);
   assert.doesNotMatch(activity.textContent,/work packages published/);
   assert.match(activity.textContent,/Attempt 1 · Response rejected/);
@@ -859,14 +870,18 @@ test('Planning activity stays visible and streams drafts before publishing outco
   data.planning_activity[0].events.push({type:'plan.protocol.completed',at:'2026-11-10T01:02:00Z',attempt:2},
    {type:'plan.finished',at:'2026-11-10T01:02:00Z'});
   await view.refresh();activity=view.root.querySelector('[data-planning-objective="primary"]');
+  assert.equal(activity.open,true);
+  assert.match(activity.querySelector('summary').textContent,/Plan published/);
   assert.match(activity.textContent,/Plan validation passed/);assert.match(activity.textContent,/Decision recorded/);
+  activity.open=false;activity.dispatchEvent(new dom.window.Event('toggle'));
   assert.doesNotMatch(activity.textContent,/Planning in progress/);
   assert.match(activity.textContent,/2 goals · 3 work packages published/);
   assert.match(activity.textContent,/dispatch queue/);
   assert.doesNotMatch(activity.textContent,/Receiving planning draft/);
   data.planning_activity[0].outcome={action:'wait',reason:'No valuable gap remains',next_review_at:'2026-11-10T02:00:00Z'};
   await view.refresh();activity=view.root.querySelector('[data-planning-objective="primary"]');
-  assert.match(activity.textContent,/Waiting for the next check/);
+  assert.equal(activity.open,false);
+  assert.match(activity.querySelector('summary').textContent,/Waiting for the next check/);
   assert.match(activity.textContent,/No valuable gap remains/);
   assert.match(activity.textContent,/Next check:/);
   assert.doesNotMatch(activity.textContent,/work packages published/);

@@ -38,17 +38,37 @@ function section(root,title,text) {
   const box=element('section','agent-roadmap-section');box.append(element('h5','',title));
   if(text) box.append(element('p','',text));root.append(box);return box;
 }
-function planningActivity(root,d,objective,state) {
-  const box=section(root,'Plan activity');box.classList.add('agent-plan-activity');
-  box.dataset.planningObjective=objective.id;
+function planningStatus(run,state) {
+  if(run?.state==='planning') {
+    const event=(run.events || []).filter(e=>e.type?.includes('.protocol.')).at(-1);
+    const phase=event?.type.split('.').at(-1);
+    const validation={proposed:'Validating draft',completed:'Validation passed · preparing publication',
+      rejected:'Draft rejected',retrying:'Retrying with corrections',fallback:'Retrying model request',exhausted:'Correction attempts exhausted'};
+    if(validation[phase] && (!run.stream || (event.attempt || 0)>=(run.stream.attempt || 0)))return validation[phase];
+    return {requesting:'Waiting for first output',streaming:'Receiving planning draft',
+      received:'Validating draft',failed:'Model request failed'}[run.stream?.state] || 'Preparing plan · waiting for model';
+  }
+  if(state?.revision_requested && state.state==='ready')return 'Replan queued';
+  if(waitingBudget(state))return 'Waiting for daily budget';
+  if(['paused','blocked','awaiting_input','deferred'].includes(state?.state))return name(state.state);
+  if(run?.state==='failed')return 'Planning failed';
+  if(run?.state==='superseded')return 'Inputs changed · waiting for replanning';
+  if(run?.state==='committed')return {wait:'Waiting for the next check',request_input:'Waiting for an answer',
+    complete_objective:'Objective completed',review_stage:'Stage review completed'}[run.outcome?.action]
+    || (run.outcome ? 'Plan published' : 'Planning completed');
+  if(state?.state==='waiting')return 'Waiting for the next check';
+  return 'No active planning';
+}
+function planningActivity(root,d,objective,state,view) {
   const runs=(d.planning_activity || []).filter(run=>run.objective_id===objective.id);
   const latest=runs[0];
-  const status=element('p','muted');status.setAttribute('role','status');
-  status.textContent=latest?.state==='planning'
-    ? 'Planning in progress · updates automatically while this page is visible.'
-    : state?.revision_requested && state.state==='ready' ? 'Replan requested · waiting for the next planning attempt.'
-    : 'Recent planning attempts · updates automatically while this page is visible.';
-  box.append(status);
+  const box=roadmapDisclosure(view,root,d,`planning-activity:${objective.id}`,'Planning');
+  box.classList.add('agent-plan-activity','dashboard-wide');box.dataset.planningObjective=objective.id;
+  const summary=box.querySelector('summary');
+  const status=element('span','agent-plan-status',planningStatus(latest,state));status.setAttribute('role','status');
+  summary.append(status);
+  if(d.role.long_term_objectives.length>1)summary.append(element('span','agent-plan-objective',objective.desired_outcome));
+  box.append(element('p','muted small','Live planning activity · updates automatically while this page is visible.'));
   if(!runs.length) {
     box.append(element('p','empty-state',d.planning_activity
       ? 'No planning attempts recorded yet.' : 'Planning activity is not available from the running service yet.'));
@@ -225,6 +245,7 @@ export function renderRoadmaps(root,d,view) {
     const statusName=budgetWaiting ? 'Waiting for daily budget'
       : d.planning_engine===2 && state?.state==='waiting' && ['MODEL_PROTOCOL','CONTRACT_INVALID'].includes(state.blocker?.code)
       ? 'Planning needs correction' : name(state?.state);
+    planningActivity(root,d,objective,state,view);
     const block=panel(root,'Delivery roadmap',true);block.classList.add('agent-roadmap');block.dataset.objectiveId=objective.id || '';
     const header=block.querySelector('header');header.append(badge(enabled?statusName:'Auto-progress not enabled',state?.state));
     if(roadmap?.revision || roadmap?.created_at) header.append(element('small','muted',`${roadmap.revision?'route v'+roadmap.revision:''}${roadmap.created_at?' · '+time(roadmap.created_at):''}`));
@@ -252,7 +273,6 @@ export function renderRoadmaps(root,d,view) {
     if(!current) block.append(element('p','empty-state',enabled
       ? (d.planning_engine===2?'Preparing the first complete stage. If project facts are missing, a discovery stage will appear here.':'Enabled; waiting to verify the current state and run the first planning round.')
       :'No stage route yet; historical goals are kept below.'));
-    planningActivity(block,d,objective,state);
     const nodes=[...stages.filter(s=>s.state==='completed' && s.id!==current?.id).map(s=>({id:s.id,title:s.title,state:s.state,tag:'Delivered',stage:s})),
       ...(current?[{id:current.id,title:current.title,state:current.state,tag:terminal.has(current.state)?'Latest stage':current.kind==='discovery'?'Discovery stage':'Current stage',stage:current}]:[]),
       ...(roadmap?.future || []).map((f,i)=>({id:`future:${roadmap.id}:${f.key || i}`,title:f.title,tag:'Tentative direction',future:f,state:'tentative'}))];

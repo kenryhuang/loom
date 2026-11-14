@@ -127,10 +127,14 @@ def test_plan_correction_then_mcp_execution_reaches_semantic_acceptance(request_
             elif prompt.startswith("You independently verify"):
                 payload = json.loads(messages[1].content)
                 assert {c["id"] for c in payload["criteria"]} in ({"sources"}, {"goal"})
-                search = next(r for r in payload["evidence"] if r.get("tool") == TOOL)
-                assert search["ok"]
-                assert ("Neptune" in search["output"]) is useful_results
-                self.reviewed = True
+                if payload["criteria"][0]["id"] == "sources":
+                    search = next(r for r in payload["evidence"] if r.get("tool") == TOOL)
+                    assert search["ok"]
+                    assert ("Neptune" in search["output"]) is useful_results
+                    self.reviewed = True
+                else:
+                    assert self.reviewed and useful_results
+                    assert any(e.get("results") for e in payload["evidence"])  # Goal consumes independently checked receipts.
             else:
                 self.solver_calls += 1
                 if self.solver_calls == 1:

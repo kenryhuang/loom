@@ -173,7 +173,8 @@ def test_durable_command_acceptance_counts_calls_and_journals_checks(tmp_path):
     service = LoomService(tmp_path / "data", provider_factory=provider_factory).start()
     try:
         sid = service.create("verified", {"objective": "Maintain", "workspace": str(workspace), "plan_mode": "off"})["session_id"]
-        state = wait_state(service, sid, "idle")
+        # Source discovery and each review commit durable artifacts/checkpoints.
+        state = wait_state(service, sid, "idle", timeout=30)
         assert state["acceptance"]["state"] == "passed"
         assert state["token_budget"]["used"] == 45
         events = service.events(sid, limit=1000)

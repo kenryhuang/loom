@@ -97,6 +97,10 @@ class VerificationLedger:
             seen.add(ref['sha256'])
             content = self.read(ref)
             if ref.get('kind', '').startswith(('verification', 'visual')):
+                if ref.get('kind') == 'verification_evidence' and isinstance(content, dict) and 'criteria' in content:
+                    from loom.tasks.acceptance_sources import validate_receipt
+
+                    validate_receipt(content, self.assembly)
                 self.validate_sources(content, seen)
 
     def plan(self, kind, identity, factory):
