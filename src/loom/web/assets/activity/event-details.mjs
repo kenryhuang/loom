@@ -75,6 +75,12 @@ export function eventPresentation(kind, data) {
   }
   if (kind === "artifact.created") {
     const artifact = data.artifact || {};
+    if (artifact.kind === "verification_source_directory") {
+      const value = data.artifact_content;
+      return {title: "Acceptance evidence indexed", subject: value ? `${value.sources?.length || 0} sources available for review` : "Expand to view files, tools and recorded results",
+        sections: value ? verificationArtifactSections(value) || meaningfulFields(value) :
+          [{label: "", value: "Immutable evidence snapshots support review and checkpoint recovery. Content loads when expanded."}]};
+    }
     if (artifact.kind === "visual_evidence") {
       const value = data.artifact_content;
       return {title: "Browser screenshots saved", subject: value ? `${value.frames?.length || 0} frames · ${value.url || ''}` : "Expand to view actual captures",
@@ -93,6 +99,11 @@ export function eventPresentation(kind, data) {
 }
 
 export function verificationArtifactSections(value) {
+  if (value && Array.isArray(value.sources) && (value.sources.length > 0 || value.version === 3) && value.sources.every(row => row?.source_ref)) {
+    return [{label: "", value: "Evidence indexed for acceptance review. Indexing does not mean every source has been reviewed or that acceptance has passed. View recorded content without rerunning tools."},
+      ...value.sources.map(row => ({label: "", kind: "verification-source", value: row}))];
+  }
+  if (value?.row) return evidenceSections([value.row]);
   if (!value || !((value.plan && Array.isArray(value.evidence)) || (value.criterion && value.result))) return null;
   const sections = [{label: "", value: value.criterion ? "Recorded verification check and supporting evidence." :
     "Evidence supplied to the acceptance review. This bundle is not the final acceptance verdict."}];
@@ -100,7 +111,13 @@ export function verificationArtifactSections(value) {
   const criteria = value.plan?.criteria || [value.criterion];
   criteria.filter(Boolean).forEach((c, i) => sections.push({label: `Criterion ${i + 1}`, kind: "acceptance-criterion", value: c}));
   sections.push(...meaningfulFields({result: value.result, detail: value.detail, unresolved_requirements: value.plan?.unresolved_requirements}));
-  for (const [i, evidence] of (value.evidence || []).entries()) {
+  sections.push(...evidenceSections(value.evidence || []));
+  return sections;
+}
+
+function evidenceSections(evidenceRows) {
+  const sections = [];
+  for (const [i, evidence] of evidenceRows.entries()) {
     const label = evidence.id === "candidate" ? "Candidate answer under review" : `Evidence ${i + 1}${evidence.tool ? ` · ${evidence.tool}` : ""}`;
     if (evidence.content) sections.push({label, value: evidence.content, kind: "markdown"});
     if (evidence.input) sections.push(...meaningfulFields({[label]: {input: evidence.input}}));
@@ -112,9 +129,12 @@ export function verificationArtifactSections(value) {
         for (const key of ["stdout", "stderr"])
           if (output[key]) sections.push({label: `${label} · ${key}`, value: output[key], kind: "code"});
         if (output.exit_code != null) sections.push({label: `${label} · Exit code`, value: String(output.exit_code)});
+      } else if (output && typeof output === "object" && typeof output.content === "string") {
+        sections.push({label: `${label} · Recorded content`, value: output.content, kind: "code"});
+        sections.push(...meaningfulFields({[label]: Object.fromEntries(Object.entries(output).filter(([key]) => key !== "content"))}));
       } else sections.push(...meaningfulFields({[label]: {output}}));
     }
-    sections.push(...meaningfulFields({[label]: {result: evidence.result, detail: evidence.detail}}));
+    sections.push(...meaningfulFields({[label]: {result: evidence.result, detail: evidence.detail, error: evidence.error}}));
     if (evidence.truncated) sections.push({label, value: "Recorded output was truncated; omitted content was not included in this evidence."});
   }
   return sections;

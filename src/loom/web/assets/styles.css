@@ -2496,3 +2496,20 @@ section.setup-block { padding: 20px; }
 
 .agent-plan-stream pre { max-height:220px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; padding:12px; background:var(--surface); }
 .agent-plan-publication { border-left:3px solid var(--border); padding:8px 12px; }
+
+/* Planning uses a compact lifecycle timeline; payloads remain opt-in. */
+.agent-plan-attempt h5 { margin:16px 0 8px; font-size:12px; color:var(--muted); }
+.agent-plan-scope { margin:8px 0; overflow-wrap:anywhere; }
+.agent-plan-events { margin-left:5px; border-left:1px solid var(--line); }
+.agent-plan-events li { position:relative; padding:7px 0 7px 18px; }
+.agent-plan-events li::before { content:''; position:absolute; left:-4px; top:14px; width:7px; height:7px; border-radius:50%; background:var(--accent); }
+.agent-plan-publication { border-color:var(--accent); background:var(--raised); border-radius:4px; }
+.agent-plan-publication > h5 { margin-top:0; }
+.agent-plan-tasks { padding-left:22px; }
+.agent-plan-tasks li { padding:8px 0; overflow-wrap:anywhere; }
+.agent-plan-tasks li > div { margin-bottom:6px; }
+.agent-plan-tasks .markdown p { margin:0; }
+.agent-plan-tasks a { margin-left:12px; font-size:12px; }
+.agent-plan-stream { margin-top:14px; }
+.agent-plan-stream summary { color:var(--muted); font-size:12px; }
+.agent-plan-stream pre { max-height:220px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }

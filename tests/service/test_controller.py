@@ -609,6 +609,104 @@ def test_tick_still_replies_when_a_record_handler_crashes(tmp_path, monkeypatch)
         service.close()
 
 
+def test_tick_replies_when_record_handler_raises_oserror(tmp_path, monkeypatch):
+    """Persistence failures like ENOSPC surface as OSError inside worker_record (e.g.
+    artifact file writes on a full disk). The worker must still receive an error
+    reply — an unanswered record freezes it on future.result() forever and the run
+    turns into a zombie that the supervisor never recovers."""
+    from types import SimpleNamespace
+
+    service = LoomService(tmp_path / "data", provider_factory=provider_factory)
+    try:
+        sid = create(service, tmp_path / "workspace")
+        descriptor = service.prepare_attempt(sid)
+        replies = []
+
+        class FakeConnection:
+            def __init__(self):
+                self.records = [dict(epoch=descriptor["epoch"], attempt_id=descriptor["run"]["attempt_id"],
+                                     record_id="poison", type="read_artifact", payload=encode({"digest": "ab" * 32}))]
+
+            def poll(self):
+                return bool(self.records)
+
+            def recv(self):
+                return self.records.pop(0)
+
+            def send(self, reply):
+                replies.append(reply)
+
+        class FakeProcess:
+            def is_alive(self):
+                return True
+
+        service.active[sid] = SimpleNamespace(connection=FakeConnection(), process=FakeProcess(), terminal_since=None,
+                                              workspace=str(tmp_path / "workspace"))
+
+        def boom(*args):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(service, "worker_record", boom)
+        service._tick()
+        assert replies and "No space left" in replies[0].get("error", "")
+        service.active.pop(sid)
+    finally:
+        service.close()
+
+
+def test_tick_kills_stalled_running_worker(tmp_path, monkeypatch):
+    """A live worker that goes silent (no records) while its run stays 'running' is
+    frozen — e.g. blocked on an unanswered RPC. The supervisor must kill it so the
+    existing dead-worker recovery can resume the run from its checkpoint."""
+    from types import SimpleNamespace
+
+    service = LoomService(tmp_path / "data", provider_factory=provider_factory, worker_stall_timeout=0.01)
+    try:
+        sid = create(service, tmp_path / "workspace")
+        descriptor = service.prepare_attempt(sid)
+
+        def force_running(state, emit, db):
+            state["run"]["state"] = "running"
+
+        service.store.update(sid, force_running)
+
+        class FakeConnection:
+            def poll(self):
+                return False
+
+            def send(self, reply):
+                pass
+
+            def close(self):
+                pass
+
+        class FakeProcess:
+            def __init__(self):
+                self.killed = False
+                self.exitcode = None
+
+            def is_alive(self):
+                return not self.killed
+
+            def kill(self):
+                self.killed = True
+                self.exitcode = -9
+
+            def join(self, timeout=None):
+                pass
+
+        process = FakeProcess()
+        service.active[sid] = SimpleNamespace(connection=FakeConnection(), process=process, terminal_since=None,
+                                              workspace=str(tmp_path / "workspace"),
+                                              last_record_at=time.monotonic() - 3600, epoch=descriptor["epoch"])
+        service._tick()
+        assert process.killed
+        assert sid not in service.active
+        assert service.snapshot(sid)["run"]["state"] != "running"
+    finally:
+        service.close()
+
+
 def test_call_budget_change_preserves_paused_run_and_checkpoint(tmp_path):
     service = LoomService(tmp_path / 'data', provider_factory=provider_factory).start()
     try:

@@ -93,8 +93,13 @@ export function builtinRenderers() {
       event.payload.artifact?.kind === "acceptance_tool_evidence", () => ({hidden: true}))
     .register("verification-internal-artifact", event => event.type === "artifact.created" && [
       "verification_work_input", "verification_work_output", "verification_work_plan", "verification_chunk",
-      "verification_batch_view", "verification_source_inventory", "verification_evidence_selection", "verification_superseded_goal_view",
+      "verification_batch_view", "verification_source", "verification_source_inventory", "verification_evidence_selection", "verification_superseded_goal_view",
     ].includes(event.payload.artifact?.kind), () => ({hidden: true}))
+    .register("verification-source-directory", event => event.type === "artifact.created" &&
+      event.payload.artifact?.kind === "verification_source_directory", event => ({
+        key: `verification-sources:${event.run_id}`, aggregate: true, kind: "artifact",
+        summary: "Acceptance evidence indexed", artifact: event.payload.artifact, details: event.payload,
+      }))
     .register("acceptance-round", isAcceptanceRound, acceptanceDescriptor)
     .register("verification-artifact", event => event.type === "artifact.created" &&
       ["verification_evidence", "verification", "visual_evidence"].includes(event.payload.artifact?.kind), event => ({

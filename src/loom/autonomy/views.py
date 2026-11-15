@@ -92,7 +92,7 @@ PAGE_COLLECTIONS = {
     "overview": {key: ["id", "state"] for key in ("goals", "work_packages", "learning")},
     "goals": {
         "goals": GOAL_FIELDS,
-        "work_packages": ["id", "goal_id", "session_id", "state", "objective", "order", "reason", "blocked_reason", "superseded_contract"],
+        "work_packages": ["id", "goal_id", "agent_run_id", "session_id", "state", "objective", "order", "reason", "blocked_reason", "superseded_contract"],
         "stages": [
             "kind",
             "plan_id",
@@ -186,13 +186,17 @@ def page_snapshot(store, aid, view):
 def planning_activity(db, aid, objectives):
     """Bounded progress records, without model proposals or input snapshots."""
     activity = []
+    lease = db.execute("SELECT json_extract(body,'$.planner_lease') FROM agents WHERE id=?", (aid,)).fetchone()
+    current_run = lease[0] if lease else None
     for objective in objectives:
         runs = project(db, "agent_runs",
-            ["id", "objective_id", "kind", "state", "created_at", "reason", "stream", "outcome", "decision.action", "decision.reason"],
+            ["id", "objective_id", "kind", "state", "created_at", "reason", "stream", "outcome", "goal_id", "stage_id",
+             "work_package_ids", "decision.action", "decision.reason"],
             "WHERE agent_id=? AND json_extract(body,'$.objective_id')=? "
-            "AND json_extract(body,'$.kind') IN ('unified_plan','stage_plan','stage_review','work_plan') ORDER BY rowid DESC LIMIT 3",
-            (aid, objective["id"]))
+            "AND json_extract(body,'$.kind') IN ('unified_plan','stage_plan','stage_review','work_plan') ORDER BY (id=?) DESC, rowid DESC LIMIT 3",
+            (aid, objective["id"], current_run or ""))
         for run in runs:
+            run["is_current"] = run["id"] == current_run
             # Older attempts retain their small decision summary, never the full proposal.
             action, reason = run.pop("decision.action", None), run.pop("decision.reason", None)
             if run["state"] == "committed" and not run.get("outcome") and action:

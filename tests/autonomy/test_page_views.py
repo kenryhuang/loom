@@ -299,3 +299,19 @@ def test_historical_wait_decision_exposes_reason_without_full_proposal(agent_ser
     assert activity['outcome'] == dict(action='wait', reason='No remaining delivery gap')
     assert 'private' not in json.dumps(activity)
     assert 'goal_count' not in activity['outcome']  # Historical counts were not recorded.
+
+
+def test_planning_activity_keeps_the_leased_run_and_projects_work_relationships(agent_service):
+    service, facade, aid, _ = agent_service
+    with service.store.transaction() as db:
+        agent = facade.store.get(db, 'agents', aid)
+        agent['planner_lease'] = 'plan-0'
+        facade.store.put(db, 'agents', agent)
+        for index in range(5):
+            facade.store.put(db, 'agent_runs', dict(id=f'plan-{index}', agent_id=aid, objective_id='quality',
+                kind='work_plan', state='planning', goal_id=f'goal-{index}', work_package_ids=[f'work-{index}']))
+    runs = page(facade, aid, 'goals')['planning_activity']
+    assert [r['id'] for r in runs] == ['plan-0', 'plan-4', 'plan-3']
+    assert [r['is_current'] for r in runs] == [True, False, False]
+    assert runs[0]['goal_id'] == 'goal-0'
+    assert runs[0]['work_package_ids'] == ['work-0']

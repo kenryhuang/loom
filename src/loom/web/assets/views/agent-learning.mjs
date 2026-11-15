@@ -195,7 +195,10 @@ export class AgentLearningView {
     }
     if (memory.pinned) meta.append(badge('Priority reference'));
     for (const tag of memory.tags || []) meta.append(badge(tag));
-    row.append(meta,element('h4','',memory.title),element('p','',memory.summary),element('p','muted small',`Scope: ${memory.scope}`));
+    row.append(meta,element('h4','',memory.title));
+    // Extraction often stores the title as the summary verbatim; showing both repeats the heading.
+    if (memory.summary && memory.summary !== memory.title) row.append(element('p','',memory.summary));
+    row.append(element('p','muted small',`Scope: ${memory.scope}`));
     const identity = JSON.stringify([memory.source.evaluation_id,memory.source.record_id]);
     const evidence = this.disclosure(row,'View evidence & method details',`evidence:${identity}`);
     if (memory.memory_id) this.lazyKnowledge(evidence,memory);

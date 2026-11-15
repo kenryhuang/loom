@@ -331,6 +331,19 @@ def test_nonfatal_error_fails_only_the_request_and_the_pipe_stays_usable():
         connection.gate.set()
 
 
+def test_rpc_times_out_instead_of_freezing_forever():
+    """If the supervisor never answers (e.g. its reply path broke on a full disk),
+    the worker must fail the RPC instead of blocking on future.result() forever."""
+    connection = Connection()  # The gate stays closed: no reply ever arrives.
+    bridge = WorkerBridge(connection, state(), rpc_timeout=0.2)
+    try:
+        with pytest.raises(TimeoutError):
+            bridge.rpc("poll_control", {})
+    finally:
+        connection.gate.set()
+        bridge.close()
+
+
 def test_domain_rejection_is_fatal_only_for_trace_records():
     import sqlite3
 

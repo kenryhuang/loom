@@ -22,7 +22,39 @@ function renderSection(item, loadArtifact, detailMode) {
   const node = element("section", "activity-section");
   if (item.label) node.append(element("small", "activity-label", item.label));
   const value = item.value;
-  if (item.kind === "visual-evidence") {
+  if (item.kind === "verification-source") {
+    const row = element("details", "verification-source");
+    row.dataset.key = `source:${value.id}`;
+    const target = value.paths?.join(", ") || value.description || "Recorded source";
+    const status = value.origin === "tool_receipt" ? value.ok === true ? "Succeeded" : value.ok === false ? "Failed" : "Result not recorded" : "Recorded evidence";
+    row.append(element("summary", "", `${value.tool || "Verification check"} · ${target} · ${status}`));
+    const content = element("div", "verification-source-content");
+    if (value.input) content.append(element("pre", "activity-code", preview(typeof value.input === "string" ? value.input : JSON.stringify(value.input, null, 2))));
+    const button = element("button", "quiet", "View recorded content");
+    button.type = "button";
+    button.disabled = !loadArtifact;
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      button.textContent = "Loading recorded content…";
+      try {
+        const saved = await loadArtifact(value.source_ref.sha256);
+        if (!saved?.row || saved.row.id !== value.id) throw new Error("Evidence source does not match its index");
+        let source = saved.row;
+        if (saved.tool_receipt && source.artifact?.sha256) {
+          const receipt = await loadArtifact(source.artifact.sha256);
+          source = source.artifact_format === "call" ? {...source, input: receipt.input, output: receipt.output} : {...source, output: receipt};
+        }
+        content.replaceChildren(renderVerificationArtifact({row: source}, loadArtifact, detailMode));
+        button.remove();
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = "Retry recorded content";
+        content.textContent = `Could not load evidence: ${error.message}`;
+      }
+    });
+    row.append(button, content);
+    node.append(row);
+  } else if (item.kind === "visual-evidence") {
     const view = renderVerificationArtifact(value, loadArtifact, detailMode);
     if (view) node.append(view);
   } else if (item.kind === "acceptance-criterion") {

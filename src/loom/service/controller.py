@@ -47,7 +47,7 @@ def _record_error_response(record, exc):
 class LoomService:
     def __init__(self, directory, *, config_path=None, max_active_runs=2, provider_factory=None, plugin_registry_factory=None,
                  autonomy_enabled=False, agent_planner=None, evaluation_provider_factory=None, agent_stage_planner=None,
-                 setup_recommender=None, agent_plan_provider=None, agent_planning_engine=None):
+                 setup_recommender=None, agent_plan_provider=None, agent_planning_engine=None, worker_stall_timeout=3600.0):
         if isinstance(max_active_runs, bool) or not isinstance(max_active_runs, int) or max_active_runs < 1:
             raise ServiceError("max_active_runs must be positive")
         self.store = SessionStore(directory, plugin_registry_factory=plugin_registry_factory)
@@ -70,6 +70,10 @@ class LoomService:
         self.store.knowledge.config_path = self.config_path
         self.capacity = max_active_runs
         self.provider_factory = provider_factory
+        # Backstop for live-but-frozen workers: a "running" run that exchanges no
+        # records for this long can never finish on its own (all worker RPCs are
+        # answered promptly by design; streaming emits a constant trickle).
+        self.worker_stall_timeout = float(worker_stall_timeout)
         self.active = {}
         self.shared_active = lambda: {}
         self.shared_capacity = self.capacity
@@ -836,18 +840,22 @@ class LoomService:
             try:
                 while attempt.connection.poll():
                     record = attempt.connection.recv()
+                    attempt.last_record_at = time.monotonic()
                     try:
                         result = self.worker_record(sid, record)
-                        attempt.connection.send({"value": encode(result)})
-                    except (ServiceError, sqlite3.Error) as exc:
-                        attempt.connection.send(_record_error_response(record, exc))
-                    except (EOFError, BrokenPipeError, OSError):
+                    except (EOFError, BrokenPipeError):
                         raise
+                    except (ServiceError, sqlite3.Error) as exc:
+                        reply = _record_error_response(record, exc)
                     except Exception as exc:
-                        # An unanswered record freezes the worker on future.result()
-                        # forever; unexpected handler failures still owe it an error.
+                        # Includes OSError from failed persistence (e.g. ENOSPC on
+                        # artifact writes). An unanswered record freezes the worker
+                        # on future.result() forever; handler failures owe it a reply.
                         traceback.print_exc()
-                        attempt.connection.send({"error": f"Internal service error: {exc}"})
+                        reply = {"error": f"Internal service error: {exc}"}
+                    else:
+                        reply = {"value": encode(result)}
+                    attempt.connection.send(reply)
             except (EOFError, BrokenPipeError, OSError):
                 pass
         with self.lock:
@@ -869,6 +877,13 @@ class LoomService:
                 if attempt.process.is_alive() and state["run"]["state"] != "running":
                     attempt.terminal_since = attempt.terminal_since or time.monotonic()
                     if time.monotonic() - attempt.terminal_since > 2:
+                        attempt.process.kill()
+                if attempt.process.is_alive() and state["run"]["state"] == "running":
+                    # A running worker that goes silent is frozen (e.g. blocked on an
+                    # RPC the reply path never answered). Killing it routes through
+                    # the regular dead-worker recovery, which resumes from checkpoint.
+                    last_seen = getattr(attempt, "last_record_at", None) or time.monotonic()
+                    if time.monotonic() - last_seen > self.worker_stall_timeout:
                         attempt.process.kill()
                 if not attempt.process.is_alive():
                     attempt.process.join()

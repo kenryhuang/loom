@@ -1,8 +1,8 @@
-import {element} from '../markdown.mjs';
+import {element, renderMarkdown} from '../markdown.mjs';
 import {panel, badge, number, disclosure} from './dashboard.mjs';
 
 const terminal = new Set(['completed','cancelled','superseded']);
-const states = {active:'In progress',ready:'Ready to plan',planning:'Planning',reviewing:'In acceptance review',completed:'Delivered',blocked:'Needs attention',
+const states = {active:'In progress',ready:'Ready to plan',planning:'Planning',reviewing:'In acceptance review',completed:'Delivered',pending:'Pending',running:'Running',dispatched:'Dispatched',succeeded:'Accepted',failed:'Failed',blocked:'Needs attention',
   waiting:'Waiting for the next check',awaiting_input:'Waiting for an answer',deferred:'Deferred',paused:'Paused',cancelled:'Cancelled',superseded:'Superseded',queued:'Queued'};
 const name = state => states[state] || state || 'Ready to plan';
 const button = (title,action,cls='quiet') => {const b=element('button',cls,title);b.type='button';b.addEventListener('click',action);return b;};
@@ -61,81 +61,112 @@ function planningStatus(run,state) {
 }
 function planningActivity(root,d,objective,state,view) {
   const runs=(d.planning_activity || []).filter(run=>run.objective_id===objective.id);
-  const latest=runs[0];
+  const active=runs.find(run=>run.is_current ?? run.state==='planning');
+  const latest=active || runs[0];
   const box=roadmapDisclosure(view,root,d,`planning-activity:${objective.id}`,'Planning');
   box.classList.add('agent-plan-activity','dashboard-wide');box.dataset.planningObjective=objective.id;
   const summary=box.querySelector('summary');
-  const status=element('span','agent-plan-status',planningStatus(latest,state));status.setAttribute('role','status');
-  summary.append(status);
+  const status=element('span','agent-plan-status',!active && latest?.state==='planning'
+    ? 'No active planning · unfinished record' : planningStatus(latest,state));
+  status.setAttribute('role','status');summary.append(status);
   if(d.role.long_term_objectives.length>1)summary.append(element('span','agent-plan-objective',objective.desired_outcome));
-  box.append(element('p','muted small','Live planning activity · updates automatically while this page is visible.'));
+  box.append(element('p','muted small','Stage planning defines goals → Work package planning splits a selected goal into executable tasks → Execution runs in Sessions.'));
   if(!runs.length) {
     box.append(element('p','empty-state',d.planning_activity
       ? 'No planning attempts recorded yet.' : 'Planning activity is not available from the running service yet.'));
     return;
   }
+  box.append(element('p','muted small',`${active?'Current planning is shown first.':'No active planning. Showing the latest recorded result.'} Latest 3 runs; up to 20 recent events per run. Updates automatically.`));
   const labels={requesting:'Waiting for the planning model',proposed:'Response received · validating the plan',
-    normalized:'Response format adjusted',rejected:'Response rejected',retrying:'Retrying with correction feedback',
-    fallback:'Retrying with a compatible response format',completed:'Plan validation passed',exhausted:'Correction attempts exhausted'};
-  const outcomes={planning:'In progress',committed:'Decision recorded',failed:'Planning failed',superseded:'Inputs changed · attempt superseded'};
-  box.append(element('p','muted small','Latest 3 planning attempts; up to 20 recent events per attempt.'));
-  for(const run of runs) {
+    rejected:'Response rejected',retrying:'Retrying with correction feedback',fallback:'Retrying with a compatible response format',
+    completed:'Plan validation passed',exhausted:'Correction attempts exhausted'};
+  const outcomes={planning:'Unfinished record',committed:'Decision recorded',failed:'Planning failed',superseded:'Inputs changed · attempt superseded'};
+  const title=run=>run.kind==='stage_review'?'Stage review':run.kind==='work_plan'?'Work package planning':'Stage planning';
+  const scope=run=>{
+    const goal=(d.goals || []).find(g=>g.id===run.goal_id);
+    const sid=run.outcome?.stage_id || run.stage_id || goal?.stage_id;
+    const stage=(d.stages || []).find(s=>s.id===sid);
+    return [sid?`Stage: ${stage?.title || sid}`:'',run.goal_id?`Goal: ${goal?.objective || run.goal_id}`:''].filter(Boolean).join(' · ') || 'Objective-level planning';
+  };
+  const renderRun=(parent,run,position)=>{
     const record=element('section','agent-plan-attempt');record.dataset.planningRun=run.id;
     const heading=element('div','agent-roadmap-detail-heading');
-    heading.append(element('strong','',run.kind==='stage_review'?'Stage review':run.kind==='work_plan'?'Work package planning':'Stage planning'),badge(outcomes[run.state] || run.state,run.state));
-    record.append(heading);
+    heading.append(element('strong','',`${position} · ${title(run)}`),badge(run===active?'In progress':outcomes[run.state] || run.state,run.state));
+    record.append(heading,element('p','agent-plan-scope',scope(run)),element('p','muted small',`Started ${time(run.created_at,d.role.timezone) || 'time unavailable'}`));
+    if(run.kind==='work_plan')record.append(element('p','muted small','Each run plans one goal. Runs for different goals are separate; retries within a run appear as numbered attempts below.'));
+    record.append(element('h5','','Process'));
     const list=element('ol','agent-plan-events');list.setAttribute('aria-label','Planning events');
-    const messages=new Set();
-    const add=(at,title,message)=>{
+    const seen=new Set();
+    const add=(at,text)=>{
       const row=element('li'),stamp=element('time','muted small',time(at,d.role.timezone));
-      if(at)stamp.dateTime=at;
-      row.append(stamp,element('span','',title));
-      if(message && !messages.has(message)){row.append(element('p','muted',message));messages.add(message);}
-      list.append(row);
+      if(at)stamp.dateTime=at;row.append(stamp,element('span','',text));list.append(row);
     };
     add(run.created_at,'Planning started');
     for(const event of run.events || []) {
       const phase=event.type?.split('.').at(-1);
-      const title=event.type?.includes('.protocol.') ? labels[phase]
+      const text=event.type?.includes('.protocol.') ? labels[phase]
         : ['plan.finished','stage.planning.finished','planning.finished'].includes(event.type) ? outcomes[run.state] || 'Planning finished'
         : ['plan.rejected','stage.planning.failed'].includes(event.type) ? 'Planning failed' : null;
-      if(title)add(event.at,`${event.attempt?`Attempt ${event.attempt} · `:''}${title}`,event.message);
+      const key=`${event.attempt || 0}:${text}`;
+      if(text && !seen.has(key)){add(event.at,`${event.attempt?`Attempt ${event.attempt} · `:''}${text}`);seen.add(key);}
     }
+    if(run===active)add(run.stream?.updated_at,planningStatus(run));
     record.append(list);
-    const stream=run.stream;
-    if(stream) {
-      const live=element('section','agent-plan-stream');
-      const phase=run.state==='planning'
-        ? ({requesting:'Waiting for first output',streaming:'Receiving planning draft',received:'Draft received · awaiting validation and publication',failed:'Model request failed'}[stream.state] || stream.state)
-        : 'Saved planning draft';
-      live.append(element('strong','',phase),element('p','muted small',
-        `Attempt ${stream.attempt || 1} · ${stream.model || 'Planning model'} · Updated ${time(stream.updated_at,d.role.timezone)}`));
-      if(!stream.streaming)live.append(element('p','muted','This provider returns the draft when its response is complete.'));
-      for(const [channel,value] of Object.entries(stream.channels || {})) {
-        const label={content:'Draft output',reasoning:'Model reasoning output',reasoning_context:'Model reasoning context'}[channel] || channel;
-        live.append(element('p','muted small',`${label} · ${number(value.characters)} characters${value.truncated?' · showing the latest 6,000 characters':''}`),
-          element('pre','',value.text || ''));
-      }
-      if(stream.error)live.append(element('p','muted',stream.error));
-      live.append(element('p','muted small','Draft output is provisional. Goals and work packages are published only after validation and input checks.'));
-      record.append(live);
+    if(run.stream && run===active) {
+      const stream=run.stream,characters=Object.values(stream.channels || {}).reduce((sum,value)=>sum+(value.characters || 0),0);
+      record.append(element('p','muted small',`Attempt ${stream.attempt || 1} · ${stream.model || 'Planning model'} · ${number(characters)} characters · Updated ${time(stream.updated_at,d.role.timezone) || 'time unavailable'}`));
     }
+    const publication=element('section','agent-plan-publication');publication.append(element('h5','','Result'));
     if(run.state==='committed' && run.outcome) {
       const outcome=run.outcome;
       const action={wait:'Waiting for the next check',request_input:'Waiting for an answer',complete_objective:'Objective completed',review_stage:'Stage review recorded'}[outcome.action];
-      const publication=element('div','agent-plan-publication');
       publication.append(element('strong','',action || 'Plan published'));
       if(outcome.goal_count!=null)publication.append(element('p','',`${number(outcome.goal_count)} goals · ${number(outcome.work_package_count || 0)} work packages published`));
+      if(outcome.reason)publication.append(renderMarkdown(outcome.reason));
       if(outcome.work_package_count>0)publication.append(element('p','muted','Work packages have entered the dispatch queue; execution starts when dependencies and resources allow.'));
       else if(outcome.goal_count>0)publication.append(element('p','muted','Ready goals will be planned into work packages on a subsequent scheduling pass.'));
-      if(outcome.reason)publication.append(element('p','',outcome.reason));
+      const works=(d.work_packages || []).filter(w=>w.agent_run_id===run.id || (run.work_package_ids || []).includes(w.id)).sort((a,b)=>(a.order || 0)-(b.order || 0));
+      if(works.length) {
+        publication.append(element('p','muted small','Published work packages · current execution status'));
+        const tasks=element('ol','agent-plan-tasks');
+        for(const work of works){
+          const item=element('li'),body=element('div');body.append(renderMarkdown(work.objective));
+          const goal=(d.goals || []).find(g=>g.id===work.goal_id);
+          if(goal)body.append(element('p','muted small',`Goal: ${goal.objective}`));
+          item.append(body,badge(name(work.state),work.state));
+          if(work.session_id){const link=element('a','','Open Session');link.href=`#/sessions/${encodeURIComponent(work.session_id)}`;item.append(link);}
+          tasks.append(item);
+        }
+        publication.append(tasks);
+      }
       if(outcome.next_review_at)publication.append(element('p','muted',`Next check: ${time(outcome.next_review_at,d.role.timezone)}`));
-      record.append(publication);
+    } else {
+      publication.append(element('p','',run===active?'No published result yet.':run.state==='committed'?'Planning completed; no result summary was recorded.':run.state==='failed'?'Planning failed; no plan published.':run.state==='superseded'?'Inputs changed; this attempt was not published.':'This record is unfinished and is not the current planning run.'));
+      if(run.reason && run!==active)publication.append(renderMarkdown(run.reason));
     }
-    if(run.state==='planning' && !(run.events || []).length)
-      record.append(element('p','muted','Preparing the planning request or waiting for the model response.'));
-    if(run.reason && !messages.has(run.reason))record.append(element('p','muted',run.reason));
-    box.append(record);
+    record.append(publication);
+    const raw=roadmapDisclosure(view,record,d,`planning-raw:${run.id}`,'Raw output & event details');raw.classList.add('agent-plan-stream');
+    raw.append(element('p','muted small',`Run ${run.id}`));
+    raw.append(element('p','muted small','Draft output is provisional. Goals and work packages are published only after validation and input checks.'));
+    if(run.stream) {
+      if(!run.stream.streaming)raw.append(element('p','muted','This provider returns the draft when its response is complete.'));
+      for(const [channel,value] of Object.entries(run.stream.channels || {})) {
+        raw.append(element('p','muted small',`${channel} · ${number(value.characters)} characters${value.truncated?' · showing the latest 6,000 characters':''}`),element('pre','',value.text || ''));
+      }
+      if(run.stream.error)raw.append(element('p','',run.stream.error));
+    }
+    raw.append(element('pre','',JSON.stringify(run.events || [],null,2)));
+    parent.append(record);
+  };
+  renderRun(box,latest,active?'Current run':'Latest record');
+  const history=runs.filter(run=>run!==latest);
+  if(history.length) {
+    const archived=roadmapDisclosure(view,box,d,`planning-history:${objective.id}`,`Planning history · ${history.length} recent runs`);
+    archived.append(element('p','muted small','Newest first. These are previous planning runs, not concurrently running tasks. History alone does not imply that one plan replaces another.'));
+    for(const run of history) {
+      const item=roadmapDisclosure(view,archived,d,`planning-run:${run.id}`,`${title(run)} · ${scope(run)} · ${outcomes[run.state] || run.state} · ${time(run.created_at,d.role.timezone)}`);
+      renderRun(item,run,'Historical run');
+    }
   }
 }
 function goalIds(stage,d) {

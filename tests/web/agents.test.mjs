@@ -887,3 +887,40 @@ test('Planning block defaults closed, preserves expansion and updates its curren
   assert.doesNotMatch(activity.textContent,/work packages published/);
  }finally{view.close();dom.window.close();}
 });
+
+
+test('Planning separates the leased run from history and formats published tasks without exposing raw drafts',async()=>{
+ const data=fixture();data.planning_engine=2;data.view='goals';
+ data.role.long_term_objectives=[{id:'primary',desired_outcome:'Deliver',stage_planning:{mode:'autonomous'}}];
+ data.goals=[{id:'g1',objective:'First goal',state:'active',acceptance:[]},{id:'g2',objective:'Second goal',state:'active',acceptance:[]}];
+ data.planning_activity=[
+  {id:'newer',objective_id:'primary',kind:'work_plan',goal_id:'g2',state:'committed',is_current:false,
+   outcome:{action:'work_plan',reason:'**Validated** delivery',goal_count:0,work_package_count:1},events:[],
+   stream:{channels:{content:{text:'{"private_draft":true}',characters:22}}}},
+  {id:'leased',objective_id:'primary',kind:'work_plan',goal_id:'g1',state:'planning',is_current:true,events:[]},
+  {id:'stale',objective_id:'primary',kind:'work_plan',goal_id:'g2',state:'planning',is_current:false,events:[]}];
+ data.work_packages=[{id:'w1',goal_id:'g2',agent_run_id:'newer',objective:'**Ship** the change',state:'running',session_id:'s/1'}];
+ const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');await view.changeTab('Goals');
+  let activity=view.root.querySelector('[data-planning-objective="primary"]');
+  assert.equal(activity.querySelector('[data-planning-run]').dataset.planningRun,'leased');
+  assert.match(activity.querySelector('[data-planning-run="leased"]').textContent,/Current run.*Work package planning.*Goal: First goal/s);
+  const historical=activity.querySelector('[data-planning-run="newer"]');
+  assert.equal(historical.parentElement.open,false);
+  assert.match(historical.querySelector('.agent-plan-publication strong').textContent,/Plan published/);
+  assert.equal(historical.querySelector('.agent-plan-publication .markdown strong').textContent,'Validated');
+  assert.equal(historical.querySelector('.agent-plan-tasks strong').textContent,'Ship');
+  assert.equal(historical.querySelector('.agent-plan-tasks a').getAttribute('href'),'#/sessions/s%2F1');
+  assert.equal(historical.querySelector('.agent-plan-stream').open,false);
+  assert.equal(historical.querySelector('.agent-plan-stream pre').textContent,'{"private_draft":true}');
+  assert.match(activity.querySelector('[data-planning-run="stale"]').textContent,/not the current planning run/);
+  const raw=historical.querySelector('.agent-plan-stream');raw.open=true;raw.dispatchEvent(new dom.window.Event('toggle'));
+  await view.refresh();activity=view.root.querySelector('[data-planning-objective="primary"]');
+  assert.equal(activity.querySelector('[data-planning-run="newer"] .agent-plan-stream').open,true);
+  data.planning_activity=data.planning_activity.filter(r=>r.id!=='leased');
+  await view.refresh();activity=view.root.querySelector('[data-planning-objective="primary"]');
+  assert.match(activity.textContent,/No active planning/);
+  assert.match(activity.querySelector('[data-planning-run]').textContent,/Latest record/);
+ }finally{view.close();dom.window.close();}
+});

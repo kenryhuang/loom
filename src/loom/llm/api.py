@@ -1031,6 +1031,9 @@ class OpenAIProvider:
     context_window_tokens: int | None = None
     input_modalities: tuple[str, ...] = ("text",)
     image_reader: Any = field(default=None, repr=False, compare=False)
+    # Socket timeout for every blocking HTTP operation (connect, each read).
+    # urllib's default is to wait forever; a stalled connection must not freeze a run.
+    request_timeout_seconds: float | None = 300.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "request_options", normalize_request_options(self.request_options))
@@ -1124,7 +1127,7 @@ class OpenAIProvider:
                 headers=request["headers"],
             )
             try:
-                with urllib.request.urlopen(req) as response:  # noqa: S310
+                with urllib.request.urlopen(req, timeout=self.request_timeout_seconds) as response:  # noqa: S310
                     payload = json.loads(response.read().decode("utf-8"))
                     return {"status": response.status, "ok": 200 <= response.status < 300, "json": payload}
             except urllib.error.HTTPError as exc:
@@ -1140,7 +1143,12 @@ class OpenAIProvider:
             return await self.http_client(url, request)
 
         metrics: dict[str, Any] = {}
-        return {"status": 200, "ok": True, "chunks": _urlopen_stream_chunks(url, request, metrics=metrics), "stream_metrics": metrics}
+        return {
+            "status": 200,
+            "ok": True,
+            "chunks": _urlopen_stream_chunks(url, request, metrics=metrics, timeout=self.request_timeout_seconds),
+            "stream_metrics": metrics,
+        }
 
 
 def create_openai_provider(**config: Any) -> OpenAIProvider:
@@ -2073,7 +2081,7 @@ async def _aiter_chunks(chunks: Any):
         yield chunk
 
 
-async def _urlopen_stream_chunks(url: str, request: dict[str, Any], *, metrics: dict[str, Any] | None = None):
+async def _urlopen_stream_chunks(url: str, request: dict[str, Any], *, metrics: dict[str, Any] | None = None, timeout: float | None = None):
     import asyncio
     import threading
 
@@ -2102,7 +2110,7 @@ async def _urlopen_stream_chunks(url: str, request: dict[str, Any], *, metrics: 
             headers=request["headers"],
         )
         try:
-            with urllib.request.urlopen(req) as response:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=timeout) as response:  # noqa: S310
                 for line in response:
                     put(line)
         except urllib.error.HTTPError as exc:
@@ -2200,7 +2208,7 @@ def _assembled_openai_stream_tool_calls(tool_parts: dict[int, dict[str, Any]]) -
     return calls
 
 
-def _send_stream_sync(url: str, request: dict[str, Any]) -> dict[str, Any]:
+def _send_stream_sync(url: str, request: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
     req = urllib.request.Request(
         url,
         data=json.dumps(request["body"]).encode("utf-8"),
@@ -2208,7 +2216,7 @@ def _send_stream_sync(url: str, request: dict[str, Any]) -> dict[str, Any]:
         headers=request["headers"],
     )
     try:
-        with urllib.request.urlopen(req) as response:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=timeout) as response:  # noqa: S310
             chunks = [line.decode("utf-8") for line in response]
             return {"status": response.status, "ok": 200 <= response.status < 300, "chunks": chunks}
     except urllib.error.HTTPError as exc:

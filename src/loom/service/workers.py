@@ -60,9 +60,14 @@ def reap_group(pid, identity):
 
 
 class WorkerBridge:
-    def __init__(self, connection, state):
+    """RPC channel to the supervisor. Every record is answered promptly by design,
+    so a reply outstanding beyond rpc_timeout means the reply path is broken (e.g.
+    the supervisor could not persist on a full disk) — fail instead of freezing."""
+
+    def __init__(self, connection, state, *, rpc_timeout=300.0):
         self.connection = connection
         self.state = state
+        self.rpc_timeout = rpc_timeout
         self.transport = WorkerTransport(connection, state)
         self._evidence_artifacts = OrderedDict()
         self.checkpoint = decode(state.get("checkpoint_value"))
@@ -82,7 +87,7 @@ class WorkerBridge:
                 return dict(self._evidence_artifacts[digest])
         request = self.transport.request(kind, payload)
         self.transport.enqueue(request)
-        result = request.future.result()
+        result = request.future.result(timeout=self.rpc_timeout)
         if digest is not None:
             # Only cache confirmed durable references, never tool execution results.
             self._evidence_artifacts[digest] = dict(result)
@@ -158,6 +163,7 @@ class Attempt:
     accounted: float
     terminal_since: float | None = None
     resource_claims: tuple = ()
+    last_record_at: float | None = None
 
 
 def spawn_attempt(state, config_path, provider_factory, plugin_registry_factory=None):
@@ -170,5 +176,6 @@ def spawn_attempt(state, config_path, provider_factory, plugin_registry_factory=
     child.close()
     started = time.monotonic()
     return Attempt(
-        process, parent, state["task"]["workspace"], state["epoch"], started, started, resource_claims=tuple(state["task"].get("resource_claims", ()))
+        process, parent, state["task"]["workspace"], state["epoch"], started, started, resource_claims=tuple(state["task"].get("resource_claims", ())),
+        last_record_at=started,
     )

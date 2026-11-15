@@ -66,6 +66,17 @@ test('Learning history and memory link to their exact saved analysis, evaluation
   }finally{env.close();}
 });
 
+test('Library cards do not repeat the title as the summary paragraph',async()=>{
+  const data=fixture(),record={...memory(),title:'Observed deduplicated fact',summary:'Observed deduplicated fact'};
+  const env=setup(data,async path=>path.includes('/memory/library')?{records:[record],total:1}:undefined);
+  try{
+    await env.open();
+    const entry=env.view.root.querySelector('.agent-memory-results .agent-learning-entry');
+    assert.equal(entry.querySelector('h4').textContent,'Observed deduplicated fact');
+    assert.equal([...entry.querySelectorAll('p')].filter(p=>p.textContent.includes('Observed deduplicated fact')).length,0);
+  }finally{env.close();}
+});
+
 test('Legacy memory without a saved analysis links to the source Session explicitly',async()=>{
   const data=fixture(),env=setup(data,async path=>path.includes('/memory/library')?{records:[memory()],total:1}:undefined);
   try{

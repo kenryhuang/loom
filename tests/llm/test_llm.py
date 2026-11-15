@@ -1488,6 +1488,49 @@ def test_openai_provider_stream_chat_handles_empty_choice_chunks():
     asyncio.run(scenario())
 
 
+def test_openai_provider_http_calls_carry_explicit_timeout(monkeypatch):
+    """urllib without a timeout blocks forever on a stalled connection; every LLM
+    HTTP call (regular and streaming) must carry the provider's explicit timeout."""
+    timeouts = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"role": "assistant", "content": "ok"}}]}).encode()
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    def fake_urlopen(request, *, timeout=None):
+        timeouts.append(timeout)
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = create_openai_provider(api_key="key", model="m", request_timeout_seconds=12)
+
+    async def scenario():
+        await provider._send("https://test.invalid/chat", {"body": {}, "headers": {}})
+        streamed = await provider._send_stream("https://test.invalid/chat", {"body": {}, "headers": {}})
+        return [chunk async for chunk in streamed["chunks"]]
+
+    chunks = asyncio.run(scenario())
+    assert chunks
+    assert timeouts == [12, 12]
+
+
+def test_openai_provider_request_timeout_defaults_to_five_minutes():
+    provider = create_openai_provider(api_key="key", model="m")
+    assert provider.request_timeout_seconds == 300
+
+
 def test_openai_provider_stream_chat_yields_before_urlopen_stream_completes(monkeypatch):
     async def scenario():
         release_second_chunk = threading.Event()
@@ -1509,7 +1552,7 @@ def test_openai_provider_stream_chat_yields_before_urlopen_stream_completes(monk
                 yield f"data: {json.dumps(done_chunk)}\n\n".encode()
                 yield b"data: [DONE]\n\n"
 
-        def fake_urlopen(_request):
+        def fake_urlopen(_request, *, timeout=None):
             return SlowStreamingResponse()
 
         monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -1790,7 +1833,7 @@ def test_openai_provider_streaming_http_error_preserves_provider_diagnostic(monk
             }
         ).encode()
 
-        def fake_urlopen(request):
+        def fake_urlopen(request, *, timeout=None):
             raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", None, io.BytesIO(payload))
 
         monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -1982,7 +2025,7 @@ def test_http_receive_timing_is_independent_of_slow_consumer(monkeypatch):
             yield from lines
             received.set()
 
-    monkeypatch.setattr(api.urllib.request, "urlopen", lambda request: Response())
+    monkeypatch.setattr(api.urllib.request, "urlopen", lambda request, **kwargs: Response())
 
     async def run():
         metrics = {}
