@@ -13,6 +13,16 @@ from tests.tasks.test_acceptance import Judge
 from tests.tasks.test_acceptance_batches import criterion, passed, setup
 
 
+def test_verifier_rejects_shell_command_as_tool_gap_target():
+    row = dict(criterion_id='goal', status='blocked', reason='Build receipt missing', evidence_ids=[],
+               gap=dict(kind='missing_evidence', required_fact='npm run build exits zero', suggested_action='Run build',
+                        targets=[dict(kind='tool', value='npm run build')]))
+    with pytest.raises(ValueError, match='runtime tool IDs'):
+        validate_verification(dict(results=[row]), [dict(id='goal')], [])
+    row['gap']['targets'][0]['value'] = 'shell_execute'
+    assert validate_verification(dict(results=[row]), [dict(id='goal')], []) == [row]
+
+
 def receipt(assembly, identifier, command, stdout):
     ref = assembly.publish_artifact({'input': {'command': command, 'cwd': '.'}, 'output': {'stdout': stdout, 'exit_code': 0}},
                                     'acceptance_tool_evidence')

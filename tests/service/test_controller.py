@@ -724,3 +724,45 @@ def test_call_budget_change_preserves_paused_run_and_checkpoint(tmp_path):
         assert sum(e['type'] == 'task.budget.changed' for e in service.events(sid)) == 1
     finally:
         service.close()
+
+
+def test_boundary_rotation_garbage_collects_superseded_checkpoint(tmp_path):
+    from loom.llm.api import TokenUsage
+
+    service = LoomService(tmp_path / "data", provider_factory=provider_factory)
+    try:
+        sid = create(service, tmp_path / "workspace")
+        descriptor = service.prepare_attempt(sid)
+
+        def boundary(record_id):
+            return service.worker_record(
+                sid,
+                {
+                    "attempt_id": descriptor["run"]["attempt_id"],
+                    "epoch": descriptor["epoch"],
+                    "record_id": record_id,
+                    "type": "boundary",
+                    "payload": encode(
+                        {"llm_calls": 1, "usage": TokenUsage(total_tokens=1), "input_cursor": 0, "task_events": [], "marker": record_id}
+                    ),
+                },
+            )
+
+        boundary("cp-1")
+        first = service.store.snapshot(sid)["run"]["checkpoint"]["sha256"]
+        assert service.store.artifacts.location(first).exists()
+        boundary("cp-2")
+        second = service.store.snapshot(sid)["run"]["checkpoint"]["sha256"]
+        assert second != first
+        assert service.store.artifacts.location(second).exists()
+        # The superseded checkpoint is unreferenced and unlinked after commit.
+        assert not service.store.artifacts.location(first).exists()
+        with service.store.read() as db:
+            assert not db.execute("SELECT 1 FROM artifacts WHERE digest=?", (first,)).fetchone()
+            assert db.execute("SELECT 1 FROM artifacts WHERE digest=?", (second,)).fetchone()
+        # Redelivering an acknowledged boundary must not resurrect the garbage.
+        boundary("cp-1")
+        assert service.store.snapshot(sid)["run"]["checkpoint"]["sha256"] == second
+        assert not service.store.artifacts.location(first).exists()
+    finally:
+        service.close()

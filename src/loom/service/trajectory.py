@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -18,6 +19,8 @@ from loom.evaluation.trajectory import build_fact_analysis
 from loom.service.contracts import ServiceError, canonical, new_id
 from loom.trace_analysis import build_episode_graph
 from loom.trace_analysis.links import tool_output
+
+log = logging.getLogger(__name__)
 
 VERSION = "session-trajectory.4.6"
 
@@ -244,6 +247,35 @@ class SessionTrajectory:
         except Exception as exc:
             body.update(state="failed", error=f"Could not analyze session trace: {exc}")
             self._save(body)
+        if body.get("state") == "completed":
+            try:
+                self._supersede_prior_analyses(body["session_id"], body["id"])
+            except Exception:
+                log.exception("Could not supersede prior analyses for %s", body["session_id"])
+
+    def _supersede_prior_analyses(self, sid, keep_id):
+        """Keep only the newest completed analysis per session. Older snapshots are
+        recomputable from the event log and previously cost ~30 MB each in artifacts."""
+        with self.store.transaction() as db:
+            rows = [(row["id"], json.loads(row["body"])) for row in db.execute(
+                "SELECT id, body FROM session_analyses WHERE session_id=? AND state='completed' AND id!=?", (sid, keep_id))]
+            if not rows:
+                return
+            # A resumable (non-terminal) evaluation reloads its parent analysis on resume.
+            # The ownership table only exists once the semantic subsystem initializes.
+            pinned = set()
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='semantic_jobs'").fetchone():
+                pinned = {row[0] for row in db.execute(
+                    "SELECT json_extract(body,'$.analysis_id') FROM semantic_jobs WHERE session_id=? "
+                    "AND json_extract(body,'$.state') NOT IN ('completed','failed','stopped')", (sid,))}
+            for analysis_id, prior in rows:
+                if analysis_id in pinned:
+                    continue
+                db.execute("DELETE FROM session_analyses WHERE id=?", (analysis_id,))
+                for key in ("source", "result"):
+                    digest = (prior.get(key) or {}).get("sha256")
+                    if digest:
+                        self.store.unreference_artifact(db, sid, digest)
 
     def _remember(self, identifier, source, result):
         with self.lock:

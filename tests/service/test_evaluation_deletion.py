@@ -21,14 +21,14 @@ def test_delete_removes_metadata_records_outputs_and_cache_but_keeps_source(eval
     parent = trajectory.get(sid, aid)
     job = completed(semantic, sid, aid)
     digest = job["result"]["sha256"]
-    assert (store.artifacts.root / f"{digest}.json").exists()
+    assert store.artifacts.location(digest).exists()
     assert semantic.delete(sid, aid, job["id"]) == {"id": job["id"], "deleted": True}
     with store.transaction() as db:
         assert not db.execute("SELECT 1 FROM semantic_jobs WHERE id=?", (job["id"],)).fetchone()
         assert not db.execute("SELECT 1 FROM evaluation_artifacts").fetchone()
         assert not db.execute("SELECT 1 FROM evaluation_deletions").fetchone()
         assert not db.execute("SELECT 1 FROM artifacts WHERE digest=?", (digest,)).fetchone()
-    assert not (store.artifacts.root / f"{digest}.json").exists()
+    assert not store.artifacts.location(digest).exists()
     assert not semantic.list(sid, aid)["jobs"]
     with pytest.raises(ServiceError) as error:
         semantic.get(sid, aid, job["id"])
@@ -58,12 +58,12 @@ def test_delete_cleans_all_revisions_and_legacy_orphans_preserves_other_job(eval
         other_prior = store.artifact_in_transaction(db, sid, {"analysis_id": other["id"], "old_revision": 3}, "trajectory_evaluation")
     semantic.delete(sid, aid, job["id"])
     for digest in digests:
-        assert not (store.artifacts.root / f"{digest}.json").exists()
+        assert not store.artifacts.location(digest).exists()
     assert semantic.get(sid, aid, other["id"])["evaluation"] == other["evaluation"]
     store.artifacts.read(other_prior["sha256"])
     semantic.delete(sid, aid, other["id"])
-    assert not (store.artifacts.root / f"{other_prior['sha256']}.json").exists()
-    assert not (store.artifacts.root / f"{job['result']['sha256']}.json").exists()
+    assert not store.artifacts.location(other_prior['sha256']).exists()
+    assert not store.artifacts.location(job['result']['sha256']).exists()
 
 
 def test_delete_keeps_cross_session_registration_and_explicit_trace_reference(evaluation, tmp_path):
@@ -140,7 +140,7 @@ def test_failed_file_cleanup_is_durable_and_retryable(evaluation, monkeypatch, r
         restored.close()
     else:
         semantic.delete(sid, aid, job["id"])
-    assert not (store.artifacts.root / f"{job['result']['sha256']}.json").exists()
+    assert not store.artifacts.location(job['result']['sha256']).exists()
     with store.transaction() as db:
         assert not db.execute("SELECT 1 FROM evaluation_deletions").fetchone()
 
@@ -160,7 +160,7 @@ def test_resume_tracks_prior_result_even_before_ownership_migration(evaluation):
     with store.transaction() as db:
         assert db.execute("SELECT 1 FROM evaluation_artifacts WHERE evaluation_id=? AND digest=?", (job["id"], prior["sha256"])).fetchone()
     semantic.delete(sid, aid, job["id"])
-    assert not (store.artifacts.root / f"{prior['sha256']}.json").exists()
+    assert not store.artifacts.location(prior['sha256']).exists()
 
 
 def test_pending_cleanup_preserves_a_republished_output(evaluation, monkeypatch, tmp_path):

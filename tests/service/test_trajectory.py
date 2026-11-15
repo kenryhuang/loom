@@ -105,12 +105,18 @@ def test_analysis_restores_source_links_usage_and_pins_evidence_across_updates_a
         assert manager.get(sid, job["id"])["source_cursor"] == job["source_cursor"]
         newer = manager.start(sid)
         assert newer["id"] != job["id"] and newer["source_cursor"] > job["source_cursor"]
-        finished(manager, sid, newer["id"])
+        newer_source = finished(manager, sid, newer["id"])["analysis"]["source_sha256"]
+        # Superseded analyses are reclaimed; only the newest snapshot is retained.
+        with pytest.raises(ServiceError, match="not found"):
+            manager.get(sid, job["id"])
     finally:
         manager.close()
     manager = SessionTrajectory(store)
     try:
-        assert manager.get(sid, job["id"])["analysis"]["source_sha256"] == analysis["source_sha256"]
+        with pytest.raises(ServiceError, match="not found"):
+            manager.get(sid, job["id"])
+        assert manager.get(sid, newer["id"])["analysis"]["source_sha256"] == newer_source
+        assert manager.start(sid)["id"] == newer["id"]
         assert manager.start(sid)["id"] == newer["id"]
     finally:
         manager.close()

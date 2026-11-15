@@ -148,8 +148,35 @@ def test_revision_retains_old_contract_and_publishes_new_one_atomically(unified)
     assert len(snapshot["stages"]) == 1
 
 
-@pytest.mark.parametrize('package_count', [1, 2])
-def test_worker_loads_compiled_verification_without_second_model_plan(unified, package_count):
+@pytest.mark.parametrize('gate', ['unverified', 'human', 'required_revision', 'requested_goals', 'unfinished'])
+def test_execution_repair_reconciliation_preserves_unresolved_requests(unified, monkeypatch, gate):
+    _, facade, aid, _ = unified
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    with facade.store.sessions.transaction() as db:
+        agent = facade.store.get(db, 'agents', aid)
+        state = facade.store.rows(db, 'agent_objective_planning', aid)[0]
+        stage = facade.store.get(db, 'agent_stages', state['stage_id'], aid)
+        state.update(revision_requested=True, state='waiting')
+        state['answers'].append(dict(type='execution_gap', producer='host'))
+        if gate == 'human':
+            state['answers'].append(dict(type='replan', producer='human', text='Change the scope'))
+        if gate in {'required_revision', 'requested_goals'}:
+            state[gate] = {'acceptance': ['New requirement']}
+        for goal in facade.store.rows(db, 'agent_goals', aid):
+            goal['state'] = 'completed'
+            facade.store.put(db, 'agent_goals', goal)
+        for work in facade.store.rows(db, 'agent_work_packages', aid):
+            work['state'] = 'pending' if gate == 'unfinished' else 'succeeded'
+            facade.store.put(db, 'agent_work_packages', work)
+        if gate != 'unverified':
+            monkeypatch.setattr('loom.autonomy.acceptance.recorded_verdict', lambda *_: True)
+        facade.supervisor.unified.reconcile_execution_repair(db, agent, state, stage)
+        assert state['revision_requested']
+        assert state['state'] == 'waiting'
+
+
+@pytest.mark.parametrize('package_count,pending_repair', [(1, False), (2, False), (1, True)])
+def test_worker_loads_compiled_verification_without_second_model_plan(unified, package_count, pending_repair):
     service, facade, aid, _ = unified
     def plan_or_review(agent, payload):
         if payload.get("stage"):
@@ -168,6 +195,12 @@ def test_worker_loads_compiled_verification_without_second_model_plan(unified, p
     service.agent_plan_provider = plan_or_review
     facade.supervisor.scheduler.advance(aid, manual=True)
     facade.supervisor.scheduler.advance(aid, manual=True)
+    if pending_repair:
+        with facade.store.sessions.transaction() as db:
+            planning = facade.store.rows(db, 'agent_objective_planning', aid)[0]
+            planning['answers'].append(dict(type='execution_gap', producer='host', report={}))
+            planning.update(revision_requested=True, state='waiting', next_review_at='2099-01-01T00:00:00+00:00')
+            facade.store.put(db, 'agent_objective_planning', planning)
     service.start()
     result = until(lambda: facade.store.snapshot(aid), lambda s: s["work_packages"][0]["state"] in {"succeeded", "failed"})
     work = result["work_packages"][0]

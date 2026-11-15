@@ -36,6 +36,35 @@ class ServiceArtifacts:
         self.directory = directory
         self.root = directory / "artifacts"
         self.root.mkdir(parents=True, exist_ok=True)
+        self._migrate_flat_layout()
+
+    def _location(self, digest: str, extension: str) -> Path:
+        # Two-level fan-out keeps any single directory small at 100k+ artifacts.
+        return self.root / digest[:2] / f"{digest}.{extension}"
+
+    def location(self, digest: str, extension: str = "json") -> Path:
+        """Where a digest lives in the current (sharded) layout."""
+        return self._location(digest, extension)
+
+    def existing_path(self, digest: str, extension: str = "json") -> Path:
+        """Resolve a digest across layout generations; may not exist."""
+        sharded = self._location(digest, extension)
+        return sharded if sharded.exists() else self.root / f"{digest}.{extension}"
+
+    def _migrate_flat_layout(self):
+        """Move pre-sharding <digest>.<ext> files into their fan-out directories."""
+        for entry in os.scandir(self.root):
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            if not re.fullmatch(r"[0-9a-f]{64}\.(json|bin)", entry.name):
+                continue
+            shard = self.root / entry.name[:2]
+            shard.mkdir(exist_ok=True)
+            target = shard / entry.name
+            if target.exists():
+                os.unlink(entry.path)  # The name is the content hash: duplicates are identical.
+            else:
+                os.replace(entry.path, target)
 
     def publish(self, value, kind: str) -> dict:
         return self._publish(canonical(value).encode(), kind, "application/json", "json")
@@ -48,6 +77,8 @@ class ServiceArtifacts:
     @contextmanager
     def prepare_bytes(self, raw, kind, media_type, extension):
         digest = hashlib.sha256(raw).hexdigest()
+        target = self._location(digest, extension)
+        target.parent.mkdir(exist_ok=True)
         fd, temporary = tempfile.mkstemp(dir=self.root)
         temporary = Path(temporary)
         try:
@@ -55,16 +86,17 @@ class ServiceArtifacts:
                 stream.write(raw)
                 stream.flush()
                 os.fsync(stream.fileno())
-            ref = {"schema_version": "1", "kind": kind, "relative_path": f"artifacts/{digest}.{extension}",
+            ref = {"schema_version": "1", "kind": kind, "relative_path": f"artifacts/{digest[:2]}/{digest}.{extension}",
                    "sha256": digest, "byte_size": len(raw), **({'media_type': media_type} if extension != 'json' else {})}
-            yield PreparedArtifact(temporary, self.root / f'{digest}.{extension}', ref)
+            yield PreparedArtifact(temporary, target, ref)
         finally:
             temporary.unlink(missing_ok=True)
 
     def _publish(self, raw, kind, media_type, extension):
         digest = hashlib.sha256(raw).hexdigest()
-        path = self.root / f"{digest}.{extension}"
+        path = self._location(digest, extension)
         if not path.exists():
+            path.parent.mkdir(exist_ok=True)
             fd, temporary = tempfile.mkstemp(dir=self.root)
             try:
                 with os.fdopen(fd, "wb") as stream:
@@ -75,17 +107,21 @@ class ServiceArtifacts:
             finally:
                 if os.path.exists(temporary):
                     os.unlink(temporary)
-        return {"schema_version": "1", "kind": kind, "relative_path": f"artifacts/{digest}.{extension}", "sha256": digest, "byte_size": len(raw),
+        return {"schema_version": "1", "kind": kind, "relative_path": f"artifacts/{digest[:2]}/{digest}.{extension}", "sha256": digest, "byte_size": len(raw),
                 **({"media_type": media_type} if extension != "json" else {})}
 
     def read(self, digest: str) -> bytes:
         if not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ServiceError("Invalid artifact digest")
-        try:
-            path = self.root / f"{digest}.json"
-            raw = (path if path.exists() else self.root / f"{digest}.bin").read_bytes()
-        except OSError as exc:
-            raise ServiceError("Artifact not found", 404) from exc
+        for path in (self._location(digest, "json"), self._location(digest, "bin"),
+                     self.root / f"{digest}.json", self.root / f"{digest}.bin"):
+            try:
+                raw = path.read_bytes()
+                break
+            except OSError:
+                continue
+        else:
+            raise ServiceError("Artifact not found", 404)
         if hashlib.sha256(raw).hexdigest() != digest:
             raise ServiceError("Artifact integrity failure", 500)
         return raw
@@ -95,6 +131,7 @@ class ServiceArtifacts:
         if not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ServiceError("Invalid artifact digest")
         for extension in ("json", "bin"):
+            self._location(digest, extension).unlink(missing_ok=True)
             (self.root / f"{digest}.{extension}").unlink(missing_ok=True)
 
 

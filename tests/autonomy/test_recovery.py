@@ -22,6 +22,20 @@ def dispatched(agent_service):
     return service, facade, aid, facade.snapshot(aid)["sessions"][0]["session_id"]
 
 
+def test_historical_command_tool_targets_require_reverification_not_tool_installation():
+    from loom.tasks.recovery import assess
+
+    state = dict(task=dict(objective='Run lint and build'), run=dict(id='run'), acceptance=dict(
+        state='blocked', results=[dict(criterion_id='goal', status='blocked', gap=dict(
+            kind='missing_evidence', targets=[dict(kind='tool', value='npm run build'),
+                                             dict(kind='tool', value='shell_execute')]))]))
+    report = assess(state)
+    assert report['mode'] == 'reassemble'
+    assert any(c['code'] == 'ACCEPTANCE_PROTOCOL' for c in report['causes'])
+    required = [c['details']['tool_ids'] for c in report['causes'] if c['code'] == 'TOOLS_REQUIRED']
+    assert required == [['shell_execute']]
+
+
 def test_pause_resume_and_cancel_survive_acknowledgement_loss(agent_service):
     service, facade, aid, sid = dispatched(agent_service)
     # Commit only the Agent command: simulate death before the Session control.

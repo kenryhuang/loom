@@ -224,6 +224,7 @@ class ObjectiveCoordinator:
                 return False
             stage = store.get(db, "agent_stages", state["stage_id"], aid) if state.get("stage_id") else None
             stage = stage if stage and stage["state"] not in TERMINAL else None
+            self.reconcile_execution_repair(db, agent, state, stage)
             sources = planning_facts(store, db, aid)
             trigger = self.trigger(agent, objective, sources)
             key = input_key(agent, objective, state, stage, sources, execution_facts(store, db, aid, oid), trigger)
@@ -383,6 +384,31 @@ class ObjectiveCoordinator:
                 store.put(db, "agent_runs", saved)
                 store.event(db, aid, "plan.rejected", dict(run_id=rid, objective_id=oid, reason=str(exc)))
             return False
+
+    def reconcile_execution_repair(self, db, agent, state, stage):
+        """A resumed execution can satisfy the gap that requested a revision.
+
+        Release only host repair requests backed by completed deliveries. Human
+        changes still require a revision; stage completion still requires review.
+        """
+        from loom.autonomy.acceptance import recorded_verdict
+
+        latest = (state.get("answers") or [{}])[-1]
+        if (not stage or not state.get("revision_requested")
+                or latest.get("type") != "execution_gap" or latest.get("producer") != "host"
+                or state.get("required_revision") or state.get("requested_goals")):
+            return
+        goals = [self.store.get(db, "agent_goals", gid, agent["id"]) for gid in stage["goal_ids"]]
+        works = [w for w in self.store.rows(db, "agent_work_packages", agent["id"])
+                 if w.get("plan_id") == stage.get("plan_id") and not w.get("superseded_contract")]
+        if (not goals or not works or any(g["state"] != "completed" or g.get("source_changed") for g in goals)
+                or any(not any(w["goal_id"] == g["id"] for w in works) for g in goals)
+                or any(w["state"] != "succeeded" or not recorded_verdict(db, w) for w in works)):
+            return
+        state.update(revision_requested=False, state="active", last_input=None, next_review_at="",
+                     blocker=None, no_progress=0, revision=state["revision"] + 1)
+        self.store.put(db, "agent_objective_planning", state)
+        self.store.event(db, agent["id"], "plan.execution_repair.resolved", dict(stage_id=stage["id"]))
 
     def commit(self, db, agent, state, objective, decision, compiled, rid):
         store, aid = self.store, agent["id"]

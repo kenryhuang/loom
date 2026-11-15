@@ -51,6 +51,20 @@ def test_controller_enters_and_submits_plan_with_stable_ids():
     ]
 
 
+def test_blocked_checklist_can_be_projected_after_restore():
+    from loom.runtime.planning import plan_state_dict, plan_state_from_mapping
+
+    runtime = PlanningRuntime(PlanMode.FORCE, id_factory=_ids(), now=_now)
+    runtime.controller.submit('Verify', ('Run database-backed tests',))
+    result = runtime.controller.update('Database unavailable', (dict(
+        id='step_1', content='Run database-backed tests', status='blocked', note='PostgreSQL is unavailable',
+        blocker=dict(code='EXTERNAL_DEPENDENCY', tool_ids=['shell_execute'])),))
+    assert result.ok
+    restored = plan_state_from_mapping(plan_state_dict(runtime.controller.state))
+    assert restored.items[0].status is PlanItemStatus.BLOCKED
+    assert 'PostgreSQL is unavailable' in runtime._workflow_description(restored)
+
+
 def test_force_mode_starts_in_planning_and_queues_entered_event():
     controller = _controller(PlanMode.FORCE)
 

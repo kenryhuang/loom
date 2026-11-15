@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -14,6 +15,8 @@ from loom.service import session_storage as storage
 from loom.service.artifacts import ServiceArtifacts
 from loom.service.contracts import EDITABLE_TASK_FIELDS, EVENT_SCHEMA, ServiceError, canonical, new_id, object_value, text, validate_command, validate_create
 from loom.service.session_notifications import Notifications
+
+log = logging.getLogger(__name__)
 
 SCHEDULING_PREDICATE = storage.ADMISSION
 
@@ -696,6 +699,28 @@ class SessionStore:
         ref = prepared.install()
         db.execute('INSERT OR IGNORE INTO artifacts VALUES(?,?,?)', (sid, ref['sha256'], canonical(ref)))
         return ref
+
+    def unreference_artifact(self, db, sid, digest):
+        """Drop a session's artifact reference inside the caller's transaction and
+        unlink the file after commit once no reference table mentions the digest."""
+        db.execute("DELETE FROM artifacts WHERE session_id=? AND digest=?", (sid, digest))
+        after_commit(self.path, lambda: self._unlink_orphaned_artifact(digest), key=("gc-artifact", digest))
+
+    def _unlink_orphaned_artifact(self, digest):
+        try:
+            # The check runs under the writer lock so a concurrent publisher cannot
+            # commit a fresh reference between the check and the unlink.
+            with self.transaction() as db:
+                if db.execute("SELECT 1 FROM artifacts WHERE digest=? LIMIT 1", (digest,)).fetchone():
+                    return
+                tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                # Ownership tables only exist once their subsystem initializes.
+                for table in ("agent_artifacts", "evaluation_artifacts"):
+                    if table in tables and db.execute(f"SELECT 1 FROM {table} WHERE digest=? LIMIT 1", (digest,)).fetchone():
+                        return
+                self.artifacts.delete(digest)
+        except (OSError, ServiceError):
+            log.warning("Could not unlink orphaned artifact %.12s…; a later sweep can retry", digest, exc_info=True)
 
     def read_artifact(self, sid, digest):
         with self.read() as db:

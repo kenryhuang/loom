@@ -999,6 +999,7 @@ def _status_mark(status: PlanItemStatus) -> str:
         PlanItemStatus.IN_PROGRESS: "~",
         PlanItemStatus.COMPLETED: "x",
         PlanItemStatus.SKIPPED: "-",
+        PlanItemStatus.BLOCKED: "!",
     }[status]
 
 

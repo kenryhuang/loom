@@ -135,7 +135,7 @@ def capture(store, sid, directory, root, config_view, secrets=(), *, requested_r
                 continue
             try:
                 # Do not materialize unbounded artifacts in the diagnostic model input.
-                if (store.artifacts.root / f"{digest}.json").stat().st_size > 8_000_000:
+                if store.artifacts.existing_path(digest).stat().st_size > 8_000_000:
                     raise ValueError("Artifact exceeds snapshot per-file limit")
                 value = json.loads(store.read_artifact(sid, digest))
                 artifact_ids.update(refs(value))

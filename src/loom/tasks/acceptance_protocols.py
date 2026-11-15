@@ -178,6 +178,8 @@ def validate_verification(value, criteria, evidence, assembly=None):
             if (not isinstance(target, dict) or target.get("kind") not in {"workspace_path", "tool", "source"}
                     or not isinstance(target.get("value"), str) or not 0 < len(target["value"]) <= 2000):
                 raise ValueError("Invalid gap target")
+            if target["kind"] == "tool" and any(c.isspace() for c in target["value"]):
+                raise ValueError("Tool gap targets must be runtime tool IDs, not shell commands; put commands in required_fact")
             if assembly and target["kind"] == "workspace_path":
                 from loom.tasks.workspace_probe import bound_path
 

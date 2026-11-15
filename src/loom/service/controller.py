@@ -550,7 +550,11 @@ class LoomService:
             elif kind == "boundary":
                 previous = decode(run.get("counters", encode({})))
                 used = getattr(previous.get("usage"), "total_tokens", 0)
+                superseded = (run.get("checkpoint") or {}).get("sha256")
                 run["checkpoint"] = self.store.register_artifact(db, sid, prepared)
+                if superseded and superseded != run["checkpoint"]["sha256"]:
+                    # Only the newest checkpoint is ever read back on resume; rotate.
+                    self.store.unreference_artifact(db, sid, superseded)
                 for event in value.get("task_events", []):
                     self._worker_event(state, emit, db, event, prepared_events)
                 if run.get("assembly_update_pending") == value.get("assembly_revision"):
@@ -706,7 +710,11 @@ class LoomService:
                         )
                 if control.kind in {"continue", "completed"}:
                     run["steps"] += 1
+                    consumed = (run.get("checkpoint") or {}).get("sha256")
                     run["checkpoint"] = None
+                    if consumed:
+                        # The step result supersedes the checkpoint it was consumed from.
+                        self.store.unreference_artifact(db, sid, consumed)
                 if control.kind == "continue" and run["steps"] >= state["task"]["limits"]["max_steps"]:
                     control = replace(control, kind="paused", reason="Step budget exceeded", reason_code="STEP_BUDGET_EXCEEDED")
                 if control.kind == "completed":

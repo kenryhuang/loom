@@ -421,7 +421,7 @@ def test_semantic_api_validates_scope_and_runs_evaluation_without_task_events(ap
     with pytest.raises(ServiceError):
         client._json(f"{route}/{job['id']}")
     assert client.snapshot(sid)["event_cursor"] == cursor
-    assert not (service.store.artifacts.root / f"{result['result']['sha256']}.json").exists()
+    assert not service.store.artifacts.location(result['result']['sha256']).exists()
 
 
 def test_goal_loop_http_polling_and_publication_preserve_stream_metrics(api):

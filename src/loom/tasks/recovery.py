@@ -60,6 +60,13 @@ def assess(state, *, failure=None):
         gap = result.get('gap') or {}
         targets = gap.get('targets', [])
         missing = [t['value'] for t in targets if t.get('kind') == 'tool']
+        malformed = [t for t in missing if any(c.isspace() for c in t)]
+        if malformed:
+            # Historical verifier replies may put shell commands in tool IDs.
+            # Reverify the failed criterion; never install commands as tools or
+            # treat the missing execution evidence as satisfied.
+            add('ACCEPTANCE_PROTOCOL', criterion_id=result['criterion_id'], invalid_tool_targets=malformed)
+            missing = [t for t in missing if t not in malformed]
         if missing:
             add('TOOLS_REQUIRED', tool_ids=sorted(set(missing)), criterion_id=result['criterion_id'])
         if gap.get('kind') == 'external_dependency':
