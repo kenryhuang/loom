@@ -63,7 +63,7 @@ function planningActivity(root,d,objective,state,view) {
   const runs=(d.planning_activity || []).filter(run=>run.objective_id===objective.id);
   const active=runs.find(run=>run.is_current ?? run.state==='planning');
   const latest=active || runs[0];
-  const box=roadmapDisclosure(view,root,d,`planning-activity:${objective.id}`,'Planning');
+  const box=roadmapDisclosure(view,root,d,`planning-activity:${objective.id}`,'Planning',state?.state==='awaiting_input');
   box.classList.add('agent-plan-activity','dashboard-wide');box.dataset.planningObjective=objective.id;
   const summary=box.querySelector('summary');
   const status=element('span','agent-plan-status',!active && latest?.state==='planning'
@@ -71,9 +71,11 @@ function planningActivity(root,d,objective,state,view) {
   status.setAttribute('role','status');summary.append(status);
   if(d.role.long_term_objectives.length>1)summary.append(element('span','agent-plan-objective',objective.desired_outcome));
   box.append(element('p','muted small','Stage planning defines goals → Work package planning splits a selected goal into executable tasks → Execution runs in Sessions.'));
+  answerControls(box,d,objective,state,view);
   if(!runs.length) {
     box.append(element('p','empty-state',d.planning_activity
       ? 'No planning attempts recorded yet.' : 'Planning activity is not available from the running service yet.'));
+    manageControls(box,d,objective,state,view);
     return;
   }
   box.append(element('p','muted small',`${active?'Current planning is shown first.':'No active planning. Showing the latest recorded result.'} Latest 3 runs; up to 20 recent events per run. Updates automatically.`));
@@ -168,6 +170,7 @@ function planningActivity(root,d,objective,state,view) {
       renderRun(item,run,'Historical run');
     }
   }
+  manageControls(box,d,objective,state,view);
 }
 function goalIds(stage,d) {
   return [...new Set([...(stage.goal_ids || []),...d.goals.filter(g=>g.stage_id===stage.id).map(g=>g.id)])];
@@ -247,14 +250,18 @@ function stageDetail(root,stage,d,view,isCurrent) {
     });});add.append(form);
   }
 }
-function controls(root,d,objective,state,view) {
-  const send=(type,extra={})=>view.act(()=>view.api.post(d.id,`objectives/${encodeURIComponent(objective.id)}/planning/commands`,
-    {command_id:crypto.randomUUID(),expected_revision:state.revision,type,...extra}));
-  if(state.state==='awaiting_input' && state.question) {
-    const box=section(root,'Your answer is needed to proceed'),form=element('form','agent-form');box.classList.add('notice');
-    form.append(element('p','',state.question.text));view.showRows(form,state.question.options || []);field(form,'answer','Your answer');
-    form.append(button('Submit stage answer',()=>send('answer',{question_id:state.question.id,question_revision:state.question.revision,answer:form.elements.answer.value})));box.append(form);
-  }
+const planningSend=(view,d,objective,state)=>(type,extra={})=>view.act(()=>view.api.post(d.id,`objectives/${encodeURIComponent(objective.id)}/planning/commands`,
+  {command_id:crypto.randomUUID(),expected_revision:state.revision,type,...extra}));
+function answerControls(root,d,objective,state,view) {
+  if(!state || state.state!=='awaiting_input' || !state.question) return;
+  const send=planningSend(view,d,objective,state);
+  const box=section(root,'Your answer is needed to proceed'),form=element('form','agent-form');box.classList.add('notice');
+  form.append(element('p','',state.question.text));view.showRows(form,state.question.options || []);field(form,'answer','Your answer');
+  form.append(button('Submit stage answer',()=>send('answer',{question_id:state.question.id,question_revision:state.question.revision,answer:form.elements.answer.value})));box.append(form);
+}
+function manageControls(root,d,objective,state,view) {
+  if(!state) return;
+  const send=planningSend(view,d,objective,state);
   const manage=roadmapDisclosure(view,root,d,`planning:${objective.id}`,'Adjust route & progress settings');
   manage.append(button(state.manual_pause?'Resume stage progress':'Pause stage progress',()=>send(state.manual_pause?'resume':'pause')));
   const form=element('form','agent-form');field(form,'reason','What new information or changed conditions are there');
@@ -300,8 +307,7 @@ export function renderRoadmaps(root,d,view) {
     if(state?.blocker?.details?.issues?.length) for(const issue of state.blocker.details.issues) {
       const detail=`${issue.path}: ${issue.message}`;
       if(!state.reason?.includes(detail)) block.append(element('p','muted',detail));
-    }
-    if(!current) block.append(element('p','empty-state',enabled
+    }    if(!current) block.append(element('p','empty-state',enabled
       ? (d.planning_engine===2?'Preparing the first complete stage. If project facts are missing, a discovery stage will appear here.':'Enabled; waiting to verify the current state and run the first planning round.')
       :'No stage route yet; historical goals are kept below.'));
     const nodes=[...stages.filter(s=>s.state==='completed' && s.id!==current?.id).map(s=>({id:s.id,title:s.title,state:s.state,tag:'Delivered',stage:s})),
@@ -355,6 +361,5 @@ export function renderRoadmaps(root,d,view) {
         if(r.future?.length)view.showRows(record,r.future.map(f=>f.title));
       }
     }
-    if(state) controls(block,d,objective,state,view);
   }
 }

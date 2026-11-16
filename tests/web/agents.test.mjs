@@ -372,6 +372,26 @@ test('Stage roadmap shows actual delivery, learning gaps and versioned human ans
  }finally{view.close();dom.window.close();}
 });
 
+test('Planning answers and route controls live inside the Planning activity block',async()=>{
+ const data=fixture();data.role.long_term_objectives=[{id:'quality',desired_outcome:'Improve Solaris',stage_planning:{mode:'autonomous'}}];
+ data.objective_planning=[{id:'p',objective_id:'quality',revision:4,state:'awaiting_input',reason:'Choose the next scope',stage_id:'stage1',roadmap_id:'roadmap1',
+  question:{id:'question1',revision:2,text:'Which interaction matters?',options:['Camera','Selection']}}];
+ data.planning_activity=[{id:'run1',objective_id:'quality',kind:'unified_plan',state:'committed',created_at:'2026-11-15T08:30:24+00:00',
+  outcome:{action:'wait',reason:'Waiting for the next review',committed_at:'2026-11-15T08:30:24+00:00'}}];
+ data.stages=[{id:'stage1',objective_id:'quality',title:'Camera navigation',state:'completed',goal_ids:[],acceptance:['Recorded test passed']}];
+ const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');view.tab='Goals';view.render();
+  const planning=view.root.querySelector('.agent-plan-activity');
+  assert.equal(planning.open,true,'Planning block opens itself while awaiting an answer');
+  assert.ok(planning.querySelector('[name="answer"]'),'answer form rendered inside the Planning block');
+  assert.match(planning.textContent,/Adjust route &amp; progress settings|Adjust route & progress settings/);
+  const roadmap=view.root.querySelector('.agent-roadmap');
+  assert.equal(roadmap.querySelector('[name="answer"]'),null,'roadmap panel no longer hosts the answer form');
+  assert.doesNotMatch(roadmap.textContent,/Adjust route/,'roadmap panel no longer hosts route controls');
+ }finally{view.close();dom.window.close();}
+});
+
 test('Stage planning is explicitly enabled per objective with the Agent revision',async()=>{
  const data=fixture();data.role.long_term_objectives[0].id='quality';let sent;
  const {dom,view}=setup({json:async(path,options)=>{if(options?.body){sent=options.body;return {};}
