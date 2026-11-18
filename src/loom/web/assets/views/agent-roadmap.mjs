@@ -59,31 +59,76 @@ function planningStatus(run,state) {
   if(state?.state==='waiting')return 'Waiting for the next check';
   return 'No active planning';
 }
-function planningActivity(root,d,objective,state,view) {
-  const runs=(d.planning_activity || []).filter(run=>run.objective_id===objective.id);
+const phaseNames={stage_running:'Stage running',stage_review:'Stage review',plan_next_stage:'Plan next stage'};
+function runPhase(run) {
+  return run?.phase || (run?.kind==='stage_review' || run?.outcome?.action==='review_stage' ? 'stage_review'
+    : run?.kind==='work_plan' ? 'stage_running' : 'plan_next_stage');
+}
+function deliveryPhase(d,state,current,runs) {
   const active=runs.find(run=>run.is_current ?? run.state==='planning');
-  const latest=active || runs[0];
-  const box=roadmapDisclosure(view,root,d,`planning-activity:${objective.id}`,'Planning',state?.state==='awaiting_input');
-  box.classList.add('agent-plan-activity','dashboard-wide');box.dataset.planningObjective=objective.id;
+  if(active?.kind==='work_plan' && !current)return 'stage_running';
+  if(!current && runs[0]?.kind==='work_plan')return 'stage_running';
+  if(active && active.kind!=='work_plan')return active.phase || (active.kind==='stage_review' ? 'stage_review'
+    : current && !terminal.has(current.state) && !state?.revision_requested ? 'stage_review' : 'plan_next_stage');
+  if(state?.revision_requested)return 'plan_next_stage';
+  if(current && !terminal.has(current.state)) {
+    const ids=current.goal_ids || [];
+    const delivered=ids.length>0 && ids.every(id=>(d.goals || []).some(g=>g.id===id && g.state==='completed'));
+    if(current.state==='reviewing' || delivered)return 'stage_review';
+    return 'stage_running';
+  }
+  return 'plan_next_stage';
+}
+export function planningActivity(root,d,objective,state,view,phase,historicalStage=null) {
+  const history=historicalStage && view.stagePlanningHistory.get(JSON.stringify([d.id,historicalStage.id,historicalStage.revision]));
+  const runs=historicalStage ? history?.runs || [] : (d.planning_activity || []).filter(run=>run.objective_id===objective.id);
+  const active=!historicalStage && runs.find(run=>run.is_current ?? run.state==='planning');
+  // A plan that produced the current stage is history, not its successor plan.
+  const latest=historicalStage ? null : phase==='stage_running' ? active : active || runs.find(run=>runPhase(run)===phase
+    && (!run.stage_id || run.stage_id===state?.stage_id)
+    && !(phase==='plan_next_stage' && run.outcome?.stage_id && run.outcome.stage_id===state?.stage_id
+      && ['propose_stage','revise_stage'].includes(run.outcome.action)));
+  const box=roadmapDisclosure(view,root,d,`planning-activity:${objective.id}:${historicalStage?.id || phase}`,historicalStage?`Planning · ${historicalStage.title}`:phase==='stage_running'?'Planning':`Planning · ${phaseNames[phase]}`,!!historicalStage || phase!=='stage_running' || state?.state==='awaiting_input');
+  box.classList.add('agent-plan-activity','dashboard-wide');box.dataset.planningObjective=objective.id;box.dataset.planningPhase=phase;
   const summary=box.querySelector('summary');
-  const status=element('span','agent-plan-status',!active && latest?.state==='planning'
-    ? 'No active planning · unfinished record' : planningStatus(latest,state));
+  let statusText=planningStatus(latest,state);
+  if(historicalStage)statusText='Stage planning history';
+  else if(phase==='stage_running')statusText='Stage running';
+  else if(!active && latest?.state==='planning')statusText='No active planning · unfinished record';
+  else if(!latest && statusText==='No active planning')statusText=`${phaseNames[phase]} queued`;
+  const status=element('span','agent-plan-status',statusText);
   status.setAttribute('role','status');summary.append(status);
   if(d.role.long_term_objectives.length>1)summary.append(element('span','agent-plan-objective',objective.desired_outcome));
-  box.append(element('p','muted small','Stage planning defines goals → Work package planning splits a selected goal into executable tasks → Execution runs in Sessions.'));
-  answerControls(box,d,objective,state,view);
+  if(historicalStage)box.dataset.planningStage=historicalStage.id;
+  else {
+    box.append(element('h4','',phaseNames[phase]));
+    answerControls(box,d,objective,state,view);
+  }
+  if(historicalStage && (!history || history.loading || history.error)) {
+    box.append(element('p','muted',history?.error || 'Loading stage planning history…'));
+    if(history?.error)box.append(button('Retry loading history',()=>view.loadStagePlanning(d,historicalStage,{retry:true})));
+    manageControls(box,d,objective,state,view);return;
+  }
   if(!runs.length) {
-    box.append(element('p','empty-state',d.planning_activity
+    box.append(element('p','empty-state',historicalStage ? 'No planning records are linked to this stage.' : d.planning_activity
       ? 'No planning attempts recorded yet.' : 'Planning activity is not available from the running service yet.'));
     manageControls(box,d,objective,state,view);
     return;
   }
-  box.append(element('p','muted small',`${active?'Current planning is shown first.':'No active planning. Showing the latest recorded result.'} Latest 3 runs; up to 20 recent events per run. Updates automatically.`));
+  const waiting=latest?.state==='committed' && latest.outcome?.action==='wait';
+  const explanation=historicalStage ? 'Planning records for this stage, newest first.' : active ? `${phaseNames[phase]} is processing. Updates automatically.`
+    : waiting ? `${phaseNames[phase]} completed with a decision to wait. No new stage was published.`
+    : latest ? 'This planning run has finished. Its process and result are shown below.'
+    : phase==='stage_running' ? 'Select a completed stage to inspect its planning history.'
+    : `${phaseNames[phase]} has no current run. Select a completed stage to inspect its planning history.`;
+  box.append(element('p','agent-plan-explanation muted small',explanation));
+  if(waiting && (state?.next_review_at || latest.outcome.next_review_at))
+    box.append(element('p','agent-plan-next-check',`Next check: ${time(state?.next_review_at || latest.outcome.next_review_at,d.role.timezone)}`));
   const labels={requesting:'Waiting for the planning model',proposed:'Response received · validating the plan',
     rejected:'Response rejected',retrying:'Retrying with correction feedback',fallback:'Retrying with a compatible response format',
     completed:'Plan validation passed',exhausted:'Correction attempts exhausted'};
   const outcomes={planning:'Unfinished record',committed:'Decision recorded',failed:'Planning failed',superseded:'Inputs changed · attempt superseded'};
-  const title=run=>run.kind==='stage_review'?'Stage review':run.kind==='work_plan'?'Work package planning':'Stage planning';
+  const title=run=>run.kind==='work_plan'?'Work package planning':phaseNames[run===active?phase:runPhase(run)];
   const scope=run=>{
     const goal=(d.goals || []).find(g=>g.id===run.goal_id);
     const sid=run.outcome?.stage_id || run.stage_id || goal?.stage_id;
@@ -141,7 +186,7 @@ function planningActivity(root,d,objective,state,view) {
         }
         publication.append(tasks);
       }
-      if(outcome.next_review_at)publication.append(element('p','muted',`Next check: ${time(outcome.next_review_at,d.role.timezone)}`));
+      if(outcome.next_review_at && !(waiting && run===latest))publication.append(element('p','muted',`Next check: ${time(outcome.next_review_at,d.role.timezone)}`));
     } else {
       publication.append(element('p','',run===active?'No published result yet.':run.state==='committed'?'Planning completed; no result summary was recorded.':run.state==='failed'?'Planning failed; no plan published.':run.state==='superseded'?'Inputs changed; this attempt was not published.':'This record is unfinished and is not the current planning run.'));
       if(run.reason && run!==active)publication.append(renderMarkdown(run.reason));
@@ -160,15 +205,11 @@ function planningActivity(root,d,objective,state,view) {
     raw.append(element('pre','',JSON.stringify(run.events || [],null,2)));
     parent.append(record);
   };
-  renderRun(box,latest,active?'Current run':'Latest record');
-  const history=runs.filter(run=>run!==latest);
-  if(history.length) {
-    const archived=roadmapDisclosure(view,box,d,`planning-history:${objective.id}`,`Planning history · ${history.length} recent runs`);
-    archived.append(element('p','muted small','Newest first. These are previous planning runs, not concurrently running tasks. History alone does not imply that one plan replaces another.'));
-    for(const run of history) {
-      const item=roadmapDisclosure(view,archived,d,`planning-run:${run.id}`,`${title(run)} · ${scope(run)} · ${outcomes[run.state] || run.state} · ${time(run.created_at,d.role.timezone)}`);
-      renderRun(item,run,'Historical run');
-    }
+  if(latest)renderRun(box,latest,active?'Current run':'Latest record');
+  else if(!historicalStage && phase!=='stage_running')box.append(element('p','muted',`${phaseNames[phase]} is queued. No published result yet.`));
+  if(historicalStage)for(const run of runs) {
+    const item=roadmapDisclosure(view,box,d,`planning-run:${run.id}`,`${title(run)} · ${outcomes[run.state] || run.state} · ${time(run.created_at,d.role.timezone)}`);
+    renderRun(item,run,'Historical run');
   }
   manageControls(box,d,objective,state,view);
 }
@@ -283,9 +324,11 @@ export function renderRoadmaps(root,d,view) {
     const statusName=budgetWaiting ? 'Waiting for daily budget'
       : d.planning_engine===2 && state?.state==='waiting' && ['MODEL_PROTOCOL','CONTRACT_INVALID'].includes(state.blocker?.code)
       ? 'Planning needs correction' : name(state?.state);
-    planningActivity(root,d,objective,state,view);
+    const runs=(d.planning_activity || []).filter(run=>run.objective_id===objective.id);
+    const phase=deliveryPhase(d,state,current,runs);
     const block=panel(root,'Delivery roadmap',true);block.classList.add('agent-roadmap');block.dataset.objectiveId=objective.id || '';
-    const header=block.querySelector('header');header.append(badge(enabled?statusName:'Auto-progress not enabled',state?.state));
+    block.dataset.deliveryPhase=phase;
+    const header=block.querySelector('header');header.append(badge(phaseNames[phase],phase));header.append(badge(enabled?statusName:'Auto-progress not enabled',state?.state));
     if(roadmap?.revision || roadmap?.created_at) header.append(element('small','muted',`${roadmap.revision?'route v'+roadmap.revision:''}${roadmap.created_at?' · '+time(roadmap.created_at):''}`));
     block.append(element('h4','agent-roadmap-vision',objective.desired_outcome));
     if(roadmap?.baseline) block.append(element('p','agent-roadmap-baseline',`Current baseline · ${roadmap.baseline}`));
@@ -316,6 +359,9 @@ export function renderRoadmaps(root,d,view) {
     // Replaced/cancelled stages remain inspectable in history, not on the active route.
     const history=stages.filter(s=>!nodes.some(n=>n.id===s.id));
     const all=[...nodes,...history.map(s=>({id:s.id,title:s.title,tag:'Historical stage',state:s.state,stage:s}))];
+    const previous=view.roadmapCurrentStages.get(key);
+    if(previous && previous!==current?.id)view.roadmapSelections.set(key,current?.id);
+    view.roadmapCurrentStages.set(key,current?.id);
     const selected=all.find(n=>n.id===view.roadmapSelections.get(key)) || all.find(n=>n.id===current?.id) || nodes[0];
     const choose=id=>{
       view.roadmapSelections.set(key,id);view.render();
@@ -326,16 +372,26 @@ export function renderRoadmaps(root,d,view) {
     nodes.forEach((node,i)=>{
       const item=element('li','agent-roadmap-step');item.dataset.state=node.state;
       const b=button('',()=>choose(node.id),'agent-roadmap-node');b.dataset.roadmapNode=node.id;b.setAttribute('aria-pressed',String(selected?.id===node.id));
-      if(node.id===current?.id)b.setAttribute('aria-current','step');
+      if(node.id===current?.id && phase==='stage_running')b.setAttribute('aria-current','step');
       b.append(element('span','agent-roadmap-node-tag',`${String(i+1).padStart(2,'0')} / ${node.tag}`),element('strong','',node.title),
         element('span','agent-roadmap-node-outcome',node.stage?.expected_outcome || node.future?.expected_outcome || ''),badge(node.future?'To be confirmed at review':name(node.state),node.state));
       item.append(b);rail.append(item);
+      if(node.stage && node.id===current?.id)for(const transition of ['stage_review','plan_next_stage']) {
+        const step=element('li','agent-roadmap-step agent-roadmap-transition');
+        const isCurrent=node.id===current?.id && phase===transition;
+        const completed=transition==='stage_review' && node.stage.state==='completed';
+        step.dataset.phase=transition;step.dataset.state=isCurrent?'active':completed?'completed':'pending';
+        if(isCurrent)step.setAttribute('aria-current','step');
+        step.append(element('strong','',phaseNames[transition]),element('span','muted small',isCurrent?'Current phase':completed?'Completed':'Next'));
+        rail.append(step);
+      }
     });
     if(nodes.length)block.append(rail);
     queueMicrotask(()=>{
       if(!rail.isConnected || rail.scrollWidth<=rail.clientWidth)return;
-      const target=[...rail.querySelectorAll('[data-roadmap-node]')].find(n=>n.dataset.roadmapNode===(selected?.id || current?.id));
-      if(target)rail.scrollLeft=Math.max(0,target.parentElement.offsetLeft-rail.firstElementChild.offsetLeft-40);
+      const selectedNode=[...rail.querySelectorAll('[data-roadmap-node]')].find(n=>n.dataset.roadmapNode===(selected?.id || current?.id));
+      const target=(selected?.id===current?.id && rail.querySelector('.agent-roadmap-transition[aria-current]')) || selectedNode?.parentElement;
+      if(target)rail.scrollLeft=Math.max(0,target.offsetLeft-rail.firstElementChild.offsetLeft-40);
     });
     if(current && selected?.id!==current.id) block.append(button('View current stage',()=>choose(current.id)));
     const detail=element('section','agent-roadmap-detail');detail.setAttribute('aria-label','Selected route node');
@@ -346,11 +402,13 @@ export function renderRoadmaps(root,d,view) {
       if(selected.future.depends_on?.length)detail.append(element('p','muted',`Depends on: ${selected.future.depends_on.map(id=>names.get(id)||id).join(' → ')}`));
     }
     if(selected)block.append(detail);
-    const basis=roadmapDisclosure(view,block,d,`basis:${objective.id}`,'Current state & planning basis');
-
-    basis.append(element('p','',roadmap?.baseline || 'No stage baseline yet; actual delivery evidence becomes the basis for later planning.'));
-    if(roadmap?.reason) section(basis,'Why this route',roadmap.reason);
-    if(roadmap?.created_at)basis.append(element('p','muted',`Route updated at ${time(roadmap.created_at)}`));
+    const historicalStage=selected?.stage && terminal.has(selected.stage.state)
+      && (selected.id!==current?.id || view.roadmapSelections.get(key)===selected.id) ? selected.stage : null;
+    if(historicalStage) {
+      view.loadStagePlanning(d,historicalStage);
+      block.append(button('View current planning',()=>{view.roadmapSelections.delete(key);view.render();}));
+    }
+    planningActivity(block,d,objective,state,view,phase,historicalStage);
     const revisions=(d.roadmaps || []).filter(r=>r.objective_id===objective.id || stages.some(s=>s.roadmap_id===r.id));
     if(revisions.length>1 || history.length) {
       const changes=roadmapDisclosure(view,block,d,`history:${objective.id}`,`Route change history · ${Math.max(revisions.length-1,0)} update(s)`);

@@ -387,8 +387,8 @@ test('Planning answers and route controls live inside the Planning activity bloc
   assert.ok(planning.querySelector('[name="answer"]'),'answer form rendered inside the Planning block');
   assert.match(planning.textContent,/Adjust route &amp; progress settings|Adjust route & progress settings/);
   const roadmap=view.root.querySelector('.agent-roadmap');
-  assert.equal(roadmap.querySelector('[name="answer"]'),null,'roadmap panel no longer hosts the answer form');
-  assert.doesNotMatch(roadmap.textContent,/Adjust route/,'roadmap panel no longer hosts route controls');
+  assert.equal(roadmap.querySelector('[name="answer"]'),planning.querySelector('[name="answer"]'));
+  assert.match(roadmap.textContent,/Adjust route/);
  }finally{view.close();dom.window.close();}
 });
 
@@ -845,7 +845,7 @@ test('Budget waiting shows the allowance and automatic reset instead of review',
  }finally{view.close();dom.window.close();}
 });
 
-test('Planning block defaults closed, preserves expansion and updates its current status',async()=>{
+test('Planning block opens the active phase, preserves expansion and updates its status',async()=>{
  const data=fixture();data.planning_engine=2;data.view='goals';data.role.timezone='Asia/Shanghai';
  data.role.long_term_objectives=[{id:'primary',desired_outcome:'Build next stage',stage_planning:{mode:'autonomous'}},
   {id:'other',desired_outcome:'Other objective',stage_planning:{mode:'autonomous'}}];
@@ -857,8 +857,8 @@ test('Planning block defaults closed, preserves expansion and updates its curren
   await view.open();await view.select('a');await view.changeTab('Goals');
   let activity=view.root.querySelector('[data-planning-objective="primary"]');
   assert.equal(activity.tagName,'DETAILS');
-  assert.equal(activity.open,false);
-  assert.equal(activity.closest('.agent-roadmap'),null);
+  assert.equal(activity.open,true);
+  assert.ok(activity.closest('.agent-roadmap'));
   assert.match(activity.querySelector('summary').textContent,/Planning.*Preparing plan/);
   assert.doesNotMatch(activity.querySelector('summary').textContent,/Planning started|Draft output/);
   assert.match(activity.textContent,/Planning started/);
@@ -869,14 +869,14 @@ test('Planning block defaults closed, preserves expansion and updates its curren
    {type:'plan.protocol.retrying',at:'2026-11-10T01:01:00Z',attempt:1},
    {type:'plan.protocol.requesting',at:'2026-11-10T01:01:01Z',attempt:2}];
   await view.refresh();activity=view.root.querySelector('[data-planning-objective="primary"]');
-  assert.equal(activity.open,false); // Polling updates the collapsed status without opening it.
+  assert.equal(activity.open,true); // Polling preserves the active phase expansion.
   assert.match(activity.querySelector('summary').textContent,/Receiving planning draft/);
   activity.open=true;activity.dispatchEvent(new dom.window.Event('toggle'));
   data.planning_activity[0].stream.channels.content={text:'new live draft',characters:456};
   await view.refresh();activity=view.root.querySelector('[data-planning-objective="primary"]');
   assert.equal(activity.open,true);
   assert.match(activity.textContent,/new live draft/);
-  assert.equal(view.root.querySelector('[data-planning-objective="other"]').open,false);
+  assert.equal(view.root.querySelector('[data-planning-objective="other"]').open,true);
   assert.match(activity.textContent,/Receiving planning draft/);
   assert.match(activity.textContent,/456 characters/);
   assert.match(activity.textContent,/Draft output is provisional/);
@@ -903,6 +903,9 @@ test('Planning block defaults closed, preserves expansion and updates its curren
   assert.equal(activity.open,false);
   assert.match(activity.querySelector('summary').textContent,/Waiting for the next check/);
   assert.match(activity.textContent,/No valuable gap remains/);
+  assert.match(activity.querySelector('.agent-plan-explanation').textContent,/Plan next stage completed with a decision to wait/);
+  assert.doesNotMatch(activity.textContent,/No active planning/);
+  assert.match(activity.querySelector('.agent-plan-next-check').textContent,/Next check:.*10:00:00/);
   assert.match(activity.textContent,/Next check:/);
   assert.doesNotMatch(activity.textContent,/work packages published/);
  }finally{view.close();dom.window.close();}
@@ -920,12 +923,25 @@ test('Planning separates the leased run from history and formats published tasks
   {id:'leased',objective_id:'primary',kind:'work_plan',goal_id:'g1',state:'planning',is_current:true,events:[]},
   {id:'stale',objective_id:'primary',kind:'work_plan',goal_id:'g2',state:'planning',is_current:false,events:[]}];
  data.work_packages=[{id:'w1',goal_id:'g2',agent_run_id:'newer',objective:'**Ship** the change',state:'running',session_id:'s/1'}];
- const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ data.stages=[{id:'old',objective_id:'primary',title:'Old stage',state:'completed',goal_ids:[],acceptance:[]},
+  {id:'current',objective_id:'primary',title:'Current stage',state:'active',goal_ids:['g1'],acceptance:[]}];
+ data.objective_planning=[{objective_id:'primary',stage_id:'current',state:'active'}];
+ let historyCalls=0;
+ const {dom,view}=setup({json:async path=>{
+  if(path.endsWith('/stages/old/planning-history')){historyCalls++;return {stage_id:'old',planning_activity:data.planning_activity.filter(r=>r.id!=='leased')};}
+  return path==='/v1/agents'?{agents:[data]}:data;
+ }});
  try{
   await view.open();await view.select('a');await view.changeTab('Goals');
   let activity=view.root.querySelector('[data-planning-objective="primary"]');
   assert.equal(activity.querySelector('[data-planning-run]').dataset.planningRun,'leased');
   assert.match(activity.querySelector('[data-planning-run="leased"]').textContent,/Current run.*Work package planning.*Goal: First goal/s);
+  assert.equal(activity.querySelector('[data-planning-run="newer"]'),null);
+  assert.doesNotMatch(activity.textContent,/Planning history ·/);
+  view.root.querySelector('[data-roadmap-node="old"]').click();await tick();
+  activity=view.root.querySelector('[data-planning-stage="old"]');
+  assert.ok(activity);assert.equal(historyCalls,1);
+  assert.equal(activity.querySelector('[data-planning-run="leased"]'),null);
   const historical=activity.querySelector('[data-planning-run="newer"]');
   assert.equal(historical.parentElement.open,false);
   assert.match(historical.querySelector('.agent-plan-publication strong').textContent,/Plan published/);
@@ -940,7 +956,62 @@ test('Planning separates the leased run from history and formats published tasks
   assert.equal(activity.querySelector('[data-planning-run="newer"] .agent-plan-stream').open,true);
   data.planning_activity=data.planning_activity.filter(r=>r.id!=='leased');
   await view.refresh();activity=view.root.querySelector('[data-planning-objective="primary"]');
-  assert.match(activity.textContent,/No active planning/);
-  assert.match(activity.querySelector('[data-planning-run]').textContent,/Latest record/);
+  assert.match(activity.textContent,/Planning records for this stage/);
+  assert.equal(historyCalls,1);
+  [...view.root.querySelectorAll('button')].find(b=>b.textContent==='View current planning').click();
+  assert.equal(view.root.querySelector('[data-planning-stage]'),null);
+  assert.match(view.root.textContent,/Adjust route/);
+  assert.match(activity.querySelector('[data-planning-run]').textContent,/Historical run/);
+ }finally{view.close();dom.window.close();}
+});
+
+test('Roadmap follows running, review and next-stage planning, then selects the published stage',async()=>{
+ const data=fixture();data.view='goals';data.planning_engine=2;
+ data.role.long_term_objectives=[{id:'quality',desired_outcome:'Deliver navigation',stage_planning:{mode:'autonomous'}}];
+ data.objective_planning=[{objective_id:'quality',state:'active',stage_id:'a',revision:1}];
+ data.stages=[{id:'a',objective_id:'quality',title:'Stage A',state:'active',goal_ids:['ga'],acceptance:[]}];
+ data.goals=[{id:'ga',stage_id:'a',objective:'First delivery',state:'active',acceptance:[]}];
+ data.planning_activity=[];
+ const {dom,view}=setup({json:async path=>path==='/v1/agents'?{agents:[data]}:data});
+ try{
+  await view.open();await view.select('a');await view.changeTab('Goals');
+  const phase=()=>view.root.querySelector('.agent-roadmap').dataset.deliveryPhase;
+  const planning=()=>view.root.querySelector('[data-planning-objective="quality"]');
+  assert.equal(phase(),'stage_running');assert.equal(planning().open,false);
+  assert.ok(view.root.querySelector('[data-stage-id="a"]'));
+  assert.equal(planning().parentElement,view.root.querySelector('.agent-roadmap'));
+  assert.doesNotMatch(view.root.textContent,/Current state & planning basis/);
+  assert.equal(view.root.querySelectorAll('.agent-roadmap-transition').length,2);
+  data.goals[0].state='completed';
+  data.planning_activity=[{id:'review',objective_id:'quality',stage_id:'a',kind:'unified_plan',phase:'stage_review',state:'planning',is_current:true,
+   stream:{state:'streaming',channels:{content:{text:'Reviewing evidence',characters:18}}},events:[]}];
+  await view.refresh();assert.equal(phase(),'stage_review');assert.equal(planning().open,true);
+  assert.match(planning().textContent,/Current run · Stage review/);
+  assert.match(planning().textContent,/Receiving planning draft/);
+  data.planning_activity[0].state='failed';data.planning_activity[0].is_current=false;
+  data.planning_activity[0].reason='Review model failed';
+  await view.refresh();assert.equal(phase(),'stage_review');assert.match(planning().textContent,/Review model failed/);
+  data.planning_activity[0].state='committed';data.planning_activity[0].outcome={action:'review_stage',reason:'Evidence accepted'};
+  data.planning_activity.push({id:'original',objective_id:'quality',kind:'unified_plan',phase:'plan_next_stage',state:'committed',is_current:false,
+   outcome:{action:'propose_stage',stage_id:'a'},events:[]});
+  data.stages[0].state='completed';data.objective_planning[0].state='ready';
+  await view.refresh();assert.equal(phase(),'plan_next_stage');assert.equal(planning().open,true);
+  assert.match(planning().querySelector('summary').textContent,/Plan next stage queued/);
+  assert.doesNotMatch(planning().textContent,/Historical run · Stage review/);
+  data.planning_activity.unshift({id:'next',objective_id:'quality',stage_id:'a',kind:'unified_plan',phase:'plan_next_stage',state:'planning',is_current:true,events:[]});
+  await view.refresh();assert.match(planning().textContent,/Current run · Plan next stage/);
+  view.root.querySelector('[data-roadmap-node="a"]').click();
+  data.stages.push({id:'b',objective_id:'quality',title:'Stage B',state:'active',goal_ids:['gb'],acceptance:[]});
+  data.goals.push({id:'gb',stage_id:'b',objective:'Next delivery',state:'active',acceptance:[]});
+  data.objective_planning[0].stage_id='b';data.objective_planning[0].state='active';
+  data.planning_activity[0].state='committed';data.planning_activity[0].is_current=false;
+  data.planning_activity[0].outcome={action:'propose_stage',stage_id:'b',goal_count:1};
+  await view.refresh();assert.equal(phase(),'stage_running');assert.equal(planning().open,false);
+  assert.equal(view.root.querySelector('[data-roadmap-node="b"]').getAttribute('aria-pressed'),'true');
+  assert.equal(view.root.querySelectorAll('.agent-roadmap-transition').length,2);
+  assert.equal(view.root.querySelector('[data-roadmap-node="a"]').parentElement.nextElementSibling.querySelector('[data-roadmap-node]').dataset.roadmapNode,'b');
+  assert.match(view.root.querySelector('.agent-roadmap-detail').textContent,/Next delivery/);
+  view.root.querySelector('[data-roadmap-node="a"]').click();await view.refresh();
+  assert.equal(view.root.querySelector('[data-roadmap-node="a"]').getAttribute('aria-pressed'),'true');
  }finally{view.close();dom.window.close();}
 });

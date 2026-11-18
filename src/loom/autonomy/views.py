@@ -183,18 +183,35 @@ def page_snapshot(store, aid, view):
         return agent
 
 
-def planning_activity(db, aid, objectives):
+def planning_activity(db, aid, objectives, stage=None):
     """Bounded progress records, without model proposals or input snapshots."""
     activity = []
     lease = db.execute("SELECT json_extract(body,'$.planner_lease') FROM agents WHERE id=?", (aid,)).fetchone()
     current_run = lease[0] if lease else None
+    linked_runs, goal_ids, review_ids = set(), set(), set()
+    if stage:
+        from loom.autonomy.store import digest
+
+        linked_runs = {r[0] for r in db.execute(
+            "SELECT json_extract(body,'$.input_run_id') FROM agent_roadmaps WHERE agent_id=? "
+            "AND json_extract(body,'$.stage_id')=?", (aid, stage['id']))}
+        goal_ids = {r[0] for r in db.execute(
+            "SELECT id FROM agent_goals WHERE agent_id=? AND json_extract(body,'$.stage_id')=?", (aid, stage['id']))}
+        review_ids = {r[0] for r in db.execute(
+            "SELECT id FROM agent_stage_reviews WHERE agent_id=? AND json_extract(body,'$.stage_id')=?", (aid, stage['id']))}
     for objective in objectives:
         runs = project(db, "agent_runs",
-            ["id", "objective_id", "kind", "state", "created_at", "reason", "stream", "outcome", "goal_id", "stage_id",
+            ["id", "objective_id", "kind", "phase", "state", "created_at", "reason", "stream", "outcome", "goal_id", "stage_id",
              "work_package_ids", "decision.action", "decision.reason"],
             "WHERE agent_id=? AND json_extract(body,'$.objective_id')=? "
-            "AND json_extract(body,'$.kind') IN ('unified_plan','stage_plan','stage_review','work_plan') ORDER BY (id=?) DESC, rowid DESC LIMIT 3",
+            "AND json_extract(body,'$.kind') IN ('unified_plan','stage_plan','stage_review','work_plan') ORDER BY (id=?) DESC, rowid DESC"
+            + ("" if stage else " LIMIT 3"),
             (aid, objective["id"], current_run or ""))
+        if stage:
+            runs = [run for run in runs if run.get('stage_id') == stage['id']
+                    or (run.get('outcome') or {}).get('stage_id') == stage['id']
+                    or run['id'] in linked_runs or run.get('goal_id') in goal_ids
+                    or 'review_' + run['id'] in review_ids or 'review_' + digest(run['id'])[:32] in review_ids]
         for run in runs:
             run["is_current"] = run["id"] == current_run
             # Older attempts retain their small decision summary, never the full proposal.

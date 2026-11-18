@@ -51,6 +51,7 @@ def test_default_engine_publishes_whole_discovery_stage_before_dispatch(unified)
     with facade.store.sessions.transaction() as db:
         run = next(r for r in facade.store.rows(db, "agent_runs", aid) if r.get("kind") == "unified_plan")
     assert run["state"] == "committed"
+    assert run["phase"] == "plan_next_stage"
     assert run["outcome"]["goal_count"] == run["outcome"]["work_package_count"] == 1
     assert run["outcome"]["stage_id"] == stage["id"]
     facade.supervisor.scheduler.advance(aid, manual=True)
@@ -78,6 +79,37 @@ def test_work_packages_keep_their_business_reasons_separate_from_plan_revision(u
     assert [w["reason"] for w in published] == [w["reason"] for w in works]
     assert all(w["reason"] != value["reason"] for w in published)
     assert snapshot["plan_revisions"][0]["proposal"]["reason"] == value["reason"]
+
+
+def test_next_stage_summarizes_completed_contracts_and_still_rejects_repeat(unified):
+    service, facade, aid, _ = unified
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    snap = facade.store.snapshot(aid)
+    stage, goal = snap["stages"][0], snap["goals"][0]
+    with facade.store.sessions.transaction() as db:
+        for table, row in (("agent_stages", stage), ("agent_goals", goal)):
+            facade.store.put(db, table, {**row, "state": "completed"})
+        state = facade.store.rows(db, "agent_objective_planning", aid)[0]
+        state["answers"].append(dict(producer="human", text="Plan the next delivery"))
+        facade.store.put(db, "agent_objective_planning", state)
+
+    inputs = []
+    def repeat(_, payload):
+        inputs.append(payload)
+        return proposal()
+
+    service.agent_plan_provider = repeat
+    facade.supervisor.unified.advance(aid, stage["objective_id"])
+    payload, = inputs
+    assert payload["answers"][-1]["text"] == "Plan the next delivery"
+    assert payload["existing_goals"] == []
+    assert payload["delivery_index"]["goals"][0]["objective"] == goal["objective"]
+    assert payload["history"][0]["non_goals"] == stage["non_goals"]
+    assert "acceptance_criteria" not in payload["history"][0]
+    with facade.store.sessions.read() as db:
+        failed, = [r for r in facade.store.rows(db, "agent_runs", aid) if r["state"] == "failed"]
+    assert "repeats an existing delivery" in failed["reason"]
+    assert facade.store.read_artifact(aid, failed["input_snapshot_ref"]["sha256"]) == payload
 
 
 @pytest.mark.parametrize("reason", [None, ""])

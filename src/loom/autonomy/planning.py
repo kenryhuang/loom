@@ -14,7 +14,7 @@ from loom.autonomy.contracts import scheduling_policy, stage_enabled
 from loom.autonomy.plan_compiler import capabilities, compile_plan, environments
 from loom.autonomy.plan_evidence import PROTOCOL_VERSION
 from loom.autonomy.plan_evidence import prepare as prepare_evidence
-from loom.autonomy.plan_planner import PlanPlanner
+from loom.autonomy.plan_planner import PlanPlanner, model_context
 from loom.autonomy.stage_overlap import delivery_index
 from loom.autonomy.stages import TERMINAL, evidence, planning_state, role_signature
 from loom.autonomy.store import digest
@@ -282,14 +282,17 @@ class ObjectiveCoordinator:
                 state.update(state="waiting", reason="Planning response is unknown; revise with new information before retrying.", last_input=key)
                 store.put(db, "agent_objective_planning", state)
                 return False
+            run["phase"] = "stage_review" if stage and not state.get("revision_requested") else "plan_next_stage"
+            run["stage_id"] = stage["id"] if stage else state.get("stage_id")
             agent["planner_lease"] = rid
             store.put(db, "agents", agent)
             store.put(db, "agent_runs", run)
-            payload = dict(planning_engine=2, objective=objective, stage=stage, evidence=records,
-                           existing_goals=goals, history=history, answers=state["answers"], required_revision=state.get("required_revision"),
-                           context=dict(source_routes=agent["role"]["source_routes"]), source_status=sources,
+            payload = dict(planning_engine=2, objective=objective, answers=state["answers"],
+                           required_revision=state.get("required_revision"),
                            requested_goals=state.get("requested_goals", []),
                            revision_requested=state.get("revision_requested", False),
+                           stage=stage, evidence=records, existing_goals=goals, history=history,
+                           context=dict(source_routes=agent["role"]["source_routes"]), source_status=sources,
                            prior_attempts=prior_attempts[-3:],
                            required_verification=required_verification,
                            delivery_index=delivery_index([s for s in history if not stage or s["id"] != stage["id"]],
@@ -302,6 +305,9 @@ class ObjectiveCoordinator:
             from loom.autonomy.stage_planner import fit_payload
 
             payload = fit_payload(prepare_evidence(payload))
+            # Validate against all historical contracts, with the same citation set the model sees.
+            validation_context = {**payload, "existing_goals": goals, "history": history}
+            payload = model_context(payload)
             with store.sessions.transaction() as db:
                 run["input_snapshot_ref"] = store.artifact(db, aid, payload, "plan_input")
                 store.put(db, "agent_runs", run)
@@ -314,9 +320,10 @@ class ObjectiveCoordinator:
 
             if run.get("decision"):
                 decision = run["decision"]
-                compiled = compile_plan(self.service, agent, payload, decision, envs, rid, store.now())
+                compiled = compile_plan(self.service, agent, validation_context, decision, envs, rid, store.now())
             else:
-                decision, compiled = self.planner.propose(agent, payload, envs, rid, checkpoint)
+                decision, compiled = self.planner.propose(agent, payload, envs, rid, checkpoint,
+                                                         validation_context=validation_context)
             # Re-resolve outside the transaction; permission/binding changes invalidate the draft.
             if capabilities(environments(self.service, agent)) != payload["capabilities"]:
                 raise ServiceError("Environment changed while planning; re-evaluate the proposal", 409, code="SOURCE_CHANGED")

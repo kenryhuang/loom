@@ -2513,3 +2513,7 @@ section.setup-block { padding: 20px; }
 .agent-plan-stream { margin-top:14px; }
 .agent-plan-stream summary { color:var(--muted); font-size:12px; }
 .agent-plan-stream pre { max-height:220px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+
+.agent-roadmap-transition { flex:0 0 150px; align-self:center; display:grid; gap:8px; padding:16px; border:1px dashed var(--line); border-radius:8px; }
+.agent-roadmap-transition[data-state="active"] { border-style:solid; border-color:var(--accent); background:var(--raised); }
+.agent-plan-activity > h4 { margin:16px 0 8px; }

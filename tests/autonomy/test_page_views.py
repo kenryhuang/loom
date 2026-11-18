@@ -197,7 +197,7 @@ def test_planning_activity_is_bounded_scoped_and_refreshes_without_agent_revisio
     with service.store.transaction() as db:
         for index in range(5):
             facade.store.put(db, 'agent_runs', dict(id=f'plan-{index}', agent_id=aid, objective_id='quality',
-                kind='unified_plan', state='planning', created_at=facade.store.now(),
+                kind='unified_plan', phase='stage_review', state='planning', created_at=facade.store.now(),
                 decision={'private_proposal': 'do-not-transmit' * 10000}, input_snapshot_ref={'private_input': 'hidden'}))
         for run_id, owner, objective in [('foreign-agent', other['id'], 'quality'), ('foreign-objective', aid, 'other')]:
             facade.store.put(db, 'agent_runs', dict(id=run_id, agent_id=owner, objective_id=objective,
@@ -205,6 +205,7 @@ def test_planning_activity_is_bounded_scoped_and_refreshes_without_agent_revisio
     before = page(facade, aid, 'goals')
     assert [r['id'] for r in before['planning_activity']] == ['plan-4', 'plan-3', 'plan-2']
     assert before['planning_activity'][0]['events'] == []
+    assert before['planning_activity'][0]['phase'] == 'stage_review'
     with service.store.transaction() as db:
         for attempt in range(25):
             facade.store.event(db, aid, 'plan.protocol.requesting', dict(agent_run_id='plan-4', attempt=attempt + 1))
@@ -315,3 +316,36 @@ def test_planning_activity_keeps_the_leased_run_and_projects_work_relationships(
     assert [r['is_current'] for r in runs] == [True, False, False]
     assert runs[0]['goal_id'] == 'goal-0'
     assert runs[0]['work_package_ids'] == ['work-0']
+
+
+def test_stage_planning_history_loads_old_linked_runs_without_other_stages_or_private_inputs(agent_service):
+    from loom.autonomy.store import digest
+
+    service, facade, aid, workspace = agent_service
+    foreign = facade.store.create('foreign-history', role(workspace))
+    with service.store.transaction() as db:
+        facade.store.put(db, 'agent_stages', dict(id='old-stage', agent_id=aid, objective_id='quality', state='completed'))
+        facade.store.put(db, 'agent_stages', dict(id='foreign-stage', agent_id=foreign['id'], objective_id='quality', state='completed'))
+        facade.store.put(db, 'agent_roadmaps', dict(id='old-route', agent_id=aid, stage_id='old-stage', input_run_id='legacy-plan'))
+        facade.store.put(db, 'agent_stage_reviews', dict(id='review_' + digest('legacy-review')[:32], agent_id=aid, stage_id='old-stage'))
+        facade.store.put(db, 'agent_goals', dict(id='old-goal', agent_id=aid, stage_id='old-stage'))
+        for rid, fields in [
+            ('legacy-plan', {}), ('legacy-review', {'kind': 'stage_review'}),
+            ('work-plan', {'kind': 'work_plan', 'goal_id': 'old-goal'}),
+            ('review', {'stage_id': 'old-stage', 'phase': 'stage_review'}),
+            ('published', {'outcome': {'stage_id': 'old-stage', 'action': 'propose_stage'}}),
+            *[(f'unrelated-{i}', {'stage_id': 'new-stage'}) for i in range(4)],
+        ]:
+            facade.store.put(db, 'agent_runs', dict(id=rid, agent_id=aid, objective_id='quality',
+                kind='unified_plan', state='committed', input_snapshot_ref={'private': 'hidden'},
+                decision={'private_proposal': 'hidden'}, **{k: v for k, v in fields.items() if k != 'kind'})
+                | ({'kind': fields['kind']} if 'kind' in fields else {}))
+        facade.store.put(db, 'agent_runs', dict(id='foreign-run', agent_id=foreign['id'], objective_id='quality',
+            kind='unified_plan', state='committed', stage_id='old-stage'))
+    assert len(page(facade, aid, 'goals')['planning_activity']) == 3
+    result = facade.dispatch('GET', [aid, 'stages', 'old-stage', 'planning-history'], {})
+    assert result['stage_id'] == 'old-stage'
+    assert [r['id'] for r in result['planning_activity']] == ['published', 'review', 'work-plan', 'legacy-review', 'legacy-plan']
+    assert 'private' not in json.dumps(result)
+    with pytest.raises(ServiceError):
+        facade.dispatch('GET', [aid, 'stages', 'foreign-stage', 'planning-history'], {})

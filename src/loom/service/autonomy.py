@@ -473,6 +473,13 @@ class AutonomyService:
             from loom.autonomy.stage_commands import command
 
             return command(self, aid, route[1], body)
+        if len(route) == 3 and route[0] == 'stages' and route[2] == 'planning-history' and method == 'GET':
+            from loom.autonomy.views import planning_activity
+
+            with self.store.sessions.read() as db:
+                stage = self.store.get(db, 'agent_stages', route[1], aid)
+                return dict(stage_id=stage['id'], planning_activity=planning_activity(
+                    db, aid, [dict(id=stage['objective_id'])], stage=stage))
         if route == ['stages'] and method == 'GET':
             return dict(stages=self.store.snapshot(aid, fields={'stages'})['stages'])
         if len(route) == 2 and route[0] == 'stages' and method == 'GET':

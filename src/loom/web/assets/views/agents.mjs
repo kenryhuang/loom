@@ -5,7 +5,7 @@ import {AgentLearningView} from './agent-learning.mjs';
 import {panel, cards, table, badge, number, seconds, disclosure} from './dashboard.mjs';
 import {agentResourceChoices} from './agent-resources.mjs';
 import {selectedTools} from './external-tools.mjs';
-import {editableStage, renderRoadmaps, roadmapDisclosure} from './agent-roadmap.mjs';
+import {editableStage, renderRoadmaps, roadmapDisclosure, planningActivity} from './agent-roadmap.mjs';
 import {renderExecution} from './agent-execution.mjs';
 import {AgentConfigurationEditor, configurationTitles, configuredRole} from './agent-configuration.mjs';
 
@@ -38,6 +38,8 @@ export class AgentsView {
     this.learningStates = new Map();
     this.stageExpansionStates = new Map();
     this.roadmapSelections = new Map();
+    this.roadmapCurrentStages = new Map();
+    this.stagePlanningHistory = new Map();
     this.sessionMetrics = new Map();
     this.heading = root.parentElement?.querySelector('#agents-heading');
   }
@@ -47,6 +49,7 @@ export class AgentsView {
     this.setup?.close(); this.setup = null; this.creating = false; this.root.classList.remove('agent-setup-page');
     this.configurationEditor?.close(); this.configurationEditor = null;
     this.manualSchedule = null;
+    this.stagePlanningHistory.clear();
   }
   async open() {
     this.close(); this.abort = new AbortController();
@@ -115,6 +118,31 @@ export class AgentsView {
     const configurationEditing = this.configurationEditor?.form.isConnected;
     if (!editing && !resourceEditing && !learningEditing && !configurationEditing && !this.creating && this.renderedDetail !== JSON.stringify(detail)) this.render();
     else if (!this.creating) this.updateSchedule(detail);
+  }
+  async loadStagePlanning(d,stage,{retry=false}={}) {
+    const key=JSON.stringify([d.id,stage.id,stage.revision]);
+    if(!retry && this.stagePlanningHistory.has(key))return;
+    const generation=this.generation;
+    this.stagePlanningHistory.set(key,{loading:true});
+    try {
+      const result=await this.api.get(d.id,`stages/${encodeURIComponent(stage.id)}/planning-history`,this.abort?.signal);
+      if(generation!==this.generation)return;
+      if(!Array.isArray(result.planning_activity) || result.stage_id!==stage.id)throw new Error('Stage planning history is unavailable from this service.');
+      this.stagePlanningHistory.set(key,{runs:result.planning_activity});
+    } catch(error) {
+      if(generation!==this.generation)return;
+      if(error.name==='AbortError'){this.stagePlanningHistory.delete(key);return;}
+      this.stagePlanningHistory.set(key,{error:error.message});
+    }
+    if(this.selected===d.id && this.tab==='Goals') {
+      const old=[...this.root.querySelectorAll('[data-planning-stage]')].find(node=>node.dataset.planningStage===stage.id);
+      if(old) {
+        const holder=element('div'),objective=this.detail.role.long_term_objectives.find(o=>o.id===stage.objective_id);
+        const state=(this.detail.objective_planning || []).find(s=>s.objective_id===stage.objective_id);
+        planningActivity(holder,this.detail,objective,state,this,old.dataset.planningPhase,stage);
+        old.replaceWith(holder.firstElementChild);
+      }
+    }
   }
   async fillSessionMetrics(detail,signal) {
     const missing=(detail.work_packages || []).filter(w=>w.session_id && !Object.hasOwn(w,'execution_seconds'));
