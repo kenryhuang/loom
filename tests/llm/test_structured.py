@@ -38,6 +38,49 @@ def test_complete_fence_is_normalized_but_truncated_or_refused_responses_are_rej
         assert error.value.code == code
 
 
+def test_invalid_json_error_reports_exact_position():
+    with pytest.raises(ProtocolError) as error:
+        parse_response(LlmResponse(content='{"answer": "ok" "extra": 1}'))
+    assert error.value.code == 'invalid_json'
+    message = str(error.value)
+    assert "Expecting ',' delimiter" in message and "line 1" in message and "column 17" in message and "char 16" in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('response', [LlmResponse(content='{"answer": "ok" "extra": 1}'),
+                                      LlmResponse(content='{"answer": "cut off', finish_reason='length')])
+async def test_protocol_failures_carry_raw_response_for_postmortem(response):
+    events = []
+
+    async def send(payload, attempt, mode):
+        return response
+
+    async def event(kind, payload):
+        events.append((kind, payload))
+
+    with pytest.raises(ProtocolExhausted):
+        await request_structured(protocol=PROTOCOL, payload={}, send=send, event=event)
+    rejected = [payload for kind, payload in events if kind == 'rejected']
+    exhausted = [payload for kind, payload in events if kind == 'exhausted']
+    assert rejected and exhausted
+    assert all(payload['raw_response'] == response.content for payload in rejected + exhausted)
+
+
+@pytest.mark.asyncio
+async def test_successful_protocol_events_have_no_raw_response():
+    events = []
+
+    async def send(payload, attempt, mode):
+        return LlmResponse(content=json.dumps({'answer': 'ok'}))
+
+    async def event(kind, payload):
+        events.append((kind, payload))
+
+    await request_structured(protocol=PROTOCOL, payload={}, send=send, event=event)
+    assert [kind for kind, _ in events] == ['proposed', 'completed']
+    assert all('raw_response' not in payload for _, payload in events)
+
+
 @pytest.mark.asyncio
 async def test_schema_correction_has_paths_and_preserves_context():
     requests, events = [], []
@@ -119,6 +162,15 @@ async def test_request_schema_reaches_http_without_mutating_shared_provider():
     assert all(b['response_format']['json_schema']['strict'] for b in bodies)
     assert not shared.request_options
     assert output_mode(replace(shared, base_url='https://example.com/v1')) == 'text'
+
+
+def test_dashscope_kimi_k3_uses_json_object_mode():
+    provider = OpenAIProvider('test', 'kimi-k3', base_url='https://dashscope.aliyuncs.com/compatible-mode/v1')
+    assert output_mode(provider) == 'json_object'
+    assert output_mode(replace(provider, base_url='https://example.com/v1')) == 'text'
+    wired = protocol_provider(provider, PROTOCOL, 'json_object')
+    assert wired.request_options['response_format'] == {'type': 'json_object'}
+    assert not provider.request_options  # The shared provider is never mutated.
 
 
 @pytest.mark.asyncio

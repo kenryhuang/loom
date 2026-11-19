@@ -467,7 +467,7 @@ class AcceptanceController:
                                     protocol=protocol, mode=mode, raw_response=True, **({"provider": provider, "images": images} if images else {}))
 
         async def event(kind, fields):
-            self.data["protocol"] = {**{k: v for k, v in fields.items() if k != "proposal"}, "stage": stage, "state": kind}
+            self.data["protocol"] = {**{k: v for k, v in fields.items() if k not in {"proposal", "raw_response"}}, "stage": stage, "state": kind}
             if kind == "fallback":
                 self.data["protocol_mode"] = {"provider_digest": mode_key, "mode": fields["mode"]}
             if kind == "proposed":

@@ -349,3 +349,17 @@ def test_stage_planning_history_loads_old_linked_runs_without_other_stages_or_pr
     assert 'private' not in json.dumps(result)
     with pytest.raises(ServiceError):
         facade.dispatch('GET', [aid, 'stages', 'foreign-stage', 'planning-history'], {})
+
+
+def test_work_view_sessions_expose_execution_and_work_state(agent_service):
+    _, facade, aid, _ = agent_service
+    work = prepare(facade, aid)
+    facade.supervisor.dispatcher.dispatch(aid, work['id'])
+    row = next(s for s in page(facade, aid, 'work')['sessions'] if s.get('work_package_id') == work['id'])
+    assert row['task_state'] == 'queued' and row['work_state'] == 'dispatched'
+    with facade.store.sessions.transaction() as db:
+        package = facade.store.get(db, 'agent_work_packages', work['id'], aid)
+        package.update(state='blocked', blocked_reason='Plan revision limit reached; provide new input')
+        facade.store.put(db, 'agent_work_packages', package)
+    row = next(s for s in page(facade, aid, 'work')['sessions'] if s.get('work_package_id') == work['id'])
+    assert row['work_state'] == 'blocked' and row['blocked_reason'] == 'Plan revision limit reached; provide new input'

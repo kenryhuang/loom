@@ -745,7 +745,7 @@ def test_exhausted_citation_correction_stays_local_without_transport_retry(unifi
     service, facade, aid, _ = unified
     invalid = proposal()
     invalid['source_refs'] = ['invented-evidence']
-    provider = ReplyProvider([reply(json.dumps(invalid)), reply(json.dumps(invalid))])
+    provider = ReplyProvider([reply(json.dumps(invalid))] * 4)
     service.agent_plan_provider = None
     service.config_path = 'fixture.yaml'
     monkeypatch.setattr(module, 'load_task_config', lambda _: ok(None))
@@ -756,7 +756,7 @@ def test_exhausted_citation_correction_stays_local_without_transport_retry(unifi
     assert snap['objective_planning'][0]['next_review_at'] == ''
     assert not snap['objective_planning'][0].get('transient_attempts')
     facade.supervisor.scheduler.advance(aid, manual=True)
-    assert len(provider.payloads) == 2
+    assert len(provider.payloads) == 4
 
 
 def test_executable_verification_schema_disallows_unresolved_requirements(unified):
@@ -890,3 +890,62 @@ def test_revision_wait_keeps_a_visible_contract_gate(unified):
     snap = facade.store.snapshot(aid)
     assert snap['objective_planning'][0]['blocker']['code'] == 'EXECUTION_CONTRACT'
     assert snap['scheduler']['state'] == 'waiting'
+
+
+def test_protocol_exhaustion_stores_full_raw_response_as_artifact(unified):
+    import asyncio
+    import json
+
+    from loom.autonomy.plan_planner import PlanPlanner
+
+    service, facade, aid, _ = unified
+    planner = PlanPlanner(service, facade.store)
+    raw = '{"answer": "ok" "extra": 1}'
+    asyncio.run(planner.record_protocol({"id": aid}, "run-x", "exhausted",
+        dict(code="invalid_json", issues=[dict(path="/", message="Expecting ',' delimiter")], raw_response=raw)))
+    with facade.store.sessions.read() as db:
+        event = next(json.loads(row[0]) for row in db.execute(
+            "SELECT body FROM agent_events WHERE agent_id=? AND json_extract(body,'$.type')='plan.protocol.exhausted'", (aid,)))
+    payload = event["payload"]
+    assert "raw_response" not in payload
+    assert facade.store.read_artifact(aid, payload["raw_response_ref"]["sha256"]) == raw
+
+
+def test_plan_planner_allows_three_protocol_corrections(unified, monkeypatch):
+    from types import SimpleNamespace
+
+    from loom.autonomy import plan_planner
+
+    _, facade, aid, _ = unified
+    captured = {}
+
+    async def fake_structured(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(value={"action": "wait", "reason": "No new work", "source_refs": []})
+
+    monkeypatch.setattr(plan_planner, "request_structured", fake_structured)
+    monkeypatch.setattr(plan_planner, "load_task_config", lambda path: SimpleNamespace(unwrap=lambda: {}))
+    monkeypatch.setattr(plan_planner, "_create_provider", lambda config, model_name=None: SimpleNamespace(unwrap=lambda: object()))
+    monkeypatch.setattr(plan_planner, "schema", lambda envs, payload: {"type": "object"})
+    service = SimpleNamespace(config_path="config.yaml", agent_plan_provider=None)
+    planner = plan_planner.PlanPlanner(service, facade.store)
+    agent = {"id": aid, "role": {"model": "kimi-k3", "budget": {"output_tokens": 8192}}}
+    value, compiled = planner.propose(agent, {"objective": {"id": "primary"}}, [], "run-x", lambda v: None, validation_context={})
+    assert captured["max_corrections"] == 3
+    assert value["action"] == "wait" and compiled is None
+
+
+def test_taken_over_session_allows_manual_revise(unified):
+    service, facade, aid, _ = unified
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    facade.supervisor.scheduler.advance(aid, manual=True)
+    work = facade.store.snapshot(aid)["work_packages"][0]
+    sid = work["session_id"]
+    service.submit(sid, {"command_id": "pause-first", "type": "pause", "payload": {}})
+    revise = {"command_id": "manual-revise", "type": "revise_task", "payload": {"task": {"objective": "Human revised objective"}}}
+    with pytest.raises(ServiceError, match="Revise the stage plan"):
+        service.submit(sid, revise)
+    facade.session_command(aid, sid, dict(command_id="take", type="takeover",
+                                          expected_revision=facade.snapshot(aid)["revision"]))
+    service.submit(sid, {**revise, "command_id": "manual-revise-2"})
+    assert service.snapshot(sid)["task"]["objective"] == "Human revised objective"

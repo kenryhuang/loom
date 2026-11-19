@@ -176,7 +176,13 @@ def page_snapshot(store, aid, view):
             agent[key] = project(db, table, collections[key], "WHERE agent_id=? ORDER BY rowid", (aid,)) if key in collections else []
         agent["learning_allocations"] = []
         agent["sessions"] = (
-            [dict(r) for r in db.execute("SELECT * FROM agent_sessions WHERE agent_id=?", (aid,))] if view in {"overview", "work", "learning"} else []
+            [dict(r) for r in db.execute(
+                "SELECT a.session_id,a.work_package_id,a.taken_over,s.task_state,s.run_state,"
+                "json_extract(w.body,'$.state') AS work_state,json_extract(w.body,'$.blocked_reason') AS blocked_reason "
+                "FROM agent_sessions a "
+                "LEFT JOIN session_heads s ON s.id=a.session_id AND s.deleted_at IS NULL "
+                "LEFT JOIN agent_work_packages w ON w.id=a.work_package_id AND w.agent_id=a.agent_id "
+                "WHERE a.agent_id=?", (aid,))] if view in {"overview", "work", "learning"} else []
         )
         if view == "goals":
             agent["planning_activity"] = planning_activity(db, aid, agent["role"]["long_term_objectives"])

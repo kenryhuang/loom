@@ -1015,3 +1015,20 @@ test('Roadmap follows running, review and next-stage planning, then selects the 
   assert.equal(view.root.querySelector('[data-roadmap-node="a"]').getAttribute('aria-pressed'),'true');
  }finally{view.close();dom.window.close();}
 });
+
+test('Session management table shows execution state so blocked sessions are identifiable',()=>{
+ const {dom,view}=setup({});const root=document.createElement('div');
+ try{
+  const d=Object.assign(fixture(),{view:'work',execution:{runtime:[]},sessions:[
+   {session_id:'s/1',work_package_id:'w1',taken_over:0,task_state:'paused',run_state:'suspended',work_state:'blocked',blocked_reason:'Plan revision limit reached; provide new input'},
+   {session_id:'s/2',work_package_id:null,taken_over:0,task_state:'idle'}]});
+  view.renderWork(root,d);
+  const table=[...root.querySelectorAll('table')].find(t=>[...t.querySelectorAll('th')].some(th=>th.textContent==='Ownership'));
+  assert.deepEqual([...table.querySelectorAll('th')].map(x=>x.textContent),['Session','State','Ownership','Actions']);
+  const rows=table.tBodies[0].rows;
+  assert.match(rows[0].cells[1].textContent,/Blocked/);
+  assert.match(rows[0].cells[1].textContent,/Paused/);
+  assert.equal(rows[0].cells[1].querySelector('[title]')?.getAttribute('title'),'Plan revision limit reached; provide new input');
+  assert.match(rows[1].cells[1].textContent,/Idle/);
+ }finally{view.close();dom.window.close();}
+});

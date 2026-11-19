@@ -551,9 +551,17 @@ export class AgentsView {
     renderExecution(root,d,this);
     const sessions = roadmapDisclosure(this,root,d,'execution-sessions','Session management & routing');
     sessions.classList.add('dashboard-wide');
-    table(sessions,['Session','Ownership','Actions'],d.sessions.map(s => [link(s.session_id,`#/sessions/${encodeURIComponent(s.session_id)}`),
-      badge(s.taken_over ? 'Human takeover' : 'Agent managed'),button(s.taken_over ? 'Return Session' : 'Take over Session',()=>this.act(()=>this.api.post(d.id,
-        `sessions/${encodeURIComponent(s.session_id)}/commands`,{command_id:uuid(),type:s.taken_over?'release':'takeover',expected_revision:d.revision})))]));
+    table(sessions,['Session','State','Ownership','Actions'],d.sessions.map(s => {
+      const state=element('span');
+      const marker=badge(label(s.work_state || s.task_state),s.work_state || s.task_state || '');
+      if(s.blocked_reason)marker.title=s.blocked_reason;
+      state.append(marker);
+      if(s.work_state && s.task_state)state.append(element('span','muted small',`session ${label(s.task_state)}`));
+      return [link(s.session_id,`#/sessions/${encodeURIComponent(s.session_id)}`),
+        state,
+        badge(s.taken_over ? 'Human takeover' : 'Agent managed'),button(s.taken_over ? 'Return Session' : 'Take over Session',()=>this.act(()=>this.api.post(d.id,
+          `sessions/${encodeURIComponent(s.session_id)}/commands`,{command_id:uuid(),type:s.taken_over?'release':'takeover',expected_revision:d.revision})))];
+    }));
     const routes = roadmapDisclosure(this,sessions,d,'execution-routes','Session routing rationale'), output=element('div'); routes.append(output);
     routes.firstChild.append(button('View routing history',()=>this.act(async()=>{const {routes:rows}=await this.api.get(d.id,'routes');output.replaceChildren();
       table(output,['Choice','Rationale'],rows.map(r=>[r.action,r.reason]));})));

@@ -170,12 +170,14 @@ class LoomService:
                 binding = state.get('autonomy') or {}
                 if binding.get('engine_version') == 2 and command['type'] in {
                         'resume', 'restart_task', 'revise_task', 'submit_message', 'set_external_tools', 'set_knowledge_bases'}:
-                    row = db.execute('SELECT body FROM agent_work_packages WHERE id=?', (binding['work_package_id'],)).fetchone()
-                    work = json.loads(row[0]) if row else {}
-                    if not work or work.get('superseded_contract') or work.get('contract_digest') != binding.get('contract_digest'):
-                        raise ServiceError('This execution contract was superseded; use the current stage plan', 409)
-                    if command['type'] != 'resume':
-                        raise ServiceError('Revise the stage plan or take over the Session before changing its execution contract', 409)
+                    link = db.execute('SELECT taken_over FROM agent_sessions WHERE session_id=?', (sid,)).fetchone()
+                    if not (link and link[0]):
+                        row = db.execute('SELECT body FROM agent_work_packages WHERE id=?', (binding['work_package_id'],)).fetchone()
+                        work = json.loads(row[0]) if row else {}
+                        if not work or work.get('superseded_contract') or work.get('contract_digest') != binding.get('contract_digest'):
+                            raise ServiceError('This execution contract was superseded; use the current stage plan', 409)
+                        if command['type'] != 'resume':
+                            raise ServiceError('Revise the stage plan or take over the Session before changing its execution contract', 409)
                 if command['type'] in {'set_external_tools', 'set_knowledge_bases'} and sid in self.active:
                     raise ServiceError('Wait for the paused worker to exit before changing tools', 409)
                 if command['type'] in {'restart_task', 'revise_task'} and sid in self.active:

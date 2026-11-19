@@ -60,7 +60,9 @@ class StructuredResult:
 
 def parse_response(response, max_chars=1_000_000):
     if response.finish_reason in {"length", "max_tokens"}:
-        raise ProtocolError("truncated", [{"path": "/", "message": "Output was truncated; return a concise complete response"}])
+        error = ProtocolError("truncated", [{"path": "/", "message": "Output was truncated; return a concise complete response"}])
+        error.raw_response = response.content or ""
+        raise error
     if response.finish_reason in {"content_filter", "refusal"}:
         raise ProtocolError("refused", [{"path": "/", "message": "Provider refused or filtered the response"}], retryable=False)
     raw = response.content or ""
@@ -90,8 +92,13 @@ def parse_response(response, max_chars=1_000_000):
     try:
         value = json.loads(raw, object_pairs_hook=pairs, parse_constant=constant, parse_float=number)
     except (ValueError, RecursionError) as exc:
-        reason = exc.msg if isinstance(exc, json.JSONDecodeError) else str(exc)
-        raise ProtocolError("invalid_json", [{"path": "/", "message": "Response is not valid JSON: " + reason}]) from exc
+        if isinstance(exc, json.JSONDecodeError):
+            reason = f"{exc.msg} at line {exc.lineno} column {exc.colno} (char {exc.pos})"
+        else:
+            reason = str(exc)
+        error = ProtocolError("invalid_json", [{"path": "/", "message": "Response is not valid JSON: " + reason}])
+        error.raw_response = response.content or ""
+        raise error from exc
     pending = [(value, 0)]
     while pending:
         node, depth = pending.pop()
@@ -115,10 +122,11 @@ def output_mode(provider):
     if configured in {"json_schema", "json_object"}:
         return configured
     host = urlsplit(provider.base_url).hostname or ""
-    if (host == "dashscope.aliyuncs.com" or host.endswith(".aliyuncs.com")) and provider.model.startswith(
-        ("qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.7-flash")
-    ):
-        return "json_schema"
+    if host == "dashscope.aliyuncs.com" or host.endswith(".aliyuncs.com"):
+        if provider.model.startswith(("qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.7-flash")):
+            return "json_schema"
+        if provider.model.startswith("kimi-k3"):
+            return "json_object"  # Verified on dashscope: accepts response_format and streams valid JSON.
     return "text"
 
 
@@ -245,9 +253,10 @@ async def request_structured(*, protocol, payload, send, validate=lambda value: 
             fallback, mode = True, "text"
             await emit("fallback", code=exc.code, issues=exc.issues)
         except ProtocolError as exc:
-            await emit("rejected", code=exc.code, issues=exc.issues, validation_error=str(exc))
+            raw = {"raw_response": exc.raw_response} if getattr(exc, "raw_response", None) is not None else {}
+            await emit("rejected", code=exc.code, issues=exc.issues, validation_error=str(exc), **raw)
             if not exc.retryable or corrections >= max_corrections or (exc.code == "truncated" and not retry_truncated):
-                await emit("exhausted", code=exc.code, issues=exc.issues)
+                await emit("exhausted", code=exc.code, issues=exc.issues, **raw)
                 raise ProtocolExhausted(exc.code, exc.issues, retryable=exc.retryable) from exc
             corrections += 1
             request = {**deepcopy(payload), "repair": {
